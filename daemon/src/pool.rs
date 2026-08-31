@@ -540,6 +540,12 @@ impl SessionPool {
                             if meta.state != State::Running {
                                 meta.state = State::Running;
                                 meta.needs_name = true;
+                                // 回到 Running = 上一个 waiting 已被应答。清掉
+                                // 去重键，下一次 waiting（哪怕又是空 key 的
+                                // composer）才能再通知——否则「agent 干完这轮
+                                // 等你」只在会话生命周期里推送一次，之后永远
+                                // 静默。5 分钟冷却（last_notify_at 不清）防抖。
+                                meta.last_notified_question = None;
                             }
                             meta.question = None;
                             meta.hook_waiting = false;

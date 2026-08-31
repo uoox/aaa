@@ -113,8 +113,10 @@ pub struct RootView {
     pub stalled: HashMap<String, u64>,
     // 会话监听端口缓存（Web 预览）
     pub ports_cache: HashMap<String, Vec<PortEntry>>,
-    // 通知去重：同会话同 question 只通知一次
+    // 通知去重：同会话同 question 不重复；回到 Running 时清键（下一轮
+    // waiting 重新可通知），5 分钟冷却兜底防 TUI 闪烁刷屏
     last_notified_question: HashMap<String, String>,
+    last_notify_at: HashMap<String, std::time::Instant>,
 
     // 侧栏宽度（拖右边缘调整，松手落盘）与拖动中的 (按下时鼠标 x, 按下时宽度)
     pub sidebar_w: f32,
@@ -182,6 +184,7 @@ impl RootView {
             stalled: HashMap::new(),
             ports_cache: HashMap::new(),
             last_notified_question: HashMap::new(),
+            last_notify_at: HashMap::new(),
             sidebar_w: UiState::load().sidebar_w,
             sidebar_drag: None,
             name_input,
@@ -252,7 +255,7 @@ impl RootView {
             DaemonEvent::Session { session } => {
                 // 任何会话帧（状态/preview/title 变化）都视为有活动，解除空转标记
                 self.stalled.remove(&session.id);
-                self.maybe_notify(&session);
+                self.maybe_notify(&session, cx);
                 self.upsert_session(session, cx);
             }
             DaemonEvent::SessionRemoved { id } => {
@@ -322,26 +325,43 @@ impl RootView {
     }
 
     /// 系统通知：进入 waiting（带 question，去重）与 running→exited
-    fn maybe_notify(&mut self, new: &Session) {
+    fn maybe_notify(&mut self, new: &Session, cx: &Context<Self>) {
         let old_state = self
             .sessions
             .iter()
             .find(|s| s.id == new.id)
             .map(|s| s.state);
+        // 用户正盯着这个会话（窗口前台 + 当前页就是它）就别弹通知——
+        // 刚从 app 里开的项目立刻弹「等待输入」只是噪音
+        let watching =
+            self.page == Page::Session(new.id.clone()) && cx.active_window().is_some();
         match new.state {
+            SessionState::Running => {
+                // 上一个 waiting 已被应答：清键，下一轮 waiting 重新可通知
+                self.last_notified_question.remove(&new.id);
+            }
             SessionState::Waiting => {
                 let key = new
                     .question
                     .as_ref()
                     .map(|q| q.text.clone())
                     .unwrap_or_default();
-                if self.last_notified_question.get(&new.id) != Some(&key) {
-                    let body = if key.is_empty() { "等待输入" } else { &key };
-                    crate::notify::send(&new.display_title(), body);
+                let cooled = self
+                    .last_notify_at
+                    .get(&new.id)
+                    .is_none_or(|t| t.elapsed().as_secs() >= 300);
+                if self.last_notified_question.get(&new.id) != Some(&key) && cooled {
+                    if !watching {
+                        let body = if key.is_empty() { "等待输入" } else { &key };
+                        crate::notify::send(&new.display_title(), body);
+                        self.last_notify_at
+                            .insert(new.id.clone(), std::time::Instant::now());
+                    }
+                    // 看着时也记 key：切走后同一问题不该再补一刀
                     self.last_notified_question.insert(new.id.clone(), key);
                 }
             }
-            SessionState::Exited if old_state == Some(SessionState::Running) => {
+            SessionState::Exited if old_state == Some(SessionState::Running) && !watching => {
                 let body = match new.exit_code {
                     Some(code) => format!("已退出 (exit {code})"),
                     None => "已退出".to_string(),
@@ -607,19 +627,21 @@ impl RootView {
                 .cursor_pointer()
         };
 
-        // ── 上分区：存活会话 ────────────────────────────────────────────
-        let alive: Vec<Session> = self
+        // ── 上分区：会话按三态分组（open-agent-view 式心智模型）────────
+        //   需要输入 = waiting（最顶，急事）
+        //   进行中   = running
+        //   已完成   = idle / exited（agent 说完了这轮）
+        let alive_paths: Vec<&str> = self
             .sessions
             .iter()
             .filter(|s| s.state != SessionState::Exited)
-            .cloned()
+            .map(|s| s.project_path.as_str())
             .collect();
-        let alive_paths: Vec<&str> = alive.iter().map(|s| s.project_path.as_str()).collect();
 
-        let mut active_col = div().flex().flex_col().gap(px(1.));
-        for (ix, s) in alive.iter().enumerate() {
+        let session_row = |s: &Session, ix: usize| {
             let id = s.id.clone();
             let id_close = s.id.clone();
+            let exited = s.state == SessionState::Exited;
             let active = self.page == Page::Session(id.clone());
             let is_stalled = s.state == SessionState::Running && self.stalled.contains_key(&s.id);
             let agent_label: SharedString = if s.agent == "shell" {
@@ -627,66 +649,124 @@ impl RootView {
             } else {
                 s.agent.clone().into()
             };
-            active_col = active_col.child(
-                row_base(("sb-sess", ix).into())
-                    .group("sb-row")
-                    .when(active, |el| el.bg(c(theme::SURFACE_RAISED)))
-                    .hover(|st| st.bg(c(theme::SURFACE_RAISED)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.open_session(id.clone(), cx);
-                    }))
-                    .child(dot(theme::state_color(s.state.as_str())))
-                    .child(
+            row_base(("sb-sess", ix).into())
+                .group("sb-row")
+                .when(active, |el| el.bg(c(theme::SURFACE_RAISED)))
+                .hover(|st| st.bg(c(theme::SURFACE_RAISED)))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.open_session(id.clone(), cx);
+                }))
+                .child(dot(theme::state_color(s.state.as_str())))
+                .child(
+                    div()
+                        .flex_1()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .text_size(px(12.5))
+                        .text_color(c(if exited { theme::DIM } else { theme::INK }))
+                        .child(SharedString::from(s.display_title())),
+                )
+                .when(is_stalled, |el| {
+                    el.child(
                         div()
-                            .flex_1()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .whitespace_nowrap()
-                            .text_size(px(12.5))
-                            .text_color(c(theme::INK))
-                            .child(SharedString::from(s.display_title())),
-                    )
-                    .when(is_stalled, |el| {
-                        el.child(
-                            div()
-                                .text_size(px(9.5))
-                                .font_family("Menlo")
-                                .text_color(c(theme::AMBER))
-                                .child("空转?"),
-                        )
-                    })
-                    .child(
-                        div()
-                            .text_size(px(10.))
+                            .text_size(px(9.5))
                             .font_family("Menlo")
-                            .text_color(c(theme::FAINT))
-                            .child(agent_label),
+                            .text_color(c(theme::AMBER))
+                            .child("空转?"),
                     )
-                    .child(
-                        // × = 关闭这个 TUI/Shell：终止进程、项目回到下分区。
-                        // 一律先弹确认——还在跑的 agent 被顺手点掉最伤。
-                        div()
-                            .id(("sb-close", ix))
-                            .flex_none()
-                            .px(px(3.))
-                            .rounded(px(4.))
-                            .text_size(px(10.))
-                            .text_color(c(theme::FAINT))
-                            .hover(|st| st.text_color(c(theme::RED)).bg(c(theme::EDGE_LIGHT)))
-                            // 非当前行悬停才现身；invisible 连命中盒一起去掉
-                            .when(!active, |el| {
-                                el.invisible().group_hover("sb-row", |st| st.visible())
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.modal = Modal::ConfirmKill {
+                })
+                .child(
+                    div()
+                        .text_size(px(10.))
+                        .font_family("Menlo")
+                        .text_color(c(theme::FAINT))
+                        .child(agent_label),
+                )
+                .child(
+                    // × = 关闭这个 TUI/Shell：终止进程、项目回到下分区。
+                    // 一律先弹确认——还在跑的 agent 被顺手点掉最伤。
+                    // 已退出的会话没进程可杀，× 直接走「删除会话」确认。
+                    div()
+                        .id(("sb-close", ix))
+                        .flex_none()
+                        .px(px(3.))
+                        .rounded(px(4.))
+                        .text_size(px(10.))
+                        .text_color(c(theme::FAINT))
+                        .hover(|st| st.text_color(c(theme::RED)).bg(c(theme::EDGE_LIGHT)))
+                        // 非当前行悬停才现身；invisible 连命中盒一起去掉
+                        .when(!active, |el| {
+                            el.invisible().group_hover("sb-row", |st| st.visible())
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.modal = if exited {
+                                Modal::ConfirmDeleteSession {
                                     id: id_close.clone(),
-                                };
-                                cx.notify();
-                            }))
-                            .child("✕"),
-                    ),
-            );
+                                }
+                            } else {
+                                Modal::ConfirmKill {
+                                    id: id_close.clone(),
+                                }
+                            };
+                            cx.notify();
+                        }))
+                        .child("✕"),
+                )
+        };
+
+        let group_header = |label: &'static str, color: u32, n: usize| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .px(px(16.))
+                .pt(px(8.))
+                .pb(px(2.))
+                .child(div().w(px(5.)).h(px(5.)).flex_none().rounded_full().bg(c(color)))
+                .child(
+                    div()
+                        .text_size(px(10.))
+                        .font_family("Menlo")
+                        .text_color(c(theme::FAINT))
+                        .child(SharedString::from(format!("{label} {n}"))),
+                )
+        };
+
+        let buckets: [(&'static str, u32, Vec<&Session>); 3] = [
+            (
+                "需要输入",
+                theme::AMBER,
+                self.sessions.iter().filter(|s| s.state == SessionState::Waiting).collect(),
+            ),
+            (
+                "进行中",
+                theme::GREEN,
+                self.sessions.iter().filter(|s| s.state == SessionState::Running).collect(),
+            ),
+            (
+                "已完成",
+                theme::FAINT,
+                self.sessions
+                    .iter()
+                    .filter(|s| {
+                        matches!(s.state, SessionState::Idle | SessionState::Exited)
+                    })
+                    .collect(),
+            ),
+        ];
+        let mut active_col = div().flex().flex_col().gap(px(1.));
+        let mut ix = 0usize;
+        for (label, color, group) in buckets {
+            if group.is_empty() {
+                continue;
+            }
+            active_col = active_col.child(group_header(label, color, group.len()));
+            for s in group {
+                active_col = active_col.child(session_row(s, ix));
+                ix += 1;
+            }
         }
 
         // ── 下分区：未激活的项目（双击开启会话并移入上分区） ─────────────

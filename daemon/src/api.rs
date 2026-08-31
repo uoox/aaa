@@ -169,6 +169,12 @@ async fn auth_mw(
 // ---------- helpers ----------
 
 fn ssd_guard(app: &App) -> ApiResult<()> {
+    // 重启窗口期（PUT /config 落盘到 exec 之间）内存里的 project_root 是旧值：
+    // 此刻放行创建/上传会在刚迁走的旧根上 create_dir_all——把旧根整个重造在
+    // 系统盘，正是 SSD 守卫要防的事（审查 P0）。统一 409，客户端稍候重试。
+    if app.restarting.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(ApiError::conflict("daemon 正在重启（配置刚修改），稍候重试"));
+    }
     let state = app.root_state();
     if state.is_ok() {
         Ok(())

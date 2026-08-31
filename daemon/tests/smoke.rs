@@ -495,14 +495,17 @@ async fn inbox_auto_feed_on_first_waiting() {
     let sid_feed = spawn_sess(&p_feed, true);
     let sid_off = spawn_sess(&p_off, false);
 
-    // attach and park both shells on a y/n prompt (read waits for a key,
-    // so the screen ends with `(y/n) ` and goes silent -> waiting)
+    // attach and park both shells on a free-text question (read waits for a
+    // key, the screen ends with `?` and goes silent -> waiting with an
+    // options-less question). NOT a y/n prompt: option dialogs discard free
+    // text, so the feeder now deliberately skips them (P0 fix) —— feeding
+    // only happens where typed text is actually accepted.
     let attach = |sid: String| async move {
         let url = format!("ws://127.0.0.1:{port}/api/v1/sessions/{sid}/attach?token={TOKEN}");
         let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
         let _ = tokio::time::timeout(Duration::from_secs(5), ws.next()).await; // hello
         ws.send(tokio_tungstenite::tungstenite::Message::Binary(
-            b"read -k 1 '?Continue? (y/n) '\r".to_vec().into(),
+            "read -k 1 '?接下来做什么?'\r".as_bytes().to_vec().into(),
         ))
         .await
         .unwrap();

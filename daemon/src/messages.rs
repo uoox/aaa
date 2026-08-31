@@ -46,6 +46,9 @@ pub struct MsgStore {
     /// tool_use id -> tool name (to label tool_results)
     tool_names: HashMap<String, String>,
     pub discover_ticks: u32,
+    /// 当前 file 来自 resume-id 兜底（旧 transcript）。resume 后 agent 会写
+    /// **新**文件；兜底命中的旧文件永不增长，必须保留升级到新文件的机会。
+    pub via_fallback: bool,
     pub dirty: bool,
 }
 
@@ -67,6 +70,7 @@ impl MsgStore {
             msgs: VecDeque::new(),
             tool_names: HashMap::new(),
             discover_ticks: 0,
+            via_fallback: false,
             dirty: false,
         }
     }
@@ -469,7 +473,7 @@ pub fn discover_file(
     project_path: &str,
     resume_id: Option<&str>,
     created_epoch: f64,
-) -> Option<PathBuf> {
+) -> Option<(PathBuf, bool)> {
     let candidates: Vec<PathBuf> = match source {
         "claude" => {
             let mut v = Vec::new();
@@ -557,7 +561,10 @@ pub fn discover_file(
             best = Some((mt, f));
         }
     }
-    best.or(resume_file).map(|(_, f)| f)
+    // (file, is_fallback)：best = 会话自己写的新文件；resume_file = 旧 id 的
+    // transcript，只是兜底——它不再增长，调用方要保留换到新文件的机会
+    best.map(|(_, f)| (f, false))
+        .or(resume_file.map(|(_, f)| (f, true)))
 }
 
 /// Incremental tail of the discovered file.
@@ -624,14 +631,43 @@ pub fn poll_session(paths: &Paths, sess: &crate::pool::Session) -> Option<u64> {
         if !attempt {
             return None;
         }
-        store.file = discover_file(
+        match discover_file(
             paths,
             store.source,
             &project_path,
             resume_id.as_deref(),
             created_epoch,
-        );
-        store.file.as_ref()?;
+        ) {
+            // resume 兜底（旧 transcript）先压 ~30s 再接受：resume 后 agent
+            // 很快会写出**新**文件（best 命中），过早锁死旧文件就只剩历史、
+            // 永无增量（审查 P0）。30s 内新文件仍没出现才用旧的垫底。
+            Some((_, true)) if store.discover_ticks <= 30 => return None,
+            Some((f, fb)) => {
+                store.file = Some(f);
+                store.via_fallback = fb;
+            }
+            None => return None,
+        }
+    } else if store.via_fallback {
+        // 已在兜底文件上：持续找真正的新文件，出现即升级。旧文件不会再
+        // 增长，升级只可能带来新内容；历史消息已按旧文件编号，保留不动。
+        store.discover_ticks += 1;
+        if store.discover_ticks.is_multiple_of(5) {
+            if let Some((f, false)) = discover_file(
+                paths,
+                store.source,
+                &project_path,
+                resume_id.as_deref(),
+                created_epoch,
+            ) {
+                if Some(&f) != store.file.as_ref() {
+                    store.file = Some(f);
+                    store.offset = 0;
+                    store.partial.clear();
+                    store.via_fallback = false;
+                }
+            }
+        }
     }
     poll_file(&mut store);
     if store.dirty {
@@ -781,11 +817,14 @@ mod tests {
             .unwrap()
             .as_secs_f64()
             - 10.0;
-        let found = discover_file(&paths, "claude", &proj_s, None, created).unwrap();
+        let (found, fb) = discover_file(&paths, "claude", &proj_s, None, created).unwrap();
         assert_eq!(found, f);
-        // by resume id even when mtime predates the session
-        let found2 = discover_file(&paths, "claude", "/other", Some("abc-123"), created + 1e9);
-        assert_eq!(found2.unwrap(), f);
+        assert!(!fb, "cwd+mtime 命中不是兜底");
+        // by resume id even when mtime predates the session —— 但要标成兜底
+        let (found2, fb2) =
+            discover_file(&paths, "claude", "/other", Some("abc-123"), created + 1e9).unwrap();
+        assert_eq!(found2, f);
+        assert!(fb2, "resume-id 命中是兜底，调用方要保留升级机会");
         // tail incrementally
         let mut store = MsgStore::for_agent("claude");
         store.file = Some(f.clone());

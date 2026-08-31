@@ -29,13 +29,19 @@ pub fn should_notify_waiting(
 }
 
 pub async fn on_waiting(app: &SharedApp, sess: Arc<Session>, question: Option<Question>) {
-    // 1) inbox auto-feed: once per session, when the box is non-empty
+    // 1) inbox auto-feed: once per session, when the box is non-empty.
+    // 只对接受自由文本的 waiting 喂：输入框（question=None）或无选项的
+    // 开放问题。带选项的对话框（trust dialog、权限确认——每个新项目的
+    // 第一屏就是它）会丢弃自由文本，而 take_all 已把条目删掉——清单既
+    // 没送达也不可恢复，附带的 \r 还会替用户确认当前高亮项。留到下一次
+    // 输入框 waiting 再喂。
+    let accepts_text = question.as_ref().is_none_or(|q| q.options.is_empty());
     let (project_path, can_feed, alive) = {
         let meta = sess.meta.lock().unwrap();
         let alive = sess.live.lock().unwrap().is_some();
         (
             meta.project_path.clone(),
-            meta.feed_inbox && !meta.inbox_fed && meta.state == State::Waiting,
+            accepts_text && meta.feed_inbox && !meta.inbox_fed && meta.state == State::Waiting,
             alive,
         )
     };

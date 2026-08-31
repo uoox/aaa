@@ -25,10 +25,33 @@ pub enum Verdict {
 }
 
 /// Strip box-drawing borders and outer whitespace for pattern analysis.
+/// U+2500–U+257F 是整个 Box Drawing 区块（含 ┌┐└┘├┤ 等所有角与交叉），
+/// 逐字符列举永远列不全——审查抓到过 `├─` 开头的行被当成内容。
 fn strip_box(line: &str) -> &str {
     line.trim_matches(|c: char| {
-        c.is_whitespace() || matches!(c, '│' | '┃' | '║' | '╎' | '¦' | '╭' | '╮' | '╰' | '╯')
+        c.is_whitespace() || ('\u{2500}'..='\u{257F}').contains(&c) || c == '¦'
     })
+}
+
+/// 横向分隔线/边框残余：strip_box 剥掉竖线和圆角后，`╭────╮`/`──────`
+/// 只剩一串横线。这类行没有信息量——把它当「问题文本」或 preview 推进
+/// 通知，用户收到的就是一条横杠（实测 bug）。
+fn is_rule(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars().all(|c| {
+            c.is_whitespace()
+                || matches!(
+                    c,
+                    '─' | '━' | '═' | '┄' | '┅' | '┆' | '┈' | '┉' | '╌' | '╍' | '-' | '–'
+                        | '—' | '_' | '⎯' | '·' | '•' | '∙' | '＿' | '＝' | '=' | '~'
+                )
+        })
+}
+
+/// 有信息量的行：剥边框后非空且不是分隔线；返回剥好的文本
+fn meaningful(line: &str) -> Option<&str> {
+    let s = strip_box(line);
+    if s.is_empty() || is_rule(s) { None } else { Some(s) }
 }
 
 /// Parse `❯ 1. label` / `  2. label` / `3) label`; returns (selected, key, label).
@@ -64,9 +87,9 @@ fn is_yn_prompt(line: &str) -> bool {
 
 /// Analyze the visible screen lines (top to bottom) of a silent session.
 pub fn analyze(lines: &[String]) -> Verdict {
-    // drop trailing blank lines
+    // drop trailing blank / rule-only lines（composer 的下边框剥完就是横线）
     let mut end = lines.len();
-    while end > 0 && strip_box(&lines[end - 1]).is_empty() {
+    while end > 0 && meaningful(&lines[end - 1]).is_none() {
         end -= 1;
     }
     if end == 0 {
@@ -90,18 +113,22 @@ pub fn analyze(lines: &[String]) -> Verdict {
     if !cur.is_empty() {
         runs.push(cur);
     }
+    // 只认带 ❯/> 高亮标记的选项块：agent 的普通回答里满是「1. …\n2. …”
+    // 编号列表，没有高亮标记就当它是文本——否则每个带清单的回答都会被
+    // 判成假 waiting 并推高优通知（审查 P0）。真正的选择对话框（Claude
+    // Code 等）永远有一项被 ❯ 标着。
     let best_block = runs
         .into_iter()
         .rev()
-        .find(|r| r.len() >= 2 || r.iter().any(|b| b.1))
+        .find(|r| r.iter().any(|b| b.1))
         .unwrap_or_default();
     if !best_block.is_empty() {
         // question = nearest non-empty, non-option line above the block
         let first_idx = best_block[0].0;
         let mut text = String::new();
         for line in view[..first_idx].iter().rev() {
-            let s = strip_box(line);
-            if s.is_empty() || parse_option(line).is_some() {
+            let Some(s) = meaningful(line) else { continue };
+            if parse_option(line).is_some() {
                 continue;
             }
             text = s.trim_start_matches("? ").trim().to_string();
@@ -171,8 +198,9 @@ fn unnumbered_options(view: &[String], marker_idx: usize) -> Vec<QuestionOption>
         vec![QuestionOption { key: String::new(), label: label.trim().to_string() }];
     for line in view.iter().skip(marker_idx + 1) {
         let t = strip_box(line).trim();
-        // The list ends at a blank line, a hint line, or anything box-drawn.
+        // The list ends at a blank line, a rule, a hint line, or anything box-drawn.
         if t.is_empty()
+            || is_rule(t)
             || t.starts_with('│')
             || t.contains("to confirm")
             || t.contains("to cancel")
@@ -193,10 +221,8 @@ fn unnumbered_options(view: &[String], marker_idx: usize) -> Vec<QuestionOption>
 fn question_above(view: &[String], idx: usize) -> String {
     let mut fallback = String::new();
     for line in view[..idx].iter().rev().take(12) {
-        let t = strip_box(line).trim();
-        if t.is_empty() {
-            continue;
-        }
+        let Some(t) = meaningful(line) else { continue };
+        let t = t.trim();
         if t.ends_with('?') || t.ends_with('？') {
             return t.to_string();
         }
@@ -214,16 +240,17 @@ pub fn analyze_screen(screen: &vt100::Screen) -> Verdict {
     analyze(&lines)
 }
 
-/// Preview: last `n` lines of the visible screen, trailing blanks removed.
+/// Preview: last `n` *meaningful* lines of the visible screen——空行和边框
+/// 分隔线不算数（preview 会进 ntfy 通知正文，横杠行毫无信息量）。
 pub fn preview(screen: &vt100::Screen, n: usize) -> String {
     let (_, cols) = screen.size();
     let lines: Vec<String> = screen.rows(0, cols).collect();
-    let mut end = lines.len();
-    while end > 0 && lines[end - 1].trim().is_empty() {
-        end -= 1;
-    }
-    let start = end.saturating_sub(n);
-    lines[start..end].join("\n")
+    let picked: Vec<&str> = lines
+        .iter()
+        .filter_map(|l| meaningful(l))
+        .collect();
+    let start = picked.len().saturating_sub(n);
+    picked[start..].join("\n")
 }
 
 #[cfg(test)]
@@ -330,5 +357,48 @@ mod tests {
     fn preview_takes_last_lines() {
         let p = feed("l1\r\nl2\r\nl3\r\nl4\r\nl5\r\n\r\n\r\n");
         assert_eq!(preview(p.screen(), 4), "l2\nl3\nl4\nl5");
+    }
+
+    #[test]
+    fn numbered_list_in_answer_is_not_a_question() {
+        // agent 回答里的编号清单（无 ❯ 高亮）+ 下方 composer：
+        // 是文本不是选择对话框，只算「输入框 waiting」
+        let p = feed(
+            "计划如下：\r\n1. 先改 daemon\r\n2. 再改客户端\r\n3. 发版\r\n╭────────╮\r\n│ > \r\n╰────────╯\r\n",
+        );
+        assert_eq!(analyze_screen(p.screen()), Verdict::Waiting(None));
+    }
+
+    #[test]
+    fn rules_never_become_question_text_or_preview() {
+        // 实测 bug：claude code 的分隔线/输入框边框剥完竖线只剩横线，
+        // 曾被当成问题文本/preview 推进通知——用户收到一条横杠。
+        // 1) 选项块上方紧邻分隔线：问题要跳过横线取到真文本
+        let p = feed(
+            "要选哪个部署方式？\r\n────────────────────\r\n❯ 1. docker\r\n  2. 裸机\r\n",
+        );
+        match analyze_screen(p.screen()) {
+            Verdict::Waiting(Some(q)) => assert_eq!(q.text, "要选哪个部署方式？"),
+            other => panic!("expected waiting, got {other:?}"),
+        }
+        // 2) preview 不含分隔线与空行
+        let p = feed("done thinking\r\n╭──────────╮\r\n│ > \r\n╰──────────╯\r\n");
+        let pv = preview(p.screen(), 4);
+        assert!(!pv.contains('─'), "preview 不应含横线: {pv:?}");
+        assert!(pv.contains("done thinking"));
+        // 3) 未编号 ❯ 列表被分隔线截断，不把横线收作选项
+        let p = feed(
+            "Pick one\r\n❯ first\r\n  second\r\n──────\r\n  stray\r\n",
+        );
+        if let Verdict::Waiting(Some(q)) = analyze_screen(p.screen()) {
+            assert!(
+                q.options.iter().all(|o| !o.label.contains('─') && o.label != "stray"),
+                "选项不应越过分隔线: {:?}",
+                q.options
+            );
+        }
+        // 4) 满屏只有横线 = 没有可判内容 → idle，绝不 waiting
+        let p = feed("──────────\r\n──────────\r\n");
+        assert_eq!(analyze_screen(p.screen()), Verdict::Idle);
     }
 }

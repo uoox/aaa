@@ -189,4 +189,11 @@ class WaitingDeduper(private val cooldownMs: Long = 5 * 60 * 1000) {
     }
 
     fun clear(sessionId: String) { last.remove(sessionId) }
+
+    /** 会话回到 running = 上一个 waiting 已被应答：清掉 question 键（下一轮
+     *  waiting——哪怕又是空 key 的 composer——重新可通知），保留时间戳走冷却。 */
+    fun answered(sessionId: String) {
+        val prev = last[sessionId] ?: return
+        last[sessionId] = Entry(" answered", prev.at)
+    }
 }

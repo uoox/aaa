@@ -73,6 +73,7 @@ object Notifier {
                 if (!deduper.offer(s.id, s.question?.text)) return
                 notifyWaiting(context, s)
             }
+            is NotifyEvent.Answered -> deduper.answered(ev.id)
             is NotifyEvent.Exited -> {
                 val s = ev.session
                 deduper.clear(s.id)

@@ -31,6 +31,8 @@ sealed class ConnState {
 sealed class NotifyEvent {
     data class Waiting(val session: Session) : NotifyEvent()
     data class Exited(val session: Session) : NotifyEvent()
+    /** waiting → running：上一问已被应答，通知去重键要复位 */
+    data class Answered(val id: String) : NotifyEvent()
     data class Stalled(val session: Session?, val id: String, val quietS: Long) : NotifyEvent()
 }
 
@@ -179,6 +181,7 @@ class AppStore private constructor(context: Context) {
                 val prev = synchronized(prevStates) { val p = prevStates[s.id]; prevStates[s.id] = s.state; p }
                 _sessions.value = _sessions.value.filter { it.id != s.id } + s
                 if (s.state == "waiting" && prev != "waiting") _notifyEvents.tryEmit(NotifyEvent.Waiting(s))
+                if (s.state == "running" && prev != "running") _notifyEvents.tryEmit(NotifyEvent.Answered(s.id))
                 if (s.state == "exited" && prev == "running") _notifyEvents.tryEmit(NotifyEvent.Exited(s))
             }
             is EventFrame.SessionRemoved -> {

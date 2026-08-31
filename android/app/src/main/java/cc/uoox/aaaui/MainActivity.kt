@@ -350,21 +350,19 @@ fun SessionsTab(store: AppStore, nav: NavHostController) {
     val openSession = LocalOpenSession.current
     val sessions by store.sessions.collectAsState()
     val conn by store.connState.collectAsState()
-    var filter by rememberSaveable { mutableStateOf("all") }
     var refreshing by remember { mutableStateOf(false) }
 
-    // Sort/filter only when the inputs change, not on every recomposition
+    // 三态分组（open-agent-view 式心智模型）：需要输入 / 进行中 / 已完成。
+    // Group only when the inputs change, not on every recomposition
     // (conn latency updates and pull-to-refresh recompose this tab too).
-    val filtered = remember(sessions, filter) {
-        val sorted = sessions.sortedWith(compareBy<Session> { STATE_RANK[it.state] ?: 4 }.thenByDescending { it.last_output_at })
-        when (filter) {
-            "waiting" -> sorted.filter { it.state == "waiting" }
-            "running" -> sorted.filter { it.state == "running" }
-            else -> sorted
-        }
+    val groups = remember(sessions) {
+        val sorted = sessions.sortedByDescending { it.last_output_at }
+        listOf(
+            Triple("需要输入", Tok.Amber, sorted.filter { it.state == "waiting" }),
+            Triple("进行中", Tok.Green, sorted.filter { it.state == "running" }),
+            Triple("已完成", Tok.Faint, sorted.filter { it.state == "idle" || it.state == "exited" }),
+        ).filter { it.third.isNotEmpty() }
     }
-    val waitingCount = sessions.count { it.state == "waiting" }
-    val runningCount = sessions.count { it.state == "running" }
 
     Column(Modifier.fillMaxSize()) {
         Row(
@@ -380,32 +378,6 @@ fun SessionsTab(store: AppStore, nav: NavHostController) {
             }
         }
 
-        sessions.firstOrNull { it.state == "waiting" }?.let { w ->
-            Card(
-                onClick = { openSession(w.id, "") },
-                colors = CardDefaults.cardColors(containerColor = Tok.Amber.copy(alpha = 0.12f)),
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp),
-            ) {
-                Column(Modifier.padding(12.dp)) {
-                    Text("⚡ ${Tok.agentLabel(w.agent)} 等待输入 · ${w.project_name}", color = Tok.Amber, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                    w.question?.let { Text(it.text, color = Tok.Ink, fontSize = 13.sp, modifier = Modifier.padding(top = 3.dp)) }
-                }
-            }
-        }
-
-        // 横向可滚：两栏模式下列表栏只有 280dp，三个筛选片放不下时 Row 会把最后一个
-        // 压成一列一个字。滚动比换行好——筛选是一条带子，不是一块区域。
-        Row(
-            Modifier
-                .horizontalScroll(rememberScrollState())
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            FilterChip(filter == "all", { filter = "all" }, label = { Text("全部 ${sessions.size}") })
-            FilterChip(filter == "waiting", { filter = "waiting" }, label = { DotWithText(Tok.Amber, "等待输入 $waitingCount", Tok.Ink) })
-            FilterChip(filter == "running", { filter = "running" }, label = { DotWithText(Tok.Green, "运行中 $runningCount", Tok.Ink) })
-        }
-
         PullToRefreshBox(
             isRefreshing = refreshing,
             onRefresh = {
@@ -414,15 +386,30 @@ fun SessionsTab(store: AppStore, nav: NavHostController) {
             },
             modifier = Modifier.fillMaxSize(),
         ) {
-            if (filtered.isEmpty()) {
+            if (groups.isEmpty()) {
                 Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
                     Text("暂无会话", color = Tok.Faint)
                     Text("点右下 ＋ 新建", color = Tok.Faint, fontSize = 12.sp)
                 }
             }
             LazyColumn(Modifier.fillMaxSize()) {
-                items(filtered, key = { it.id }) { s ->
-                    SessionCard(s) { openSession(s.id, "") }
+                groups.forEach { (label, color, list) ->
+                    item(key = "hdr-$label") {
+                        Row(
+                            Modifier.padding(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            StateDot(color, 6)
+                            Spacer(Modifier.width(7.dp))
+                            Text(
+                                "$label ${list.size}", color = Tok.Faint, fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace,
+                            )
+                        }
+                    }
+                    items(list, key = { it.id }) { s ->
+                        SessionCard(s) { openSession(s.id, "") }
+                    }
                 }
                 item { Spacer(Modifier.height(80.dp)) }
             }
