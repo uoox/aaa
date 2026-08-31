@@ -432,8 +432,8 @@ impl RootView {
         cx.notify();
     }
 
-    /// 关 tab（仅 detach，不 kill 进程）——侧栏行的 × 走的就是这条，
-    /// 与被删掉的横向 tab 条上那个 × 语义完全一致：进程照跑，回来还能再开。
+    /// 收起本地 tab（不碰 daemon）。侧栏 × 的完整语义在 confirm_kill 里：
+    /// 先 kill 会话再调这里收 tab；删除会话、session_removed 也走这条清理。
     pub fn close_tab(&mut self, id: &str, cx: &mut Context<Self>) {
         self.terminals.remove(id);
         self.open_order.retain(|x| x != id);
@@ -513,7 +513,9 @@ impl RootView {
             return;
         }
         if ks.key == "tab" && m.control {
-            self.cycle_session(cx);
+            if matches!(self.modal, Modal::None) {
+                self.cycle_session(cx);
+            }
             cx.stop_propagation();
         }
     }

@@ -717,10 +717,12 @@ fn migrate_root(paths: &Paths, old: &Path, new: &Path) -> Result<(), String> {
     //    cwd 查不到会话，id 只能现在采
     let mut reg = Registry::load(old);
     let mut cache = CwdCache::load(&paths.cwd_cache());
-    for (dir, agent, id) in reg.entries() {
-        if id.is_some() || agent == "shell" || !Path::new(&dir).starts_with(old) {
+    for (dir, agent, _id) in reg.entries() {
+        if agent == "shell" || !Path::new(&dir).starts_with(old) {
             continue;
         }
+        // 一律现采：注册表里的 id 只在经 daemon resume 时回写过，用户可能
+        // 之后用 aaal / 裸 agent 在该目录开过更新的对话。find 落空才留旧 id。
         let sid = stores::find(paths, &mut cache, &agent, &dir);
         if !sid.is_empty() {
             let _ = reg.set_id(&dir, &agent, &sid);
@@ -736,9 +738,14 @@ fn migrate_root(paths: &Paths, old: &Path, new: &Path) -> Result<(), String> {
     }
     std::fs::rename(old, new)
         .map_err(|e| format!("移动失败（跨卷迁移请手动 cp 后仅改配置）: {e}"))?;
-    // ③ 注册表键改前缀（文件已随根一起移动）
+    // ③ 注册表键改前缀（文件已随根一起移动）。走到这里根已经搬完了，
+    // 重写失败绝不能再报 Err——否则配置不写、daemon 不重启，留下一个指着
+    // 已消失旧根的死局。旧键会被 is_live 当外部路径保留，损失只是 resume
+    // 兜底失效，降级为日志。
     let mut reg = Registry::load(new);
-    reg.rewrite_prefix(old, new).map_err(|e| format!("注册表重写失败: {e}"))?;
+    if let Err(e) = reg.rewrite_prefix(old, new) {
+        eprintln!("migrate: 注册表重写失败（目录已移动，仅影响 resume 兜底）: {e}");
+    }
     Ok(())
 }
 
