@@ -4,13 +4,22 @@
 use std::ops::Range;
 
 use gpui::{
-    App, Bounds, Context, ElementInputHandler, EntityInputHandler, FocusHandle, Focusable,
-    KeyDownEvent, MouseButton, SharedString, UTF16Selection, Window, canvas, div, fill, point,
-    prelude::*, px, size,
+    App, Bounds, ContentMask, Context, ElementInputHandler, EntityInputHandler, FocusHandle,
+    Focusable, KeyDownEvent, MouseButton, SharedString, UTF16Selection, Window, canvas, div, fill,
+    point, prelude::*, px, size,
 };
 
 use super::kit::c;
 use crate::theme;
+
+/// 文本超出字段宽度时的水平偏移：优先保证光标可见，其次不在右边留白。
+/// （光标右侧留一个字符的余量，否则光标会压在边框上看不见。）
+fn text_scroll_shift(text_w: f32, caret: f32, view_w: f32) -> f32 {
+    if text_w <= view_w {
+        return 0.0;
+    }
+    (caret + 8.0 - view_w).clamp(0.0, text_w - view_w)
+}
 
 pub struct MiniInput {
     pub text: String,
@@ -292,32 +301,69 @@ impl Render for MiniInput {
                                 .text_system()
                                 .shape_line(display, font_size, &runs, None);
                         let line_h = bounds.size.height;
-                        let origin = point(bounds.origin.x, bounds.origin.y + px(6.));
-                        let _ = line.paint(
-                            origin,
-                            line_h - px(12.),
-                            gpui::TextAlign::Left,
-                            None,
-                            window,
-                            cx,
-                        );
-                        if focused {
-                            let cx_off = if empty {
-                                px(0.)
-                            } else {
-                                line.x_for_index(cursor_byte)
-                            };
-                            window.paint_quad(fill(
-                                Bounds::new(
-                                    point(bounds.origin.x + cx_off, bounds.origin.y + px(5.)),
-                                    size(px(1.5), bounds.size.height - px(10.)),
-                                ),
-                                c(theme::CYAN),
-                            ));
-                        }
+                        let caret = if empty {
+                            px(0.)
+                        } else {
+                            line.x_for_index(cursor_byte)
+                        };
+                        // canvas 不受父元素 overflow 约束：不自己裁，超宽文本会一路画到
+                        // 相邻控件上去（设置页 40 字符的 token 就这么盖住过「连接」按钮）。
+                        // 裁的同时按光标滚动，否则长值只能看见开头、根本没法编辑。
+                        let shift = px(text_scroll_shift(
+                            f32::from(line.width),
+                            f32::from(caret),
+                            f32::from(bounds.size.width),
+                        ));
+                        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                            let origin =
+                                point(bounds.origin.x - shift, bounds.origin.y + px(6.));
+                            let _ = line.paint(
+                                origin,
+                                line_h - px(12.),
+                                gpui::TextAlign::Left,
+                                None,
+                                window,
+                                cx,
+                            );
+                            if focused {
+                                window.paint_quad(fill(
+                                    Bounds::new(
+                                        point(
+                                            bounds.origin.x + caret - shift,
+                                            bounds.origin.y + px(5.),
+                                        ),
+                                        size(px(1.5), bounds.size.height - px(10.)),
+                                    ),
+                                    c(theme::CYAN),
+                                ));
+                            }
+                        });
                     },
                 )
                 .size_full(),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_text_never_scrolls() {
+        assert_eq!(text_scroll_shift(60.0, 60.0, 222.0), 0.0);
+        assert_eq!(text_scroll_shift(222.0, 0.0, 222.0), 0.0);
+    }
+
+    #[test]
+    fn long_text_follows_caret() {
+        // 设置页 token 字段的真实数值：文本 293.5，可视 222
+        let (text_w, view_w) = (293.5, 222.0);
+        // 光标在行首 → 不滚
+        assert_eq!(text_scroll_shift(text_w, 0.0, view_w), 0.0);
+        // 光标在行尾 → 滚到底，文本右端贴齐字段右边缘（不多滚，右边不留白）
+        assert_eq!(text_scroll_shift(text_w, text_w, view_w), text_w - view_w);
+        // 光标在中间偏右 → 恰好把光标带进视野并留 8px 余量
+        assert_eq!(text_scroll_shift(text_w, 250.0, view_w), 36.0);
     }
 }

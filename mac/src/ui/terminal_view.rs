@@ -1,7 +1,8 @@
 //! 终端视图：自绘 gpui 元素遍历 alacritty `Term` grid。
 //! 等宽 Menlo，前景/背景/粗体/斜体/下划线/光标块/回滚缓冲；
 //! IME 走 EntityInputHandler（中文组字预览显示在光标处）；
-//! 视图尺寸变化 → 行列重算 → WS resize 控制帧。
+//! 视图尺寸变化 → 行列重算 → WS resize 控制帧；
+//! 鼠标：拖选 + 松手即复制、右键菜单（复制/粘贴）、链接悬停下划线并点击打开。
 //! （独立实现，不含任何 Zed GPL terminal_view 代码。）
 
 use alacritty_terminal::index::{Column, Line, Point as TermPoint, Side};
@@ -11,14 +12,14 @@ use alacritty_terminal::term::cell::Flags as CellFlags;
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor};
 use gpui::{
     App, Bounds, ClipboardItem, Context, ElementInputHandler, EntityInputHandler, FocusHandle,
-    Focusable, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, ScrollDelta,
-    ScrollWheelEvent, SharedString, UTF16Selection, Window, canvas, div, fill, point, prelude::*,
-    px, size,
+    Focusable, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+    ScrollDelta, ScrollWheelEvent, SharedString, UTF16Selection, Window, canvas, div, fill, point,
+    prelude::*, px, size,
 };
 
 use super::kit::{c, ca};
 use crate::net::{AttachHandle, Net};
-use crate::term::{KeyInput, TermModel, encode_key, encode_paste};
+use crate::term::{KeyInput, TermModel, encode_key, encode_paste, find_urls};
 use crate::theme;
 
 const FONT_SIZE: f32 = 12.5;
@@ -37,6 +38,74 @@ pub struct TerminalView {
     /// canvas 内容区左上角（窗口坐标，prepaint 时回写；鼠标→格点换算用）
     last_origin: Option<gpui::Point<Pixels>>,
     selecting: bool,
+    /// 上一帧算出的可点链接（鼠标命中用；snapshot 时回写）
+    links: Vec<LinkSpan>,
+    /// 悬停中的链接（存跨度本身而非下标：重算后下标会错位）
+    hover_link: Option<LinkSpan>,
+    /// 右键菜单锚点，相对内容区左上角（窗口挪动/滚动后仍然对）
+    menu: Option<(f32, f32)>,
+}
+
+/// 一段可点链接：viewport 行 + 列区间 [start, end) + 目标地址
+#[derive(Clone, PartialEq)]
+struct LinkSpan {
+    row: u16,
+    start: u16,
+    end: u16,
+    url: String,
+}
+
+#[derive(Debug, PartialEq)]
+enum MouseUpAction {
+    Copy,
+    OpenLink,
+    Nothing,
+}
+
+/// 左键松手到底算什么。选区优先：一次手势要么是「选中复制」，要么是「点链接」，
+/// 不能两件事都办——否则拖选到链接上松手会顺手把浏览器也打开。
+/// 空选区（只是点了一下）不动剪贴板，所以单击链接仍然能走到 OpenLink。
+fn resolve_mouse_up(has_selection: bool, over_link: bool) -> MouseUpAction {
+    match (has_selection, over_link) {
+        (true, _) => MouseUpAction::Copy,
+        (false, true) => MouseUpAction::OpenLink,
+        (false, false) => MouseUpAction::Nothing,
+    }
+}
+
+/// 一行的链接：OSC 8（终端自己声明的）优先，正则扫出来的只补它没盖到的段落。
+/// `cols[i]` 是第 i 个字符的起始列——CJK 占两格，字符下标推不出列号，只能查表。
+fn line_links(
+    row: u16,
+    text: &str,
+    cols: &[u16],
+    osc8: &[(u16, u16, String)],
+) -> Vec<LinkSpan> {
+    let mut out: Vec<LinkSpan> = osc8
+        .iter()
+        .map(|(s, e, url)| LinkSpan {
+            row,
+            start: *s,
+            end: *e,
+            url: url.clone(),
+        })
+        .collect();
+    for span in find_urls(text) {
+        let last = span.end - 1;
+        let start = cols[span.start];
+        // 结束列 = 末字符起始列 + 它占的格数；行尾没有下一格可比时按 1 格算
+        let end = cols.get(last + 1).copied().unwrap_or(cols[last] + 1);
+        if osc8.iter().any(|(s, e, _)| start < *e && *s < end) {
+            continue;
+        }
+        out.push(LinkSpan {
+            row,
+            start,
+            end,
+            url: span.url,
+        });
+    }
+    out
 }
 
 // ── 渲染快照（render 时从 grid 提取，canvas 闭包里绘制） ────────────────────
@@ -114,6 +183,9 @@ impl TerminalView {
             scroll_accum: 0.,
             last_origin: None,
             selecting: false,
+            links: Vec::new(),
+            hover_link: None,
+            menu: None,
         }
     }
 
@@ -181,8 +253,45 @@ impl TerminalView {
         Some((TermPoint::new(Line(line), Column(colf as usize)), side))
     }
 
+    /// 窗口坐标 → viewport 行列（链接命中用；越界返回 None，
+    /// 不像 `grid_point` 那样把点夹到边上——夹了就会误开边缘的链接）
+    fn viewport_cell(&self, pos: gpui::Point<Pixels>) -> Option<(u16, u16)> {
+        let (cell_w, line_h) = self.cell?;
+        let origin = self.last_origin?;
+        let x = f32::from(pos.x) - f32::from(origin.x) - PAD;
+        let y = f32::from(pos.y) - f32::from(origin.y) - PAD;
+        if x < 0. || y < 0. {
+            return None;
+        }
+        let col = (x / f32::from(cell_w)).floor();
+        let row = (y / f32::from(line_h)).floor();
+        if col >= self.model.cols as f32 || row >= self.model.rows as f32 {
+            return None;
+        }
+        Some((row as u16, col as u16))
+    }
+
+    fn link_at(&self, pos: gpui::Point<Pixels>) -> Option<LinkSpan> {
+        let (row, col) = self.viewport_cell(pos)?;
+        self.links
+            .iter()
+            .find(|l| l.row == row && col >= l.start && col < l.end)
+            .cloned()
+    }
+
+    fn paste_from_clipboard(&mut self, cx: &mut Context<Self>) {
+        if let Some(item) = cx.read_from_clipboard()
+            && let Some(text) = item.text()
+        {
+            let bracketed = self.model.mode().contains(TermMode::BRACKETED_PASTE);
+            let bytes = encode_paste(&text, bracketed);
+            self.send_input(bytes, cx);
+        }
+    }
+
     fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.focus_handle.focus(window, cx);
+        self.menu = None; // 菜单已 occlude，能走到这里的左键都是菜单外的
         if let Some((p, side)) = self.grid_point(ev.position) {
             if ev.modifiers.shift && self.model.term.selection.is_some() {
                 if let Some(sel) = self.model.term.selection.as_mut() {
@@ -202,13 +311,50 @@ impl TerminalView {
     }
 
     fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.selecting
-            && ev.pressed_button == Some(MouseButton::Left)
-            && let Some((p, side)) = self.grid_point(ev.position)
-        {
-            if let Some(sel) = self.model.term.selection.as_mut() {
+        if self.selecting && ev.pressed_button == Some(MouseButton::Left) {
+            // 拖选进行中不去管链接：一次手势只干一件事
+            if let Some((p, side)) = self.grid_point(ev.position)
+                && let Some(sel) = self.model.term.selection.as_mut()
+            {
                 sel.update(p, side);
+                cx.notify();
             }
+            return;
+        }
+        // 悬停高亮只在跨度变化时 notify，否则鼠标一动就整屏重绘
+        let hit = self.link_at(ev.position);
+        if hit != self.hover_link {
+            self.hover_link = hit;
+            cx.notify();
+        }
+    }
+
+    fn on_mouse_up(&mut self, ev: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        self.selecting = false;
+        let link = self.link_at(ev.position);
+        match resolve_mouse_up(self.has_selection(), link.is_some()) {
+            MouseUpAction::Copy => {
+                self.copy_selection(cx);
+            }
+            MouseUpAction::OpenLink => {
+                if let Some(l) = link {
+                    cx.open_url(&l.url);
+                }
+            }
+            MouseUpAction::Nothing => {}
+        }
+        cx.notify();
+    }
+
+    fn on_right_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // 右键不碰选区（左键才注册了 on_mouse_down），「复制」才有东西可复制
+        self.focus_handle.focus(window, cx);
+        if let Some(origin) = self.last_origin {
+            self.menu = Some((
+                f32::from(ev.position.x - origin.x),
+                f32::from(ev.position.y - origin.y),
+            ));
+            cx.stop_propagation();
             cx.notify();
         }
     }
@@ -223,19 +369,82 @@ impl TerminalView {
         }
     }
 
+    fn has_selection(&self) -> bool {
+        self.model
+            .term
+            .selection_to_string()
+            .is_some_and(|s| !s.is_empty())
+    }
+
+    /// 右键菜单。用 occlude 挡住底下的终端，免得点菜单顺手清了选区。
+    fn render_context_menu(
+        &self,
+        at: (f32, f32),
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        const W: f32 = 132.0;
+        const H: f32 = 62.0;
+        // 贴着右/下边缘弹出时往回收，别把菜单顶到状态栏外面去
+        let (cell_w, line_h) = self.cell.unwrap_or((px(8.), px(18.)));
+        let max_x = (self.model.cols as f32 * f32::from(cell_w) + PAD * 2.0 - W).max(0.);
+        let max_y = (self.model.rows as f32 * f32::from(line_h) + PAD * 2.0 - H).max(0.);
+        let has_sel = self.has_selection();
+
+        let item = |id: &'static str, label: &'static str, enabled: bool| {
+            div()
+                .id(id)
+                .px(px(12.))
+                .py(px(4.))
+                .text_color(c(if enabled { theme::INK } else { theme::FAINT }))
+                .when(enabled, |el| {
+                    el.cursor_pointer().hover(|st| st.bg(ca(theme::CYAN, 0.18)))
+                })
+                .child(label)
+        };
+
+        div()
+            .absolute()
+            .left(px(at.0.min(max_x)))
+            .top(px(at.1.min(max_y)))
+            .occlude()
+            .w(px(W))
+            .py(px(4.))
+            .rounded(px(8.))
+            .bg(c(theme::SURFACE_RAISED))
+            .border_1()
+            .border_color(c(theme::EDGE_LIGHT))
+            .text_size(px(12.))
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.menu = None;
+                cx.notify();
+            }))
+            .child(
+                item("term-menu-copy", "复制", has_sel).on_click(cx.listener(
+                    |this, _, _, cx| {
+                        this.copy_selection(cx);
+                        this.menu = None;
+                        cx.notify();
+                    },
+                )),
+            )
+            .child(
+                item("term-menu-paste", "粘贴", true).on_click(cx.listener(
+                    |this, _, _, cx| {
+                        this.paste_from_clipboard(cx);
+                        this.menu = None;
+                        cx.notify();
+                    },
+                )),
+            )
+    }
+
     fn on_key_down(&mut self, ev: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let ks = &ev.keystroke;
         let m = ks.modifiers;
         if m.platform {
             if ks.key == "v" {
-                if let Some(item) = cx.read_from_clipboard()
-                    && let Some(text) = item.text()
-                {
-                    let bracketed = self.model.mode().contains(TermMode::BRACKETED_PASTE);
-                    let bytes = encode_paste(&text, bracketed);
-                    self.send_input(bytes, cx);
-                    cx.stop_propagation();
-                }
+                self.paste_from_clipboard(cx);
+                cx.stop_propagation();
             } else if ks.key == "c" && self.copy_selection(cx) {
                 cx.stop_propagation();
             }
@@ -306,7 +515,9 @@ impl TerminalView {
 
     // ── grid → 快照 ─────────────────────────────────────────────────────
 
-    fn snapshot(&self) -> Snap {
+    /// 提取渲染快照，顺带把这一屏的可点链接回写到 `self.links`
+    /// （鼠标事件里没有 grid 可遍历，命中测试只能吃这份缓存）
+    fn snapshot(&mut self) -> Snap {
         let term = &self.model.term;
         let content = term.renderable_content();
         let display_offset = content.display_offset;
@@ -348,6 +559,12 @@ impl TerminalView {
                 sels: Vec::new(),
             })
             .collect();
+        // 链接扫描的两个原料：整行文本（含空格）+ 每字符起始列。
+        // 列必须查表——一个 CJK 占两格，字符下标推不出列号。
+        let mut raw: Vec<(String, Vec<u16>)> =
+            (0..rows).map(|_| (String::new(), Vec::new())).collect();
+        // OSC 8 显式超链接：终端自己声明的地址，优先于按文本猜的
+        let mut osc8: Vec<Vec<(u16, u16, String)>> = (0..rows).map(|_| Vec::new()).collect();
 
         for indexed in content.display_iter {
             let vrow = indexed.point.line.0 + display_offset as i32;
@@ -360,6 +577,20 @@ impl TerminalView {
             let flags = cell.flags;
             if flags.contains(CellFlags::WIDE_CHAR_SPACER) || flags.contains(CellFlags::HIDDEN) {
                 continue;
+            }
+            let wide = flags.contains(CellFlags::WIDE_CHAR);
+            {
+                let (text, cols) = &mut raw[vrow as usize];
+                text.push(if cell.c == '\0' { ' ' } else { cell.c });
+                cols.push(col);
+            }
+            if let Some(h) = cell.hyperlink() {
+                let end = col + if wide { 2 } else { 1 };
+                let runs = &mut osc8[vrow as usize];
+                match runs.last_mut() {
+                    Some((_, e, uri)) if *e == col && uri == h.uri() => *e = end,
+                    _ => runs.push((col, end, h.uri().to_string())),
+                }
             }
             let mut fg = resolve(&cell.fg, theme::TERM_FG);
             let mut bg = resolve(&cell.bg, theme::TERM_BG);
@@ -377,7 +608,6 @@ impl TerminalView {
             }
             // 背景 span
             if bg != theme::TERM_BG {
-                let wide = flags.contains(CellFlags::WIDE_CHAR);
                 let end = col + if wide { 2 } else { 1 };
                 match line.bgs.last_mut() {
                     Some((_, e, color)) if *e == col && *color == bg => *e = end,
@@ -388,7 +618,7 @@ impl TerminalView {
             if let Some(sr) = &content.selection
                 && sr.contains(indexed.point)
             {
-                let end = col + if flags.contains(CellFlags::WIDE_CHAR) { 2 } else { 1 };
+                let end = col + if wide { 2 } else { 1 };
                 match line.sels.last_mut() {
                     Some((_, e)) if *e == col => *e = end,
                     _ => line.sels.push((col, end)),
@@ -404,9 +634,15 @@ impl TerminalView {
                     underline: flags.intersects(CellFlags::UNDERLINE),
                     strike: flags.contains(CellFlags::STRIKEOUT),
                 };
-                line.push_cell(col, cell.c, flags.contains(CellFlags::WIDE_CHAR), style);
+                line.push_cell(col, cell.c, wide, style);
             }
         }
+
+        let links: Vec<LinkSpan> = raw
+            .iter()
+            .enumerate()
+            .flat_map(|(vrow, (text, cols))| line_links(vrow as u16, text, cols, &osc8[vrow]))
+            .collect();
 
         // 光标
         let cur = content.cursor;
@@ -421,12 +657,19 @@ impl TerminalView {
                 None
             }
         };
+        let history = self.model.history_len();
+
+        // 屏幕滚过之后旧的悬停跨度可能已经不在了，别留着画一条无主的下划线
+        if self.hover_link.as_ref().is_some_and(|h| !links.contains(h)) {
+            self.hover_link = None;
+        }
+        self.links = links;
 
         Snap {
             lines,
             cursor,
             display_offset,
-            history: self.model.history_len(),
+            history,
         }
     }
 }
@@ -539,6 +782,11 @@ impl Render for TerminalView {
         let last_sent = self.last_sent;
         let last_origin = self.last_origin;
         let conn_down = self.conn_down;
+        let hover = self
+            .hover_link
+            .as_ref()
+            .map(|l| (l.row, l.start, l.end));
+        let menu = self.menu;
 
         // 4 个字体变体一次构建（seg 循环内只 clone，不重复走 font()/SharedString 分配）
         let fonts: [gpui::Font; 4] = std::array::from_fn(|i| {
@@ -559,17 +807,13 @@ impl Render for TerminalView {
             .size_full()
             .bg(c(theme::TERM_BG))
             .track_focus(&self.focus_handle)
+            .when(hover.is_some(), |el| el.cursor_pointer())
             .on_key_down(cx.listener(Self::on_key_down))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+            .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_down))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.selecting = false;
-                    cx.notify();
-                }),
-            )
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .child(
                 canvas(
                     move |bounds, _window, cx| {
@@ -699,6 +943,20 @@ impl Render for TerminalView {
                                 );
                             }
                         }
+                        // 悬停链接的下划线（画在格底，不动 seg 的 TextRun：
+                        // 一改 style 整段就得重新合并，悬停不值这个代价）
+                        if let Some((row, s, e)) = hover {
+                            window.paint_quad(fill(
+                                Bounds::new(
+                                    point(
+                                        ox + cell_w * (s as f32),
+                                        oy + line_h * (row as f32) + line_h - px(2.),
+                                    ),
+                                    size(cell_w * ((e - s) as f32), px(1.)),
+                                ),
+                                c(theme::CYAN),
+                            ));
+                        }
                         // IME 组字预览
                         if let Some(m) = &marked
                             && let Some((row, col, _, _)) = snap.cursor
@@ -795,6 +1053,7 @@ impl Render for TerminalView {
                         .child("连接已断开 · 自动重连中…"),
                 )
             })
+            .children(menu.map(|at| self.render_context_menu(at, cx)))
     }
 }
 
@@ -855,5 +1114,56 @@ mod tests {
         assert_eq!(line.segs.len(), 2);
         assert_eq!(line.segs[0].text, "中文");
         assert_eq!(line.segs[1].col, 5);
+    }
+
+    /// 每字符一格的行（终端里的 ASCII 行）
+    fn ascii_cols(text: &str) -> Vec<u16> {
+        (0..text.chars().count() as u16).collect()
+    }
+
+    #[test]
+    fn link_columns_account_for_wide_chars() {
+        // "打开 https://a.io" —— 两个 CJK 各占 2 格，URL 从第 5 列起
+        let text = "打开 https://a.io";
+        let mut cols = vec![0u16, 2, 4]; // 打(0,宽) 开(2,宽) 空格(4)
+        cols.extend(5..5 + "https://a.io".chars().count() as u16);
+        let links = line_links(3, text, &cols, &[]);
+        assert_eq!(links.len(), 1);
+        assert_eq!((links[0].row, links[0].start), (3, 5));
+        assert_eq!(links[0].end, 5 + "https://a.io".chars().count() as u16);
+        assert_eq!(links[0].url, "https://a.io");
+    }
+
+    #[test]
+    fn link_at_line_end_gets_a_column() {
+        // URL 顶到行尾：末字符后面没有下一格可查，按 1 格算
+        let text = "x https://a.io";
+        let links = line_links(0, text, &ascii_cols(text), &[]);
+        assert_eq!((links[0].start, links[0].end), (2, 14));
+    }
+
+    #[test]
+    fn osc8_wins_over_text_scan() {
+        // 终端自己声明的地址与显示文本不一致时，以 OSC 8 为准，不叠加第二条
+        let text = "click https://decoy.example here";
+        let osc8 = vec![(6u16, 27u16, "https://real.example/x".to_string())];
+        let links = line_links(0, text, &ascii_cols(text), &osc8);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].url, "https://real.example/x");
+        // 不重叠的正则结果照样保留
+        let text = "a https://b.io  and more";
+        let osc8 = vec![(0u16, 1u16, "https://osc.io".to_string())];
+        let links = line_links(0, text, &ascii_cols(text), &osc8);
+        assert_eq!(links.len(), 2);
+    }
+
+    #[test]
+    fn selection_wins_over_link() {
+        // 拖选结束时松手：复制，绝不顺带开链接
+        assert_eq!(resolve_mouse_up(true, true), MouseUpAction::Copy);
+        assert_eq!(resolve_mouse_up(true, false), MouseUpAction::Copy);
+        // 单击（空选区）落在链接上才算点链接
+        assert_eq!(resolve_mouse_up(false, true), MouseUpAction::OpenLink);
+        assert_eq!(resolve_mouse_up(false, false), MouseUpAction::Nothing);
     }
 }

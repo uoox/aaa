@@ -235,6 +235,9 @@ pub struct ApiError {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
+// 变体大小差异是刻意的：这些是每帧从 WS 反序列化出来、立刻被消费掉的短命值，
+// 装箱换来的是每个事件一次堆分配，比多占几百字节栈更贵。
+#[allow(clippy::large_enum_variant)]
 pub enum DaemonEvent {
     Snapshot { sessions: Vec<Session> },
     Session { session: Session },
@@ -256,6 +259,8 @@ pub enum DaemonEvent {
 
 // ── attach WS 帧 ────────────────────────────────────────────────────────────
 
+// 同上：短命的反序列化帧，装箱不划算
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum AttachServerMsg {
@@ -294,6 +299,69 @@ impl DaemonConfig {
         let path = dirs::home_dir()?.join(".config/aaa-daemon/config.toml");
         let text = std::fs::read_to_string(path).ok()?;
         toml::from_str(&text).ok()
+    }
+}
+
+// ── UI 本机偏好（~/.config/aaa-ui/ui.toml） ─────────────────────────────────
+
+/// 侧栏宽度可拖区间：窄于 180 会话标题只剩两三个字，宽于 480 终端就没地方了。
+pub const SIDEBAR_W_MIN: f32 = 180.0;
+pub const SIDEBAR_W_MAX: f32 = 480.0;
+pub const SIDEBAR_W_DEFAULT: f32 = 210.0;
+
+/// 拖拽/读盘两条路径共用一个夹取，任何来源的脏值都不会把侧栏拖没。
+pub fn clamp_sidebar_width(w: f32) -> f32 {
+    if w.is_nan() {
+        return SIDEBAR_W_DEFAULT;
+    }
+    w.clamp(SIDEBAR_W_MIN, SIDEBAR_W_MAX)
+}
+
+fn default_sidebar_w() -> f32 {
+    SIDEBAR_W_DEFAULT
+}
+
+/// daemon 的 config.toml 是双方的契约，UI 不往里写；窗口布局这类只属于本机的
+/// 偏好另起一个文件。读写失败一律回落默认值——配置坏了也必须能开窗。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UiState {
+    #[serde(default = "default_sidebar_w")]
+    pub sidebar_w: f32,
+}
+
+impl Default for UiState {
+    fn default() -> Self {
+        UiState {
+            sidebar_w: SIDEBAR_W_DEFAULT,
+        }
+    }
+}
+
+impl UiState {
+    fn path() -> Option<std::path::PathBuf> {
+        Some(dirs::home_dir()?.join(".config/aaa-ui/ui.toml"))
+    }
+
+    pub fn load() -> Self {
+        let mut s: UiState = Self::path()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|t| toml::from_str(&t).ok())
+            .unwrap_or_default();
+        s.sidebar_w = clamp_sidebar_width(s.sidebar_w);
+        s
+    }
+
+    pub fn save(&self) {
+        let Some(path) = Self::path() else { return };
+        let write = || -> std::io::Result<()> {
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            std::fs::write(&path, toml::to_string(self).unwrap_or_default())
+        };
+        if let Err(e) = write() {
+            log::warn!("写入 {} 失败: {e}", path.display());
+        }
     }
 }
 
@@ -453,6 +521,28 @@ mod tests {
         let ep = Endpoint::from_config(&c);
         assert_eq!(ep.http_base(), "http://127.0.0.1:2730/api/v1");
         assert_eq!(ep.ws_base(), "ws://127.0.0.1:2730/api/v1");
+    }
+
+    #[test]
+    fn sidebar_width_clamped() {
+        assert_eq!(clamp_sidebar_width(300.0), 300.0);
+        assert_eq!(clamp_sidebar_width(10.0), SIDEBAR_W_MIN);
+        assert_eq!(clamp_sidebar_width(9999.0), SIDEBAR_W_MAX);
+        assert_eq!(clamp_sidebar_width(f32::NAN), SIDEBAR_W_DEFAULT);
+        // 边界含端点，拖到极限不应被再挪一格
+        assert_eq!(clamp_sidebar_width(SIDEBAR_W_MIN), SIDEBAR_W_MIN);
+        assert_eq!(clamp_sidebar_width(SIDEBAR_W_MAX), SIDEBAR_W_MAX);
+    }
+
+    #[test]
+    fn ui_state_roundtrip_and_tolerance() {
+        let s = UiState { sidebar_w: 320.0 };
+        let text = toml::to_string(&s).unwrap();
+        let back: UiState = toml::from_str(&text).unwrap();
+        assert_eq!(back.sidebar_w, 320.0);
+        // 缺字段（旧版本写的文件）用默认值补齐，不报错
+        let empty: UiState = toml::from_str("").unwrap();
+        assert_eq!(empty.sidebar_w, SIDEBAR_W_DEFAULT);
     }
 
     #[test]

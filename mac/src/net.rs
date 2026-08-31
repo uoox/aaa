@@ -33,6 +33,9 @@ pub enum ConnState {
 
 /// 送回 UI 的事件
 #[derive(Debug)]
+// 变体大小差异是刻意的：这些是每帧从 WS 反序列化出来、立刻被消费掉的短命值，
+// 装箱换来的是每个事件一次堆分配，比多占几百字节栈更贵。
+#[allow(clippy::large_enum_variant)]
 pub enum UiEvent {
     Conn(ConnState),
     Daemon(DaemonEvent),

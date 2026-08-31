@@ -1,4 +1,4 @@
-//! UI 根视图：侧栏 + tab 条 + 页面区 + 状态栏 + 模态框。
+//! UI 根视图：侧栏（唯一的会话切换入口）+ 页面区 + 状态栏 + 模态框。
 
 mod kit;
 mod mini_input;
@@ -12,7 +12,8 @@ use std::collections::{HashMap, HashSet};
 
 use futures::StreamExt;
 use gpui::{
-    AppContext as _, Context, Entity, SharedString, Task, Window, div, prelude::*, px,
+    AppContext as _, Context, Entity, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    SharedString, Task, Window, div, prelude::*, px,
 };
 
 use crate::model::*;
@@ -22,12 +23,24 @@ use kit::*;
 use mini_input::MiniInput;
 use terminal_view::TerminalView;
 
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Page {
     Overview,
     Session(String),
     Projects,
     Settings,
+}
+
+/// 关掉 `closed` 之后停在哪一页：只有关的正是当前页才换页，换到剩下的最近一个
+/// 会话，一个都不剩就回总览。`open_order` 传入时已剔除 `closed`。
+fn page_after_close(current: &Page, closed: &str, open_order: &[String]) -> Page {
+    if current != &Page::Session(closed.to_string()) {
+        return current.clone();
+    }
+    open_order
+        .last()
+        .map(|x| Page::Session(x.clone()))
+        .unwrap_or(Page::Overview)
 }
 
 pub enum Modal {
@@ -83,6 +96,10 @@ pub struct RootView {
     pub ports_cache: HashMap<String, Vec<PortEntry>>,
     // 通知去重：同会话同 question 只通知一次
     last_notified_question: HashMap<String, String>,
+
+    // 侧栏宽度（拖右边缘调整，松手落盘）与拖动中的 (按下时鼠标 x, 按下时宽度)
+    pub sidebar_w: f32,
+    sidebar_drag: Option<(f32, f32)>,
 
     // 输入框
     pub name_input: Entity<MiniInput>,
@@ -146,6 +163,8 @@ impl RootView {
             stalled: HashMap::new(),
             ports_cache: HashMap::new(),
             last_notified_question: HashMap::new(),
+            sidebar_w: UiState::load().sidebar_w,
+            sidebar_drag: None,
             name_input,
             search_input,
             host_input,
@@ -224,13 +243,7 @@ impl RootView {
                 self.stalled.remove(&id);
                 self.ports_cache.remove(&id);
                 self.last_notified_question.remove(&id);
-                if self.page == Page::Session(id.clone()) {
-                    self.page = self
-                        .open_order
-                        .last()
-                        .map(|x| Page::Session(x.clone()))
-                        .unwrap_or(Page::Overview);
-                }
+                self.page = page_after_close(&self.page, &id, &self.open_order);
                 cx.notify();
             }
             DaemonEvent::ProjectsChanged {} => self.fetch_projects(cx),
@@ -416,17 +429,12 @@ impl RootView {
         cx.notify();
     }
 
-    /// 关 tab（仅 detach，不 kill 进程）
+    /// 关 tab（仅 detach，不 kill 进程）——侧栏行的 × 走的就是这条，
+    /// 与被删掉的横向 tab 条上那个 × 语义完全一致：进程照跑，回来还能再开。
     pub fn close_tab(&mut self, id: &str, cx: &mut Context<Self>) {
         self.terminals.remove(id);
         self.open_order.retain(|x| x != id);
-        if self.page == Page::Session(id.to_string()) {
-            self.page = self
-                .open_order
-                .last()
-                .map(|x| Page::Session(x.clone()))
-                .unwrap_or(Page::Overview);
-        }
+        self.page = page_after_close(&self.page, id, &self.open_order);
         cx.notify();
     }
 
@@ -482,9 +490,13 @@ impl RootView {
         let mut sessions_col = div().flex().flex_col().gap(px(1.));
         for (ix, s) in self.sessions.iter().enumerate() {
             let id = s.id.clone();
+            let id_close = s.id.clone();
             let active = self.page == Page::Session(id.clone());
             let is_stalled =
                 s.state == SessionState::Running && self.stalled.contains_key(&s.id);
+            // × 只给真正开着的会话：横向 tab 条撤掉后侧栏行就是 tab，
+            // 没打开过的会话没有 tab 可关，给个点了没反应的按钮更糟。
+            let is_open = self.open_order.iter().any(|x| x == &s.id);
             let agent_label: SharedString = if s.agent == "shell" {
                 "term".into()
             } else {
@@ -493,6 +505,7 @@ impl RootView {
             sessions_col = sessions_col.child(
                 div()
                     .id(("sb-sess", ix))
+                    .group("sb-row")
                     .flex()
                     .items_center()
                     .gap(px(8.))
@@ -536,7 +549,32 @@ impl RootView {
                             .font_family("Menlo")
                             .text_color(c(theme::FAINT))
                             .child(agent_label),
-                    ),
+                    )
+                    .when(is_open, |el| {
+                        el.child(
+                            div()
+                                .id(("sb-close", ix))
+                                .flex_none()
+                                .px(px(3.))
+                                .rounded(px(4.))
+                                .text_size(px(10.))
+                                .text_color(c(theme::FAINT))
+                                .hover(|st| {
+                                    st.text_color(c(theme::INK)).bg(c(theme::EDGE_LIGHT))
+                                })
+                                // 非当前行悬停才现身；invisible 连命中盒一起去掉，
+                                // 不会变成一个看不见却点得到的陷阱。位置照样占着，
+                                // 鼠标划过时整行不跳。
+                                .when(!active, |el| {
+                                    el.invisible().group_hover("sb-row", |st| st.visible())
+                                })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation(); // 别让点 × 顺带选中该行
+                                    this.close_tab(&id_close, cx);
+                                }))
+                                .child("✕"),
+                        )
+                    }),
             );
         }
 
@@ -567,14 +605,13 @@ impl RootView {
         };
 
         div()
-            .w(px(210.))
+            .w(px(self.sidebar_w))
             .flex_none()
             .h_full()
             .flex()
             .flex_col()
+            .overflow_hidden() // 拖窄时会话标题按 ellipsis 收，不许挤出侧栏
             .bg(c(theme::SURFACE))
-            .border_r_1()
-            .border_color(c(theme::EDGE))
             .child(
                 div()
                     .id("sb-overview")
@@ -709,68 +746,47 @@ impl RootView {
             )
     }
 
-    fn render_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let mut bar = div()
-            .flex()
-            .items_center()
-            .h(px(34.))
+    /// 侧栏右边缘的拖拽把手：兼作原来的分隔线，所以侧栏本身不再画 border_r。
+    fn render_sidebar_resizer(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let dragging = self.sidebar_drag.is_some();
+        div()
+            .id("sidebar-resizer")
+            .w(px(4.))
             .flex_none()
-            .px(px(6.))
-            .gap(px(2.))
-            .bg(c(theme::BG))
-            .border_b_1()
-            .border_color(c(theme::EDGE));
-        for (ix, id) in self.open_order.iter().enumerate() {
-            let Some(s) = self.session(id) else {
-                continue;
-            };
-            let active = self.page == Page::Session(id.clone());
-            let id2 = id.clone();
-            let id3 = id.clone();
-            let name = if s.project_name.is_empty() {
-                s.display_title()
-            } else {
-                s.project_name.clone()
-            };
-            bar = bar.child(
-                div()
-                    .id(("tab", ix))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .px(px(10.))
-                    .py(px(4.))
-                    .rounded(px(6.))
-                    .cursor_pointer()
-                    .text_size(px(12.))
-                    .when(active, |el| {
-                        el.bg(c(theme::SURFACE_RAISED)).text_color(c(theme::INK))
-                    })
-                    .when(!active, |el| el.text_color(c(theme::DIM)))
-                    .hover(|st| st.bg(c(theme::SURFACE)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.open_session(id2.clone(), cx);
-                    }))
-                    .child(dot(theme::state_color(s.state.as_str())))
-                    .child(SharedString::from(name))
-                    .child(
-                        div()
-                            .id(("tab-close", ix))
-                            .ml(px(2.))
-                            .px(px(3.))
-                            .rounded(px(4.))
-                            .text_size(px(10.))
-                            .text_color(c(theme::FAINT))
-                            .hover(|st| st.text_color(c(theme::INK)).bg(c(theme::EDGE_LIGHT)))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.close_tab(&id3, cx);
-                            }))
-                            .child("✕"),
-                    ),
-            );
+            .h_full()
+            .cursor_col_resize()
+            .bg(c(if dragging { theme::CYAN } else { theme::EDGE }))
+            .hover(|st| st.bg(c(theme::CYAN)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, ev: &MouseDownEvent, _, cx| {
+                    // 记按下时的锚点而不是逐帧累加 delta：中途丢帧也不会漂。
+                    this.sidebar_drag = Some((f32::from(ev.position.x), this.sidebar_w));
+                    cx.notify();
+                }),
+            )
+    }
+
+    fn on_sidebar_drag(&mut self, ev: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let Some((from_x, from_w)) = self.sidebar_drag else {
+            return;
+        };
+        let w = clamp_sidebar_width(from_w + (f32::from(ev.position.x) - from_x));
+        if w != self.sidebar_w {
+            self.sidebar_w = w;
+            cx.notify();
         }
-        bar
+    }
+
+    fn on_sidebar_drag_end(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.sidebar_drag.take().is_some() {
+            // 只在松手时落盘：拖动中每帧写文件没有意义
+            UiState {
+                sidebar_w: self.sidebar_w,
+            }
+            .save();
+            cx.notify();
+        }
     }
 
     fn render_question_bar(&self, s: &Session, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
@@ -1033,8 +1049,6 @@ impl Render for RootView {
             handle.focus(window, cx);
         }
 
-        let show_tabs = matches!(self.page, Page::Session(_)) && !self.open_order.is_empty();
-
         let content = div().flex_1().min_h(px(0.)).flex().flex_col().map(|el| {
             match self.page.clone() {
                 Page::Session(id) => {
@@ -1083,9 +1097,6 @@ impl Render for RootView {
                     .child("SSD 未挂载：创建 / 启动 / 删除已禁用（绝不建占位目录），挂载恢复后自动解除"),
             );
         }
-        if show_tabs {
-            main = main.child(self.render_tabs(cx));
-        }
         main = main.child(content).child(self.render_statusbar(cx));
 
         let mut root = div()
@@ -1095,11 +1106,58 @@ impl Render for RootView {
             .text_color(c(theme::INK))
             .text_size(px(13.))
             .child(self.render_sidebar(cx))
+            .child(self.render_sidebar_resizer(cx))
             .child(main);
+
+        // 拖动中把 move/up 挂到根上：4px 的把手留不住指针，只有根覆盖整窗。
+        // 不拖时不挂，免得每次鼠标移动都空跑一遍监听。
+        if self.sidebar_drag.is_some() {
+            root = root
+                .on_mouse_move(cx.listener(Self::on_sidebar_drag))
+                .on_mouse_up(MouseButton::Left, cx.listener(Self::on_sidebar_drag_end))
+                // 甩出窗口才松手时根命中盒不算 hover，up 走不到上面那条；
+                // 不接住它侧栏就会一直粘着鼠标走
+                .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_sidebar_drag_end));
+        }
 
         if let Some(modal) = self.render_modal(cx) {
             root = root.child(modal);
         }
         root
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ids(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn closing_other_tab_does_not_switch_page() {
+        let cur = Page::Session("s_1".into());
+        assert_eq!(
+            page_after_close(&cur, "s_2", &ids(&["s_1"])),
+            Page::Session("s_1".into())
+        );
+        // 在别的页上关 tab 也不该被拽走
+        assert_eq!(
+            page_after_close(&Page::Settings, "s_2", &ids(&["s_1"])),
+            Page::Settings
+        );
+    }
+
+    #[test]
+    fn closing_current_tab_falls_back() {
+        let cur = Page::Session("s_2".into());
+        // 回到剩下的最近一个
+        assert_eq!(
+            page_after_close(&cur, "s_2", &ids(&["s_1", "s_3"])),
+            Page::Session("s_3".into())
+        );
+        // 一个都不剩 → 总览
+        assert_eq!(page_after_close(&cur, "s_2", &[]), Page::Overview);
     }
 }

@@ -271,6 +271,106 @@ pub fn encode_paste(text: &str, bracketed: bool) -> Vec<u8> {
     }
 }
 
+// ── 链接识别 ────────────────────────────────────────────────────────────────
+
+/// 一行文本里的一个链接：字符下标 [start, end)，`url` 已剥掉尾部标点。
+#[derive(Debug, Clone, PartialEq)]
+pub struct UrlSpan {
+    pub start: usize,
+    pub end: usize,
+    pub url: String,
+}
+
+/// 只认带 scheme 的绝对地址。刻意比「看着像域名就算」保守：终端里满屏都是
+/// main.rs、Cargo.toml、a.b.c 这种路径与包名，裸域名规则会把它们统统变成点不开
+/// 的假链接，比不识别还难用。规则与 Android 端 `Links.kt` 对齐。
+const SCHEMES: [&str; 4] = ["http://", "https://", "ftp://", "file://"];
+
+/// 句末标点：URL 出现在中英文句子里时它们几乎不可能是地址的一部分。
+const TRAILING_PUNCT: &str = ".,;:!?'\"“”‘’、。，；：！？…";
+
+fn starts_with_ci(hay: &[char], needle: &str) -> bool {
+    needle
+        .chars()
+        .enumerate()
+        .all(|(k, nc)| hay.get(k).is_some_and(|hc| hc.to_ascii_lowercase() == nc))
+}
+
+/// scheme 前必须是分隔符，否则 `xhttp://` 这种半截也会被认成链接
+fn is_boundary(c: char) -> bool {
+    !(c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+'))
+}
+
+fn is_terminator(c: char) -> bool {
+    c.is_whitespace()
+        || c.is_control()
+        || matches!(c, '<' | '>' | '"' | '\'' | '`' | '\\' | '^' | '{' | '}' | '|')
+}
+
+/// 剥尾：句末标点直接去掉；成对括号只在不配平时才剥，
+/// 这样 Wikipedia 那种 `.../Foo_(bar)` 的地址不会被砍掉半截。
+fn trim_url_tail(raw: &str) -> String {
+    let mut chars: Vec<char> = raw.chars().collect();
+    while let Some(&last) = chars.last() {
+        if TRAILING_PUNCT.contains(last) {
+            chars.pop();
+            continue;
+        }
+        let open = match last {
+            ')' => '(',
+            ']' => '[',
+            '}' => '{',
+            _ => break,
+        };
+        let opens = chars.iter().filter(|&&c| c == open).count();
+        let closes = chars.iter().filter(|&&c| c == last).count();
+        if opens < closes {
+            chars.pop();
+        } else {
+            break;
+        }
+    }
+    chars.into_iter().collect()
+}
+
+/// 扫出一行文本里的所有链接。下标按**字符**计（调用方要把它换算成终端列，
+/// 一个 CJK 字符占两格，下标推不出列号）。
+pub fn find_urls(text: &str) -> Vec<UrlSpan> {
+    // 整屏逐帧扫描，先用一次子串判断挡掉绝大多数行
+    if !text.contains("://") {
+        return Vec::new();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < chars.len() {
+        let Some(scheme) = SCHEMES.iter().find(|s| starts_with_ci(&chars[i..], s)) else {
+            i += 1;
+            continue;
+        };
+        if i > 0 && !is_boundary(chars[i - 1]) {
+            i += 1;
+            continue;
+        }
+        let mut end = i + scheme.chars().count();
+        while end < chars.len() && !is_terminator(chars[end]) {
+            end += 1;
+        }
+        let url = trim_url_tail(&chars[i..end].iter().collect::<String>());
+        let n = url.chars().count();
+        // scheme 后面空无一物的不算地址
+        if n > scheme.chars().count() {
+            out.push(UrlSpan {
+                start: i,
+                end: i + n,
+                url,
+            });
+        }
+        i = end.max(i + 1);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -450,6 +550,49 @@ mod tests {
         // 输入清选区语义由 TerminalView::send_input 保证（此处仅验证 None 情况）
         tm.term.selection = None;
         assert_eq!(tm.term.selection_to_string(), None);
+    }
+
+    #[test]
+    fn finds_schemed_urls_only() {
+        let f = |t: &str| find_urls(t).into_iter().map(|s| s.url).collect::<Vec<_>>();
+        assert_eq!(f("see https://example.com/a?b=1 ok"), ["https://example.com/a?b=1"]);
+        assert_eq!(f("http://127.0.0.1:5173"), ["http://127.0.0.1:5173"]);
+        assert_eq!(f("file:///tmp/x.log"), ["file:///tmp/x.log"]);
+        // 终端里的常客：路径、包名、裸域名一律不认
+        assert!(f("src/ui/mod.rs:475 cargo build").is_empty());
+        assert!(f("example.com www.example.com").is_empty());
+        assert!(f("Cargo.toml a.b.c").is_empty());
+        // scheme 粘在别的词后面不算
+        assert!(f("xhttps://a.com").is_empty());
+        // scheme 后面什么都没有不算
+        assert!(f("https://").is_empty());
+    }
+
+    #[test]
+    fn trims_sentence_punctuation_but_keeps_balanced_parens() {
+        let f = |t: &str| find_urls(t).into_iter().map(|s| s.url).collect::<Vec<_>>();
+        assert_eq!(f("详见 https://example.com/a。"), ["https://example.com/a"]);
+        assert_eq!(f("see https://example.com/a."), ["https://example.com/a"]);
+        assert_eq!(f("(https://example.com/a)"), ["https://example.com/a"]);
+        // 地址自带的成对括号要保住
+        assert_eq!(
+            f("https://w.org/Foo_(bar)"),
+            ["https://w.org/Foo_(bar)"]
+        );
+        assert_eq!(f("[https://a.io/x]"), ["https://a.io/x"]);
+    }
+
+    #[test]
+    fn url_span_indices_are_char_based() {
+        // 前面是 CJK：start/end 必须按字符数，不能是字节数
+        let spans = find_urls("打开 https://a.io 看看");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].start, 3);
+        assert_eq!(spans[0].end, 3 + "https://a.io".chars().count());
+        // 一行两个链接
+        let spans = find_urls("a http://x.io b https://y.io c");
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[1].url, "https://y.io");
     }
 
     #[test]
