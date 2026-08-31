@@ -192,15 +192,6 @@ pub struct DeleteResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct Permission {
-    pub id: String,
-    #[serde(default)]
-    pub label: String,
-    #[serde(default)]
-    pub status: String, // granted|denied|undetermined|unknown|needs_settings
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PairResponse {
     #[serde(default)]
     pub payload: String,

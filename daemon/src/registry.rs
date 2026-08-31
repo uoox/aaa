@@ -1,13 +1,24 @@
-//! `.aaa-agents` registry — line format `<dir>\t<agent>`, atomic whole-file
-//! rewrite. Bidirectionally compatible with the aaa CLI.
+//! `.aaa-agents` registry — line format `<dir>\t<agent>[\t<conversation id>]`,
+//! atomic whole-file rewrite. Bidirectionally compatible with the aaa CLI.
+//!
+//! The third column records the agent conversation id for that directory, so a
+//! project can be resumed after the project root moves: agent stores key their
+//! sessions by cwd, and a migrated path finds nothing there — the registry id
+//! is the fallback that still names the old conversation.
 
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
+#[derive(Clone, Debug, Default)]
+struct Entry {
+    agent: String,
+    id: Option<String>,
+}
+
 pub struct Registry {
     path: PathBuf,
-    map: HashMap<String, String>,
+    map: HashMap<String, Entry>,
 }
 
 impl Registry {
@@ -21,22 +32,56 @@ impl Registry {
         let mut map = HashMap::new();
         if let Ok(body) = std::fs::read_to_string(&path) {
             for line in body.lines() {
-                let mut it = line.splitn(2, '\t');
+                let mut it = line.splitn(3, '\t');
                 let (Some(d), Some(a)) = (it.next(), it.next()) else { continue };
-                if !d.is_empty() && !a.is_empty() {
-                    map.insert(d.to_string(), a.to_string());
+                if d.is_empty() || a.is_empty() {
+                    continue;
                 }
+                let id = it.next().map(str::trim).filter(|s| !s.is_empty()).map(String::from);
+                map.insert(d.to_string(), Entry { agent: a.to_string(), id });
             }
         }
         Registry { path, map }
     }
 
     pub fn get(&self, dir: &str) -> Option<&str> {
-        self.map.get(dir).map(|s| s.as_str())
+        self.map.get(dir).map(|e| e.agent.as_str())
+    }
+
+    pub fn get_id(&self, dir: &str) -> Option<&str> {
+        self.map.get(dir).and_then(|e| e.id.as_deref())
+    }
+
+    /// All `(dir, agent, id)` rows, for migration sweeps.
+    pub fn entries(&self) -> Vec<(String, String, Option<String>)> {
+        self.map
+            .iter()
+            .map(|(d, e)| (d.clone(), e.agent.clone(), e.id.clone()))
+            .collect()
     }
 
     pub fn set(&mut self, dir: &str, agent: &str) -> io::Result<()> {
-        self.map.insert(dir.to_string(), agent.to_string());
+        let e = self.map.entry(dir.to_string()).or_default();
+        if e.agent != agent {
+            // 换 agent 的同时旧对话 id 就没有意义了
+            e.id = None;
+        }
+        e.agent = agent.to_string();
+        self.flush()
+    }
+
+    /// Record the conversation id for a directory (agent entry must make sense
+    /// to the caller; a missing row is created with the given agent).
+    pub fn set_id(&mut self, dir: &str, agent: &str, id: &str) -> io::Result<()> {
+        let e = self.map.entry(dir.to_string()).or_default();
+        if e.agent.is_empty() {
+            e.agent = agent.to_string();
+        }
+        if e.agent == agent && e.id.as_deref() == Some(id) {
+            return Ok(()); // no churn, no write
+        }
+        e.agent = agent.to_string();
+        e.id = Some(id.to_string());
         self.flush()
     }
 
@@ -44,6 +89,24 @@ impl Registry {
         if self.map.remove(dir).is_none() {
             return Ok(());
         }
+        self.flush()
+    }
+
+    /// After the project root moved from `old_root` to `new_root`: rewrite every
+    /// key under the old prefix to the new one. Call with a Registry loaded from
+    /// the NEW root (the file travelled with the move).
+    pub fn rewrite_prefix(&mut self, old_root: &Path, new_root: &Path) -> io::Result<()> {
+        let old_s = old_root.to_string_lossy().into_owned();
+        let mut next = HashMap::new();
+        for (d, e) in self.map.drain() {
+            let nd = match Path::new(&d).strip_prefix(old_root) {
+                Ok(rel) => new_root.join(rel).to_string_lossy().into_owned(),
+                Err(_) if d == old_s => new_root.to_string_lossy().into_owned(),
+                Err(_) => d,
+            };
+            next.insert(nd, e);
+        }
+        self.map = next;
         self.flush()
     }
 
@@ -78,11 +141,15 @@ impl Registry {
         }
         let mut body = String::new();
         let mut entries: Vec<_> = self.map.iter().filter(|(d, _)| self.is_live(d)).collect();
-        entries.sort();
-        for (d, a) in entries {
+        entries.sort_by(|a, b| a.0.cmp(b.0));
+        for (d, e) in entries {
             body.push_str(d);
             body.push('\t');
-            body.push_str(a);
+            body.push_str(&e.agent);
+            if let Some(id) = &e.id {
+                body.push('\t');
+                body.push_str(id);
+            }
             body.push('\n');
         }
         let tmp = self.path.with_file_name(format!(".aaa-agents.tmp.{}", std::process::id()));
@@ -107,7 +174,41 @@ mod tests {
         let reg = Registry::load(root);
         assert_eq!(reg.get("/Volumes/SSD/project/foo"), Some("claude"));
         assert_eq!(reg.get("/Volumes/SSD/project/bar"), Some("codex"));
+        assert_eq!(reg.get_id("/Volumes/SSD/project/foo"), None);
         assert_eq!(reg.get("badline"), None);
+    }
+
+    #[test]
+    fn conversation_id_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let p = root.join("proj");
+        std::fs::create_dir(&p).unwrap();
+        let ps = p.to_string_lossy().into_owned();
+        let mut reg = Registry::load(root);
+        reg.set_id(&ps, "claude", "sess-uuid-1").unwrap();
+        let body = std::fs::read_to_string(root.join(".aaa-agents")).unwrap();
+        assert_eq!(body, format!("{ps}\tclaude\tsess-uuid-1\n"));
+        let reg2 = Registry::load(root);
+        assert_eq!(reg2.get(&ps), Some("claude"));
+        assert_eq!(reg2.get_id(&ps), Some("sess-uuid-1"));
+    }
+
+    #[test]
+    fn changing_agent_drops_stale_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let p = root.join("proj");
+        std::fs::create_dir(&p).unwrap();
+        let ps = p.to_string_lossy().into_owned();
+        let mut reg = Registry::load(root);
+        reg.set_id(&ps, "claude", "id-1").unwrap();
+        reg.set(&ps, "codex").unwrap();
+        assert_eq!(reg.get_id(&ps), None, "claude 的 id 对 codex 没有意义");
+        // 同 agent 重复 set 保留 id
+        reg.set_id(&ps, "codex", "id-2").unwrap();
+        reg.set(&ps, "codex").unwrap();
+        assert_eq!(reg.get_id(&ps), Some("id-2"));
     }
 
     #[test]
@@ -151,6 +252,27 @@ mod tests {
         assert!(body.contains(&format!("{live_s}\tcodex")), "live entry updated");
         assert!(!body.contains(&gone_s), "orphaned entry pruned on write");
         assert!(body.contains(external), "entry outside the root is kept");
+    }
+
+    #[test]
+    fn rewrite_prefix_moves_keys_and_keeps_ids() {
+        let old = tempfile::tempdir().unwrap();
+        let new = tempfile::tempdir().unwrap();
+        let proj_old = old.path().join("p1").to_string_lossy().into_owned();
+        std::fs::create_dir_all(new.path().join("p1")).unwrap();
+        std::fs::write(
+            new.path().join(".aaa-agents"),
+            format!("{proj_old}\tclaude\tid-9\n/Volumes/Other/x\tcodex\n"),
+        )
+        .unwrap();
+        let mut reg = Registry::load(new.path());
+        reg.rewrite_prefix(old.path(), new.path()).unwrap();
+        let np = new.path().join("p1").to_string_lossy().into_owned();
+        assert_eq!(reg.get(&np), Some("claude"));
+        assert_eq!(reg.get_id(&np), Some("id-9"));
+        assert_eq!(reg.get("/Volumes/Other/x"), Some("codex"), "外部路径不动");
+        let body = std::fs::read_to_string(new.path().join(".aaa-agents")).unwrap();
+        assert!(body.contains(&format!("{np}\tclaude\tid-9")));
     }
 
     #[test]

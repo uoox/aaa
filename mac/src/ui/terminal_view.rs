@@ -389,6 +389,9 @@ impl TerminalView {
             }
             return; // 其余 cmd 组合留给 App
         }
+        if m.control && ks.key == "tab" {
+            return; // Ctrl-Tab 留给 App 级「切换激活会话」，不进 PTY
+        }
         if self.marked.is_some() {
             return; // IME 组字中
         }
@@ -411,16 +414,9 @@ impl TerminalView {
             ScrollDelta::Pixels(p) => f32::from(p.y) / line_h,
             ScrollDelta::Lines(l) => l.y,
         };
-        if self.model.mode().contains(TermMode::ALT_SCREEN) {
-            // 备用屏（TUI）：滚轮转方向键
-            let n = dy.round() as i32;
-            if n != 0 {
-                let seq: &[u8] = if n > 0 { b"\x1b[A" } else { b"\x1b[B" };
-                let bytes = seq.repeat(n.unsigned_abs().min(3) as usize);
-                self.attach.input(bytes);
-            }
-            return;
-        }
+        // 滚轮永远只滚视口，绝不合成方向键：备用屏（vim/less）时代那套
+        // 「滚轮转 ↑↓」在 TUI agent 里会变成光标乱跳/选项乱选，比不滚更糟。
+        // 备用屏没有回滚缓冲，滚了就是没动静——这是诚实的行为。
         self.scroll_accum += dy;
         let n = self.scroll_accum.trunc() as i32;
         if n != 0 {

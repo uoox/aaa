@@ -76,6 +76,21 @@ pub fn main_entry() {
     }
 }
 
+/// Apply-by-restart for the config API: `exec` keeps the PID, so a
+/// launchd-supervised daemon stays supervised, and an orphan process (no
+/// launchd) keeps running too — either way `run()` re-reads the config.
+/// Callers guarantee no live sessions (exec tears down every PTY).
+pub fn restart_self_after_ms(ms: u64) {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+        use std::os::unix::process::CommandExt;
+        let exe = std::env::current_exe().unwrap_or_else(|_| "aaa-daemon".into());
+        let err = std::process::Command::new(exe).arg("run").exec();
+        eprintln!("re-exec failed: {err}");
+        std::process::exit(1); // launchd KeepAlive 会拉起来；游离进程只能到此为止
+    });
+}
+
 fn run() {
     let paths = Paths::from_env();
     let cfg = match crate::config::load_or_create(&paths.config_path()) {

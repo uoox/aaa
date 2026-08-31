@@ -27,7 +27,7 @@ daemon 与三个客户端的唯一协调契约。实现与本文冲突时，以�
 | `~/.config/aaa-daemon/config.toml` | daemon 配置（首次运行自动生成，含随机 token） |
 | `~/.local/state/aaa-daemon/` | 会话元数据、已退出会话的回放、日志 |
 | `/Volumes/SSD/project` | 项目根（config 可改） |
-| `/Volumes/SSD/project/.aaa-agents` | **沿用 aaa CLI 的注册表**：每行 `<目录>\t<agent>`，原子整体重写 |
+| `/Volumes/SSD/project/.aaa-agents` | **沿用 aaa CLI 的注册表**：每行 `<目录>\t<agent>[\t<对话id>]`，原子整体重写。第三列是该目录最近一次 resume 用的 agent 对话 id：目录迁移后 agent 存储按旧 cwd 查不到会话，靠它兜底（`POST /sessions` resume 命中时回写；`PUT /config` 迁移前全量采集） |
 | `~/.cache/aaa-cwds.json` | **沿用 aaa CLI 的缓存**：键 `claude:<path>` `codex:<path>` `pi:<path>` `cname2:<path>` `ainame:<path>`，读写保持兼容 |
 
 config.toml 结构：
@@ -106,6 +106,8 @@ Claude 的 hook 事件（见下）可精确覆盖启发式。
 | GET | `/mac/permissions` | 见「macOS 权限」 |
 | POST | `/mac/permissions/request` | 见「macOS 权限」 |
 | GET | `/pair` | `{payload}`，二维码内容（见「配对」） |
+| GET | `/config` | `{port, token, project_root}`（以磁盘 config.toml 为准） |
+| PUT | `/config` | `{port?, token?, project_root?, migrate?}`。**写盘 + daemon 自我重启**（`exec` 自身，PID 不变，launchd 托管不受影响）；有非 exited 会话 → 409。`project_root` 变更且 `migrate=true`：先把各项目对话 id 采进注册表，再整根 `rename`（同卷限定，跨卷报错让人手动拷），最后重写注册表路径前缀；`migrate=false` 时要求新目录已存在，只改指向 |
 | POST | `/hooks/claude` | **仅接受 localhost 来源，免 token**；Claude Code hook 转发 |
 
 ## WS

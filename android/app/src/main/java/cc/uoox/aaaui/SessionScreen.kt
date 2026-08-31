@@ -18,6 +18,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -67,6 +68,7 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -451,15 +453,23 @@ fun MessagesView(messages: List<ChatMessage>, supported: Boolean?) {
         }
         return
     }
-    LazyColumn(state = listState, modifier = Modifier.fillMaxSize().padding(horizontal = 10.dp)) {
-        // key: stable identity across refetches; contentType: reuse slots per row kind
-        items(messages, key = { it.seq }, contentType = { it.kind.ifEmpty { it.role } }) { m -> MessageRow(m) }
-        item { Spacer(Modifier.height(8.dp)) }
+    // 气泡宽度跟随实际可用宽度（按比例），不再写死 300/320dp——写死的数值在
+    // 折叠屏内屏上只占半栏，看起来像被锁在小屏宽度。
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val bubbleMax = bubbleMaxWidth(maxWidth)
+        LazyColumn(state = listState, modifier = Modifier.fillMaxSize().padding(horizontal = 10.dp)) {
+            // key: stable identity across refetches; contentType: reuse slots per row kind
+            items(messages, key = { it.seq }, contentType = { it.kind.ifEmpty { it.role } }) { m -> MessageRow(m, bubbleMax) }
+            item { Spacer(Modifier.height(8.dp)) }
+        }
     }
 }
 
+/** 气泡上限 = 可用宽度的 82%，收在 [260dp, 720dp]：窄屏别挤成一列字，超宽别一行拉满难读。 */
+fun bubbleMaxWidth(available: Dp): Dp = (available * 0.82f).coerceIn(260.dp, 720.dp)
+
 @Composable
-private fun MessageRow(m: ChatMessage) {
+private fun MessageRow(m: ChatMessage, bubbleMax: Dp) {
     when {
         m.kind == "thinking" -> ThinkingRow(m)
         m.kind == "tool_use" || m.kind == "tool_result" -> ToolRow(m)
@@ -467,7 +477,7 @@ private fun MessageRow(m: ChatMessage) {
         m.role == "user" -> Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.End) {
             Text(
                 rememberLinkified(m), color = Tok.Ink, fontSize = 14.sp,
-                modifier = Modifier.widthIn(max = 300.dp)
+                modifier = Modifier.widthIn(max = bubbleMax)
                     .background(Tok.Cyan.copy(alpha = 0.16f), RoundedCornerShape(14.dp, 14.dp, 4.dp, 14.dp))
                     .padding(horizontal = 12.dp, vertical = 8.dp),
             )
@@ -479,7 +489,7 @@ private fun MessageRow(m: ChatMessage) {
         else -> Row(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
             Text(
                 rememberLinkified(m), color = Tok.Ink, fontSize = 14.sp,
-                modifier = Modifier.widthIn(max = 320.dp)
+                modifier = Modifier.widthIn(max = bubbleMax)
                     .background(Tok.Surface, RoundedCornerShape(14.dp, 14.dp, 14.dp, 4.dp))
                     .padding(horizontal = 12.dp, vertical = 8.dp),
             )

@@ -300,17 +300,20 @@ fun HomeScaffold(
 
     // 宽屏只把底栏换成左侧 rail，内容仍是单栏——横跨整屏只装三个 tab 的底栏是纯浪费，
     // 但把列表和会话拆成两栏在实机上信息太碎，试过之后收回来了。
+    // 新建按钮两种布局统一悬浮在右下角：rail 的 header 位在左上，拇指够不着。
     if (placement == NavPlacement.Rail) {
         Row(Modifier.fillMaxSize().background(Tok.Bg)) {
-            NavigationRail(
-                containerColor = Tok.Surface,
-                header = { if (tab == 0) newButton() },
-            ) {
+            NavigationRail(containerColor = Tok.Surface) {
                 NavigationRailItem(tab == 0, { tab = 0 }, icon = { Text("▣", fontSize = 16.sp) }, label = { Text("会话") })
                 NavigationRailItem(tab == 1, { tab = 1 }, icon = { Text("▤", fontSize = 16.sp) }, label = { Text("项目") })
                 NavigationRailItem(tab == 2, { tab = 2 }, icon = { Text("⚙", fontSize = 16.sp) }, label = { Text("设置") })
             }
-            Box(Modifier.weight(1f).fillMaxSize()) { tabs() }
+            Box(Modifier.weight(1f).fillMaxSize()) {
+                tabs()
+                if (tab == 0) {
+                    Box(Modifier.align(Alignment.BottomEnd).padding(20.dp)) { newButton() }
+                }
+            }
         }
     } else {
         Scaffold(

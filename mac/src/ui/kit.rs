@@ -109,14 +109,3 @@ pub fn btn_danger(id: impl Into<gpui::ElementId>, label: impl Into<SharedString>
         .hover(|s| s.opacity(0.85))
         .child(label.into())
 }
-
-/// 权限状态 → (颜色, 中文)
-pub fn permission_status_style(status: &str) -> (u32, &'static str) {
-    match status {
-        "granted" => (theme::GREEN, "已授权"),
-        "denied" => (theme::RED, "已拒绝"),
-        "undetermined" => (theme::AMBER, "未询问"),
-        "needs_settings" => (theme::AMBER, "需去系统设置"),
-        _ => (theme::FAINT, "未知"),
-    }
-}

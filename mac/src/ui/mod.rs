@@ -3,17 +3,15 @@
 mod kit;
 mod mini_input;
 mod modals;
-mod overview;
-mod projects;
 mod settings;
 mod terminal_view;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use futures::StreamExt;
 use gpui::{
-    AppContext as _, Context, Entity, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    SharedString, Task, Window, div, prelude::*, px,
+    AppContext as _, Context, Entity, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, SharedString, Task, Window, div, prelude::*, px,
 };
 
 use crate::model::*;
@@ -25,14 +23,13 @@ use terminal_view::TerminalView;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Page {
-    Overview,
+    Home,
     Session(String),
-    Projects,
     Settings,
 }
 
 /// 关掉 `closed` 之后停在哪一页：只有关的正是当前页才换页，换到剩下的最近一个
-/// 会话，一个都不剩就回总览。`open_order` 传入时已剔除 `closed`。
+/// 会话，一个都不剩就回主页。`open_order` 传入时已剔除 `closed`。
 fn page_after_close(current: &Page, closed: &str, open_order: &[String]) -> Page {
     if current != &Page::Session(closed.to_string()) {
         return current.clone();
@@ -40,7 +37,20 @@ fn page_after_close(current: &Page, closed: &str, open_order: &[String]) -> Page
     open_order
         .last()
         .map(|x| Page::Session(x.clone()))
-        .unwrap_or(Page::Overview)
+        .unwrap_or(Page::Home)
+}
+
+/// Ctrl-Tab：在存活会话里循环。`alive` 按侧栏顺序；当前不在列表里（主页 /
+/// 设置 / 已退出）就回到第一个。
+fn next_session_id(alive: &[String], current: Option<&str>) -> Option<String> {
+    if alive.is_empty() {
+        return None;
+    }
+    let ix = current
+        .and_then(|c| alive.iter().position(|x| x == c))
+        .map(|i| (i + 1) % alive.len())
+        .unwrap_or(0);
+    Some(alive[ix].clone())
 }
 
 pub enum Modal {
@@ -48,9 +58,6 @@ pub enum Modal {
     NewProject {
         agent_idx: usize,
         busy: bool,
-    },
-    AgentPick {
-        path: String,
     },
     DeleteConfirm {
         paths: Vec<String>,
@@ -66,6 +73,13 @@ pub enum Modal {
     ConfirmDeleteSession {
         id: String,
     },
+    /// 项目目录变更确认：迁移 or 仅指向（daemon 会重启）
+    ConfirmConfig {
+        port: u16,
+        token: String,
+        old_root: String,
+        new_root: String,
+    },
 }
 
 pub struct RootView {
@@ -80,7 +94,6 @@ pub struct RootView {
     pub sessions: Vec<Session>,
     pub projects: Vec<Project>,
     pub agents: Vec<AgentInfo>,
-    pub permissions: Vec<Permission>,
     /// 配对二维码模块（(宽, 黑白位图)；fetch 时编码一次，渲染帧只读）
     pub qr_modules: Option<(usize, Vec<bool>)>,
     pub endpoint_from_config: bool,
@@ -103,13 +116,12 @@ pub struct RootView {
 
     // 输入框
     pub name_input: Entity<MiniInput>,
-    pub search_input: Entity<MiniInput>,
     pub host_input: Entity<MiniInput>,
     pub port_input: Entity<MiniInput>,
     pub token_input: Entity<MiniInput>,
-
-    // 项目页选择
-    pub selected_paths: HashSet<String>,
+    pub root_input: Entity<MiniInput>,
+    /// 项目目录输入框只在首次拿到 health 时填一次，之后不覆盖用户输入
+    root_input_seeded: bool,
 
     pub error: Option<String>,
     _pump: Task<()>,
@@ -134,10 +146,10 @@ impl RootView {
         });
 
         let name_input = cx.new(|cx| MiniInput::new(cx, "留空 = 时间戳目录名"));
-        let search_input = cx.new(|cx| MiniInput::new(cx, "搜索…"));
         let host_input = cx.new(|cx| MiniInput::new(cx, "127.0.0.1"));
         let port_input = cx.new(|cx| MiniInput::new(cx, "2730"));
         let token_input = cx.new(|cx| MiniInput::new(cx, "aaa_tk_…"));
+        let root_input = cx.new(|cx| MiniInput::new(cx, "/Volumes/SSD/project"));
         if let Some(ep) = &endpoint {
             host_input.update(cx, |i, cx| i.set_text(ep.host.clone(), cx));
             port_input.update(cx, |i, cx| i.set_text(ep.port.to_string(), cx));
@@ -146,7 +158,7 @@ impl RootView {
 
         RootView {
             net,
-            page: Page::Overview,
+            page: Page::Home,
             modal: Modal::None,
             conn: ConnState::Connecting,
             health: None,
@@ -154,7 +166,6 @@ impl RootView {
             sessions: Vec::new(),
             projects: Vec::new(),
             agents: builtin_agents(),
-            permissions: Vec::new(),
             qr_modules: None,
             endpoint_from_config,
             terminals: HashMap::new(),
@@ -166,11 +177,11 @@ impl RootView {
             sidebar_w: UiState::load().sidebar_w,
             sidebar_drag: None,
             name_input,
-            search_input,
             host_input,
             port_input,
             token_input,
-            selected_paths: HashSet::new(),
+            root_input,
+            root_input_seeded: false,
             error: None,
             _pump: pump,
         }
@@ -344,6 +355,11 @@ impl RootView {
             self.net.health(),
             |r, h: Health, cx| {
                 r.ssd_mounted = h.ssd_mounted;
+                if !r.root_input_seeded && !h.project_root.is_empty() {
+                    r.root_input_seeded = true;
+                    let root = h.project_root.clone();
+                    r.root_input.update(cx, |i, cx| i.set_text(root, cx));
+                }
                 r.health = Some(h);
                 cx.notify();
             },
@@ -372,7 +388,6 @@ impl RootView {
             cx,
         );
         self.fetch_projects(cx);
-        self.fetch_permissions(cx);
         self.spawn_fetch(
             self.net.pair(),
             |r, p: PairResponse, cx| {
@@ -389,18 +404,6 @@ impl RootView {
             self.net.projects(),
             |r, p: Vec<Project>, cx| {
                 r.projects = p;
-                cx.notify();
-            },
-            false,
-            cx,
-        );
-    }
-
-    pub fn fetch_permissions(&mut self, cx: &mut Context<Self>) {
-        self.spawn_fetch(
-            self.net.permissions(),
-            |r, p: Vec<Permission>, cx| {
-                r.permissions = p;
                 cx.notify();
             },
             false,
@@ -480,40 +483,84 @@ impl RootView {
 
     // ── 渲染 ────────────────────────────────────────────────────────────
 
-    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let waiting_count = self
+    /// Ctrl-Tab / 双击下分区都会走到的「激活会话」帮手
+    fn cycle_session(&mut self, cx: &mut Context<Self>) {
+        let alive: Vec<String> = self
             .sessions
             .iter()
-            .filter(|s| s.state == SessionState::Waiting)
-            .count();
+            .filter(|s| s.state != SessionState::Exited)
+            .map(|s| s.id.clone())
+            .collect();
+        let cur = match &self.page {
+            Page::Session(id) => Some(id.as_str()),
+            _ => None,
+        };
+        if let Some(next) = next_session_id(&alive, cur) {
+            self.open_session(next, cx);
+        }
+    }
 
-        let mut sessions_col = div().flex().flex_col().gap(px(1.));
-        for (ix, s) in self.sessions.iter().enumerate() {
+    /// App 级快捷键：⌘N/Ctrl-N 新建项目，Ctrl-Tab 切换激活会话。
+    /// 挂在根节点上吃冒泡：终端把 Ctrl-Tab 放行、⌘ 组合本来就不吞。
+    fn on_root_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let ks = &ev.keystroke;
+        let m = ks.modifiers;
+        if ks.key == "n" && (m.platform || m.control) {
+            if matches!(self.modal, Modal::None) {
+                self.open_new_project_modal(window, cx);
+            }
+            cx.stop_propagation();
+            return;
+        }
+        if ks.key == "tab" && m.control {
+            self.cycle_session(cx);
+            cx.stop_propagation();
+        }
+    }
+
+    // ── 侧栏 ───────────────────────────────────────────────────────────
+    //
+    // 结构（自上而下）：新建按钮 → 激活的会话（TUI/Shell 开着的） → 分隔线 →
+    // 未激活的项目（双击开启会话）。没有大标题、没有总览页——侧栏本身就是
+    // 全部导航。
+
+    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let row_base = |id: gpui::ElementId| {
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .px(px(10.))
+                .py(px(5.))
+                .mx(px(6.))
+                .rounded(px(6.))
+                .cursor_pointer()
+        };
+
+        // ── 上分区：存活会话 ────────────────────────────────────────────
+        let alive: Vec<Session> = self
+            .sessions
+            .iter()
+            .filter(|s| s.state != SessionState::Exited)
+            .cloned()
+            .collect();
+        let alive_paths: Vec<&str> = alive.iter().map(|s| s.project_path.as_str()).collect();
+
+        let mut active_col = div().flex().flex_col().gap(px(1.));
+        for (ix, s) in alive.iter().enumerate() {
             let id = s.id.clone();
             let id_close = s.id.clone();
             let active = self.page == Page::Session(id.clone());
-            let is_stalled =
-                s.state == SessionState::Running && self.stalled.contains_key(&s.id);
-            // × 只给真正开着的会话：横向 tab 条撤掉后侧栏行就是 tab，
-            // 没打开过的会话没有 tab 可关，给个点了没反应的按钮更糟。
-            let is_open = self.open_order.iter().any(|x| x == &s.id);
+            let is_stalled = s.state == SessionState::Running && self.stalled.contains_key(&s.id);
             let agent_label: SharedString = if s.agent == "shell" {
                 "term".into()
             } else {
                 s.agent.clone().into()
             };
-            sessions_col = sessions_col.child(
-                div()
-                    .id(("sb-sess", ix))
+            active_col = active_col.child(
+                row_base(("sb-sess", ix).into())
                     .group("sb-row")
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .px(px(10.))
-                    .py(px(5.))
-                    .mx(px(6.))
-                    .rounded(px(6.))
-                    .cursor_pointer()
                     .when(active, |el| el.bg(c(theme::SURFACE_RAISED)))
                     .hover(|st| st.bg(c(theme::SURFACE_RAISED)))
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -527,11 +574,7 @@ impl RootView {
                             .text_ellipsis()
                             .whitespace_nowrap()
                             .text_size(px(12.5))
-                            .text_color(c(if s.state == SessionState::Exited {
-                                theme::DIM
-                            } else {
-                                theme::INK
-                            }))
+                            .text_color(c(theme::INK))
                             .child(SharedString::from(s.display_title())),
                     )
                     .when(is_stalled, |el| {
@@ -550,31 +593,101 @@ impl RootView {
                             .text_color(c(theme::FAINT))
                             .child(agent_label),
                     )
-                    .when(is_open, |el| {
-                        el.child(
-                            div()
-                                .id(("sb-close", ix))
-                                .flex_none()
-                                .px(px(3.))
-                                .rounded(px(4.))
-                                .text_size(px(10.))
-                                .text_color(c(theme::FAINT))
-                                .hover(|st| {
-                                    st.text_color(c(theme::INK)).bg(c(theme::EDGE_LIGHT))
-                                })
-                                // 非当前行悬停才现身；invisible 连命中盒一起去掉，
-                                // 不会变成一个看不见却点得到的陷阱。位置照样占着，
-                                // 鼠标划过时整行不跳。
-                                .when(!active, |el| {
-                                    el.invisible().group_hover("sb-row", |st| st.visible())
-                                })
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    cx.stop_propagation(); // 别让点 × 顺带选中该行
-                                    this.close_tab(&id_close, cx);
-                                }))
-                                .child("✕"),
-                        )
-                    }),
+                    .child(
+                        // × = 关闭这个 TUI/Shell：终止进程、项目回到下分区。
+                        // 一律先弹确认——还在跑的 agent 被顺手点掉最伤。
+                        div()
+                            .id(("sb-close", ix))
+                            .flex_none()
+                            .px(px(3.))
+                            .rounded(px(4.))
+                            .text_size(px(10.))
+                            .text_color(c(theme::FAINT))
+                            .hover(|st| st.text_color(c(theme::RED)).bg(c(theme::EDGE_LIGHT)))
+                            // 非当前行悬停才现身；invisible 连命中盒一起去掉
+                            .when(!active, |el| {
+                                el.invisible().group_hover("sb-row", |st| st.visible())
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.modal = Modal::ConfirmKill {
+                                    id: id_close.clone(),
+                                };
+                                cx.notify();
+                            }))
+                            .child("✕"),
+                    ),
+            );
+        }
+
+        // ── 下分区：未激活的项目（双击开启会话并移入上分区） ─────────────
+        let mut idle_col = div().flex().flex_col().gap(px(1.));
+        for (ix, p) in self
+            .projects
+            .iter()
+            .filter(|p| !alive_paths.contains(&p.path.as_str()))
+            .enumerate()
+        {
+            let proj = p.clone();
+            let del_path = p.path.clone();
+            let title = p
+                .session_title
+                .clone()
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| p.name.clone());
+            let agent_label: SharedString = match p.agent.as_deref() {
+                Some("shell") => "term".into(),
+                Some(a) => a.to_string().into(),
+                None => "".into(),
+            };
+            idle_col = idle_col.child(
+                row_base(("sb-proj", ix).into())
+                    .group("sb-idle")
+                    .hover(|st| st.bg(c(theme::SURFACE_RAISED)))
+                    .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, _, cx| {
+                        if ev.click_count() >= 2 {
+                            this.open_project(&proj, cx);
+                        }
+                    }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .text_size(px(12.))
+                            .text_color(c(theme::DIM))
+                            .child(SharedString::from(title)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .font_family("Menlo")
+                            .text_color(c(theme::FAINT))
+                            .child(agent_label),
+                    )
+                    .child(
+                        div()
+                            .id(("sb-del", ix))
+                            .flex_none()
+                            .px(px(3.))
+                            .rounded(px(4.))
+                            .text_size(px(10.))
+                            .text_color(c(theme::FAINT))
+                            .hover(|st| st.text_color(c(theme::RED)).bg(c(theme::EDGE_LIGHT)))
+                            .invisible()
+                            .group_hover("sb-idle", |st| st.visible())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.modal = Modal::DeleteConfirm {
+                                    paths: vec![del_path.clone()],
+                                    report: None,
+                                    busy: false,
+                                };
+                                cx.notify();
+                            }))
+                            .child("删"),
+                    ),
             );
         }
 
@@ -593,119 +706,49 @@ impl RootView {
             ConnState::Disconnected => (theme::RED, "未连接".to_string()),
         };
 
-        let label = |text: &'static str| {
-            div()
-                .px(px(16.))
-                .pt(px(12.))
-                .pb(px(4.))
-                .text_size(px(10.))
-                .font_family("Menlo")
-                .text_color(c(theme::FAINT))
-                .child(text)
-        };
-
         div()
             .w(px(self.sidebar_w))
             .flex_none()
             .h_full()
             .flex()
             .flex_col()
-            .overflow_hidden() // 拖窄时会话标题按 ellipsis 收，不许挤出侧栏
+            .overflow_hidden() // 拖窄时标题按 ellipsis 收，不许挤出侧栏
             .bg(c(theme::SURFACE))
             .child(
-                div()
-                    .id("sb-overview")
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .px(px(10.))
-                    .py(px(5.))
-                    .mx(px(6.))
+                row_base("sb-new".into())
                     .mt(px(10.))
-                    .rounded(px(6.))
-                    .cursor_pointer()
-                    .when(self.page == Page::Overview, |el| {
-                        el.bg(c(theme::SURFACE_RAISED))
-                    })
-                    .hover(|st| st.bg(c(theme::SURFACE_RAISED)))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.page = Page::Overview;
-                        cx.notify();
-                    }))
-                    .child(div().text_size(px(12.)).child("◱"))
-                    .child(div().text_size(px(12.5)).child("总览"))
-                    .when(waiting_count > 0, |el| {
-                        el.child(
-                            div()
-                                .ml_auto()
-                                .px(px(6.))
-                                .rounded_full()
-                                .bg(ca(theme::AMBER, 0.18))
-                                .text_size(px(10.5))
-                                .font_family("Menlo")
-                                .text_color(c(theme::AMBER))
-                                .child(SharedString::from(waiting_count.to_string())),
-                        )
-                    }),
-            )
-            .child(label("会话"))
-            .child(
-                div()
-                    .id("sb-sessions-scroll")
-                    .flex_1()
-                    .min_h(px(0.))
-                    .overflow_y_scroll()
-                    .child(sessions_col),
-            )
-            .child(label("资料库"))
-            .child(
-                div()
-                    .id("sb-projects")
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .px(px(10.))
-                    .py(px(5.))
-                    .mx(px(6.))
-                    .rounded(px(6.))
-                    .cursor_pointer()
-                    .when(self.page == Page::Projects, |el| {
-                        el.bg(c(theme::SURFACE_RAISED))
-                    })
-                    .hover(|st| st.bg(c(theme::SURFACE_RAISED)))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.page = Page::Projects;
-                        this.fetch_projects(cx);
-                        cx.notify();
-                    }))
-                    .child(div().text_size(px(12.)).child("▤"))
-                    .child(div().flex_1().text_size(px(12.5)).child("项目"))
-                    .child(
-                        div()
-                            .text_size(px(10.5))
-                            .font_family("Menlo")
-                            .text_color(c(theme::FAINT))
-                            .child(SharedString::from(self.projects.len().to_string())),
-                    ),
-            )
-            .child(
-                div()
-                    .id("sb-new")
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .px(px(10.))
-                    .py(px(5.))
-                    .mx(px(6.))
-                    .mb(px(6.))
-                    .rounded(px(6.))
-                    .cursor_pointer()
-                    .hover(|st| st.bg(c(theme::SURFACE_RAISED)))
+                    .mb(px(4.))
+                    .border_1()
+                    .border_color(c(theme::EDGE_LIGHT))
+                    .hover(|st| st.bg(c(theme::SURFACE_RAISED)).border_color(c(theme::CYAN)))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.open_new_project_modal(window, cx);
                     }))
                     .child(div().text_size(px(13.)).text_color(c(theme::CYAN)).child("＋"))
-                    .child(div().text_size(px(12.5)).child("新建…")),
+                    .child(div().flex_1().text_size(px(12.5)).child("新建项目"))
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .font_family("Menlo")
+                            .text_color(c(theme::FAINT))
+                            .child("⌘N"),
+                    ),
+            )
+            .child(
+                div()
+                    .id("sb-scroll")
+                    .flex_1()
+                    .min_h(px(0.))
+                    .overflow_y_scroll()
+                    .child(active_col)
+                    .child(
+                        div()
+                            .h(px(1.))
+                            .mx(px(10.))
+                            .my(px(7.))
+                            .bg(c(theme::EDGE)),
+                    )
+                    .child(idle_col),
             )
             .child(
                 div()
@@ -738,7 +781,6 @@ impl RootView {
                             .hover(|st| st.text_color(c(theme::CYAN)))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.page = Page::Settings;
-                                this.fetch_permissions(cx);
                                 cx.notify();
                             }))
                             .child("⚙"),
@@ -974,29 +1016,6 @@ impl RootView {
                     bar.child("会话不存在")
                 }
             }
-            Page::Projects => {
-                let root = self
-                    .health
-                    .as_ref()
-                    .map(|h| h.project_root.clone())
-                    .unwrap_or_default();
-                bar.child(SharedString::from(format!("{} 个项目", self.projects.len())))
-                    .child(SharedString::from(root))
-                    .child(
-                        div()
-                            .ml_auto()
-                            .text_color(c(if self.ssd_mounted {
-                                theme::GREEN
-                            } else {
-                                theme::RED
-                            }))
-                            .child(if self.ssd_mounted {
-                                "SSD 已挂载 ✓"
-                            } else {
-                                "SSD 未挂载 ✕"
-                            }),
-                    )
-            }
             _ => {
                 let waiting = self
                     .sessions
@@ -1073,8 +1092,23 @@ impl Render for RootView {
                         el
                     }
                 }
-                Page::Overview => el.child(self.render_overview(cx)),
-                Page::Projects => el.child(self.render_projects(cx)),
+                Page::Home => el.child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .gap(px(6.))
+                        .text_color(c(theme::FAINT))
+                        .child(div().text_size(px(13.)).child("双击左侧项目开启会话"))
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .font_family("Menlo")
+                                .child("⌘N 新建项目 · ⌃Tab 切换会话"),
+                        ),
+                ),
                 Page::Settings => el.child(self.render_settings(window, cx)),
             }
         });
@@ -1105,6 +1139,7 @@ impl Render for RootView {
             .bg(c(theme::BG))
             .text_color(c(theme::INK))
             .text_size(px(13.))
+            .on_key_down(cx.listener(Self::on_root_key))
             .child(self.render_sidebar(cx))
             .child(self.render_sidebar_resizer(cx))
             .child(main);
@@ -1150,6 +1185,17 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_tab_cycles_and_wraps() {
+        let alive = ids(&["a", "b", "c"]);
+        assert_eq!(next_session_id(&alive, Some("a")).as_deref(), Some("b"));
+        assert_eq!(next_session_id(&alive, Some("c")).as_deref(), Some("a"), "回绕");
+        // 当前不在列表（主页/设置/会话刚退出）→ 回到第一个
+        assert_eq!(next_session_id(&alive, None).as_deref(), Some("a"));
+        assert_eq!(next_session_id(&alive, Some("gone")).as_deref(), Some("a"));
+        assert_eq!(next_session_id(&[], Some("a")), None, "没有存活会话就不动");
+    }
+
+    #[test]
     fn closing_current_tab_falls_back() {
         let cur = Page::Session("s_2".into());
         // 回到剩下的最近一个
@@ -1158,6 +1204,6 @@ mod tests {
             Page::Session("s_3".into())
         );
         // 一个都不剩 → 总览
-        assert_eq!(page_after_close(&cur, "s_2", &[]), Page::Overview);
+        assert_eq!(page_after_close(&cur, "s_2", &[]), Page::Home);
     }
 }

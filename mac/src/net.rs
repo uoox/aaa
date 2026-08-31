@@ -180,12 +180,23 @@ impl Net {
     ) -> impl Future<Output = Result<DeleteResponse>> + use<> {
         self.post_json("/projects/delete", serde_json::json!({ "paths": paths }))
     }
-    pub fn set_project_agent(
+    /// 改 daemon 配置（写盘 + daemon 自我重启；有存活会话会被 409 拒绝）。
+    /// `migrate`: project_root 变化时整根迁移（移动目录 + 注册表重写）。
+    pub fn put_config(
         &self,
-        path: String,
-        agent: String,
+        port: Option<u16>,
+        token: Option<String>,
+        project_root: Option<String>,
+        migrate: bool,
     ) -> impl Future<Output = Result<serde_json::Value>> + use<> {
-        self.post_json("/projects/agent", serde_json::json!({"path": path, "agent": agent}))
+        self.request_raw(
+            reqwest::Method::PUT,
+            "/config".into(),
+            Some(serde_json::json!({
+                "port": port, "token": token,
+                "project_root": project_root, "migrate": migrate,
+            })),
+        )
     }
     pub fn create_session(
         &self,
@@ -233,12 +244,6 @@ impl Net {
             &format!("/sessions/{id}/rename"),
             serde_json::json!({ "title": title }),
         )
-    }
-    pub fn permissions(&self) -> impl Future<Output = Result<Vec<Permission>>> + use<> {
-        self.get_json("/mac/permissions")
-    }
-    pub fn request_permissions(&self) -> impl Future<Output = Result<serde_json::Value>> + use<> {
-        self.post_json("/mac/permissions/request", serde_json::json!({"ids": ["all"]}))
     }
     pub fn pair(&self) -> impl Future<Output = Result<PairResponse>> + use<> {
         self.get_json("/pair")

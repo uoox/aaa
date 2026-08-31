@@ -470,10 +470,21 @@ async fn sessions_create(
         let agent_id = agent.id;
         let sid = blocking(move || {
             let mut cache = CwdCache::load(&app2.paths.cwd_cache());
-            let sid = stores::find(&app2.paths, &mut cache, agent_id, &target);
+            let mut sid = stores::find(&app2.paths, &mut cache, agent_id, &target);
             if cache.dirty() {
                 let _g = app2.store_lock.lock().unwrap();
                 cache.save();
+            }
+            let mut reg = Registry::load(&app2.cfg.project_root);
+            if sid.is_empty() {
+                // 项目根迁移后 agent 存储按旧 cwd 查不到会话；注册表第三列
+                // 记的对话 id 是兜底（仅当登记的 agent 就是本次要开的）
+                if reg.get(&target) == Some(agent_id) {
+                    sid = reg.get_id(&target).unwrap_or_default().to_string();
+                }
+            } else {
+                // 顺手把最新对话 id 写回注册表：迁移时就不依赖再扫一遍存储
+                let _ = reg.set_id(&target, agent_id, &sid);
             }
             sid
         })
@@ -665,6 +676,139 @@ async fn pair_handler(State(app): State<SharedApp>) -> ApiResult<Json<Value>> {
     let token = app.cfg.token.clone();
     let payload = blocking(move || crate::pair::build_payload(port, &token)).await?;
     Ok(Json(json!({"payload": payload})))
+}
+
+// ── 配置读写（写盘 + 自我重启，不做热更新） ─────────────────────────────────
+
+async fn config_get(State(app): State<SharedApp>) -> ApiResult<Json<Value>> {
+    // 以磁盘为准：可能已有改动写入、等待重启生效
+    let disk = crate::config::load_or_create(&app.paths.config_path())
+        .map_err(|e| ApiError::internal(format!("读配置: {e}")))?;
+    Ok(Json(json!({
+        "port": disk.port,
+        "token": disk.token,
+        "project_root": disk.project_root,
+    })))
+}
+
+#[derive(Deserialize)]
+struct ConfigPut {
+    port: Option<u16>,
+    token: Option<String>,
+    project_root: Option<String>,
+    /// project_root 变化时是否迁移（整根移动 + 注册表重写）
+    #[serde(default)]
+    migrate: bool,
+}
+
+/// Move the project root wholesale and keep every project resumable.
+/// Caller guarantees no live sessions. Same-volume only (`rename`).
+fn migrate_root(paths: &Paths, old: &Path, new: &Path) -> Result<(), String> {
+    if !old.is_dir() {
+        return Err(format!("旧项目根不存在：{}", old.display()));
+    }
+    if new == old {
+        return Err("新旧目录相同".into());
+    }
+    if new.starts_with(old) || old.starts_with(new) {
+        return Err("新目录不能嵌套在旧目录内（或反之）".into());
+    }
+    // ① 迁移前把每个项目当前的对话 id 落进注册表：迁走后 agent 存储按旧
+    //    cwd 查不到会话，id 只能现在采
+    let mut reg = Registry::load(old);
+    let mut cache = CwdCache::load(&paths.cwd_cache());
+    for (dir, agent, id) in reg.entries() {
+        if id.is_some() || agent == "shell" || !Path::new(&dir).starts_with(old) {
+            continue;
+        }
+        let sid = stores::find(paths, &mut cache, &agent, &dir);
+        if !sid.is_empty() {
+            let _ = reg.set_id(&dir, &agent, &sid);
+        }
+    }
+    // ② 整根 rename（同卷原子）。跨卷不装聪明——rename 会失败，明说手动拷
+    if new.exists() {
+        let empty = std::fs::read_dir(new).map(|mut d| d.next().is_none()).unwrap_or(false);
+        if !empty {
+            return Err(format!("目标已存在且非空：{}", new.display()));
+        }
+        std::fs::remove_dir(new).map_err(|e| format!("清理空目标失败: {e}"))?;
+    }
+    std::fs::rename(old, new)
+        .map_err(|e| format!("移动失败（跨卷迁移请手动 cp 后仅改配置）: {e}"))?;
+    // ③ 注册表键改前缀（文件已随根一起移动）
+    let mut reg = Registry::load(new);
+    reg.rewrite_prefix(old, new).map_err(|e| format!("注册表重写失败: {e}"))?;
+    Ok(())
+}
+
+async fn config_put(
+    State(app): State<SharedApp>,
+    Json(body): Json<ConfigPut>,
+) -> ApiResult<Json<Value>> {
+    // 重启会杀掉所有 PTY，有存活会话时一律拒绝，绝不悄悄断人家的 agent。
+    let alive: Vec<String> = app
+        .pool
+        .list()
+        .iter()
+        .filter(|s| s.state() != SState::Exited)
+        .map(|s| s.meta.lock().unwrap().title.clone())
+        .collect();
+    if !alive.is_empty() {
+        return Err(ApiError::conflict(format!(
+            "有 {} 个存活会话（{}）。改配置需要重启 daemon，先终止它们",
+            alive.len(),
+            alive.join("、")
+        )));
+    }
+    let cfg_path = app.paths.config_path();
+    let mut cfg = crate::config::load_or_create(&cfg_path)
+        .map_err(|e| ApiError::internal(format!("读配置: {e}")))?;
+    let mut migrated = false;
+    if let Some(root) = &body.project_root {
+        let new_root = std::path::PathBuf::from(root);
+        if !new_root.is_absolute() {
+            return Err(ApiError::conflict("project_root 必须是绝对路径"));
+        }
+        if new_root != cfg.project_root {
+            if body.migrate {
+                let paths = app.paths.clone();
+                let (o, n) = (cfg.project_root.clone(), new_root.clone());
+                blocking(move || migrate_root(&paths, &o, &n))
+                    .await?
+                    .map_err(ApiError::conflict)?;
+                migrated = true;
+            } else if !new_root.is_dir() {
+                return Err(ApiError::conflict(format!(
+                    "目录不存在：{}（或选择迁移现有项目）",
+                    new_root.display()
+                )));
+            }
+            cfg.project_root = new_root;
+        }
+    }
+    if let Some(p) = body.port {
+        if p == 0 {
+            return Err(ApiError::conflict("端口不能为 0"));
+        }
+        cfg.port = p;
+    }
+    if let Some(t) = &body.token {
+        if t.trim().is_empty() {
+            return Err(ApiError::conflict("token 不能为空"));
+        }
+        cfg.token = t.trim().to_string();
+    }
+    crate::config::write_config(&cfg_path, &cfg)
+        .map_err(|e| ApiError::internal(format!("写配置: {e}")))?;
+    crate::daemon::restart_self_after_ms(600);
+    Ok(Json(json!({
+        "ok": true,
+        "migrated": migrated,
+        "restarting": true,
+        "port": cfg.port,
+        "note": "daemon 将在 1 秒内自动重启，客户端会自动重连"
+    })))
 }
 
 async fn hooks_claude(
@@ -1095,6 +1239,7 @@ pub fn router(app: SharedApp) -> Router {
         .route("/api/v1/mac/permissions", get(mac_permissions))
         .route("/api/v1/mac/permissions/request", post(mac_permissions_request))
         .route("/api/v1/pair", get(pair_handler))
+        .route("/api/v1/config", get(config_get).put(config_put))
         .route("/api/v1/hooks/claude", post(hooks_claude))
         .layer(middleware::from_fn_with_state(Arc::clone(&app), auth_mw))
         .with_state(app)
@@ -1103,6 +1248,42 @@ pub fn router(app: SharedApp) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migrate_root_moves_everything_and_rewrites_registry() {
+        let base = tempfile::tempdir().unwrap();
+        let home = base.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let paths = Paths::new(&home);
+        let old = base.path().join("proj-old");
+        let new = base.path().join("proj-new");
+        std::fs::create_dir_all(old.join("alpha")).unwrap();
+        std::fs::write(old.join("alpha/file.txt"), "x").unwrap();
+        let alpha_old = old.join("alpha").to_string_lossy().into_owned();
+        std::fs::write(
+            Registry::registry_path(&old),
+            format!("{alpha_old}\tclaude\tid-42\n/Volumes/Other/x\tcodex\n"),
+        )
+        .unwrap();
+
+        migrate_root(&paths, &old, &new).unwrap();
+
+        assert!(!old.exists(), "旧根整体移走");
+        assert!(new.join("alpha/file.txt").is_file(), "内容随根移动");
+        let reg = Registry::load(&new);
+        let alpha_new = new.join("alpha").to_string_lossy().into_owned();
+        assert_eq!(reg.get(&alpha_new), Some("claude"));
+        assert_eq!(reg.get_id(&alpha_new), Some("id-42"), "对话 id 存活");
+        assert_eq!(reg.get("/Volumes/Other/x"), Some("codex"), "外部条目不动");
+
+        // 防呆：相同 / 嵌套 / 非空目标都拒绝
+        assert!(migrate_root(&paths, &new, &new).is_err());
+        assert!(migrate_root(&paths, &new, &new.join("inner")).is_err());
+        let occupied = base.path().join("occupied");
+        std::fs::create_dir_all(occupied.join("stuff")).unwrap();
+        assert!(migrate_root(&paths, &new, &occupied).is_err());
+        assert!(new.exists(), "拒绝时不动原目录");
+    }
 
     #[test]
     fn auth_check() {

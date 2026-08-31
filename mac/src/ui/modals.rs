@@ -108,7 +108,6 @@ impl RootView {
                             *report = Some(resp);
                             *busy = false;
                         }
-                        r.selected_paths.clear();
                         r.fetch_projects(cx);
                     }
                     Err(e) => {
@@ -164,6 +163,8 @@ impl RootView {
     fn confirm_kill(&mut self, id: String, cx: &mut Context<Self>) {
         let fut = self.net.kill_session(&id);
         self.modal = Modal::None;
+        // 关 TUI = 终止 + 收起 tab：项目从上分区回到下分区
+        self.close_tab(&id, cx);
         self.spawn_fetch(fut, |_, _: serde_json::Value, _| {}, true, cx);
         cx.notify();
     }
@@ -192,7 +193,6 @@ impl RootView {
             Modal::NewProject { agent_idx, busy } => {
                 self.render_new_project(*agent_idx, *busy, cx)
             }
-            Modal::AgentPick { path } => self.render_agent_pick(path.clone(), cx),
             Modal::DeleteConfirm {
                 paths,
                 report,
@@ -203,6 +203,12 @@ impl RootView {
             Modal::ConfirmDeleteSession { id } => {
                 self.render_confirm_delete_session(id.clone(), cx)
             }
+            Modal::ConfirmConfig {
+                port,
+                token,
+                old_root,
+                new_root,
+            } => self.render_confirm_config(*port, token.clone(), old_root.clone(), new_root.clone(), cx),
         };
         Some(
             div()
@@ -303,39 +309,15 @@ impl RootView {
         list
     }
 
-    /// agent 行点击：按当前模态语义分派
+    /// agent 行点击：目前只有新建项目模态用得到（换 agent 入口已随项目页移除）
     fn on_agent_row_click(&mut self, ix: usize, cx: &mut Context<Self>) {
-        match &self.modal {
-            Modal::NewProject { busy, .. } => {
-                let b = *busy;
-                self.modal = Modal::NewProject {
-                    agent_idx: ix,
-                    busy: b,
-                };
-                cx.notify();
-            }
-            Modal::AgentPick { path } => {
-                let path = path.clone();
-                let agent = self
-                    .agents
-                    .get(ix)
-                    .map(|a| a.id.clone())
-                    .unwrap_or_default();
-                if agent == "shell" {
-                    self.set_error("注册表 agent 不能设为 shell".into(), cx);
-                    return;
-                }
-                let fut = self.net.set_project_agent(path, agent);
-                self.modal = Modal::None;
-                self.spawn_fetch(
-                    fut,
-                    |r, _: serde_json::Value, cx| r.fetch_projects(cx),
-                    true,
-                    cx,
-                );
-                cx.notify();
-            }
-            _ => {}
+        if let Modal::NewProject { busy, .. } = &self.modal {
+            let b = *busy;
+            self.modal = Modal::NewProject {
+                agent_idx: ix,
+                busy: b,
+            };
+            cx.notify();
         }
     }
 
@@ -404,41 +386,6 @@ impl RootView {
                             }),
                         ),
                     ),
-            )
-    }
-
-    fn render_agent_pick(&self, path: String, cx: &mut Context<Self>) -> gpui::Div {
-        let name = path.rsplit('/').next().unwrap_or(&path).to_string();
-        self.modal_box()
-            .child(
-                div()
-                    .font_weight(gpui::FontWeight::BOLD)
-                    .text_size(px(15.))
-                    .pb(px(4.))
-                    .child("更换默认 agent"),
-            )
-            .child(
-                div()
-                    .text_size(px(11.5))
-                    .text_color(c(theme::DIM))
-                    .pb(px(12.))
-                    .child(SharedString::from(format!("项目：{name}（写入 .aaa-agents 注册表）"))),
-            )
-            .child(
-                div()
-                    .id("ap-agents-scroll")
-                    .flex_1()
-                    .min_h(px(0.))
-                    .overflow_y_scroll()
-                    .child(self.agent_rows(None, "ap-agent", cx)),
-            )
-            .child(
-                div().flex().justify_end().pt(px(14.)).child(
-                    btn_secondary("ap-cancel", "取消").on_click(cx.listener(|this, _, _, cx| {
-                        this.modal = Modal::None;
-                        cx.notify();
-                    })),
-                ),
             )
     }
 
@@ -607,6 +554,19 @@ impl RootView {
             )
     }
 
+    /// 关闭 TUI 的提示语：还在跑的进程要说得更重
+    fn kill_warning(&self, id: &str) -> String {
+        let running = self
+            .sessions
+            .iter()
+            .any(|s| s.id == id && s.state == crate::model::SessionState::Running);
+        if running {
+            "会话仍在执行中（可能还有后台任务）。关闭会终止整个进程树（TERM，2 秒后 KILL），项目回到下方未激活区，下次双击可 resume。".into()
+        } else {
+            "进程将被终止（TERM，2 秒后 KILL），项目回到下方未激活区，下次双击可 resume。".into()
+        }
+    }
+
     fn render_confirm_kill(&self, id: String, cx: &mut Context<Self>) -> gpui::Div {
         self.modal_box()
             .w(px(400.))
@@ -616,7 +576,7 @@ impl RootView {
                     .text_size(px(15.))
                     .pb(px(8.))
                     .child(SharedString::from(format!(
-                        "终止「{}」？",
+                        "关闭「{}」？",
                         self.session_title_of(&id)
                     ))),
             )
@@ -624,7 +584,7 @@ impl RootView {
                 div()
                     .text_size(px(12.5))
                     .text_color(c(theme::DIM))
-                    .child("进程将收到 TERM（2 秒后 KILL），记录保留为已退出，可查看回放。"),
+                    .child(SharedString::from(self.kill_warning(&id))),
             )
             .child(
                 div()
@@ -688,4 +648,112 @@ impl RootView {
                     ))),
             )
     }
+    // ── 配置变更（含项目目录迁移） ──────────────────────────────────────
+
+    /// 发送配置到 daemon。root=None 表示目录没变。成功后 daemon 自我重启，
+    /// 本地立刻切到新端口/token 等它回来。
+    pub(super) fn apply_daemon_config(
+        &mut self,
+        port: u16,
+        token: String,
+        root: Option<String>,
+        migrate: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let host = self
+            .net
+            .endpoint()
+            .map(|e| e.host)
+            .unwrap_or_else(|| "127.0.0.1".into());
+        let fut = self
+            .net
+            .put_config(Some(port), Some(token.clone()), root, migrate);
+        self.modal = Modal::None;
+        self.spawn_fetch(
+            fut,
+            move |r, _: serde_json::Value, cx| {
+                r.net.set_endpoint(crate::model::Endpoint { host, port, token });
+                r.conn = crate::net::ConnState::Connecting;
+                r.set_error("配置已保存，daemon 重启中…（会自动重连，点击关闭本条）".into(), cx);
+            },
+            true,
+            cx,
+        );
+        cx.notify();
+    }
+
+    fn render_confirm_config(
+        &self,
+        port: u16,
+        token: String,
+        old_root: String,
+        new_root: String,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let (t1, t2) = (token.clone(), token);
+        let (r1, r2) = (new_root.clone(), new_root.clone());
+        self.modal_box()
+            .child(
+                div()
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_size(px(15.))
+                    .pb(px(8.))
+                    .child("项目目录变更"),
+            )
+            .child(
+                div()
+                    .font_family("Menlo")
+                    .text_size(px(11.5))
+                    .text_color(c(theme::DIM))
+                    .child(SharedString::from(old_root)),
+            )
+            .child(
+                div()
+                    .font_family("Menlo")
+                    .text_size(px(11.5))
+                    .text_color(c(theme::INK))
+                    .pb(px(10.))
+                    .child(SharedString::from(format!("→ {new_root}"))),
+            )
+            .child(
+                div()
+                    .text_size(px(12.5))
+                    .text_color(c(theme::DIM))
+                    .pb(px(4.))
+                    .child("「迁移」会整体移动目录并重写注册表（含各项目对话 id，之后 resume 不会乱）。"),
+            )
+            .child(
+                div()
+                    .text_size(px(12.5))
+                    .text_color(c(theme::DIM))
+                    .pb(px(10.))
+                    .child("「仅指向」不动旧文件，只把 daemon 指到新目录（须已存在）。两者都要求没有存活会话，daemon 会自动重启。"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap(px(8.))
+                    .pt(px(8.))
+                    .child(
+                        btn_secondary("cfg-cancel", "取消").on_click(cx.listener(
+                            |this, _, _, cx| {
+                                this.modal = Modal::None;
+                                cx.notify();
+                            },
+                        )),
+                    )
+                    .child(btn_secondary("cfg-point", "仅指向").on_click(cx.listener(
+                        move |this, _, _, cx| {
+                            this.apply_daemon_config(port, t1.clone(), Some(r1.clone()), false, cx);
+                        },
+                    )))
+                    .child(btn_primary("cfg-migrate", "迁移并切换").on_click(cx.listener(
+                        move |this, _, _, cx| {
+                            this.apply_daemon_config(port, t2.clone(), Some(r2.clone()), true, cx);
+                        },
+                    ))),
+            )
+    }
+
 }
