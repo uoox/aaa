@@ -138,6 +138,35 @@ fn val_str(v: &Value) -> String {
 
 // ---- session iterators ----
 
+/// 注册表第三列兜底 id 的有效性检查：`Some(存在与否)`=能便宜验证（claude /
+/// reasonix 的会话文件名就是 id，扫一层目录即可）；`None`=该 agent 没有便宜
+/// 的验证手段（codex 要拆 rollout 文件、pi 根本不用 id），调用方按 best-effort
+/// 继续用。目的：agent 那边把会话 GC 掉之后，别拿着坏 id 反复 resume 失败。
+pub fn id_exists(paths: &Paths, agent: &str, id: &str) -> Option<bool> {
+    if id.is_empty() || id.contains('/') || id.contains("..") {
+        return Some(false);
+    }
+    let name = format!("{id}.jsonl");
+    let scan = |root: std::path::PathBuf, nested: Option<&str>| -> bool {
+        let Ok(rd) = std::fs::read_dir(&root) else { return false };
+        for e in rd.flatten() {
+            let dir = match nested {
+                Some(sub) => e.path().join(sub),
+                None => e.path(),
+            };
+            if dir.join(&name).is_file() {
+                return true;
+            }
+        }
+        false
+    };
+    match agent {
+        "claude" => Some(scan(paths.claude_root(), None)),
+        "reasonix" => Some(scan(paths.rnx_root(), Some("sessions"))),
+        _ => None,
+    }
+}
+
 pub fn claude_sessions(paths: &Paths, cache: &mut CwdCache) -> Vec<SessRec> {
     let mut out = Vec::new();
     for d in visible_dirs(&paths.claude_root()) {
@@ -885,4 +914,26 @@ pub fn purge(paths: &Paths, cache: &mut CwdCache, target: &str) -> Vec<(String, 
         }
     }
     report
+}
+
+#[cfg(test)]
+mod id_exists_tests {
+    use super::*;
+
+    #[test]
+    fn claude_id_found_by_filename_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path());
+        let proj = paths.claude_root().join("-Volumes-SSD-project-x");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(proj.join("live-id.jsonl"), "{}\n").unwrap();
+        assert_eq!(id_exists(&paths, "claude", "live-id"), Some(true));
+        assert_eq!(id_exists(&paths, "claude", "gone-id"), Some(false), "被 GC 的 id 要报 false");
+        // 无法便宜验证的 agent 保持 best-effort
+        assert_eq!(id_exists(&paths, "codex", "whatever"), None);
+        assert_eq!(id_exists(&paths, "pi", "whatever"), None);
+        // 别让奇怪的 id 变成路径穿越
+        assert_eq!(id_exists(&paths, "claude", "../../etc/passwd"), Some(false));
+        assert_eq!(id_exists(&paths, "claude", ""), Some(false));
+    }
 }

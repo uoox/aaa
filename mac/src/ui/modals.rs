@@ -675,7 +675,35 @@ impl RootView {
             move |r, _: serde_json::Value, cx| {
                 r.net.set_endpoint(crate::model::Endpoint { host, port, token });
                 r.conn = crate::net::ConnState::Connecting;
-                r.set_error("配置已保存，daemon 重启中…（会自动重连，点击关闭本条）".into(), cx);
+                r.set_error("配置已保存，daemon 重启中…".into(), cx);
+                // 提交确认：轮询新地址的 /health，把「正常重启回来了」和
+                // 「配置写坏 / 端口 token 填错」区分开——只停在 Connecting
+                // 上用户没法知道该等还是该救（评审指出的盲区）。
+                let net = r.net.clone();
+                cx.spawn(async move |this, cx| {
+                    for _ in 0..20u32 {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_secs(1))
+                            .await;
+                        if let Ok(h) = net.health().await {
+                            let _ = this.update(cx, |r, cx| {
+                                r.set_error(
+                                    format!("daemon 已带新配置回来（v{}）✓ 点击关闭", h.version),
+                                    cx,
+                                );
+                            });
+                            return;
+                        }
+                    }
+                    let _ = this.update(cx, |r, cx| {
+                        r.set_error(
+                            "配置已写入，但 20 秒内没连上新地址——检查端口/token 是否填对，                             或看 daemon 日志（~/.local/state/aaa-daemon/）"
+                                .into(),
+                            cx,
+                        );
+                    });
+                })
+                .detach();
             },
             true,
             cx,

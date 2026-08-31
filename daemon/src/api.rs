@@ -507,9 +507,16 @@ async fn sessions_create(
             let mut reg = Registry::load(&app2.cfg.project_root);
             if sid.is_empty() {
                 // 项目根迁移后 agent 存储按旧 cwd 查不到会话；注册表第三列
-                // 记的对话 id 是兜底（仅当登记的 agent 就是本次要开的）
+                // 记的对话 id 是兜底（仅当登记的 agent 就是本次要开的）。
+                // 能验证的 agent 先验证：坏 id 当场清掉并开新会话，不要每次
+                // resume 都拿同一个已被 GC 的 id 去撞墙。
                 if reg.get(&target) == Some(agent_id) {
-                    sid = reg.get_id(&target).unwrap_or_default().to_string();
+                    let cand = reg.get_id(&target).unwrap_or_default().to_string();
+                    if stores::id_exists(&app2.paths, agent_id, &cand) == Some(false) {
+                        let _ = reg.clear_id(&target);
+                    } else {
+                        sid = cand;
+                    }
                 }
             } else {
                 // 顺手把最新对话 id 写回注册表：迁移时就不依赖再扫一遍存储

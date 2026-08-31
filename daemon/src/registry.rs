@@ -85,6 +85,17 @@ impl Registry {
         self.flush()
     }
 
+    /// 兜底 id 被证实已失效（agent 存储里找不到）时清掉，别反复撞同一堵墙
+    pub fn clear_id(&mut self, dir: &str) -> io::Result<()> {
+        match self.map.get_mut(dir) {
+            Some(e) if e.id.is_some() => {
+                e.id = None;
+                self.flush()
+            }
+            _ => Ok(()),
+        }
+    }
+
     pub fn unset(&mut self, dir: &str) -> io::Result<()> {
         if self.map.remove(dir).is_none() {
             return Ok(());
@@ -209,6 +220,22 @@ mod tests {
         reg.set_id(&ps, "codex", "id-2").unwrap();
         reg.set(&ps, "codex").unwrap();
         assert_eq!(reg.get_id(&ps), Some("id-2"));
+    }
+
+    #[test]
+    fn clear_id_keeps_the_agent_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let p = root.join("proj");
+        std::fs::create_dir(&p).unwrap();
+        let ps = p.to_string_lossy().into_owned();
+        let mut reg = Registry::load(root);
+        reg.set_id(&ps, "claude", "dead-id").unwrap();
+        reg.clear_id(&ps).unwrap();
+        assert_eq!(reg.get(&ps), Some("claude"), "行还在");
+        assert_eq!(reg.get_id(&ps), None, "坏 id 清掉");
+        // 幂等：没 id 时不写盘也不报错
+        reg.clear_id(&ps).unwrap();
     }
 
     #[test]

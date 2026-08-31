@@ -7,7 +7,8 @@
 #   packaging/bundle.sh install      # build + 覆盖安装到 /Applications（先退出正在运行的实例）
 #
 # 已知约束（本机无 Apple 开发者证书，仅 CommandLineTools）：
-# - 使用 ad-hoc 签名（codesign --sign -）。ad-hoc 签名没有稳定身份，
+# - 签名身份：优先用本机自签名证书「AAA Local Signing」（security find-identity
+#   可见即用），签名跨重建稳定，TCC 授权不再每次失效；找不到才回落 ad-hoc，
 #   每次重新构建后 TCC（通知/自动化等）授权会失效需重新授予——这正是把权限
 #   归责到 aaa-daemon 的原因（见 PROTOCOL.md），UI 本体不申请任何 TCC 权限。
 # - 本机构建的 app 无 quarantine 属性，可直接打开；若拷贝到其他机器，
@@ -80,8 +81,12 @@ PLIST
 
     plutil -lint "$APP/Contents/Info.plist"
 
-    echo "==> ad-hoc 签名"
-    codesign --force --deep --sign - "$APP"
+    SIGN_ID="-"
+    if security find-identity -v -p codesigning 2>/dev/null | grep -q "AAA Local Signing"; then
+        SIGN_ID="AAA Local Signing"
+    fi
+    echo "==> 签名: ${SIGN_ID}"
+    codesign --force --deep --sign "${SIGN_ID}" "$APP"
     codesign --verify --strict "$APP"
     codesign -dv "$APP" 2>&1 | sed -n '1,4p'
     echo "==> OK: $APP"
