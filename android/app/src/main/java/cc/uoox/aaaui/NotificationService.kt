@@ -177,6 +177,7 @@ class ReplyReceiver : BroadcastReceiver() {
             ACTION_OPTION -> intent.getStringExtra(EXTRA_TEXT)
             else -> null
         } ?: return
+        // enter 启发式（与会话屏一致）：纯数字选项键由 TUI 菜单直接消费，不补回车
         val isOptionKey = intent.action == ACTION_OPTION && text.all { it.isDigit() }
         val store = AppStore.get(context)
         store.ensureStarted()

@@ -121,13 +121,6 @@ class DaemonClient(
     suspend fun rename(id: String, title: String) { post("/sessions/$id/rename", buildJsonObject { put("title", title) }.toString()) }
     suspend fun ports(id: String): List<PortInfo> = json.decodeFromString(ListSerializer(PortInfo.serializer()), get("/sessions/$id/ports"))
 
-    suspend fun macPermissions(): List<Permission> = json.decodeFromString(ListSerializer(Permission.serializer()), get("/mac/permissions"))
-    suspend fun requestMacPermissions(): String = post("/mac/permissions/request", """{"ids":["all"]}""")
-    suspend fun pairPayload(): String {
-        val obj = json.parseToJsonElement(get("/pair")).jsonObject
-        return obj["payload"]?.jsonPrimitive?.contentOrNull.orEmpty()
-    }
-
     // ---------- v1.1 ----------
 
     suspend fun messages(id: String, after: Long = 0, limit: Int = 200): MessagesResponse =

@@ -9,7 +9,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 use anyhow::{Result, anyhow};
 use futures::channel::{mpsc, oneshot};
 use serde::de::DeserializeOwned;
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::{Bytes, Message};
 
 use crate::model::*;
 
@@ -44,7 +44,8 @@ pub enum UiEvent {
     },
     TermData {
         id: String,
-        bytes: Vec<u8>,
+        /// WS 帧 payload 原样转发（Bytes 引用计数，避免每帧拷贝）
+        bytes: Bytes,
     },
     /// attach 连接断开（会自动重连；UI 可显示提示）
     TermDown {
@@ -60,8 +61,6 @@ pub enum AttachMsg {
 
 #[derive(Clone)]
 pub struct AttachHandle {
-    #[allow(dead_code)]
-    pub id: String,
     tx: tokio::sync::mpsc::UnboundedSender<AttachMsg>,
 }
 
@@ -332,7 +331,7 @@ impl Net {
                                     Some(Ok(Message::Binary(data))) => {
                                         let _ = ui_tx.unbounded_send(UiEvent::TermData {
                                             id: sid.clone(),
-                                            bytes: data.to_vec(),
+                                            bytes: data,
                                         });
                                     }
                                     Some(Ok(Message::Text(text))) => {
@@ -386,10 +385,7 @@ impl Net {
                 backoff_ms = (backoff_ms * 2).min(15_000);
             }
         });
-        AttachHandle {
-            id: id.to_string(),
-            tx,
-        }
+        AttachHandle { tx }
     }
 }
 

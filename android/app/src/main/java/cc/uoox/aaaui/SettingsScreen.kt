@@ -1,7 +1,5 @@
 package cc.uoox.aaaui
 
-import android.content.Intent
-import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -17,7 +15,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
@@ -50,17 +47,9 @@ fun SettingsTab(store: AppStore, nav: NavHostController) {
     val settings by store.settings.flow.collectAsState(initial = AppSettings())
     val conn by store.connState.collectAsState()
     val health by store.health.collectAsState()
-    var permissions by remember { mutableStateOf<List<Permission>?>(null) }
-    var permError by remember { mutableStateOf<String?>(null) }
     var phraseDialog by remember { mutableStateOf(false) }
 
-    suspend fun loadPermissions() {
-        try { permissions = store.client?.macPermissions(); permError = null }
-        catch (e: Exception) { permError = e.message }
-    }
-    LaunchedEffect(conn) { if (conn is ConnState.Connected) { loadPermissions(); store.refreshHealth() } }
-
-    fun toast(msg: String) = Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+    LaunchedEffect(conn) { if (conn is ConnState.Connected) store.refreshHealth() }
 
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 90.dp)) {
         Text("设置", color = Tok.Ink, fontSize = 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(16.dp))
@@ -150,40 +139,6 @@ fun SettingsTab(store: AppStore, nav: NavHostController) {
             SettingRow("快捷短语") {
                 Text(settings.quickPhrases.joinToString(" · ").ifBlank { "无" }, color = Tok.Faint, fontSize = 11.sp, modifier = Modifier.weight(1f, fill = false))
                 TextButton(onClick = { phraseDialog = true }) { Text("编辑") }
-            }
-        }
-
-        // ---------- macOS 权限 ----------
-        GroupTitle("macOS 权限")
-        Group {
-            Text(
-                "授权弹窗出现在 Mac 上，请在 Mac 前完成一次；此后手机远程操作不再被权限弹窗卡死。",
-                color = Tok.Dim, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
-            )
-            permError?.let { Text("读取失败：$it", color = Tok.Red, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 14.dp)) }
-            permissions?.forEach { p ->
-                Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 5.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(p.label, color = Tok.Ink, fontSize = 13.sp, modifier = Modifier.weight(1f))
-                    val (label, color) = when (p.status) {
-                        "granted" -> "已授权" to Tok.Green
-                        "denied" -> "已拒绝" to Tok.Red
-                        "undetermined" -> "待授权" to Tok.Amber
-                        "needs_settings" -> "需在系统设置操作" to Tok.Amber
-                        else -> "未知" to Tok.Faint
-                    }
-                    Text(label, color = color, fontSize = 12.sp)
-                }
-            }
-            Row(Modifier.padding(horizontal = 14.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Button(onClick = {
-                    scope.launch {
-                        try {
-                            store.client?.requestMacPermissions()
-                            toast("已触发，弹窗在 Mac 上")
-                        } catch (e: Exception) { toast("失败：${e.message}") }
-                    }
-                }) { Text("一键申请全部") }
-                TextButton(onClick = { scope.launch { loadPermissions(); toast("已刷新") } }) { Text("刷新") }
             }
         }
 

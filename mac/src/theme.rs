@@ -11,8 +11,7 @@ pub const DIM: u32 = 0x8b99a8; // 文字二级
 pub const FAINT: u32 = 0x5f6d7c; // 文字三级
 pub const TERM_BG: u32 = 0x0a0e12; // 终端底
 pub const CYAN: u32 = 0x53c6dd; // 主操作/选中
-#[allow(dead_code)] // 设计令牌完整保留（品牌色，banner 用）
-pub const MAGENTA: u32 = 0xc583e0;
+pub const MAGENTA: u32 = 0xc583e0; // 品牌辅色（= ANSI magenta）
 pub const GREEN: u32 = 0x5ecb8f; // running
 pub const AMBER: u32 = 0xe3b45c; // waiting
 pub const RED: u32 = 0xe57373; // exited
@@ -54,21 +53,21 @@ pub fn state_label(state: &str) -> &'static str {
 
 pub const ANSI: [u32; 16] = [
     0x1c242e, // 0 black（略亮于 term-bg，保证可见）
-    0xe57373, // 1 red
-    0x5ecb8f, // 2 green
-    0xe3b45c, // 3 yellow
+    RED,      // 1 red
+    GREEN,    // 2 green
+    AMBER,    // 3 yellow
     0x6fa8dc, // 4 blue
-    0xc583e0, // 5 magenta
-    0x53c6dd, // 6 cyan
-    0xc9d4de, // 7 white
-    0x5f6d7c, // 8 bright black
+    MAGENTA,  // 5 magenta
+    CYAN,     // 6 cyan
+    TERM_FG,  // 7 white
+    FAINT,    // 8 bright black
     0xef9a9a, // 9 bright red
     0x81e2ac, // 10 bright green
     0xf0c987, // 11 bright yellow
     0x8fc3f0, // 12 bright blue
     0xd9a8ef, // 13 bright magenta
     0x7fdbef, // 14 bright cyan
-    0xe3ebf3, // 15 bright white
+    INK,      // 15 bright white
 ];
 
 pub const TERM_FG: u32 = 0xc9d4de;

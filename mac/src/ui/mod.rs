@@ -68,7 +68,8 @@ pub struct RootView {
     pub projects: Vec<Project>,
     pub agents: Vec<AgentInfo>,
     pub permissions: Vec<Permission>,
-    pub pair_payload: Option<String>,
+    /// 配对二维码模块（(宽, 黑白位图)；fetch 时编码一次，渲染帧只读）
+    pub qr_modules: Option<(usize, Vec<bool>)>,
     pub endpoint_from_config: bool,
 
     // 终端
@@ -137,7 +138,7 @@ impl RootView {
             projects: Vec::new(),
             agents: builtin_agents(),
             permissions: Vec::new(),
-            pair_payload: None,
+            qr_modules: None,
             endpoint_from_config,
             terminals: HashMap::new(),
             open_order: Vec::new(),
@@ -177,7 +178,11 @@ impl RootView {
             } => {
                 self.upsert_session(*session, cx);
                 if let Some(t) = self.terminals.get(&id) {
-                    t.update(cx, |t, cx| t.set_remote_size(cols, rows, cx));
+                    t.update(cx, |t, cx| {
+                        // hello 即视为链路恢复（重连后可能长时间无输出，不能等首字节才撤横幅）
+                        t.set_down(false, cx);
+                        t.set_remote_size(cols, rows, cx);
+                    });
                 }
             }
             UiEvent::TermData { id, bytes } => {
@@ -358,7 +363,7 @@ impl RootView {
         self.spawn_fetch(
             self.net.pair(),
             |r, p: PairResponse, cx| {
-                r.pair_payload = Some(p.payload);
+                r.qr_modules = settings::qr_encode(&p.payload);
                 cx.notify();
             },
             false,

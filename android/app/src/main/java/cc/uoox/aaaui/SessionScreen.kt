@@ -58,10 +58,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -302,6 +305,7 @@ fun SessionScreen(store: AppStore, nav: NavHostController, sessionId: String, pr
                                 "${opt.key} · ${opt.label}", color = Tok.Cyan, fontSize = 13.sp,
                                 modifier = Modifier
                                     .background(Tok.Cyan.copy(alpha = 0.14f), RoundedCornerShape(50))
+                                    // enter 启发式：纯数字选项键由 TUI 菜单直接消费，不补回车；文本回答需要回车
                                     .clickable { sendInput(opt.key, enter = !opt.key.all { ch -> ch.isDigit() }) }
                                     .padding(horizontal = 12.dp, vertical = 6.dp),
                             )
@@ -444,7 +448,8 @@ fun MessagesView(messages: List<ChatMessage>, supported: Boolean?) {
         return
     }
     LazyColumn(state = listState, modifier = Modifier.fillMaxSize().padding(horizontal = 10.dp)) {
-        items(messages, key = { it.seq }) { m -> MessageRow(m) }
+        // key: stable identity across refetches; contentType: reuse slots per row kind
+        items(messages, key = { it.seq }, contentType = { it.kind.ifEmpty { it.role } }) { m -> MessageRow(m) }
         item { Spacer(Modifier.height(8.dp)) }
     }
 }
@@ -800,22 +805,31 @@ fun DiffScreen(store: AppStore, nav: NavHostController, sessionId: String) {
 
 @Composable
 private fun PatchView(patch: String, truncated: Boolean) {
+    // One Text over an AnnotatedString instead of one Text per line: a 64KB
+    // patch is ~2k lines, and 2k composables in a non-lazy Column froze the
+    // expand animation. Built once per patch, not per recomposition.
+    val colored = remember(patch) {
+        buildAnnotatedString {
+            patch.lineSequence().forEachIndexed { i, line ->
+                val color = when {
+                    line.startsWith("+++") || line.startsWith("---") -> Tok.Dim
+                    line.startsWith("@@") -> Tok.Cyan
+                    line.startsWith("+") -> Tok.Green
+                    line.startsWith("-") -> Tok.Red
+                    else -> Tok.Dim
+                }
+                if (i > 0) append('\n')
+                withStyle(SpanStyle(color = color)) { append(line) }
+            }
+        }
+    }
     Column(
         Modifier.fillMaxWidth().padding(top = 8.dp)
             .background(Tok.TermBg, RoundedCornerShape(8.dp))
             .horizontalScroll(rememberScrollState())
             .padding(8.dp),
     ) {
-        patch.lineSequence().forEach { line ->
-            val color = when {
-                line.startsWith("+++") || line.startsWith("---") -> Tok.Dim
-                line.startsWith("@@") -> Tok.Cyan
-                line.startsWith("+") -> Tok.Green
-                line.startsWith("-") -> Tok.Red
-                else -> Tok.Dim
-            }
-            Text(line, color = color, fontSize = 11.sp, fontFamily = FontFamily.Monospace, maxLines = 1, softWrap = false)
-        }
+        Text(colored, fontSize = 11.sp, fontFamily = FontFamily.Monospace, softWrap = false)
         if (truncated) Text("… patch 过大已截断（64KB）", color = Tok.Faint, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp))
     }
 }

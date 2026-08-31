@@ -185,7 +185,6 @@ class AppStore private constructor(context: Context) {
             is EventFrame.SessionStalled -> {
                 val session = _sessions.value.find { it.id == frame.id }
                 _notifyEvents.tryEmit(NotifyEvent.Stalled(session, frame.id, frame.quietS))
-                _frames.tryEmit(frame)
             }
             is EventFrame.MessagesChanged, is EventFrame.InboxChanged -> _frames.tryEmit(frame)
             is EventFrame.Unknown -> { }

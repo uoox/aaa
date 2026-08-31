@@ -45,14 +45,8 @@ fn first_text(content: Option<&Value>) -> String {
     }
 }
 
-fn usable_prompt(t: &str) -> bool {
-    let t = t.trim();
-    if t.is_empty() {
-        return false;
-    }
-    let first = t.chars().next().unwrap();
-    !matches!(first, '<' | '{' | '/') && !t.starts_with("Caveat")
-}
+// Injected-content filter, shared with the message-stream parser.
+use crate::messages::usable_user_text as usable_prompt;
 
 /// Truncate to `n` characters (python `s[:n]` semantics).
 fn take_chars(s: &str, n: usize) -> String {
@@ -102,11 +96,14 @@ fn run_haiku(exe: &Path, prompt: &str) -> Option<String> {
     rx.recv_timeout(std::time::Duration::from_secs(5)).ok()
 }
 
+/// Test hook signature: replaces the real `claude -p --model haiku` call.
+pub type FakeHaiku = Box<dyn Fn(&str) -> Option<String> + Send>;
+
 pub struct Namer<'a> {
     pub paths: &'a crate::paths::Paths,
     pub enabled: bool,
     /// test hook: when set, used instead of invoking the real `claude` binary
-    pub fake_haiku: Option<Box<dyn Fn(&str) -> Option<String> + Send>>,
+    pub fake_haiku: Option<FakeHaiku>,
 }
 
 impl<'a> Namer<'a> {

@@ -1,10 +1,20 @@
-//! Injectable filesystem roots.
+//! Injectable filesystem roots (+ the shared atomic-write helper).
 //!
 //! Everything the daemon reads or writes outside the project root is derived
 //! from `home`, which honours `AAA_HOME` (same convention as the AAA_PY
 //! embedded in `~/.local/bin/aaa`) so tests can point it at a tempdir.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// Atomic file write: same-directory tmp (`<name>.tmp`) + rename, so readers
+/// never observe a partial file. Callers that may race on the same path must
+/// serialize themselves (the tmp name is not unique per writer).
+pub fn write_atomic(path: &Path, body: &[u8]) -> std::io::Result<()> {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let tmp = path.with_file_name(format!("{name}.tmp"));
+    std::fs::write(&tmp, body)?;
+    std::fs::rename(&tmp, path)
+}
 
 #[derive(Clone, Debug)]
 pub struct Paths {
@@ -21,7 +31,6 @@ impl Paths {
         Self { home: PathBuf::from(home) }
     }
 
-    #[allow(dead_code)] // used by unit tests
     pub fn new(home: impl Into<PathBuf>) -> Self {
         Self { home: home.into() }
     }

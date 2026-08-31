@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
 use chrono::{DateTime, SecondsFormat, Utc};
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
@@ -22,6 +23,11 @@ pub const REPLAY_SCROLLBACK_TAIL: usize = 400;
 pub const DEFAULT_ROWS: u16 = 40;
 pub const DEFAULT_COLS: u16 = 120;
 pub const SILENCE_SECS: f64 = 6.0;
+/// Cap on exited sessions restored (and kept on disk) across a daemon
+/// restart. Conservative retention: nothing is deleted while the daemon runs,
+/// only the oldest records beyond the cap are dropped at startup — replay
+/// semantics for everything kept are untouched.
+pub const MAX_RESTORED_EXITED: usize = 200;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -89,7 +95,9 @@ pub struct Session {
     pub id: String,
     pub meta: Mutex<Meta>,
     pub parser: Mutex<Option<vt100::Parser>>,
-    pub out_tx: broadcast::Sender<Vec<u8>>,
+    /// PTY output fan-out. `Bytes` so each chunk is allocated once and every
+    /// attached client clones a refcount, not the buffer.
+    pub out_tx: broadcast::Sender<Bytes>,
     pub live: Mutex<Option<Live>>,
     pub dirty: AtomicBool,
     /// v1.1: structured message stream (agent store tail)
@@ -172,7 +180,7 @@ impl Session {
     /// Replay + broadcast receiver with no gap/overlap: subscribing while the
     /// parser lock is held means the reader thread (which locks the parser
     /// before broadcasting) cannot slip bytes between the two.
-    pub fn attach_snapshot(&self, ctx: &PoolCtx) -> (Vec<u8>, broadcast::Receiver<Vec<u8>>) {
+    pub fn attach_snapshot(&self, ctx: &PoolCtx) -> (Vec<u8>, broadcast::Receiver<Bytes>) {
         let mut guard = self.parser.lock().unwrap();
         let rx = self.out_tx.subscribe();
         let replay = match guard.as_mut() {
@@ -192,10 +200,7 @@ impl Session {
         let _ = std::fs::write(self.replay_path(ctx), &replay);
         let meta = self.meta.lock().unwrap().clone();
         if let Ok(body) = serde_json::to_string_pretty(&meta) {
-            let tmp = ctx.sessions_dir.join(format!("{}.json.tmp", self.id));
-            if std::fs::write(&tmp, body).is_ok() {
-                let _ = std::fs::rename(&tmp, self.meta_path(ctx));
-            }
+            let _ = crate::paths::write_atomic(&self.meta_path(ctx), body.as_bytes());
         }
     }
 
@@ -329,14 +334,23 @@ impl SessionPool {
         self.map.lock().unwrap().get(id).cloned()
     }
 
+    /// All sessions, unordered — for internal sweeps that visit every session.
+    pub fn all(&self) -> Vec<Arc<Session>> {
+        self.map.lock().unwrap().values().cloned().collect()
+    }
+
+    /// All sessions, newest first (API-facing order).
     pub fn list(&self) -> Vec<Arc<Session>> {
-        let mut v: Vec<Arc<Session>> = self.map.lock().unwrap().values().cloned().collect();
-        v.sort_by(|a, b| {
-            let ca = a.meta.lock().unwrap().created_at;
-            let cb = b.meta.lock().unwrap().created_at;
-            cb.cmp(&ca)
-        });
-        v
+        let mut v: Vec<(DateTime<Utc>, Arc<Session>)> = self
+            .all()
+            .into_iter()
+            .map(|s| {
+                let at = s.meta.lock().unwrap().created_at;
+                (at, s)
+            })
+            .collect();
+        v.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
+        v.into_iter().map(|(_, s)| s).collect()
     }
 
     pub fn remove(&self, id: &str) -> Option<Arc<Session>> {
@@ -345,7 +359,15 @@ impl SessionPool {
 
     /// Restore exited sessions persisted by a previous daemon run.
     pub fn restore_persisted(&self) {
+        self.restore_persisted_capped(MAX_RESTORED_EXITED);
+    }
+
+    /// Restore at most `cap` persisted sessions (newest by last_output_at);
+    /// records beyond the cap have their meta + replay files removed so the
+    /// state dir cannot grow without bound across restarts.
+    fn restore_persisted_capped(&self, cap: usize) {
         let Ok(rd) = std::fs::read_dir(&self.ctx.sessions_dir) else { return };
+        let mut restored: Vec<(String, Meta)> = Vec::new();
         for entry in rd.flatten() {
             let p = entry.path();
             if p.extension().and_then(|e| e.to_str()) != Some("json") {
@@ -364,6 +386,15 @@ impl SessionPool {
             meta.state = State::Exited;
             meta.hook_waiting = false;
             meta.needs_name = false;
+            restored.push((id, meta));
+        }
+        restored.sort_by_key(|(_, m)| std::cmp::Reverse(m.last_output_at));
+        for (id, _) in restored.iter().skip(cap) {
+            let _ = std::fs::remove_file(self.ctx.sessions_dir.join(format!("{id}.json")));
+            let _ = std::fs::remove_file(self.ctx.sessions_dir.join(format!("{id}.replay")));
+        }
+        restored.truncate(cap);
+        for (id, meta) in restored {
             let (tx, _) = broadcast::channel(64);
             let msgs = crate::messages::MsgStore::for_agent(&meta.agent);
             let ckpt = crate::checkpoint::CkptState {
@@ -460,6 +491,9 @@ impl SessionPool {
             last_notified_question: None,
             last_notify_at: None,
         };
+        // Backpressure: send never blocks; a client that can't keep up drops
+        // to Lagged and gets a fresh full redraw (api::attach_loop), so a slow
+        // phone can never stall the PTY reader or other clients.
         let (tx, _) = broadcast::channel(1024);
         let msgs = crate::messages::MsgStore::for_agent(&spec.agent);
         let sess = Arc::new(Session {
@@ -508,7 +542,7 @@ impl SessionPool {
                             meta.stalled_notified = false;
                         }
                         rsess.mark_dirty();
-                        let _ = rsess.out_tx.send(data.to_vec());
+                        let _ = rsess.out_tx.send(Bytes::copy_from_slice(data));
                     }
                 }
             }
@@ -571,8 +605,7 @@ impl SessionPool {
     /// question); the caller handles inbox feed + ntfy dedup.
     pub fn tick_states(&self) -> Vec<(Arc<Session>, Option<Question>)> {
         let mut entered_waiting = Vec::new();
-        let sessions = self.list();
-        for sess in sessions {
+        for sess in self.all() {
             let (is_running, silent) = {
                 let meta = sess.meta.lock().unwrap();
                 let silent = meta
@@ -635,7 +668,7 @@ impl SessionPool {
 
     /// 250ms flush: emit throttled `session` events for dirty sessions.
     pub fn flush_dirty(&self) {
-        for sess in self.list() {
+        for sess in self.all() {
             if sess.dirty.swap(false, Ordering::Relaxed) {
                 self.ctx.hub.session(sess.to_json());
             }
@@ -689,6 +722,57 @@ mod tests {
             !SessionPool::watchdog_due(State::Running, "claude", true, 600, 0, false),
             "stall_minutes=0 disables"
         );
+    }
+
+    #[test]
+    fn pty_broadcast_shares_one_buffer_across_clients() {
+        let (tx, mut rx1) = broadcast::channel::<Bytes>(8);
+        let mut rx2 = tx.subscribe();
+        tx.send(Bytes::copy_from_slice(b"chunk")).unwrap();
+        let a = rx1.try_recv().unwrap();
+        let b = rx2.try_recv().unwrap();
+        // same allocation: N attached clients cost N refcounts, not N copies
+        assert_eq!(a.as_ptr(), b.as_ptr());
+    }
+
+    #[test]
+    fn restore_prunes_oldest_beyond_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        for i in 0..5 {
+            let meta = serde_json::json!({
+                "title": format!("t{i}"),
+                "project_path": "/p",
+                "project_name": "p",
+                "agent": "shell",
+                "state": "exited",
+                "question": null,
+                "rows": 40, "cols": 120,
+                "pid": null, "exit_code": 0, "resume_id": null,
+                "created_at": format!("2026-01-0{}T00:00:00Z", i + 1),
+                "last_output_at": format!("2026-01-0{}T00:00:00Z", i + 1),
+            });
+            std::fs::write(sessions_dir.join(format!("s_{i:08x}.json")), meta.to_string()).unwrap();
+            std::fs::write(sessions_dir.join(format!("s_{i:08x}.replay")), b"replay").unwrap();
+        }
+        let pool = SessionPool::new(PoolCtx {
+            hub: EventHub::new(),
+            sessions_dir: sessions_dir.clone(),
+            ntfy: None,
+            ckpt_cfg: crate::config::CheckpointConfig::default(),
+        });
+        pool.restore_persisted_capped(3);
+        assert_eq!(pool.all().len(), 3, "only the newest `cap` sessions restored");
+        // the two oldest records (and their replays) are gone from disk
+        assert!(!sessions_dir.join("s_00000000.json").exists());
+        assert!(!sessions_dir.join("s_00000000.replay").exists());
+        assert!(!sessions_dir.join("s_00000001.json").exists());
+        // the newest survive, replay intact
+        assert!(sessions_dir.join("s_00000004.json").exists());
+        assert!(sessions_dir.join("s_00000004.replay").exists());
+        assert!(pool.get("s_00000004").is_some());
+        assert!(pool.get("s_00000000").is_none());
     }
 
     #[test]

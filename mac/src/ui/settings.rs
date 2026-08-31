@@ -10,6 +10,18 @@ use super::kit::*;
 use crate::net::ConnState;
 use crate::theme;
 
+/// 配对 payload → 二维码模块位图（fetch 时调用一次；渲染帧不重复编码）
+pub(super) fn qr_encode(payload: &str) -> Option<(usize, Vec<bool>)> {
+    let code = qrcode::QrCode::new(payload.as_bytes()).ok()?;
+    let w = code.width();
+    let modules = code
+        .to_colors()
+        .iter()
+        .map(|c| *c == qrcode::Color::Dark)
+        .collect();
+    Some((w, modules))
+}
+
 fn mask_token(token: &str) -> String {
     if token.len() <= 12 {
         return "•".repeat(token.len().max(4));
@@ -191,17 +203,7 @@ impl RootView {
         );
 
         // ── 配对 ────────────────────────────────────────────────────────
-        let qr_modules: Option<(usize, Vec<bool>)> = self.pair_payload.as_ref().and_then(|p| {
-            qrcode::QrCode::new(p.as_bytes()).ok().map(|code| {
-                let w = code.width();
-                let colors = code
-                    .to_colors()
-                    .iter()
-                    .map(|c| *c == qrcode::Color::Dark)
-                    .collect();
-                (w, colors)
-            })
-        });
+        let qr_modules = self.qr_modules.clone();
         let pair_sect = div()
             .p(px(14.))
             .rounded(px(10.))

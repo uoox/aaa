@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["ws"] }
+bytes = "1"
 futures-util = "0.3"
 portable-pty = "0.9"
 vt100 = "0.16"

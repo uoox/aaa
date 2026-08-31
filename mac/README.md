@@ -21,6 +21,25 @@ cargo run            # 拉起窗口；无 daemon 时显示「未连接」
 - 终端 VT 模型：`alacritty_terminal`（Apache-2.0）；渲染层为本仓库自研
   （`src/ui/terminal_view.rs`），不含 Zed GPL 代码。
 
+## 打包与安装（.app）
+
+```bash
+packaging/bundle.sh            # 产出 mac/target/AAA UI.app（含图标 + Info.plist + ad-hoc 签名）
+packaging/bundle.sh install    # 覆盖安装到 /Applications（先退出正在运行的实例）
+open -a "AAA UI"
+```
+
+- Bundle ID `cc.uoox.aaaui`，图标来自 `../brand/out/aaa-ui.icns`，版本号取自 Cargo.toml，
+  build 号取 git 短 hash。
+- **ad-hoc 签名的已知坑**：本机无开发者证书，`codesign --sign -` 没有稳定身份，
+  每次重新构建安装后系统会视为「新 app」，TCC 授权（通知/自动化等）随之失效。
+  因此权限全部归责到 aaa-daemon（见 PROTOCOL.md），UI 本体不申请任何 TCC 权限；
+  系统通知走 `osascript` 子进程，归属不受重签影响。
+- 本机构建无 quarantine，可直接打开；拷到别的机器首次打开需在
+  「系统设置 → 隐私与安全性」放行，或 `xattr -dr com.apple.quarantine "/Applications/AAA UI.app"`。
+- 无 daemon / 无 `~/.config/aaa-daemon/config.toml` 时正常启动，显示「未连接」，
+  可在设置页手动填 host/port/token。
+
 ## 模块
 
 | 路径 | 职责 |

@@ -282,10 +282,7 @@ pub struct DaemonConfig {
     pub port: u16,
     #[serde(default)]
     pub token: String,
-    /// UI 端未直接使用（health 里已带），保留字段完整解析
-    #[allow(dead_code)]
-    #[serde(default)]
-    pub project_root: String,
+    // 其余字段（project_root / ntfy…）serde 默认忽略，UI 端用不到
 }
 
 fn default_port() -> u16 {

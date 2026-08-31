@@ -43,3 +43,9 @@ env_logger = "0.11"
 [profile.dev]
 # gpui 全量 debug 信息体积巨大，行号足够排错
 debug = "line-tables-only"
+
+[profile.release]
+# Zed 发布同款 thin LTO：跨 crate 内联（px 换算/颜色转换等渲染热路径都跨 crate），
+# 二进制更小 → 冷启动加载更快；debuginfo 剥离进一步减体积
+lto = "thin"
+strip = "debuginfo"

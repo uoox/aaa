@@ -114,9 +114,9 @@ fn one_line(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Same injected-content filter as the namer: skip `<…>` blocks, slash
+/// Injected-content filter (shared with the namer): skip `<…>` blocks, slash
 /// commands, JSON blobs and Caveat notes.
-fn usable_user_text(t: &str) -> bool {
+pub(crate) fn usable_user_text(t: &str) -> bool {
     let t = t.trim();
     if t.is_empty() {
         return false;
@@ -550,10 +550,11 @@ pub fn discover_file(
                 resume_file = Some((mt, f.clone()));
             }
         }
-        if mt >= created_epoch - 5.0 && head_cwd_matches(source, &f, project_path) {
-            if best.as_ref().map(|b| mt > b.0).unwrap_or(true) {
-                best = Some((mt, f));
-            }
+        if mt >= created_epoch - 5.0
+            && head_cwd_matches(source, &f, project_path)
+            && best.as_ref().map(|b| mt > b.0).unwrap_or(true)
+        {
+            best = Some((mt, f));
         }
     }
     best.or(resume_file).map(|(_, f)| f)
@@ -586,8 +587,7 @@ pub fn poll_file(store: &mut MsgStore) {
             Ok(n) => {
                 store.offset += n as u64;
                 remaining -= n as u64;
-                let chunk: Vec<u8> = buf[..n].to_vec();
-                ingest(store, &chunk);
+                ingest(store, &buf[..n]);
             }
             Err(_) => break,
         }
@@ -619,7 +619,7 @@ pub fn poll_session(paths: &Paths, sess: &crate::pool::Session) -> Option<u64> {
         if exited && store.discover_ticks > 300 {
             return None;
         }
-        let attempt = store.discover_ticks % 5 == 0;
+        let attempt = store.discover_ticks.is_multiple_of(5);
         store.discover_ticks += 1;
         if !attempt {
             return None;
@@ -631,9 +631,7 @@ pub fn poll_session(paths: &Paths, sess: &crate::pool::Session) -> Option<u64> {
             resume_id.as_deref(),
             created_epoch,
         );
-        if store.file.is_none() {
-            return None;
-        }
+        store.file.as_ref()?;
     }
     poll_file(&mut store);
     if store.dirty {

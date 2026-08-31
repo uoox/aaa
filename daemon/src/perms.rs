@@ -28,7 +28,7 @@ pub const PERM_IDS: &[(&str, &str)] = &[
 #[cfg(target_os = "macos")]
 mod ffi {
     use std::ffi::c_void;
-    use std::os::raw::{c_char, c_int};
+    use std::os::raw::c_char;
 
     pub const UTF8: u32 = 0x0800_0100;
 
@@ -188,8 +188,6 @@ mod ffi {
             .stderr(std::process::Stdio::null())
             .spawn();
     }
-
-    pub fn _unused(_: c_int) {}
 }
 
 fn home() -> std::path::PathBuf {

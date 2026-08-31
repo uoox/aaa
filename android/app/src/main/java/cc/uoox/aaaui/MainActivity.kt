@@ -25,9 +25,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.AssistChip
-import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -219,7 +216,6 @@ fun PairScreen(store: AppStore, onConnected: () -> Unit) {
                 label = { Text("host:port（多个用逗号分隔）") },
                 placeholder = { Text("mac-mini.tailxxxx.ts.net:2730") },
                 modifier = Modifier.fillMaxWidth(), singleLine = true,
-                keyboardOptions = KeyboardOptions.Default,
             )
             Spacer(Modifier.height(8.dp))
             OutlinedTextField(
@@ -289,6 +285,8 @@ fun HomeScaffold(store: AppStore, nav: NavHostController) {
 
 // ---------- A2 会话首页 ----------
 
+private val STATE_RANK = mapOf("waiting" to 0, "running" to 1, "idle" to 2, "exited" to 3)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SessionsTab(store: AppStore, nav: NavHostController) {
@@ -298,12 +296,15 @@ fun SessionsTab(store: AppStore, nav: NavHostController) {
     var filter by rememberSaveable { mutableStateOf("all") }
     var refreshing by remember { mutableStateOf(false) }
 
-    val stateRank = mapOf("waiting" to 0, "running" to 1, "idle" to 2, "exited" to 3)
-    val sorted = sessions.sortedWith(compareBy<Session> { stateRank[it.state] ?: 4 }.thenByDescending { it.last_output_at })
-    val filtered = when (filter) {
-        "waiting" -> sorted.filter { it.state == "waiting" }
-        "running" -> sorted.filter { it.state == "running" }
-        else -> sorted
+    // Sort/filter only when the inputs change, not on every recomposition
+    // (conn latency updates and pull-to-refresh recompose this tab too).
+    val filtered = remember(sessions, filter) {
+        val sorted = sessions.sortedWith(compareBy<Session> { STATE_RANK[it.state] ?: 4 }.thenByDescending { it.last_output_at })
+        when (filter) {
+            "waiting" -> sorted.filter { it.state == "waiting" }
+            "running" -> sorted.filter { it.state == "running" }
+            else -> sorted
+        }
     }
     val waitingCount = sessions.count { it.state == "waiting" }
     val runningCount = sessions.count { it.state == "running" }
@@ -373,7 +374,7 @@ fun SessionCard(s: Session, onClick: () -> Unit) {
         border = if (isWaiting) androidx.compose.foundation.BorderStroke(1.dp, Tok.Amber.copy(alpha = 0.6f)) else null,
         modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 5.dp),
     ) {
-        Column(Modifier.padding(13.dp).let { if (s.state == "exited") it.background(Color.Transparent) else it }) {
+        Column(Modifier.padding(13.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 StateDot(stateColor)
                 Spacer(Modifier.width(8.dp))

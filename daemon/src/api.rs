@@ -33,7 +33,9 @@ pub struct App {
     pub started: Instant,
     pub pool: SessionPool,
     pub hub: EventHub,
-    /// serializes cwd-cache backed store operations
+    /// Serializes cwd-cache saves (read-merge-write of `~/.cache/aaa-cwds.json`)
+    /// and project deletion. Deliberately NOT held during store scans or haiku
+    /// naming — a 60s LLM call must never block read-only requests.
     pub store_lock: std::sync::Mutex<()>,
     /// actual bound port (set after bind; cfg.port may be 0 = ephemeral)
     pub bound_port: std::sync::atomic::AtomicU16,
@@ -201,7 +203,8 @@ async fn agents_list(State(app): State<SharedApp>) -> Json<Value> {
 async fn projects_list(State(app): State<SharedApp>) -> ApiResult<Json<Value>> {
     let app2 = Arc::clone(&app);
     let rows = blocking(move || {
-        let _g = app2.store_lock.lock().unwrap();
+        // No store_lock here: naming may call haiku (up to 60s) and the cache
+        // save below merges instead of overwriting, so scans can run unlocked.
         let mut cache = CwdCache::load(&app2.paths.cwd_cache());
         let rows = stores::collect(&app2.paths, &mut cache, &app2.cfg.project_root);
         let reg = Registry::load(&app2.cfg.project_root);
@@ -241,7 +244,10 @@ async fn projects_list(State(app): State<SharedApp>) -> ApiResult<Json<Value>> {
                 })
             })
             .collect();
-        cache.save();
+        if cache.dirty() {
+            let _g = app2.store_lock.lock().unwrap();
+            cache.save();
+        }
         out
     })
     .await?;
@@ -306,6 +312,7 @@ async fn projects_delete(
     ssd_guard(&app)?;
     let app2 = Arc::clone(&app);
     let results = blocking(move || {
+        // deletion stays fully serialized (no LLM work in here, cost is small)
         let _g = app2.store_lock.lock().unwrap();
         let root_canon = std::fs::canonicalize(&app2.cfg.project_root)
             .unwrap_or_else(|_| app2.cfg.project_root.clone());
@@ -439,10 +446,12 @@ async fn sessions_create(
         let target = canon_str.clone();
         let agent_id = agent.id;
         let sid = blocking(move || {
-            let _g = app2.store_lock.lock().unwrap();
             let mut cache = CwdCache::load(&app2.paths.cwd_cache());
             let sid = stores::find(&app2.paths, &mut cache, agent_id, &target);
-            cache.save();
+            if cache.dirty() {
+                let _g = app2.store_lock.lock().unwrap();
+                cache.save();
+            }
             sid
         })
         .await?;
@@ -497,6 +506,19 @@ fn get_session(app: &App, id: &str) -> ApiResult<Arc<crate::pool::Session>> {
         .ok_or_else(|| ApiError::not_found(format!("no such session: {id}")))
 }
 
+/// Kill a live session and poll until the reader thread marks it exited.
+/// Returns whether it actually exited within `tries * step_ms`.
+async fn kill_and_wait(sess: &Arc<crate::pool::Session>, tries: u32, step_ms: u64) -> bool {
+    sess.kill().await;
+    for _ in 0..tries {
+        if sess.state() == SState::Exited {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(step_ms)).await;
+    }
+    sess.state() == SState::Exited
+}
+
 #[derive(Deserialize)]
 struct InputBody {
     text: String,
@@ -549,13 +571,8 @@ async fn session_delete(
 ) -> ApiResult<Json<Value>> {
     let sess = get_session(&app, &id)?;
     if sess.state() != SState::Exited {
-        sess.kill().await;
-        for _ in 0..25 {
-            if sess.state() == SState::Exited {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
-        }
+        // best effort: the record is removed either way
+        kill_and_wait(&sess, 25, 120).await;
     }
     app.pool.remove(&id);
     sess.remove_persisted(&app.pool.ctx);
@@ -642,7 +659,7 @@ async fn hooks_claude(
     }
     let cwd_canon = stores::realpath(cwd);
     let mut matched = 0;
-    for sess in app.pool.list() {
+    for sess in app.pool.all() {
         let is_match = {
             let meta = sess.meta.lock().unwrap();
             meta.agent == "claude"
@@ -775,14 +792,7 @@ async fn session_rollback(
                 "session is still alive; pass force:true to kill it first",
             ));
         }
-        sess.kill().await;
-        for _ in 0..40 {
-            if sess.state() == SState::Exited {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        }
-        if sess.state() != SState::Exited {
+        if !kill_and_wait(&sess, 40, 150).await {
             return Err(ApiError::internal("could not stop the session"));
         }
     }
@@ -956,8 +966,9 @@ async fn attach_loop(app: SharedApp, sess: Arc<crate::pool::Session>, mut socket
     loop {
         tokio::select! {
             out = rx.recv() => match out {
+                // Bytes chunk shared with every other attached client
                 Ok(bytes) => {
-                    if socket.send(Message::Binary(bytes.into())).await.is_err() {
+                    if socket.send(Message::Binary(bytes)).await.is_err() {
                         break;
                     }
                 }
@@ -1007,8 +1018,9 @@ async fn events_loop(app: SharedApp, mut socket: WebSocket) {
     loop {
         tokio::select! {
             ev = rx.recv() => match ev {
+                // pre-serialized frame shared with every other subscriber
                 Ok(text) => {
-                    if socket.send(Message::Text(text.into())).await.is_err() {
+                    if socket.send(Message::Text(text)).await.is_err() {
                         break;
                     }
                 }

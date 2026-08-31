@@ -435,7 +435,8 @@ pub fn find(paths: &Paths, cache: &mut CwdCache, agent: &str, target: &str) -> S
 
 // ---- detect ----
 
-#[allow(dead_code)] // part of the ported AAA_PY surface; exercised by tests
+/// Agent of the most recent session for `target`, across all stores. Part of
+/// the ported AAA_PY surface (used by the store_debug example + parity tests).
 pub fn detect(paths: &Paths, cache: &mut CwdCache, target: &str) -> String {
     let target = realpath(target);
     let mut best: (f64, String) = (0.0, String::new());
@@ -495,43 +496,67 @@ pub fn collect(paths: &Paths, cache: &mut CwdCache, root: &Path) -> Vec<ProjectR
     use std::collections::HashMap;
     let mut ctx: HashMap<String, (u64, f64)> = HashMap::new();
     let mut det: HashMap<String, (f64, String, String)> = HashMap::new();
+    // Session records share few distinct cwds; memoize canonicalization so a
+    // scan does one `canonicalize` per cwd instead of two per record.
+    let mut memo: HashMap<String, String> = HashMap::new();
 
-    fn mark(det: &mut std::collections::HashMap<String, (f64, String, String)>, cwd: &str, mtime: f64, agent: &str, path: &str) {
+    fn realpath_memo(memo: &mut HashMap<String, String>, p: &str) -> String {
+        if let Some(rp) = memo.get(p) {
+            return rp.clone();
+        }
+        let rp = realpath(p);
+        memo.insert(p.to_string(), rp.clone());
+        rp
+    }
+
+    fn mark(
+        det: &mut HashMap<String, (f64, String, String)>,
+        memo: &mut HashMap<String, String>,
+        cwd: &str,
+        mtime: f64,
+        agent: &str,
+        path: &str,
+    ) {
         if cwd.is_empty() {
             return;
         }
-        let rp = realpath(cwd);
+        let rp = realpath_memo(memo, cwd);
         let cur = det.get(&rp);
         if cur.map(|c| mtime > c.0).unwrap_or(true) {
             det.insert(rp, (mtime, agent.to_string(), path.to_string()));
         }
     }
-    let push = |ctx: &mut HashMap<String, (u64, f64)>,
-                    det: &mut HashMap<String, (f64, String, String)>,
-                    cwd: &str,
-                    size: u64,
-                    mtime: f64,
-                    agent: &str,
-                    path: &str| {
+
+    #[allow(clippy::too_many_arguments)]
+    fn push(
+        ctx: &mut HashMap<String, (u64, f64)>,
+        det: &mut HashMap<String, (f64, String, String)>,
+        memo: &mut HashMap<String, String>,
+        cwd: &str,
+        size: u64,
+        mtime: f64,
+        agent: &str,
+        path: &str,
+    ) {
         if cwd.is_empty() {
             return;
         }
-        let rp = realpath(cwd);
+        let rp = realpath_memo(memo, cwd);
         let cur = ctx.get(&rp);
         if cur.map(|c| mtime > c.1).unwrap_or(true) {
             ctx.insert(rp, (size, mtime));
         }
-        mark(det, cwd, mtime, agent, path);
-    };
+        mark(det, memo, cwd, mtime, agent, path);
+    }
 
     for r in claude_sessions(paths, cache) {
-        push(&mut ctx, &mut det, &r.cwd, r.size, r.mtime, "claude", &r.path.to_string_lossy());
+        push(&mut ctx, &mut det, &mut memo, &r.cwd, r.size, r.mtime, "claude", &r.path.to_string_lossy());
     }
     for r in codex_sessions(paths, cache) {
-        push(&mut ctx, &mut det, &r.cwd, r.size, r.mtime, "codex", &r.path.to_string_lossy());
+        push(&mut ctx, &mut det, &mut memo, &r.cwd, r.size, r.mtime, "codex", &r.path.to_string_lossy());
     }
     for r in pi_sessions(paths, cache) {
-        push(&mut ctx, &mut det, &r.cwd, r.size, r.mtime, "pi", &r.path.to_string_lossy());
+        push(&mut ctx, &mut det, &mut memo, &r.cwd, r.size, r.mtime, "pi", &r.path.to_string_lossy());
     }
     // grok: aggregate per cwd first
     let mut agg: HashMap<String, (u64, f64)> = HashMap::new();
@@ -546,7 +571,7 @@ pub fn collect(paths: &Paths, cache: &mut CwdCache, root: &Path) -> Vec<ProjectR
         }
     }
     for (cwd, (s, m)) in agg {
-        push(&mut ctx, &mut det, &cwd, s, m, "grok", "");
+        push(&mut ctx, &mut det, &mut memo, &cwd, s, m, "grok", "");
     }
     // agy: agent detection only (no size info)
     let lc = load_json_obj(&paths.agy_root().join("cache").join("last_conversations.json"));
@@ -555,7 +580,7 @@ pub fn collect(paths: &Paths, cache: &mut CwdCache, root: &Path) -> Vec<ProjectR
         for ext in [".db", ".pb"] {
             let p = paths.agy_root().join("conversations").join(format!("{cid}{ext}"));
             if let Ok(md) = std::fs::metadata(&p) {
-                mark(&mut det, ws, mtime_f(&md), "agy", "");
+                mark(&mut det, &mut memo, ws, mtime_f(&md), "agy", "");
                 break;
             }
         }
@@ -596,13 +621,13 @@ pub fn collect(paths: &Paths, cache: &mut CwdCache, root: &Path) -> Vec<ProjectR
     for (_, p, _) in &rows {
         let st = rnx_stat(paths, p);
         if !st.sid.is_empty() {
-            push(&mut ctx, &mut det, p, st.size, st.mtime, "reasonix", &st.meta);
+            push(&mut ctx, &mut det, &mut memo, p, st.size, st.mtime, "reasonix", &st.meta);
         }
     }
 
     rows.into_iter()
         .map(|(mt, p, name)| {
-            let rp = realpath(&p);
+            let rp = realpath_memo(&mut memo, &p);
             let tup = ctx.get(&rp).or_else(|| ctx.get(&p));
             let dt = det.get(&rp).or_else(|| det.get(&p));
             ProjectRow {

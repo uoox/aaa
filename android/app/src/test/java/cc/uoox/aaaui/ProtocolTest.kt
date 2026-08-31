@@ -28,13 +28,11 @@ class ProtocolTest {
         }
     }
 
-    @Test fun sessionQuestionAndPermissionJsonParse() {
+    @Test fun sessionQuestionJsonParses() {
         val session = json.decodeFromString<Session>("""{"id":"s_1","title":"T","project_path":"/p","project_name":"p","agent":"claude","state":"waiting","question":{"text":"继续？","options":[{"key":"1","label":"是"}]}}""")
         assertEquals("waiting", session.state)
+        assertEquals("1", session.question?.options?.single()?.key)
         assertEquals("是", session.question?.options?.single()?.label)
-        val permission = json.decodeFromString<Permission>("""{"id":"accessibility","label":"辅助功能","status":"granted"}""")
-        assertEquals("granted", permission.status)
-        assertTrue(permission.id.isNotBlank())
     }
 
     // ---------- v1.1 payloads ----------

@@ -1,10 +1,15 @@
 //! Event hub for the `/api/v1/events` WebSocket.
+//!
+//! Frames are serialized exactly once per event: the channel carries
+//! `Utf8Bytes` (a refcounted buffer that `Message::Text` takes as-is), so a
+//! broadcast to N subscribers clones N refcounts, not N strings.
 
+use axum::extract::ws::Utf8Bytes;
 use tokio::sync::broadcast;
 
 #[derive(Clone)]
 pub struct EventHub {
-    tx: broadcast::Sender<String>,
+    tx: broadcast::Sender<Utf8Bytes>,
 }
 
 impl Default for EventHub {
@@ -19,12 +24,12 @@ impl EventHub {
         EventHub { tx }
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<String> {
+    pub fn subscribe(&self) -> broadcast::Receiver<Utf8Bytes> {
         self.tx.subscribe()
     }
 
     pub fn send(&self, v: &serde_json::Value) {
-        let _ = self.tx.send(v.to_string());
+        let _ = self.tx.send(Utf8Bytes::from(v.to_string()));
     }
 
     pub fn session(&self, session_json: serde_json::Value) {
@@ -55,5 +60,23 @@ impl EventHub {
 
     pub fn session_stalled(&self, id: &str, quiet_s: u64) {
         self.send(&serde_json::json!({"t": "session_stalled", "id": id, "quiet_s": quiet_s}));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn one_serialization_shared_by_all_subscribers() {
+        let hub = EventHub::new();
+        let mut rx1 = hub.subscribe();
+        let mut rx2 = hub.subscribe();
+        hub.session(serde_json::json!({"id": "s_x"}));
+        let a = rx1.try_recv().unwrap();
+        let b = rx2.try_recv().unwrap();
+        assert_eq!(a.as_str(), b.as_str());
+        // same underlying allocation: the JSON was serialized exactly once
+        assert_eq!(a.as_str().as_ptr(), b.as_str().as_ptr());
     }
 }

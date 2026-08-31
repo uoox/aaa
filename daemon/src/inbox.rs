@@ -43,13 +43,8 @@ impl Inbox {
                 return;
             }
         }
-        let tmp = self.file.with_extension("json.tmp");
-        if serde_json::to_string_pretty(&self.map)
-            .ok()
-            .and_then(|body| std::fs::write(&tmp, body).ok())
-            .is_some()
-        {
-            let _ = std::fs::rename(&tmp, &self.file);
+        if let Ok(body) = serde_json::to_string_pretty(&self.map) {
+            let _ = crate::paths::write_atomic(&self.file, body.as_bytes());
         }
     }
 

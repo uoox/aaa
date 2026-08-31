@@ -1,6 +1,5 @@
 //! CLI entry + daemon run loop.
 
-
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -145,7 +144,7 @@ fn run() {
                     iv.tick().await;
                     let app2 = Arc::clone(&app);
                     let _ = tokio::task::spawn_blocking(move || {
-                        for sess in app2.pool.list() {
+                        for sess in app2.pool.all() {
                             if let Some(last_seq) =
                                 crate::messages::poll_session(&app2.paths, &sess)
                             {
@@ -168,7 +167,7 @@ fn run() {
                         continue;
                     }
                     let interval = app.cfg.checkpoint.interval_minutes;
-                    for sess in app.pool.list() {
+                    for sess in app.pool.all() {
                         let (agent, project_path, has_start, alive) = {
                             let meta = sess.meta.lock().unwrap();
                             let alive = sess.live.lock().unwrap().is_some();
@@ -212,7 +211,7 @@ fn run() {
                 loop {
                     iv.tick().await;
                     let cfg = &app.cfg.watchdog;
-                    for sess in app.pool.list() {
+                    for sess in app.pool.all() {
                         let (state, agent, silence_s, already, title) = {
                             let meta = sess.meta.lock().unwrap();
                             (
@@ -337,7 +336,7 @@ async fn name_one_session(app: &SharedApp) {
     });
     let Some(sess) = candidate else {
         // clear the flag for agents we can't name so we don't rescan forever
-        for s in app.pool.list() {
+        for s in app.pool.all() {
             let mut meta = s.meta.lock().unwrap();
             if meta.needs_name && !matches!(meta.agent.as_str(), "claude" | "reasonix") {
                 meta.needs_name = false;
@@ -352,7 +351,9 @@ async fn name_one_session(app: &SharedApp) {
     };
     let app2 = Arc::clone(app);
     let title = tokio::task::spawn_blocking(move || {
-        let _g = app2.store_lock.lock().unwrap();
+        // Unlocked on purpose: claude_name may run haiku for up to 60s, and
+        // holding store_lock across that starved every /projects request.
+        // The merge-on-save cache makes the unlocked window safe.
         let mut cache = CwdCache::load(&app2.paths.cwd_cache());
         let namer = Namer::new(&app2.paths, app2.cfg.namer);
         let name = match agent.as_str() {
@@ -376,7 +377,10 @@ async fn name_one_session(app: &SharedApp) {
             }
             _ => String::new(),
         };
-        cache.save();
+        if cache.dirty() {
+            let _g = app2.store_lock.lock().unwrap();
+            cache.save();
+        }
         name
     })
     .await

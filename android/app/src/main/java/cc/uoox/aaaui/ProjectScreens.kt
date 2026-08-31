@@ -71,8 +71,10 @@ fun ProjectsTab(store: AppStore, nav: NavHostController) {
 
     LaunchedEffect(Unit) { store.refreshProjects() }
 
-    val filtered = projects.filter {
-        query.isBlank() || it.name.contains(query, true) || it.session_title.orEmpty().contains(query, true)
+    val filtered = remember(projects, query) {
+        projects.filter {
+            query.isBlank() || it.name.contains(query, true) || it.session_title.orEmpty().contains(query, true)
+        }
     }
 
     Column(Modifier.fillMaxSize()) {

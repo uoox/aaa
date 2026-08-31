@@ -4,7 +4,14 @@
 //! `[sid, cwd]`; `cname2:<path>` -> `[mtime, name]`; `ainame:<path>` ->
 //! `[size, name]`. On save, entries whose file (the part after the first `:`)
 //! no longer exists are pruned — identical to AAA_PY `cc_save`.
+//!
+//! `save` is read-merge-write: it reloads the file and overlays only the keys
+//! written through this instance. The aaa CLI (and other daemon handlers)
+//! write the same file, and long-running work (haiku naming) happens between
+//! our load and save — a plain overwrite would clobber whatever landed in the
+//! meantime. Callers still serialize `save` itself (see `App::store_lock`).
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -12,20 +19,24 @@ use serde_json::Value;
 pub struct CwdCache {
     path: PathBuf,
     map: serde_json::Map<String, Value>,
-    dirty: bool,
+    /// keys written via `put` on this instance (the merge overlay on save)
+    written: HashSet<String>,
+}
+
+fn read_map(path: &Path) -> serde_json::Map<String, Value> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|v| match v {
+            Value::Object(m) => Some(m),
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 impl CwdCache {
     pub fn load(path: &Path) -> Self {
-        let map = std::fs::read_to_string(path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-            .and_then(|v| match v {
-                Value::Object(m) => Some(m),
-                _ => None,
-            })
-            .unwrap_or_default();
-        CwdCache { path: path.to_path_buf(), map, dirty: false }
+        CwdCache { path: path.to_path_buf(), map: read_map(path), written: HashSet::new() }
     }
 
     pub fn get(&self, key: &str) -> Option<&Value> {
@@ -33,40 +44,46 @@ impl CwdCache {
     }
 
     pub fn put(&mut self, key: impl Into<String>, val: Value) {
-        self.map.insert(key.into(), val);
-        self.dirty = true;
+        let key = key.into();
+        self.written.insert(key.clone());
+        self.map.insert(key, val);
     }
 
-    /// Persist if dirty, pruning entries for files that no longer exist.
+    /// Whether `save` has anything to write. Callers use this to skip taking
+    /// the store lock entirely on read-only passes.
+    pub fn dirty(&self) -> bool {
+        !self.written.is_empty()
+    }
+
+    /// Persist if dirty: reload the file, overlay this instance's writes,
+    /// prune entries for files that no longer exist, write atomically.
     pub fn save(&mut self) {
-        if !self.dirty {
+        if self.written.is_empty() {
             return;
         }
-        let pruned: serde_json::Map<String, Value> = self
-            .map
-            .iter()
+        let mut merged = read_map(&self.path);
+        for k in &self.written {
+            if let Some(v) = self.map.get(k) {
+                merged.insert(k.clone(), v.clone());
+            }
+        }
+        let pruned: serde_json::Map<String, Value> = merged
+            .into_iter()
             .filter(|(k, _)| {
-                k.splitn(2, ':')
-                    .nth(1)
-                    .map(|p| Path::new(p).exists())
+                k.split_once(':')
+                    .map(|(_, p)| Path::new(p).exists())
                     .unwrap_or(false)
             })
-            .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         if let Some(dir) = self.path.parent() {
             if std::fs::create_dir_all(dir).is_err() {
                 return;
             }
         }
-        let tmp = self.path.with_extension("json.tmp");
-        if serde_json::to_string(&Value::Object(pruned))
-            .ok()
-            .and_then(|body| std::fs::write(&tmp, body).ok())
-            .is_some()
-        {
-            let _ = std::fs::rename(&tmp, &self.path);
+        if let Ok(body) = serde_json::to_string(&Value::Object(pruned)) {
+            let _ = crate::paths::write_atomic(&self.path, body.as_bytes());
         }
-        self.dirty = false;
+        self.written.clear();
     }
 }
 
@@ -120,5 +137,31 @@ mod tests {
         // plain JSON object on disk — parseable by python json.load
         let raw: Value = serde_json::from_str(&std::fs::read_to_string(&cache_path).unwrap()).unwrap();
         assert!(raw.is_object());
+    }
+
+    #[test]
+    fn save_merges_with_concurrent_writers() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.jsonl");
+        let f2 = dir.path().join("b.jsonl");
+        std::fs::write(&f1, "").unwrap();
+        std::fs::write(&f2, "").unwrap();
+        let cache_path = dir.path().join("aaa-cwds.json");
+        // two instances loaded from the same (empty) file, as two concurrent
+        // handlers would be
+        let mut c1 = CwdCache::load(&cache_path);
+        let mut c2 = CwdCache::load(&cache_path);
+        c1.put(format!("claude:{}", f1.display()), json!("/cwd/1"));
+        c2.put(format!("claude:{}", f2.display()), json!("/cwd/2"));
+        c1.save();
+        c2.save(); // must not clobber c1's entry
+        let re = CwdCache::load(&cache_path);
+        assert!(re.get(&format!("claude:{}", f1.display())).is_some(), "first writer survives");
+        assert!(re.get(&format!("claude:{}", f2.display())).is_some(), "second writer present");
+        // saving with no writes is a no-op (no lock contention, no file touch)
+        let before = std::fs::metadata(&cache_path).unwrap().modified().unwrap();
+        let mut c3 = CwdCache::load(&cache_path);
+        c3.save();
+        assert_eq!(std::fs::metadata(&cache_path).unwrap().modified().unwrap(), before);
     }
 }

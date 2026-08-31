@@ -367,22 +367,23 @@ async fn full_session_lifecycle() {
     drop(guard2);
 }
 
+fn urlencode(s: &str) -> String {
+    s.bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
+}
+
 fn http_upload(port: u16, path: &str, name: &str, bytes: &[u8]) -> (u16, Value) {
-    let enc = |s: &str| -> String {
-        s.bytes()
-            .map(|b| {
-                if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
-                    (b as char).to_string()
-                } else {
-                    format!("%{b:02X}")
-                }
-            })
-            .collect()
-    };
     let url = format!(
         "http://127.0.0.1:{port}/api/v1/projects/upload?path={}&name={}",
-        enc(path),
-        enc(name)
+        urlencode(path),
+        urlencode(name)
     );
     let result = ureq::post(&url)
         .set("Authorization", &format!("Bearer {TOKEN}"))
@@ -532,16 +533,7 @@ async fn inbox_auto_feed_on_first_waiting() {
     assert!(text.contains("修复登录"), "{text}");
     assert!(text.contains("写测试"), "{text}");
 
-    let enc_feed: String = p_feed
-        .bytes()
-        .map(|b| {
-            if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
-                (b as char).to_string()
-            } else {
-                format!("%{b:02X}")
-            }
-        })
-        .collect();
+    let enc_feed = urlencode(&p_feed);
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let (_, lst) = http(
@@ -558,16 +550,7 @@ async fn inbox_auto_feed_on_first_waiting() {
         std::thread::sleep(Duration::from_millis(200));
     }
     // feed_inbox:false project's entry survives (its session also went waiting)
-    let enc_off: String = p_off
-        .bytes()
-        .map(|b| {
-            if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
-                (b as char).to_string()
-            } else {
-                format!("%{b:02X}")
-            }
-        })
-        .collect();
+    let enc_off = urlencode(&p_off);
     let (_, lst_off) = http(
         "GET",
         port,

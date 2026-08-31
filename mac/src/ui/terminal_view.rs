@@ -26,8 +26,6 @@ const LINE_HEIGHT_RATIO: f32 = 1.5;
 const PAD: f32 = 8.0;
 
 pub struct TerminalView {
-    #[allow(dead_code)]
-    pub session_id: String,
     pub model: TermModel,
     attach: AttachHandle,
     focus_handle: FocusHandle,
@@ -43,9 +41,8 @@ pub struct TerminalView {
 
 // ── 渲染快照（render 时从 grid 提取，canvas 闭包里绘制） ────────────────────
 
-struct Seg {
-    col: u16,
-    text: String,
+#[derive(Clone, Copy, PartialEq)]
+struct SegStyle {
     fg: u32,
     alpha: f32,
     bold: bool,
@@ -54,10 +51,46 @@ struct Seg {
     strike: bool,
 }
 
+struct Seg {
+    col: u16,
+    /// 每字符占用格数（1 窄 / 2 宽），seg 内统一；shape 时按 cell_w×此值强制推进
+    cell_w: u16,
+    /// 字符数（≠ 字节数；光标命中/反色判断用）
+    chars: u16,
+    text: String,
+    style: SegStyle,
+}
+
 struct LineSnap {
     segs: Vec<Seg>,
     bgs: Vec<(u16, u16, u32)>, // [start_col, end_col) 背景
     sels: Vec<(u16, u16)>,     // [start_col, end_col) 选区高亮
+}
+
+impl LineSnap {
+    /// 追加一格：与上一 seg 同风格、同字宽且列连续则并入。
+    /// 宽字符（CJK）也整段合并、一次 shape_line 按 2 格强制推进——
+    /// 每字符单独 shape 是已知热点（一行中文 ≈ 60 次 shape → 1 次）。
+    fn push_cell(&mut self, col: u16, ch: char, wide: bool, style: SegStyle) {
+        let cell_w = if wide { 2 } else { 1 };
+        match self.segs.last_mut() {
+            Some(s)
+                if s.cell_w == cell_w
+                    && s.style == style
+                    && s.col + s.chars * s.cell_w == col =>
+            {
+                s.text.push(ch);
+                s.chars += 1;
+            }
+            _ => self.segs.push(Seg {
+                col,
+                cell_w,
+                chars: 1,
+                text: ch.to_string(),
+                style,
+            }),
+        }
+    }
 }
 
 struct Snap {
@@ -71,7 +104,6 @@ impl TerminalView {
     pub fn new(session_id: String, net: &Net, cx: &mut Context<Self>) -> Self {
         let attach = net.attach(&session_id);
         TerminalView {
-            session_id,
             model: TermModel::new(80, 24),
             attach,
             focus_handle: cx.focus_handle(),
@@ -364,44 +396,15 @@ impl TerminalView {
             }
             // 文本 seg（空格不画字）
             if cell.c != ' ' && cell.c != '\0' {
-                let alpha = if flags.intersects(CellFlags::DIM) {
-                    0.55
-                } else {
-                    1.0
+                let style = SegStyle {
+                    fg,
+                    alpha: if flags.intersects(CellFlags::DIM) { 0.55 } else { 1.0 },
+                    bold,
+                    italic: flags.intersects(CellFlags::ITALIC),
+                    underline: flags.intersects(CellFlags::UNDERLINE),
+                    strike: flags.contains(CellFlags::STRIKEOUT),
                 };
-                let italic = flags.intersects(CellFlags::ITALIC);
-                let underline = flags.intersects(CellFlags::UNDERLINE);
-                let strike = flags.contains(CellFlags::STRIKEOUT);
-                let wide = flags.contains(CellFlags::WIDE_CHAR);
-                let can_merge = !wide
-                    && cell.c.is_ascii()
-                    && match line.segs.last() {
-                        Some(s) => {
-                            s.fg == fg
-                                && s.alpha == alpha
-                                && s.bold == bold
-                                && s.italic == italic
-                                && s.underline == underline
-                                && s.strike == strike
-                                && s.col + (s.text.len() as u16) == col
-                                && s.text.is_ascii()
-                        }
-                        None => false,
-                    };
-                if can_merge {
-                    line.segs.last_mut().unwrap().text.push(cell.c);
-                } else {
-                    line.segs.push(Seg {
-                        col,
-                        text: cell.c.to_string(),
-                        fg,
-                        alpha,
-                        bold,
-                        italic,
-                        underline,
-                        strike,
-                    });
-                }
+                line.push_cell(col, cell.c, flags.contains(CellFlags::WIDE_CHAR), style);
             }
         }
 
@@ -537,16 +540,19 @@ impl Render for TerminalView {
         let last_origin = self.last_origin;
         let conn_down = self.conn_down;
 
-        let mono = |bold: bool, italic: bool| {
+        // 4 个字体变体一次构建（seg 循环内只 clone，不重复走 font()/SharedString 分配）
+        let fonts: [gpui::Font; 4] = std::array::from_fn(|i| {
             let mut f = gpui::font("Menlo");
-            if bold {
+            if i & 1 != 0 {
                 f.weight = gpui::FontWeight::BOLD;
             }
-            if italic {
+            if i & 2 != 0 {
                 f.style = gpui::FontStyle::Italic;
             }
             f
-        };
+        });
+        let mono =
+            move |bold: bool, italic: bool| fonts[(bold as usize) | ((italic as usize) << 1)].clone();
 
         div()
             .id("terminal")
@@ -642,41 +648,43 @@ impl Render for TerminalView {
                             };
                             window.paint_quad(fill(b, color));
                         }
-                        // 文本
-                        for (row, line) in snap.lines.iter().enumerate() {
+                        // 文本（lines 按值消费：seg.text 直接转 SharedString，不再逐帧 clone）
+                        for (row, line) in snap.lines.into_iter().enumerate() {
                             let y = oy + line_h * (row as f32);
-                            for seg in &line.segs {
+                            for seg in line.segs {
                                 let cursor_here = matches!(snap.cursor,
                                     Some((crow, ccol, _, CursorShape::Block))
                                         if crow as usize == row
                                             && ccol >= seg.col
-                                            && (ccol as usize) < seg.col as usize + seg.text.chars().count());
-                                let mut color: gpui::Hsla = c(seg.fg).into();
-                                color.a = seg.alpha;
-                                if cursor_here && focused && seg.text.chars().count() == 1 {
+                                            && ccol < seg.col + seg.chars * seg.cell_w);
+                                let mut color: gpui::Hsla = c(seg.style.fg).into();
+                                color.a = seg.style.alpha;
+                                if cursor_here && focused && seg.chars == 1 {
                                     // 单字符 seg 且光标在其上：反色
                                     color = c(theme::TERM_BG).into();
                                 }
                                 let run = gpui::TextRun {
                                     len: seg.text.len(),
-                                    font: mono(seg.bold, seg.italic),
+                                    font: mono(seg.style.bold, seg.style.italic),
                                     color,
                                     background_color: None,
-                                    underline: seg.underline.then(|| gpui::UnderlineStyle {
+                                    underline: seg.style.underline.then(|| gpui::UnderlineStyle {
                                         thickness: px(1.),
                                         color: Some(color),
                                         wavy: false,
                                     }),
-                                    strikethrough: seg.strike.then(|| gpui::StrikethroughStyle {
-                                        thickness: px(1.),
-                                        color: Some(color),
+                                    strikethrough: seg.style.strike.then(|| {
+                                        gpui::StrikethroughStyle {
+                                            thickness: px(1.),
+                                            color: Some(color),
+                                        }
                                     }),
                                 };
-                                let shaped: SharedString = seg.text.clone().into();
-                                // ASCII run 强制格宽，消除长串累计漂移；CJK 单字符 seg 本就按格定位
-                                let force = seg.text.is_ascii().then_some(cell_w);
+                                // 全部按格宽强制推进（窄 1 格 / 宽 2 格）：
+                                // ASCII 消除长串累计漂移，CJK 合并段逐字对齐格点
+                                let force = Some(cell_w * (seg.cell_w as f32));
                                 let line_shaped = window.text_system().shape_line(
-                                    shaped,
+                                    seg.text.into(),
                                     font_size,
                                     &[run],
                                     force,
@@ -787,5 +795,65 @@ impl Render for TerminalView {
                         .child("连接已断开 · 自动重连中…"),
                 )
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn style(fg: u32) -> SegStyle {
+        SegStyle {
+            fg,
+            alpha: 1.0,
+            bold: false,
+            italic: false,
+            underline: false,
+            strike: false,
+        }
+    }
+
+    fn empty_line() -> LineSnap {
+        LineSnap {
+            segs: Vec::new(),
+            bgs: Vec::new(),
+            sels: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn merges_ascii_and_wide_runs_separately() {
+        // "ab中文x"：a(0) b(1) 中(2,宽) 文(4,宽) x(6)
+        let mut line = empty_line();
+        let s = style(0xffffff);
+        line.push_cell(0, 'a', false, s);
+        line.push_cell(1, 'b', false, s);
+        line.push_cell(2, '中', true, s);
+        line.push_cell(4, '文', true, s);
+        line.push_cell(6, 'x', false, s);
+        let segs = &line.segs;
+        assert_eq!(segs.len(), 3, "窄/宽切换处分段");
+        assert_eq!((segs[0].col, segs[0].cell_w, segs[0].text.as_str()), (0, 1, "ab"));
+        assert_eq!((segs[1].col, segs[1].cell_w, segs[1].text.as_str()), (2, 2, "中文"));
+        assert_eq!(segs[1].chars, 2);
+        assert_eq!((segs[2].col, segs[2].cell_w, segs[2].text.as_str()), (6, 1, "x"));
+    }
+
+    #[test]
+    fn style_change_and_gap_break_merge() {
+        let mut line = empty_line();
+        line.push_cell(0, 'a', false, style(0xffffff));
+        line.push_cell(1, 'b', false, style(0xff0000)); // 换色
+        line.push_cell(3, 'c', false, style(0xff0000)); // 列不连续（跳过空格）
+        assert_eq!(line.segs.len(), 3);
+        // 宽字符列连续性按 2 格推进：中(0) 文(2) 连续，文(2) 后跳到 5 断开
+        let mut line = empty_line();
+        let s = style(0xffffff);
+        line.push_cell(0, '中', true, s);
+        line.push_cell(2, '文', true, s);
+        line.push_cell(5, '字', true, s);
+        assert_eq!(line.segs.len(), 2);
+        assert_eq!(line.segs[0].text, "中文");
+        assert_eq!(line.segs[1].col, 5);
     }
 }

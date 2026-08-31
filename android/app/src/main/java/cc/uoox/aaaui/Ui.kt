@@ -59,14 +59,6 @@ object Tok {
         else -> Dim
     }
 
-    fun stateLabel(state: String): String = when (state) {
-        "running" -> "运行中"
-        "waiting" -> "等待输入"
-        "idle" -> "空闲"
-        "exited" -> "已退出"
-        else -> state
-    }
-
     fun agentLabel(agent: String): String = when (agent) {
         "claude" -> "Claude"; "codex" -> "Codex"; "pi" -> "Pi"
         "reasonix" -> "Reasonix"; "agy" -> "Antigravity"; "shell" -> "终端"

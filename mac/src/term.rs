@@ -107,7 +107,6 @@ impl TermModel {
         self.term.scroll_display(Scroll::Bottom);
     }
 
-    #[allow(dead_code)] // 测试使用
     pub fn display_offset(&self) -> usize {
         self.term.grid().display_offset()
     }
