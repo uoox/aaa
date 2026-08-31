@@ -517,6 +517,15 @@ impl RootView {
                 self.cycle_session(cx);
             }
             cx.stop_propagation();
+            return;
+        }
+        // 新建项目弹窗里回车 = 「创建并进入」。MiniInput 不消费 enter，
+        // 这里在根上接住（IME 组字中的确认回车走 input handler，到不了这）。
+        if ks.key == "enter"
+            && let Modal::NewProject { agent_idx, .. } = self.modal
+        {
+            self.confirm_create_project(agent_idx, cx);
+            cx.stop_propagation();
         }
     }
 

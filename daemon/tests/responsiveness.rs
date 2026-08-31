@@ -53,6 +53,12 @@ async fn projects_list_is_not_blocked_by_a_busy_store_lock() {
     let home = dir.path().join("home");
     std::fs::create_dir_all(root.join("myproj")).unwrap();
     std::fs::create_dir_all(&home).unwrap();
+    // 名册以注册表为准：未登记的目录不会出现在 /projects 里
+    std::fs::write(
+        root.join(".aaa-agents"),
+        format!("{}\tclaude\n", root.join("myproj").display()),
+    )
+    .unwrap();
     let app = build_app(&root, &home);
 
     // Simulate a long store operation elsewhere by parking the lock for 4s.

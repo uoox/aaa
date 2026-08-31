@@ -19,7 +19,7 @@ impl RootView {
         cx.notify();
     }
 
-    fn confirm_create_project(&mut self, agent_idx: usize, cx: &mut Context<Self>) {
+    pub(super) fn confirm_create_project(&mut self, agent_idx: usize, cx: &mut Context<Self>) {
         if let Modal::NewProject { busy, .. } = &mut self.modal {
             if *busy {
                 return;
@@ -38,8 +38,9 @@ impl RootView {
             .get(agent_idx)
             .map(|a| a.id.clone())
             .unwrap_or_else(|| "claude".into());
-        // shell 不写注册表
-        let project_agent = (agent != "shell").then(|| agent.clone());
+        // shell 也写注册表：名册以注册表为准，且不写的话 daemon 端「没登记」
+        // 会回落成 claude，从终端页建的文件夹一转头就变 claude 项目了
+        let project_agent = Some(agent.clone());
         let fallback_path = name.as_ref().and_then(|n| {
             self.health
                 .as_ref()

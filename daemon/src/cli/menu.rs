@@ -1,10 +1,8 @@
 //! The interactive menu — `aaa` with no arguments.
 //!
-//! Same shape as the zsh menu it replaces (banner, arrow keys, digit
-//! shortcuts, `q` to leave), with one structural change: live sessions are
-//! listed above the actions. In the daemon era the most common thing you want
-//! is not "start something", it is "get back to the thing that is waiting for
-//! me".
+//! 结构与 zsh 版 aaal 完全同款：banner + 编号竖排主菜单（项目管理 / New
+//! <agent> / macOS 权限），↑↓ 移动、数字直选、Enter 进入、q 退出。会话不在
+//! 主菜单铺开——项目管理表格里回车会自动接管该项目的存活会话。
 
 use std::io::Write;
 
@@ -13,52 +11,21 @@ use crate::client::{AgentInfo, Client, Project, Session};
 use crate::render;
 use crate::tty::{self, Key, Raw, BOLD, CYAN, DIM, EOL, GREY, MAGENTA, RESET, YELLOW};
 
-/// Idle redraw cadence: fast enough that a session going amber shows up
-/// while you are looking at the list, cheap enough to leave running.
+/// Idle redraw cadence: the waiting-session hint under the banner should go
+/// amber while you are looking at it, and it is cheap to keep fresh.
 const REFRESH_MS: i32 = 1500;
 
 enum Item {
-    Session(usize),
     Projects,
-    Perms,
     NewAgent(usize),
+    Perms,
 }
 
-/// What the cursor is on, by identity rather than by row number.
-///
-/// The list re-sorts itself every refresh — a session going amber jumps to
-/// the top — so holding a row index would silently slide the highlight onto a
-/// different session between the moment you aim and the moment you press
-/// Enter. Holding the id instead means the cursor follows the session.
-#[derive(Clone, Debug, PartialEq)]
-enum Sel {
-    Session(String),
-    Projects,
-    Perms,
-    NewAgent(usize),
-}
-
-fn locate(items: &[Item], sessions: &[Session], sel: &Sel) -> usize {
+fn build_items(agents: &[AgentInfo]) -> Vec<Item> {
+    let mut items = vec![Item::Projects];
+    items.extend((0..agents.len()).map(Item::NewAgent));
+    items.push(Item::Perms);
     items
-        .iter()
-        .position(|it| match (it, sel) {
-            (Item::Session(i), Sel::Session(id)) => &sessions[*i].id == id,
-            (Item::Projects, Sel::Projects) => true,
-            (Item::Perms, Sel::Perms) => true,
-            (Item::NewAgent(a), Sel::NewAgent(b)) => a == b,
-            _ => false,
-        })
-        // the selected session ended, or this is the first frame: top of list
-        .unwrap_or(0)
-}
-
-fn sel_at(items: &[Item], sessions: &[Session], idx: usize) -> Sel {
-    match items.get(idx) {
-        Some(Item::Session(i)) => Sel::Session(sessions[*i].id.clone()),
-        Some(Item::Perms) => Sel::Perms,
-        Some(Item::NewAgent(i)) => Sel::NewAgent(*i),
-        _ => Sel::Projects,
-    }
 }
 
 pub fn run(c: &Client) -> Result<(), String> {
@@ -70,14 +37,12 @@ pub fn run(c: &Client) -> Result<(), String> {
     let raw = Raw::enter(true).ok_or("无法进入 raw 模式")?;
     tty::clear();
 
-    // no concrete selection yet — locate() lands us on the first row
-    let mut sel = Sel::Session(String::new());
+    let items = build_items(&agents);
+    let mut idx = 0usize;
     let mut sessions = c.sessions().unwrap_or_default();
     let mut status = String::new();
     loop {
         live_only(&mut sessions);
-        let items = build_items(&sessions, &agents);
-        let idx = locate(&items, &sessions, &sel);
         draw(&sessions, &agents, &items, idx, &health, c, &status);
 
         match tty::read_key(REFRESH_MS) {
@@ -88,56 +53,25 @@ pub fn run(c: &Client) -> Result<(), String> {
                 health = c.health().unwrap_or(health);
                 continue;
             }
-            Some(Key::Up) => {
-                sel = sel_at(&items, &sessions, if idx == 0 { items.len() - 1 } else { idx - 1 })
-            }
-            Some(Key::Down) => sel = sel_at(&items, &sessions, (idx + 1) % items.len()),
-            // digits pick a session, letters pick a fixed row — see draw()
+            Some(Key::Up) => idx = if idx == 0 { items.len() - 1 } else { idx - 1 },
+            Some(Key::Down) => idx = (idx + 1) % items.len(),
             Some(Key::Char(d @ '1'..='9')) => {
                 let n = d as usize - '1' as usize;
-                if n < sessions.len() {
-                    sel = sel_at(&items, &sessions, n);
-                    status = activate(c, &raw, &items[n], &sessions, &agents)?;
+                if n < items.len() {
+                    idx = n;
+                    status = activate(c, &raw, &items[idx], &agents)?;
                     sessions = c.sessions().unwrap_or_default();
                     tty::clear();
                 }
-            }
-            Some(Key::Char('p')) => {
-                status = project_menu(c, &raw)?;
-                sessions = c.sessions().unwrap_or_default();
-                tty::clear();
-            }
-            Some(Key::Char('m')) => {
-                status = perms_menu(c, &raw)?;
-                tty::clear();
-            }
-            Some(Key::Char('n')) => {
-                if let Some(a) = pick_agent(c, &raw, "新项目用哪个 agent") {
-                    status = new_project(c, &raw, &a)?;
-                    sessions = c.sessions().unwrap_or_default();
-                }
-                tty::clear();
             }
             Some(Key::Enter) => {
-                status = activate(c, &raw, &items[idx], &sessions, &agents)?;
+                status = activate(c, &raw, &items[idx], &agents)?;
                 sessions = c.sessions().unwrap_or_default();
                 tty::clear();
-            }
-            Some(Key::Char('k')) => {
-                if let Item::Session(i) = items[idx] {
-                    let s = &sessions[i];
-                    if confirm(&raw, &format!("结束会话 {} · {}?", s.project_name, s.title)) {
-                        status = match c.kill(&s.id) {
-                            Ok(_) => format!("已结束 {}", s.project_name),
-                            Err(e) => e,
-                        };
-                    }
-                    sessions = c.sessions().unwrap_or_default();
-                    tty::clear();
-                }
             }
             Some(Key::Char('r')) => {
                 sessions = c.sessions().unwrap_or_default();
+                health = c.health().unwrap_or(health);
                 status.clear();
             }
             Some(Key::Char('q')) | Some(Key::Esc) | Some(Key::Ctrl('c')) => break,
@@ -160,12 +94,22 @@ fn live_only(sessions: &mut Vec<Session>) {
     });
 }
 
-fn build_items(sessions: &[Session], agents: &[AgentInfo]) -> Vec<Item> {
-    let mut items: Vec<Item> = (0..sessions.len()).map(Item::Session).collect();
-    items.push(Item::Projects);
-    items.push(Item::Perms);
-    items.extend((0..agents.len()).map(Item::NewAgent));
-    items
+/// banner 下那行会话提示：主菜单不铺开会话，但等待输入必须一眼可见。
+fn session_hint(sessions: &[Session]) -> String {
+    let waiting = sessions.iter().filter(|s| s.state == "waiting").count();
+    if sessions.is_empty() {
+        String::new()
+    } else if waiting > 0 {
+        let names: Vec<&str> = sessions
+            .iter()
+            .filter(|s| s.state == "waiting")
+            .map(|s| s.project_name.as_str())
+            .take(3)
+            .collect();
+        format!("⚡ {waiting} 个会话等待输入（{}）· 项目管理里回车接管", names.join("、"))
+    } else {
+        format!("{} 个会话在跑 · 项目管理里回车接管", sessions.len())
+    }
 }
 
 fn draw(
@@ -195,45 +139,22 @@ fn draw(
         "   ░█▀█░█▀█░█▀█{RESET}{DIM}    {}:{} · v{} · {}{EOL}\n",
         c.host, c.port, health.version, root
     ));
-    out.push_str(&format!("{BOLD}{MAGENTA}   ░▀░▀░▀░▀░▀░▀{RESET}{EOL}\n\n"));
-
-    let waiting = sessions.iter().filter(|s| s.state == "waiting").count();
-    let head = if sessions.is_empty() {
-        format!("{DIM}会话（无）{RESET}")
-    } else if waiting > 0 {
-        format!("{DIM}会话 {} 个 · {YELLOW}{waiting} 个等待输入{RESET}", sessions.len())
+    out.push_str(&format!("{BOLD}{MAGENTA}   ░▀░▀░▀░▀░▀░▀{RESET}{EOL}\n"));
+    let hint = session_hint(sessions);
+    if hint.is_empty() {
+        out.push_str(&format!("{EOL}\n"));
     } else {
-        format!("{DIM}会话 {} 个{RESET}", sessions.len())
-    };
-    out.push_str(&format!("  {head}{EOL}\n"));
+        let color = if hint.starts_with('⚡') { YELLOW } else { DIM };
+        out.push_str(&format!(
+            "   {color}{}{RESET}{EOL}\n{EOL}\n",
+            tty::truncate(&hint, w.saturating_sub(4))
+        ));
+    }
 
     for (n, item) in items.iter().enumerate() {
-        let marker = if n == idx {
-            format!("{BOLD}{CYAN}▶{RESET}")
-        } else {
-            " ".into()
-        };
-        // Digits address sessions and only sessions, so `2` means the same
-        // row whatever else is on screen; the fixed rows carry letters that
-        // never move. The old menu numbered everything, which meant every
-        // shortcut shifted as sessions came and went.
-        let key = match item {
-            Item::Session(i) if *i < 9 => format!("{DIM}{}{RESET}", i + 1),
-            Item::Projects => format!("{CYAN}p{RESET}"),
-            Item::Perms => format!("{CYAN}m{RESET}"),
-            _ => " ".into(),
-        };
         let body = match item {
-            Item::Session(i) => render::session_row(&sessions[*i], w.saturating_sub(6)),
-            Item::Projects => {
-                out.push_str(&format!("{EOL}\n  {DIM}管理{RESET}{EOL}\n"));
-                format!("{BOLD}项目管理{RESET}  {DIM}{}{RESET}", health.project_root)
-            }
-            Item::Perms => format!("{BOLD}macOS 权限{RESET}  {DIM}一次点完，此后手机远程不再被弹窗卡住{RESET}"),
+            Item::Projects => format!("项目管理  {DIM}{}{RESET}", health.project_root),
             Item::NewAgent(i) => {
-                if *i == 0 {
-                    out.push_str(&format!("{EOL}\n  {DIM}新建（n 也可以，会先选 agent）{RESET}{EOL}\n"));
-                }
                 let a = &agents[*i];
                 let mark = if a.available { "" } else { " (未安装)" };
                 format!(
@@ -242,39 +163,35 @@ fn draw(
                     a.label,
                 )
             }
+            Item::Perms => format!("macOS 权限授予  {DIM}daemon + AAA App 一次点完{RESET}"),
         };
-        out.push_str(&format!(" {marker} {key} {body}{EOL}\n"));
+        if n == idx {
+            out.push_str(&format!(
+                "  {BOLD}{CYAN}▶ {}.{RESET} {BOLD}{body}{RESET}{EOL}\n",
+                n + 1
+            ));
+        } else {
+            out.push_str(&format!("    {DIM}{}.{RESET} {body}{EOL}\n", n + 1));
+        }
     }
 
     out.push_str(&format!("{EOL}\n"));
     if !status.is_empty() {
-        out.push_str(&format!("  {CYAN}{}{RESET}{EOL}\n", tty::truncate(status, w.saturating_sub(4))));
+        out.push_str(&format!(
+            "  {CYAN}{}{RESET}{EOL}\n",
+            tty::truncate(status, w.saturating_sub(4))
+        ));
     }
     out.push_str(&format!(
-        "  {DIM}↑↓ · Enter 进入 · 数字选会话 · k 结束 · p 项目 · m 权限 · n 新建 · r 刷新 · q 退出{RESET}{EOL}\x1b[J"
+        "  {DIM}↑↓ 移动  Enter 选择  数字直选  q 退出{RESET}{EOL}\x1b[J"
     ));
     print!("{out}");
     let _ = std::io::stdout().flush();
 }
 
 /// Act on the highlighted row. Returns a one-line status for the next frame.
-fn activate(
-    c: &Client,
-    raw: &Raw,
-    item: &Item,
-    sessions: &[Session],
-    agents: &[AgentInfo],
-) -> Result<String, String> {
+fn activate(c: &Client, raw: &Raw, item: &Item, agents: &[AgentInfo]) -> Result<String, String> {
     match item {
-        Item::Session(i) => {
-            let s = &sessions[*i];
-            let title = format!("{} · {}", s.project_name, s.title);
-            match attach::attach(c, &s.id, &title) {
-                Ok(Outcome::Detached) => Ok(format!("已脱离 {}（仍在运行）", s.project_name)),
-                Ok(Outcome::Ended) => Ok(format!("{} 会话已结束", s.project_name)),
-                Err(e) => Ok(e),
-            }
-        }
         Item::Projects => project_menu(c, raw),
         Item::Perms => perms_menu(c, raw),
         Item::NewAgent(i) => new_project(c, raw, &agents[*i].id),
@@ -299,9 +216,9 @@ fn perms_menu(c: &Client, raw: &Raw) -> Result<String, String> {
             idx = perms.len().saturating_sub(1);
         }
         tty::home();
-        let mut out = format!("  {BOLD}macOS 权限{RESET}{EOL}\n");
+        let mut out = format!("  {BOLD}macOS 权限授予{RESET}{EOL}\n");
         out.push_str(&format!(
-            "  {DIM}授权归到 daemon；agent 都是它的子进程，点一次全线共享{RESET}{EOL}\n\n"
+            "  {DIM}下表归责到 daemon（agent 都是它的子进程）；a 一键连 AAA.app 的弹窗一起触发{RESET}{EOL}\n\n"
         ));
         for (n, p) in perms.iter().enumerate() {
             let marker = if n == idx { format!("{BOLD}{CYAN}▶{RESET}") } else { " ".into() };
@@ -317,7 +234,7 @@ fn perms_menu(c: &Client, raw: &Raw) -> Result<String, String> {
             out.push_str(&format!("  {CYAN}{status}{RESET}{EOL}\n"));
         }
         out.push_str(&format!(
-            "  {DIM}Enter 申请这一项 · a 一键申请全部 · r 刷新 · q 返回{RESET}{EOL}\x1b[J"
+            "  {DIM}Enter 申请这一项 · a 一键全授（daemon+App）· r 刷新 · q 返回{RESET}{EOL}\x1b[J"
         ));
         print!("{out}");
         let _ = std::io::stdout().flush();
@@ -344,6 +261,15 @@ fn perms_menu(c: &Client, raw: &Raw) -> Result<String, String> {
             Some(Key::Char('a')) => {
                 if confirm(raw, "弹窗会出现在这台 Mac 上，逐个允许。开始?") {
                     status = request(vec!["all".to_string()]);
+                    // AAA.app 是独立的 TCC 主体：daemon 的授权覆盖不了它。
+                    // 让 App 自己也把能弹的弹一遍（app 端 --request-permissions）。
+                    let app = std::process::Command::new("open")
+                        .args(["-a", "AAA", "--args", "--request-permissions"])
+                        .status();
+                    match app {
+                        Ok(st) if st.success() => status.push_str(" · AAA.app 的弹窗也已触发"),
+                        _ => status.push_str(" · AAA.app 未安装或启动失败（仅授了 daemon）"),
+                    }
                     perms = c.permissions().unwrap_or(perms);
                 }
                 tty::clear();
@@ -684,43 +610,25 @@ mod tests {
     }
 
     #[test]
-    fn the_cursor_follows_the_session_when_the_list_resorts() {
-        let agents: Vec<AgentInfo> = serde_json::from_value(serde_json::json!([{"id":"claude"}])).unwrap();
-        let mut v = vec![
-            sess("a", "running", "2026-08-31T10:00:00Z"),
-            sess("b", "running", "2026-08-31T09:00:00Z"),
-        ];
-        live_only(&mut v);
-        let items = build_items(&v, &agents);
-        // aim at the second row …
-        let sel = sel_at(&items, &v, 1);
-        assert_eq!(sel, Sel::Session("b".into()));
-        // … then b goes amber and jumps to the top
-        v[1].state = "waiting".into();
-        live_only(&mut v);
-        let items = build_items(&v, &agents);
-        assert_eq!(locate(&items, &v, &sel), 0, "光标跟着会话走，而不是停在原来的行号");
-    }
-
-    #[test]
-    fn a_vanished_session_puts_the_cursor_back_on_top() {
-        let agents: Vec<AgentInfo> = serde_json::from_value(serde_json::json!([{"id":"claude"}])).unwrap();
-        let v = vec![sess("a", "idle", "")];
-        let items = build_items(&v, &agents);
-        assert_eq!(locate(&items, &v, &Sel::Session("gone".into())), 0);
-    }
-
-    #[test]
-    fn items_cover_sessions_then_actions() {
-        let sessions = vec![sess("a", "idle", "")];
+    fn main_menu_is_aaal_shaped() {
+        // 项目管理在 1，New <agent> 跟随，权限收尾——与 aaal 主菜单同构
         let agents: Vec<AgentInfo> =
             serde_json::from_value(serde_json::json!([{"id":"claude"},{"id":"shell"}])).unwrap();
-        let items = build_items(&sessions, &agents);
-        assert_eq!(items.len(), 5);
-        assert!(matches!(items[0], Item::Session(0)));
-        assert!(matches!(items[1], Item::Projects));
-        assert!(matches!(items[2], Item::Perms));
-        assert!(matches!(items[4], Item::NewAgent(1)));
+        let items = build_items(&agents);
+        assert_eq!(items.len(), 4);
+        assert!(matches!(items[0], Item::Projects));
+        assert!(matches!(items[1], Item::NewAgent(0)));
+        assert!(matches!(items[2], Item::NewAgent(1)));
+        assert!(matches!(items[3], Item::Perms));
+    }
+
+    #[test]
+    fn hint_surfaces_waiting_sessions() {
+        let v = vec![sess("a", "waiting", ""), sess("b", "running", "")];
+        let h = session_hint(&v);
+        assert!(h.contains("1 个会话等待输入"), "{h}");
+        assert!(session_hint(&[]).is_empty());
+        assert!(session_hint(&[sess("c", "idle", "")]).contains("1 个会话在跑"));
     }
 
     #[test]

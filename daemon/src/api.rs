@@ -234,6 +234,9 @@ async fn projects_list(State(app): State<SharedApp>) -> ApiResult<Json<Value>> {
         let namer = Namer::new(&app2.paths, app2.cfg.namer);
         let out: Vec<Value> = rows
             .iter()
+            // 注册表就是项目名册：根目录下没登记的目录（顺手 clone 的仓库、
+            // 杂物文件夹）不算项目。经 daemon 建的项目/会话都会登记。
+            .filter(|r| reg.get(&r.path).is_some())
             .map(|r| {
                 // agent: registry first, else detected, else default (aaa logic)
                 let mut agent = reg
@@ -460,6 +463,21 @@ async fn sessions_create(
     }
     let canon = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
     let canon_str = canon.to_string_lossy().into_owned();
+
+    // 名册维护：开会话的目录必须在注册表里（项目列表以注册表为准）。
+    // 已登记的不动——用户手动设过的 agent 不被这次会话的选择覆盖。
+    {
+        let app2 = Arc::clone(&app);
+        let target = canon_str.clone();
+        let agent_id = agent.id;
+        blocking(move || {
+            let mut reg = Registry::load(&app2.cfg.project_root);
+            if reg.get(&target).is_none() {
+                let _ = reg.set(&target, agent_id);
+            }
+        })
+        .await?;
+    }
 
     // resume: port of aaa launch_agent_in (find most recent session for cwd)
     let mut cmd = agent.cmd.to_string();
