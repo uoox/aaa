@@ -85,6 +85,10 @@ pub struct Health {
     pub version: String,
     #[serde(default)]
     pub ssd_mounted: bool,
+    /// ok | unmounted | denied — absent on a pre-1.0 daemon, where
+    /// `ssd_mounted` is all there was.
+    #[serde(default)]
+    pub root_state: String,
     #[serde(default)]
     pub project_root: String,
     #[serde(default)]

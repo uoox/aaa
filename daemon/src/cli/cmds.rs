@@ -9,7 +9,7 @@ use std::io::Write;
 use crate::attach::{self, Outcome};
 use crate::client::{Client, Session};
 use crate::render;
-use crate::tty::{self, BOLD, CYAN, DIM, GREY, RESET, YELLOW};
+use crate::tty::{self, BOLD, CYAN, DIM, GREY, RED, RESET, YELLOW};
 
 pub const HELP: &str = "\
 aaa — AAA daemon 的命令行前端
@@ -165,7 +165,8 @@ pub fn status(c: &Client, json: bool) -> Result<(), String> {
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "host": c.host, "port": c.port, "version": h.version,
-                "ssd_mounted": h.ssd_mounted, "project_root": h.project_root,
+                "ssd_mounted": h.ssd_mounted, "root_state": root_state(&h),
+                "project_root": h.project_root,
                 "uptime_s": h.uptime_s, "sessions": live, "waiting": waiting,
             }))
             .unwrap_or_default()
@@ -173,10 +174,39 @@ pub fn status(c: &Client, json: bool) -> Result<(), String> {
         return Ok(());
     }
     println!("{BOLD}aaa-daemon{RESET} v{}  {DIM}{}:{}{RESET}", h.version, c.host, c.port);
-    println!("  项目根   {} {}", h.project_root, if h.ssd_mounted { "" } else { "(未挂载!)" });
+    println!("  项目根   {} {}", h.project_root, root_note(&h));
     println!("  运行时长 {}", uptime(h.uptime_s));
     println!("  会话     {live} 活跃 · {waiting} 等待输入 · {} 总计", sessions.len());
+    if root_state(&h) == "denied" {
+        println!(
+            "\n{YELLOW}项目根读不了{RESET}：launchd 起的 daemon 没有可移动卷访问权。\n  \
+             系统设置 → 隐私与安全性 → 完全磁盘访问权限，加入 {DIM}~/.local/bin/aaa-daemon{RESET}，\n  \
+             然后 {BOLD}aaa-daemon service uninstall && aaa-daemon service install{RESET}"
+        );
+    }
     Ok(())
+}
+
+/// Older daemons only had `ssd_mounted`; treat a missing field as the old
+/// two-state world rather than inventing a diagnosis.
+fn root_state(h: &crate::client::Health) -> &str {
+    if h.root_state.is_empty() {
+        if h.ssd_mounted {
+            "ok"
+        } else {
+            "unmounted"
+        }
+    } else {
+        &h.root_state
+    }
+}
+
+fn root_note(h: &crate::client::Health) -> String {
+    match root_state(h) {
+        "ok" => String::new(),
+        "denied" => format!("{RED}(读不了 · 缺完全磁盘访问权限){RESET}"),
+        _ => format!("{RED}(未挂载!){RESET}"),
+    }
 }
 
 fn uptime(secs: u64) -> String {
@@ -396,6 +426,30 @@ mod tests {
         assert!(resolve_in(&v, "s_ab").is_err());
         assert!(resolve_in(&v, "9").unwrap_err().contains("超出范围"));
         assert!(resolve_in(&v, "0").is_err(), "序号从 1 开始，0 不能回绕");
+    }
+
+    #[test]
+    fn a_denied_root_is_not_reported_as_unmounted() {
+        // the two need different fixes; saying "未挂载" sends you to the wrong place
+        let denied: crate::client::Health = serde_json::from_value(serde_json::json!({
+            "ssd_mounted": false, "root_state": "denied"
+        }))
+        .unwrap();
+        assert_eq!(root_state(&denied), "denied");
+        assert!(root_note(&denied).contains("完全磁盘访问"));
+    }
+
+    #[test]
+    fn a_pre_1_0_daemon_still_reads_sensibly() {
+        // no root_state field at all: fall back to the old two-state world
+        let old: crate::client::Health =
+            serde_json::from_value(serde_json::json!({"ssd_mounted": true})).unwrap();
+        assert_eq!(root_state(&old), "ok");
+        assert!(root_note(&old).is_empty());
+        let gone: crate::client::Health =
+            serde_json::from_value(serde_json::json!({"ssd_mounted": false})).unwrap();
+        assert_eq!(root_state(&gone), "unmounted");
+        assert!(root_note(&gone).contains("未挂载"));
     }
 
     #[test]
