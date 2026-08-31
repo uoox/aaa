@@ -51,14 +51,31 @@ pub fn run(c: &Client) -> Result<(), String> {
             }
             Some(Key::Up) => idx = if idx == 0 { items.len() - 1 } else { idx - 1 },
             Some(Key::Down) => idx = (idx + 1) % items.len(),
+            // digits pick a session, letters pick a fixed row — see draw()
             Some(Key::Char(d @ '1'..='9')) => {
                 let n = d as usize - '1' as usize;
-                if n < items.len() {
+                if n < sessions.len() {
                     idx = n;
                     status = activate(c, &raw, &items[idx], &sessions, &agents)?;
                     sessions = c.sessions().unwrap_or_default();
                     tty::clear();
                 }
+            }
+            Some(Key::Char('p')) => {
+                status = project_menu(c, &raw)?;
+                sessions = c.sessions().unwrap_or_default();
+                tty::clear();
+            }
+            Some(Key::Char('m')) => {
+                status = perms_menu(c, &raw)?;
+                tty::clear();
+            }
+            Some(Key::Char('n')) => {
+                if let Some(a) = pick_agent(c, &raw, "新项目用哪个 agent") {
+                    status = new_project(c, &raw, &a)?;
+                    sessions = c.sessions().unwrap_or_default();
+                }
+                tty::clear();
             }
             Some(Key::Enter) => {
                 status = activate(c, &raw, &items[idx], &sessions, &agents)?;
@@ -145,37 +162,42 @@ fn draw(
     out.push_str(&format!("  {head}{EOL}\n"));
 
     for (n, item) in items.iter().enumerate() {
-        let sel = n == idx;
-        let marker = if sel {
+        let marker = if n == idx {
             format!("{BOLD}{CYAN}▶{RESET}")
         } else {
             " ".into()
         };
-        let num = if n < 9 {
-            format!("{DIM}{}{RESET}", n + 1)
-        } else {
-            " ".into()
+        // Digits address sessions and only sessions, so `2` means the same
+        // row whatever else is on screen; the fixed rows carry letters that
+        // never move. The old menu numbered everything, which meant every
+        // shortcut shifted as sessions came and went.
+        let key = match item {
+            Item::Session(i) if *i < 9 => format!("{DIM}{}{RESET}", i + 1),
+            Item::Projects => format!("{CYAN}p{RESET}"),
+            Item::Perms => format!("{CYAN}m{RESET}"),
+            _ => " ".into(),
         };
         let body = match item {
             Item::Session(i) => render::session_row(&sessions[*i], w.saturating_sub(6)),
             Item::Projects => {
-                out.push_str(&format!("{EOL}\n  {DIM}新建{RESET}{EOL}\n"));
+                out.push_str(&format!("{EOL}\n  {DIM}管理{RESET}{EOL}\n"));
                 format!("{BOLD}项目管理{RESET}  {DIM}{}{RESET}", health.project_root)
             }
-            Item::Perms => format!("{BOLD}macOS 权限{RESET}  {DIM}一次点完，之后手机远程不再被弹窗卡住{RESET}"),
+            Item::Perms => format!("{BOLD}macOS 权限{RESET}  {DIM}一次点完，此后手机远程不再被弹窗卡住{RESET}"),
             Item::NewAgent(i) => {
+                if *i == 0 {
+                    out.push_str(&format!("{EOL}\n  {DIM}新建（n 也可以，会先选 agent）{RESET}{EOL}\n"));
+                }
                 let a = &agents[*i];
                 let mark = if a.available { "" } else { " (未安装)" };
                 format!(
-                    "New {}{}{}{}",
+                    "New {}{}{RESET}{GREY}{mark}{RESET}",
                     render::agent_color(&a.id),
                     a.label,
-                    RESET,
-                    format_args!("{GREY}{mark}{RESET}")
                 )
             }
         };
-        out.push_str(&format!(" {marker} {num} {body}{EOL}\n"));
+        out.push_str(&format!(" {marker} {key} {body}{EOL}\n"));
     }
 
     out.push_str(&format!("{EOL}\n"));
@@ -183,7 +205,7 @@ fn draw(
         out.push_str(&format!("  {CYAN}{}{RESET}{EOL}\n", tty::truncate(status, w - 4)));
     }
     out.push_str(&format!(
-        "  {DIM}↑↓ 移动 · Enter 进入 · 数字直选 · k 结束会话 · r 刷新 · q 退出{RESET}{EOL}\x1b[J"
+        "  {DIM}↑↓ · Enter 进入 · 数字选会话 · k 结束 · p 项目 · m 权限 · n 新建 · r 刷新 · q 退出{RESET}{EOL}\x1b[J"
     ));
     print!("{out}");
     let _ = std::io::stdout().flush();
