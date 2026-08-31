@@ -134,6 +134,11 @@ fn config_path() -> PathBuf {
 }
 
 impl Client {
+    /// 是否连的是本机 daemon（App 弹窗只能在本机触发）
+    pub fn host_is_local(&self) -> bool {
+        matches!(self.host.as_str(), "127.0.0.1" | "localhost" | "::1")
+    }
+
     /// `AAA_HOST`/`AAA_TOKEN` win (that is how you drive a daemon on another
     /// machine over tailscale); otherwise read the daemon's own config, which
     /// is the single source of truth for port and token on this Mac.

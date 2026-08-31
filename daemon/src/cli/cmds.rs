@@ -147,11 +147,33 @@ pub fn perms(c: &Client, json: bool) -> Result<(), String> {
 
 /// `ids` empty means "all". Prompts appear on the Mac; from a phone or an SSH
 /// session you get the summary but somebody has to be at the keyboard.
+/// "all" 同时触发 AAA.app 自己的弹窗——它是独立的 TCC 主体，daemon 的授权
+/// 覆盖不了它（`open --args` 对已运行实例送不到参数，所以先礼貌退出再启动；
+/// 会话都在 daemon 上，App 重启无损）。
 pub fn perms_request(c: &Client, ids: &[String]) -> Result<(), String> {
-    let ids = if ids.is_empty() { vec!["all".to_string()] } else { ids.to_vec() };
+    let all = ids.is_empty();
+    let ids = if all { vec!["all".to_string()] } else { ids.to_vec() };
     let v = c.request_permissions(&ids)?;
-    println!("{}", crate::menu::summarize_request(&v));
-    println!("{DIM}弹窗出现在 Mac 上，逐个允许即可{RESET}");
+    println!("daemon  {}", crate::menu::summarize_request(&v));
+    if all && c.host_is_local() {
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", "quit app \"AAA\""])
+            .status();
+        std::thread::sleep(std::time::Duration::from_millis(800));
+        let ok = std::process::Command::new("open")
+            .args(["-a", "AAA", "--args", "--request-permissions"])
+            .status()
+            .map(|st| st.success())
+            .unwrap_or(false);
+        if ok {
+            println!("App     已触发 AAA.app 的弹窗（辅助功能 / 屏幕录制 / FDA 面板 / 测试通知）");
+        } else {
+            println!("App     AAA.app 未安装或启动失败，仅授了 daemon");
+        }
+    } else if all {
+        println!("App     远程调用只授 daemon；AAA.app 的弹窗要在 Mac 本机跑 aaa perms all");
+    }
+    println!("{DIM}弹窗出现在 Mac 上，逐个允许即可；完全磁盘访问 / 相机 / 麦克风无法弹窗，已打开对应设置面板{RESET}");
     Ok(())
 }
 

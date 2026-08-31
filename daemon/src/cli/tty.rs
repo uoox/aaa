@@ -6,7 +6,7 @@
 //! page of libc, and it keeps `aaa` linking nothing the daemon does not
 //! already link.
 
-use std::io::{Read, Write};
+use std::io::Write;
 
 pub const RESET: &str = "\x1b[0m";
 pub const BOLD: &str = "\x1b[1m";
@@ -121,8 +121,18 @@ pub fn poll(other: Option<i32>, timeout_ms: i32) -> (bool, bool) {
     (fds[0].revents != 0, n == 2 && fds[1].revents != 0)
 }
 
+/// 裸 read(2)，绝不能走 `std::io::stdin()`：它带 8KB BufReader，读 ESC 那
+/// 一下会把后面的 `[B` 一起吸进用户态缓冲，随后 `poll` 看 fd 上没数据，
+/// CSI 序列就被判成裸 Esc——方向键按一下菜单直接退出（实测坑）。
 pub fn read_stdin(buf: &mut [u8]) -> usize {
-    std::io::stdin().read(buf).unwrap_or(0)
+    unsafe {
+        let n = libc::read(
+            libc::STDIN_FILENO,
+            buf.as_mut_ptr() as *mut libc::c_void,
+            buf.len(),
+        );
+        if n < 0 { 0 } else { n as usize }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
