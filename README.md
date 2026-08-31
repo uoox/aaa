@@ -17,6 +17,7 @@
 | `daemon/` | Rust 常驻服务：PTY 池 + 服务端 VT + 全套 API + aaa 逻辑移植 + TCC 权限 + checkpoint/消息流/收件箱/watchdog | 66 测试全绿，E2E 冒烟 + 独立复核通过 |
 | `mac/` | gpui 原生客户端（tty7 路线，alacritty_terminal + 自绘渲染） | 31 测试全绿，build 0 warning |
 | `android/` | Kotlin/Compose 原生客户端（vendor Termux 终端引擎，无 WebView） | 166 测试全绿（含 2 项真 daemon 集成） |
+| `brand/` | 品牌标志：`logo.py` 一次运行导出 macOS `.icns` 与 Android 各密度自适应图标 | — |
 | `PROTOCOL.md` | 三端唯一契约（API/状态机/设计令牌/v1.1 扩展） | — |
 | `prototype.html` | 双端交互原型（已确认），claude.ai artifact 同步发布 | — |
 
@@ -51,8 +52,13 @@ SSD 未挂载时 daemon 只读降级、绝不 mkdir 项目根。
 ```bash
 cd mac
 export PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH"
-cargo run          # 同机自动读 ~/.config/aaa-daemon/config.toml 连 127.0.0.1:2730
+packaging/bundle.sh build      # → mac/target/AAA UI.app
+packaging/bundle.sh install    # → /Applications，之后 Spotlight 直接启动
 ```
+
+同机启动会自动读 `~/.config/aaa-daemon/config.toml` 连 `127.0.0.1:2730`，无需配置。
+开发时 `cargo run` 亦可。
+> 签名是 ad-hoc（本机无开发者证书），**TCC 授权绑定签名、每次重新构建即失效**——这正是权限由 daemon 而非客户端持有的原因。
 
 会话侧栏（状态点：绿=运行 黄=等待输入 灰=空闲 红=退出）、多标签终端（选区/复制/CJK）、
 waiting 选项胶囊直接点、项目表格（列与 aaa CLI 一致）、系统通知、设置页出配对二维码。
