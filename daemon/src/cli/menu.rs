@@ -24,6 +24,43 @@ enum Item {
     NewAgent(usize),
 }
 
+/// What the cursor is on, by identity rather than by row number.
+///
+/// The list re-sorts itself every refresh — a session going amber jumps to
+/// the top — so holding a row index would silently slide the highlight onto a
+/// different session between the moment you aim and the moment you press
+/// Enter. Holding the id instead means the cursor follows the session.
+#[derive(Clone, Debug, PartialEq)]
+enum Sel {
+    Session(String),
+    Projects,
+    Perms,
+    NewAgent(usize),
+}
+
+fn locate(items: &[Item], sessions: &[Session], sel: &Sel) -> usize {
+    items
+        .iter()
+        .position(|it| match (it, sel) {
+            (Item::Session(i), Sel::Session(id)) => &sessions[*i].id == id,
+            (Item::Projects, Sel::Projects) => true,
+            (Item::Perms, Sel::Perms) => true,
+            (Item::NewAgent(a), Sel::NewAgent(b)) => a == b,
+            _ => false,
+        })
+        // the selected session ended, or this is the first frame: top of list
+        .unwrap_or(0)
+}
+
+fn sel_at(items: &[Item], sessions: &[Session], idx: usize) -> Sel {
+    match items.get(idx) {
+        Some(Item::Session(i)) => Sel::Session(sessions[*i].id.clone()),
+        Some(Item::Perms) => Sel::Perms,
+        Some(Item::NewAgent(i)) => Sel::NewAgent(*i),
+        _ => Sel::Projects,
+    }
+}
+
 pub fn run(c: &Client) -> Result<(), String> {
     if !tty::is_tty() {
         return Err("交互菜单需要终端；试试 aaa ls / aaa help".into());
@@ -33,15 +70,14 @@ pub fn run(c: &Client) -> Result<(), String> {
     let raw = Raw::enter(true).ok_or("无法进入 raw 模式")?;
     tty::clear();
 
-    let mut idx = 0usize;
+    // no concrete selection yet — locate() lands us on the first row
+    let mut sel = Sel::Session(String::new());
     let mut sessions = c.sessions().unwrap_or_default();
     let mut status = String::new();
     loop {
         live_only(&mut sessions);
         let items = build_items(&sessions, &agents);
-        if idx >= items.len() {
-            idx = items.len().saturating_sub(1);
-        }
+        let idx = locate(&items, &sessions, &sel);
         draw(&sessions, &agents, &items, idx, &health, c, &status);
 
         match tty::read_key(REFRESH_MS) {
@@ -49,14 +85,16 @@ pub fn run(c: &Client) -> Result<(), String> {
                 sessions = c.sessions().unwrap_or(sessions);
                 continue;
             }
-            Some(Key::Up) => idx = if idx == 0 { items.len() - 1 } else { idx - 1 },
-            Some(Key::Down) => idx = (idx + 1) % items.len(),
+            Some(Key::Up) => {
+                sel = sel_at(&items, &sessions, if idx == 0 { items.len() - 1 } else { idx - 1 })
+            }
+            Some(Key::Down) => sel = sel_at(&items, &sessions, (idx + 1) % items.len()),
             // digits pick a session, letters pick a fixed row — see draw()
             Some(Key::Char(d @ '1'..='9')) => {
                 let n = d as usize - '1' as usize;
                 if n < sessions.len() {
-                    idx = n;
-                    status = activate(c, &raw, &items[idx], &sessions, &agents)?;
+                    sel = sel_at(&items, &sessions, n);
+                    status = activate(c, &raw, &items[n], &sessions, &agents)?;
                     sessions = c.sessions().unwrap_or_default();
                     tty::clear();
                 }
@@ -635,6 +673,33 @@ mod tests {
         live_only(&mut v);
         let ids: Vec<&str> = v.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(ids, ["b", "c", "a"], "等待优先，其余按最近输出，exited 不进菜单");
+    }
+
+    #[test]
+    fn the_cursor_follows_the_session_when_the_list_resorts() {
+        let agents: Vec<AgentInfo> = serde_json::from_value(serde_json::json!([{"id":"claude"}])).unwrap();
+        let mut v = vec![
+            sess("a", "running", "2026-08-31T10:00:00Z"),
+            sess("b", "running", "2026-08-31T09:00:00Z"),
+        ];
+        live_only(&mut v);
+        let items = build_items(&v, &agents);
+        // aim at the second row …
+        let sel = sel_at(&items, &v, 1);
+        assert_eq!(sel, Sel::Session("b".into()));
+        // … then b goes amber and jumps to the top
+        v[1].state = "waiting".into();
+        live_only(&mut v);
+        let items = build_items(&v, &agents);
+        assert_eq!(locate(&items, &v, &sel), 0, "光标跟着会话走，而不是停在原来的行号");
+    }
+
+    #[test]
+    fn a_vanished_session_puts_the_cursor_back_on_top() {
+        let agents: Vec<AgentInfo> = serde_json::from_value(serde_json::json!([{"id":"claude"}])).unwrap();
+        let v = vec![sess("a", "idle", "")];
+        let items = build_items(&v, &agents);
+        assert_eq!(locate(&items, &v, &Sel::Session("gone".into())), 0);
     }
 
     #[test]
