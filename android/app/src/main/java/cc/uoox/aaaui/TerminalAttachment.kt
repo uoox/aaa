@@ -45,6 +45,7 @@ class TerminalAttachment(
     private var ws: WebSocket? = null
     @Volatile private var open = false
     @Volatile private var stopped = false
+    @Volatile private var everConnected = false
     private var attempt = 0
     private val pendingInput = ByteArrayOutputStream()
 
@@ -66,9 +67,17 @@ class TerminalAttachment(
         if (stopped) return
         ws = api.attachSocket(sessionId, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
+                val isReconnect = everConnected
+                everConnected = true
                 open = true
                 attempt = 0
                 _connected.value = true
+                if (isReconnect) {
+                    // hello 后 daemon 必发整屏 replay（含数百行历史）：重连前本地
+                    // 清掉回滚缓冲，否则每次断线重连都叠一份重复历史（审查 P1）。
+                    // 3J = 清 transcript（termux 模拟器支持），2J+H = 清屏归位。
+                    session.pushBytes("\u001b[3J\u001b[2J\u001b[H".toByteArray())
+                }
                 session.resendSize()
                 val queued = synchronized(pendingInput) {
                     val b = pendingInput.toByteArray(); pendingInput.reset(); b

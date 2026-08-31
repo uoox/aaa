@@ -117,6 +117,8 @@ pub struct RootView {
     // waiting 重新可通知），5 分钟冷却兜底防 TUI 闪烁刷屏
     last_notified_question: HashMap<String, String>,
     last_notify_at: HashMap<String, std::time::Instant>,
+    /// 本机手动终止的会话：exited 不弹「已退出」（自己动的手）
+    pub user_killed: HashSet<String>,
 
     // 侧栏宽度（拖右边缘调整，松手落盘）与拖动中的 (按下时鼠标 x, 按下时宽度)
     pub sidebar_w: f32,
@@ -185,6 +187,7 @@ impl RootView {
             ports_cache: HashMap::new(),
             last_notified_question: HashMap::new(),
             last_notify_at: HashMap::new(),
+            user_killed: HashSet::new(),
             sidebar_w: UiState::load().sidebar_w,
             sidebar_drag: None,
             name_input,
@@ -222,6 +225,8 @@ impl RootView {
                     t.update(cx, |t, cx| {
                         // hello 即视为链路恢复（重连后可能长时间无输出，不能等首字节才撤横幅）
                         t.set_down(false, cx);
+                        // hello 后必然跟整屏 replay：清掉旧模型，重连不叠历史
+                        t.reset_for_replay(cx);
                         t.set_remote_size(cols, rows, cx);
                     });
                 }
@@ -309,7 +314,10 @@ impl RootView {
             self.msg_views
                 .entry(id.clone())
                 .or_insert_with(|| cx.new(|cx| MessagesView::new(sid, net, cx)))
-                .update(cx, |v, cx| v.fetch(cx));
+                .update(cx, |v, cx| {
+                    v.fetch(cx);
+                    v.request_focus(cx);
+                });
             self.msg_mode.insert(id);
         }
         cx.notify();
@@ -361,7 +369,11 @@ impl RootView {
                     self.last_notified_question.insert(new.id.clone(), key);
                 }
             }
-            SessionState::Exited if old_state == Some(SessionState::Running) && !watching => {
+            SessionState::Exited
+                if old_state == Some(SessionState::Running)
+                    && !watching
+                    && !self.user_killed.remove(&new.id) =>
+            {
                 let body = match new.exit_code {
                     Some(code) => format!("已退出 (exit {code})"),
                     None => "已退出".to_string(),

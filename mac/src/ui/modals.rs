@@ -164,6 +164,8 @@ impl RootView {
     fn confirm_kill(&mut self, id: String, cx: &mut Context<Self>) {
         let fut = self.net.kill_session(&id);
         self.modal = Modal::None;
+        // 自己终止的会话，随后的 exited 不弹通知
+        self.user_killed.insert(id.clone());
         // 关 TUI = 终止 + 收起 tab：项目从上分区回到下分区
         self.close_tab(&id, cx);
         self.spawn_fetch(fut, |_, _: serde_json::Value, _| {}, true, cx);

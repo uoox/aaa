@@ -269,6 +269,10 @@ fn synthetic_session(app: &aaa_daemon::api::SharedApp, proj: &Path, start_ref: O
         stalled_notified: false,
         last_notified_question: None,
         last_notify_at: None,
+        screen_hash: 0,
+        screen_changed_inst: None,
+        idle_recheck: 0,
+        user_killed: false,
     };
     let (tx, _) = tokio::sync::broadcast::channel(8);
     let id = "s_router01".to_string();

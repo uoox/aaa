@@ -630,6 +630,7 @@ fun SessionMenuSheet(
                 scope.launch {
                     try {
                         val api = store.client ?: return@launch
+                        store.markUserKilled(s.id)
                         runCatching { api.kill(s.id) }
                         val fresh = api.createSession(s.project_path, s.agent, resume = true)
                         store.releaseAttachmentNow(s.id) // 老会话已经没了，别让它继续重连
@@ -679,7 +680,10 @@ fun SessionMenuSheet(
     if (killDialog) {
         ConfirmDialog("结束进程？", "进程将被终止，屏幕回放保留。", "结束",
             onConfirm = {
-                scope.launch { runCatching { store.client?.kill(s.id) }.onFailure { toast("失败：${it.message}") } }
+                scope.launch {
+                    store.markUserKilled(s.id)
+                    runCatching { store.client?.kill(s.id) }.onFailure { toast("失败：${it.message}") }
+                }
                 killDialog = false; onDismiss()
             }, onCancel = { killDialog = false })
     }

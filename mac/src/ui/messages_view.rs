@@ -5,9 +5,13 @@
 //! /events 的 messages_changed 帧增量拉。`supported:false`（shell、
 //! reasonix 等）或 404（v1 daemon）→ 上层自动回落终端并隐藏切换入口。
 
-use gpui::{Context, ScrollHandle, SharedString, Window, div, prelude::*, px, relative};
+use gpui::{
+    Context, Entity, KeyDownEvent, ScrollHandle, SharedString, Window, div, prelude::*, px,
+    relative,
+};
 
 use super::kit::{c, ca};
+use super::mini_input::MiniInput;
 use crate::model::ChatMessage;
 use crate::net::Net;
 use crate::theme;
@@ -26,10 +30,16 @@ pub struct MessagesView {
     /// 已展开的 thinking / tool 消息 seq（点击切换）
     expanded: std::collections::HashSet<u64>,
     scroll: ScrollHandle,
+    /// 底部输入框：消息流里直接对 agent 说话（POST /input，text+回车）
+    input: Entity<MiniInput>,
+    /// 下一帧渲染时把焦点放到输入框（切进消息流视图时置位）
+    wants_focus: bool,
+    sending: bool,
 }
 
 impl MessagesView {
     pub fn new(sid: String, net: Net, cx: &mut Context<Self>) -> Self {
+        let input = cx.new(|cx| MiniInput::new(cx, "对 agent 说点什么… (回车发送)"));
         let mut v = MessagesView {
             sid,
             net,
@@ -39,9 +49,52 @@ impl MessagesView {
             loading: false,
             expanded: std::collections::HashSet::new(),
             scroll: ScrollHandle::new(),
+            input,
+            wants_focus: true,
+            sending: false,
         };
         v.fetch(cx);
         v
+    }
+
+    /// 切进消息流视图时调用：下一帧把焦点交给输入框
+    pub fn request_focus(&mut self, cx: &mut Context<Self>) {
+        self.wants_focus = true;
+        cx.notify();
+    }
+
+    fn send(&mut self, cx: &mut Context<Self>) {
+        if self.sending {
+            return;
+        }
+        let text = self.input.read(cx).text.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        self.sending = true;
+        let fut = self.net.session_input(&self.sid, text.clone(), true);
+        self.input.update(cx, |i, cx| i.set_text("", cx));
+        cx.spawn(async move |this, cx| {
+            let res = fut.await;
+            let _ = this.update(cx, |v: &mut MessagesView, cx| {
+                v.sending = false;
+                if let Err(e) = res {
+                    // 发送失败把话塞回输入框，别丢
+                    log::warn!("消息流发送失败: {e}");
+                    v.input.update(cx, |i, cx| i.set_text(text, cx));
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn on_key_down(&mut self, ev: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        // MiniInput 不消费回车；IME 组字中的回车是「确认候选词」，不能抢
+        if ev.keystroke.key == "enter" && !self.input.read(cx).composing() {
+            self.send(cx);
+            cx.stop_propagation();
+        }
     }
 
     /// 增量拉取；没追平 last_seq 就继续拉（打开旧会话时的补齐循环）
@@ -258,7 +311,12 @@ impl MessagesView {
 }
 
 impl Render for MessagesView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.wants_focus && self.supported != Some(false) {
+            self.wants_focus = false;
+            let fh = self.input.read(cx).focus_handle.clone();
+            fh.focus(window, cx);
+        }
         let placeholder = |msg: &'static str| {
             div()
                 .flex_1()
@@ -269,17 +327,16 @@ impl Render for MessagesView {
                 .text_size(px(12.))
                 .child(msg)
         };
-        if self.msgs.is_empty() {
+        let body: gpui::AnyElement = if self.msgs.is_empty() {
             let msg = match self.supported {
                 None => "加载消息流…",
                 Some(false) => "该会话不支持消息流（已回落终端）",
                 Some(true) => "暂无消息",
             };
-            return div().size_full().bg(c(theme::BG)).flex().flex_col().child(placeholder(msg));
-        }
-        let rows: Vec<gpui::AnyElement> =
-            self.msgs.clone().iter().map(|m| self.row(m, cx)).collect();
-        div().size_full().bg(c(theme::BG)).flex().flex_col().child(
+            placeholder(msg).into_any_element()
+        } else {
+            let rows: Vec<gpui::AnyElement> =
+                self.msgs.clone().iter().map(|m| self.row(m, cx)).collect();
             div()
                 .id("msgs-scroll")
                 .flex_1()
@@ -291,7 +348,48 @@ impl Render for MessagesView {
                 .flex()
                 .flex_col()
                 .gap(px(6.))
-                .children(rows),
-        )
+                .children(rows)
+                .into_any_element()
+        };
+        let mut root = div()
+            .size_full()
+            .bg(c(theme::BG))
+            .flex()
+            .flex_col()
+            .on_key_down(cx.listener(Self::on_key_down))
+            .child(body);
+        // 底部 composer：终端仍是权威输入，但看着消息流就能直接回话
+        if self.supported != Some(false) {
+            let send_label = if self.sending { "…" } else { "发送" };
+            root = root.child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .px(px(12.))
+                    .py(px(8.))
+                    .border_t_1()
+                    .border_color(c(theme::EDGE))
+                    .bg(c(theme::SURFACE))
+                    .child(div().flex_1().child(self.input.clone()))
+                    .child(
+                        div()
+                            .id("msg-send")
+                            .px(px(12.))
+                            .py(px(4.))
+                            .rounded(px(6.))
+                            .bg(c(theme::CYAN))
+                            .text_size(px(12.))
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(c(0x0b2830))
+                            .cursor_pointer()
+                            .hover(|s| s.opacity(0.85))
+                            .on_click(cx.listener(|v: &mut Self, _, _, cx| v.send(cx)))
+                            .child(send_label),
+                    ),
+            );
+        }
+        root
     }
 }

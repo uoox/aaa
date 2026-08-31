@@ -58,6 +58,9 @@ impl MsgStore {
             "claude" => (true, "claude"),
             "codex" => (true, "codex"),
             "pi" => (true, "pi"),
+            "reasonix" => (true, "reasonix"),
+            // agy 的会话存储是 SQLite/protobuf，行级 tail 解析不可行 → 诚实
+            // 回落终端视图
             _ => (false, "none"),
         };
         MsgStore {
@@ -412,12 +415,114 @@ pub fn parse_pi_line(store: &mut MsgStore, v: &Value) {
     store.push(ts, role, "text", cap(text, TEXT_CAP), None);
 }
 
+// ---------- reasonix ----------
+
+/// reasonix 的 sessions/*.jsonl 是标准 chat 格式：
+/// `{"role":"user","content":…,"raw_content":…}`（raw_content = 用户敲的原文）
+/// `{"role":"assistant","content":…,"reasoning_content":…,"tool_calls":[{id,name,arguments}]}`
+/// `{"role":"tool","content":…,"name":…,"tool_call_id":…,"tool_execution":{"state":…}}`
+pub fn parse_reasonix_line(store: &mut MsgStore, v: &Value) {
+    match v.get("role").and_then(|r| r.as_str()).unwrap_or("") {
+        "user" => {
+            let text = v
+                .get("raw_content")
+                .or_else(|| v.get("content"))
+                .map(|c| content_text(Some(c)))
+                .unwrap_or_default();
+            if usable_user_text(&text) {
+                store.push("", "user", "text", cap(text.trim(), TEXT_CAP), None);
+            }
+        }
+        "assistant" => {
+            if let Some(t) = v.get("reasoning_content").and_then(|c| c.as_str()) {
+                if !t.trim().is_empty() {
+                    store.push("", "assistant", "thinking", cap(t.trim(), TEXT_CAP), None);
+                }
+            }
+            let text = content_text(v.get("content"));
+            if !text.trim().is_empty() {
+                store.push("", "assistant", "text", cap(text.trim(), TEXT_CAP), None);
+            }
+            if let Some(calls) = v.get("tool_calls").and_then(|c| c.as_array()) {
+                for tc in calls {
+                    let name = tc.get("name").and_then(|n| n.as_str()).unwrap_or("tool");
+                    // arguments 是字符串化的 JSON，解开再复用摘要器
+                    let args: Option<Value> = tc
+                        .get("arguments")
+                        .and_then(|a| a.as_str())
+                        .and_then(|s| serde_json::from_str(s).ok());
+                    let summary = summarize_reasonix_args(name, args.as_ref());
+                    if let Some(id) = tc.get("id").and_then(|i| i.as_str()) {
+                        store.tool_names.insert(id.to_string(), name.to_string());
+                    }
+                    store.push(
+                        "",
+                        "tool",
+                        "tool_use",
+                        String::new(),
+                        Some(ToolInfo {
+                            name: name.to_string(),
+                            summary,
+                            status: "running".into(),
+                        }),
+                    );
+                }
+            }
+        }
+        "tool" => {
+            let name = v
+                .get("tool_call_id")
+                .and_then(|i| i.as_str())
+                .and_then(|i| store.tool_names.get(i).cloned())
+                .or_else(|| v.get("name").and_then(|n| n.as_str()).map(String::from))
+                .unwrap_or_default();
+            let failed = v
+                .pointer("/tool_execution/state")
+                .and_then(|s| s.as_str())
+                .is_some_and(|s| s == "failed")
+                || content_text(v.get("content")).starts_with("error:");
+            let text = content_text(v.get("content"));
+            store.push(
+                "",
+                "tool",
+                "tool_result",
+                cap(text.trim(), RESULT_CAP),
+                Some(ToolInfo {
+                    name,
+                    summary: String::new(),
+                    status: if failed { "err".into() } else { "ok".into() },
+                }),
+            );
+        }
+        _ => {}
+    }
+}
+
+/// reasonix 工具入参摘要：bash 显示命令，文件类显示路径，其余找第一个字符串
+fn summarize_reasonix_args(name: &str, args: Option<&Value>) -> String {
+    let Some(args) = args else { return String::new() };
+    let by_key = |k: &str| args.get(k).and_then(|v| v.as_str()).map(String::from);
+    let s = match name {
+        "bash" | "shell" => by_key("command"),
+        "read" | "write" | "edit" => by_key("path").or_else(|| by_key("file_path")),
+        _ => None,
+    };
+    let s = s
+        .or_else(|| {
+            args.as_object()
+                .and_then(|o| o.values().find_map(|v| v.as_str().map(String::from)))
+        })
+        .unwrap_or_default();
+    cap(&one_line(&s), SUMMARY_CAP)
+}
+
 fn parse_line(store: &mut MsgStore, line: &str) {
     let Ok(v) = serde_json::from_str::<Value>(line) else { return };
     match store.source {
         "claude" => parse_claude_line(store, &v),
         "codex" => parse_codex_line(store, &v),
         "pi" => parse_pi_line(store, &v),
+        "reasonix" => parse_reasonix_line(store, &v),
         _ => {}
     }
 }
@@ -457,6 +562,8 @@ fn head_cwd_matches(source: &str, file: &Path, project_path: &str) -> bool {
                 .then(|| o.get("cwd")?.as_str().map(String::from))
                 .flatten()
         }),
+        // reasonix：cwd 已编码在候选目录名里，候选本身就是本项目的
+        "reasonix" => return true,
         _ => None,
     };
     match cwd {
@@ -473,6 +580,7 @@ pub fn discover_file(
     project_path: &str,
     resume_id: Option<&str>,
     created_epoch: f64,
+    claimed: &std::collections::HashSet<PathBuf>,
 ) -> Option<(PathBuf, bool)> {
     let candidates: Vec<PathBuf> = match source {
         "claude" => {
@@ -538,6 +646,19 @@ pub fn discover_file(
             }
             v
         }
+        "reasonix" => {
+            // cwd 直接编码在目录名里（/ → -），不用扫全根
+            let mut v = Vec::new();
+            let dir = crate::stores::rnx_dir(paths, project_path).join("sessions");
+            if let Ok(rd) = std::fs::read_dir(&dir) {
+                for f in rd.flatten().map(|e| e.path()) {
+                    if f.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+                        v.push(f);
+                    }
+                }
+            }
+            v
+        }
         _ => return None,
     };
 
@@ -547,14 +668,15 @@ pub fn discover_file(
         let (_, mt) = crate::stores::fstat(&f);
         if let Some(rid) = resume_id {
             let stem_match = match source {
-                "claude" => f.file_stem().and_then(|s| s.to_str()) == Some(rid),
+                "claude" | "reasonix" => f.file_stem().and_then(|s| s.to_str()) == Some(rid),
                 _ => false,
             };
             if stem_match {
                 resume_file = Some((mt, f.clone()));
             }
         }
-        if mt >= created_epoch - 5.0
+        if !claimed.contains(&f)
+            && mt >= created_epoch - 5.0
             && head_cwd_matches(source, &f, project_path)
             && best.as_ref().map(|b| mt > b.0).unwrap_or(true)
         {
@@ -603,11 +725,18 @@ pub fn poll_file(store: &mut MsgStore) {
 
 /// One polling pass for a session; returns Some(last_seq) when new messages
 /// arrived (caller emits the throttled messages_changed event).
-pub fn poll_session(paths: &Paths, sess: &crate::pool::Session) -> Option<u64> {
+/// `claimed`：其他会话已认领的存储文件——同目录并发两个同 agent 会话时，
+/// 各自按 mtime 认领会互相抢同一份 transcript（审查 P1），已被认领的
+/// 文件不再作为候选。
+pub fn poll_session(
+    paths: &Paths,
+    sess: &crate::pool::Session,
+    claimed: &std::collections::HashSet<PathBuf>,
+) -> Option<u64> {
     let (agent_ok, project_path, resume_id, created_epoch, exited) = {
         let meta = sess.meta.lock().unwrap();
         (
-            matches!(meta.agent.as_str(), "claude" | "codex" | "pi"),
+            matches!(meta.agent.as_str(), "claude" | "codex" | "pi" | "reasonix"),
             meta.project_path.clone(),
             meta.resume_id.clone(),
             meta.created_at.timestamp() as f64,
@@ -637,6 +766,7 @@ pub fn poll_session(paths: &Paths, sess: &crate::pool::Session) -> Option<u64> {
             &project_path,
             resume_id.as_deref(),
             created_epoch,
+            claimed,
         ) {
             // resume 兜底（旧 transcript）先压 ~30s 再接受：resume 后 agent
             // 很快会写出**新**文件（best 命中），过早锁死旧文件就只剩历史、
@@ -659,6 +789,7 @@ pub fn poll_session(paths: &Paths, sess: &crate::pool::Session) -> Option<u64> {
                 &project_path,
                 resume_id.as_deref(),
                 created_epoch,
+                claimed,
             ) {
                 if Some(&f) != store.file.as_ref() {
                     store.file = Some(f);
@@ -686,6 +817,40 @@ mod tests {
     fn feed_lines(store: &mut MsgStore, lines: &[Value]) {
         let body: String = lines.iter().map(|l| format!("{l}\n")).collect();
         ingest(store, body.as_bytes());
+    }
+
+    #[test]
+    fn reasonix_parse_roundtrip() {
+        let mut store = MsgStore::for_agent("reasonix");
+        assert!(store.supported);
+        feed_lines(
+            &mut store,
+            &[
+                json!({"role":"system","content":"You are Reasonix"}),
+                json!({"role":"user","content":"<reasoning-language>注入块</reasoning-language>"}),
+                json!({"role":"user","content":"帮我查 dae 状态","raw_content":"帮我查 dae 状态"}),
+                json!({"role":"assistant","reasoning_content":"先看配置",
+                       "tool_calls":[{"id":"call_1","name":"bash","arguments":"{\"command\":\"ls /etc/dae\"}"}]}),
+                json!({"role":"tool","tool_call_id":"call_1","name":"bash","content":"config.dae",
+                       "tool_execution":{"state":"done"}}),
+                json!({"role":"tool","tool_call_id":"call_1","name":"bash","content":"error: command exited: 1",
+                       "tool_execution":{"state":"failed"}}),
+                json!({"role":"assistant","content":"dae 配置正常。"}),
+            ],
+        );
+        let msgs: Vec<_> = store.slice(0, 100);
+        let kinds: Vec<&str> = msgs.iter().map(|m| m.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            ["text", "thinking", "tool_use", "tool_result", "tool_result", "text"],
+            "system 与注入块被过滤"
+        );
+        assert_eq!(msgs[0].text, "帮我查 dae 状态");
+        let tu = msgs[2].tool.as_ref().unwrap();
+        assert_eq!((tu.name.as_str(), tu.summary.as_str()), ("bash", "ls /etc/dae"));
+        assert_eq!(msgs[3].tool.as_ref().unwrap().status, "ok");
+        assert_eq!(msgs[4].tool.as_ref().unwrap().status, "err");
+        assert_eq!(msgs[5].role, "assistant");
     }
 
     #[test]
@@ -789,8 +954,8 @@ mod tests {
         let none = MsgStore::for_agent("shell");
         assert!(!none.supported);
         assert_eq!(none.source, "none");
-        assert!(!MsgStore::for_agent("reasonix").supported);
-        assert!(!MsgStore::for_agent("agy").supported);
+        assert!(MsgStore::for_agent("reasonix").supported, "reasonix 现已支持");
+        assert!(!MsgStore::for_agent("agy").supported, "agy 存储是 SQLite，回落终端");
     }
 
     #[test]
@@ -817,12 +982,12 @@ mod tests {
             .unwrap()
             .as_secs_f64()
             - 10.0;
-        let (found, fb) = discover_file(&paths, "claude", &proj_s, None, created).unwrap();
+        let (found, fb) = discover_file(&paths, "claude", &proj_s, None, created, &Default::default()).unwrap();
         assert_eq!(found, f);
         assert!(!fb, "cwd+mtime 命中不是兜底");
         // by resume id even when mtime predates the session —— 但要标成兜底
         let (found2, fb2) =
-            discover_file(&paths, "claude", "/other", Some("abc-123"), created + 1e9).unwrap();
+            discover_file(&paths, "claude", "/other", Some("abc-123"), created + 1e9, &Default::default()).unwrap();
         assert_eq!(found2, f);
         assert!(fb2, "resume-id 命中是兜底，调用方要保留升级机会");
         // tail incrementally

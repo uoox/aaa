@@ -78,6 +78,19 @@ pub struct Meta {
     pub last_notified_question: Option<String>,
     #[serde(skip)]
     pub last_notify_at: Option<Instant>,
+    /// 可见屏幕内容的哈希 + 上次内容变化时刻。「静默」按画面算而不是按
+    /// 字节流：agy 这类 TUI 每几秒全清屏重绘（内容不变），按输出算它
+    /// 永远是 Running、永不通知。
+    #[serde(skip)]
+    pub screen_hash: u64,
+    #[serde(skip)]
+    pub screen_changed_inst: Option<Instant>,
+    /// Idle 复检计数：误判 Idle 不能躺死（审查 P1），低频重分析
+    #[serde(skip)]
+    pub idle_recheck: u32,
+    /// 用户主动 kill：退出时不推「退出」通知（自己动的手，不用报告）
+    #[serde(skip)]
+    pub user_killed: bool,
 }
 
 fn default_true() -> bool {
@@ -247,6 +260,8 @@ impl Session {
 
     /// TERM now; escalate to KILL after 2s if the process is still alive.
     pub async fn kill(self: &Arc<Self>) {
+        // 用户/客户端主动终止：退出时不再推「退出」通知（自己动的手）
+        self.meta.lock().unwrap().user_killed = true;
         let pid = {
             let live = self.live.lock().unwrap();
             live.as_ref().and_then(|l| l.pid)
@@ -494,6 +509,10 @@ impl SessionPool {
             stalled_notified: false,
             last_notified_question: None,
             last_notify_at: None,
+            screen_hash: 0,
+            screen_changed_inst: None,
+            idle_recheck: 0,
+            user_killed: false,
         };
         // Backpressure: send never blocks; a client that can't keep up drops
         // to Lagged and gets a fresh full redraw (api::attach_loop), so a slow
@@ -591,7 +610,8 @@ impl SessionPool {
             }
             rsess.persist(&rctx);
             rsess.mark_dirty();
-            if let Some(ntfy) = &rctx.ntfy {
+            let user_killed = rsess.meta.lock().unwrap().user_killed;
+            if let Some(ntfy) = rctx.ntfy.as_ref().filter(|_| !user_killed) {
                 let meta = rsess.meta.lock().unwrap();
                 crate::ntfy::push_blocking(
                     ntfy,
@@ -616,15 +636,47 @@ impl SessionPool {
     pub fn tick_states(&self) -> Vec<(Arc<Session>, Option<Question>)> {
         let mut entered_waiting = Vec::new();
         for sess in self.all() {
-            let (is_running, silent) = {
-                let meta = sess.meta.lock().unwrap();
+            // 「静默」按可见内容算，不按字节流：agy 这类 TUI 每几秒全清屏
+            // 重绘一遍（画面不变），按输出算它永远 Running、永不通知。
+            let hash = {
+                let guard = sess.parser.lock().unwrap();
+                guard.as_ref().map(|p| {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    let screen = p.screen();
+                    let (_, cols) = screen.size();
+                    for row in screen.rows(0, cols) {
+                        row.hash(&mut h);
+                    }
+                    h.finish()
+                })
+            };
+            let (candidate, silent) = {
+                let mut meta = sess.meta.lock().unwrap();
+                if let Some(hash) = hash {
+                    if meta.screen_hash != hash {
+                        meta.screen_hash = hash;
+                        meta.screen_changed_inst = Some(Instant::now());
+                    }
+                }
                 let silent = meta
-                    .last_output_inst
+                    .screen_changed_inst
+                    .or(meta.last_output_inst)
                     .map(|t| t.elapsed().as_secs_f64() >= SILENCE_SECS)
                     .unwrap_or(false);
-                (meta.state == State::Running && !meta.hook_waiting, silent)
+                let candidate = match meta.state {
+                    State::Running => !meta.hook_waiting,
+                    // 误判过的 Idle 不能躺死（审查 P1）：每 ~30s 复检一次，
+                    // 屏幕上其实摆着问题的话还有机会升级成 Waiting
+                    State::Idle => {
+                        meta.idle_recheck = meta.idle_recheck.wrapping_add(1);
+                        meta.idle_recheck.is_multiple_of(30)
+                    }
+                    _ => false,
+                };
+                (candidate, silent)
             };
-            if !is_running || !silent {
+            if !candidate || !silent {
                 continue;
             }
             let verdict = {
@@ -633,9 +685,10 @@ impl SessionPool {
             };
             let Some(verdict) = verdict else { continue };
             let mut became_waiting: Option<Option<Question>> = None;
+            let mut changed = false;
             {
                 let mut meta = sess.meta.lock().unwrap();
-                if meta.state != State::Running {
+                if meta.state != State::Running && meta.state != State::Idle {
                     continue;
                 }
                 match verdict {
@@ -643,14 +696,20 @@ impl SessionPool {
                         meta.state = State::Waiting;
                         meta.question = q.clone();
                         became_waiting = Some(q);
+                        changed = true;
                     }
                     Verdict::Idle => {
-                        meta.state = State::Idle;
-                        meta.question = None;
+                        if meta.state != State::Idle {
+                            meta.state = State::Idle;
+                            meta.question = None;
+                            changed = true;
+                        }
                     }
                 }
             }
-            sess.mark_dirty();
+            if changed {
+                sess.mark_dirty();
+            }
             if let Some(q) = became_waiting {
                 entered_waiting.push((Arc::clone(&sess), q));
             }

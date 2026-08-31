@@ -21,6 +21,15 @@ pub struct Registry {
     map: HashMap<String, Entry>,
 }
 
+static REG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 进程内注册表写锁。load→修改→flush 不是原子的：并发 handler 各自 load
+/// 再 flush 会互相覆盖丢行——名册行丢了 = 项目从所有客户端消失（审查 P1）。
+/// 每段「load + 修改」都要先拿这把锁；纯读可以不拿。
+pub fn lock() -> std::sync::MutexGuard<'static, ()> {
+    REG_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 impl Registry {
     /// Registry file lives at `<project_root>/.aaa-agents`.
     pub fn registry_path(project_root: &Path) -> PathBuf {
@@ -83,6 +92,21 @@ impl Registry {
         e.agent = agent.to_string();
         e.id = Some(id.to_string());
         self.flush()
+    }
+
+    /// 批量落 id，一次 flush——迁移前采集逐条 set_id 是 O(n²) 次整文件写
+    pub fn set_ids(&mut self, triples: &[(String, String, String)]) -> io::Result<()> {
+        let mut dirty = false;
+        for (dir, agent, id) in triples {
+            let e = self.map.entry(dir.clone()).or_default();
+            if e.agent == *agent && e.id.as_deref() == Some(id) {
+                continue;
+            }
+            e.agent = agent.clone();
+            e.id = Some(id.clone());
+            dirty = true;
+        }
+        if dirty { self.flush() } else { Ok(()) }
     }
 
     /// 兜底 id 被证实已失效（agent 存储里找不到）时清掉，别反复撞同一堵墙

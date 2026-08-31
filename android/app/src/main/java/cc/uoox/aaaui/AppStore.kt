@@ -167,6 +167,11 @@ class AppStore private constructor(context: Context) {
         ws.cancel()
     }
 
+    /** 用户在本机点了终止的会话 id：随后的 exited 事件不推本地通知 */
+    private val userKilled = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+
+    fun markUserKilled(id: String) { userKilled.add(id) }
+
     private fun handleFrame(frame: EventFrame) {
         when (frame) {
             is EventFrame.Snapshot -> {
@@ -182,7 +187,10 @@ class AppStore private constructor(context: Context) {
                 _sessions.value = _sessions.value.filter { it.id != s.id } + s
                 if (s.state == "waiting" && prev != "waiting") _notifyEvents.tryEmit(NotifyEvent.Waiting(s))
                 if (s.state == "running" && prev != "running") _notifyEvents.tryEmit(NotifyEvent.Answered(s.id))
-                if (s.state == "exited" && prev == "running") _notifyEvents.tryEmit(NotifyEvent.Exited(s))
+                // 本机手动终止的会话不弹「会话结束」——自己动的手不用报告
+                if (s.state == "exited" && prev == "running" && !userKilled.remove(s.id)) {
+                    _notifyEvents.tryEmit(NotifyEvent.Exited(s))
+                }
             }
             is EventFrame.SessionRemoved -> {
                 synchronized(prevStates) { prevStates.remove(frame.id) }

@@ -188,8 +188,9 @@ Mac 客户端把 payload 渲染成二维码；Android 扫码解析后逐个 host
 
 - `GET /sessions/:id/messages?after=<seq>&limit=<n=200>` → `{"supported":bool,"source":"claude|codex|pi|none","last_seq":N,"messages":[…]}`
 - 消息结构：`{"seq":N,"ts":"…","role":"user|assistant|tool|system","kind":"text|thinking|tool_use|tool_result|question","text":"…","tool":{"name":"Bash","summary":"cargo build","status":"ok|err|running"}|null}`
-- daemon 在会话 spawn/resume 后定位该会话的 agent 存储文件（resume 已知文件；新会话按 cwd 匹配 + mtime ≥ 启动时刻轮询发现）并增量 tail 解析。**claude 必须支持**（jsonl：user/assistant/tool_use/tool_result/thinking，过滤 isSidechain 与注入块），codex/pi 尽力而为，reasonix/agy/shell 返回 `supported:false`（客户端回落终端视图）。
+- daemon 在会话 spawn/resume 后定位该会话的 agent 存储文件（resume 已知文件；新会话按 cwd 匹配 + mtime ≥ 启动时刻轮询发现）并增量 tail 解析。**claude 必须支持**（jsonl：user/assistant/tool_use/tool_result/thinking，过滤 isSidechain 与注入块），codex/pi/reasonix 尽力而为（reasonix：chat-jsonl，raw_content 为用户原文，tool_execution.state=failed → err），agy/shell 返回 `supported:false`（agy 存储为 SQLite，客户端回落终端视图）。resume 场景：旧 id 的 transcript 只是延迟兜底（~30s），发现会话自己写的新文件后自动升级；同目录并发会话不共享同一存储文件（已被认领的候选跳过）。
 - `/events` 新帧：`{"t":"messages_changed","id":"s_…","last_seq":N}`（≥500ms 节流）。客户端收到后增量拉取。
+- `/events` 心跳：服务端每 20s 发一个 WS Ping；客户端应以「45s 无任何帧」为读超时并重连（overlay 网络半开连接检测）。
 
 ### git checkpoint + diff + 回滚（后悔药）
 

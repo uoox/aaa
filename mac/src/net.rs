@@ -297,6 +297,9 @@ impl Net {
                                     Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Binary(_) | Message::Frame(_))) => {}
                                     Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
                                 },
+                                // 读超时：daemon 每 20s 一个 Ping，45s 一帧都没有
+                                // 就是半开连接（overlay 网络的经典死法），重连
+                                _ = tokio::time::sleep(std::time::Duration::from_secs(45)) => break,
                                 _ = wake.notified() => break, // endpoint 变了，立即重连
                             }
                         }

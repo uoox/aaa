@@ -42,6 +42,12 @@ pub struct TerminalView {
     /// scrollbar 拖拽中：抓住点相对 thumb 顶部的 y 偏移（px）
     sb_drag: Option<f32>,
     selecting: bool,
+    /// 拖选自动滚动：+n 向上翻历史 / -n 向下 / 0 停（指针在视口内）
+    sel_autoscroll: i32,
+    /// 自动滚动循环是否在跑（避免重复 spawn）
+    sel_scrolling: bool,
+    /// 拖选中最后一次指针位置（自动滚动时延伸选区用）
+    last_drag_pos: Option<gpui::Point<Pixels>>,
     /// 上一帧算出的可点链接（鼠标命中用；snapshot 时回写）
     links: Vec<LinkSpan>,
     /// 悬停中的链接（存跨度本身而非下标：重算后下标会错位）
@@ -58,7 +64,7 @@ struct LinkSpan {
 }
 
 /// scrollbar 命中带（右缘往里这么多像素内按下算抓滚动条，不开始选区）
-const SB_ZONE: f32 = 14.0;
+const SB_ZONE: f32 = 20.0;
 /// thumb 最小高度：历史很长时仍留得住指针
 const SB_MIN_THUMB: f32 = 24.0;
 
@@ -202,6 +208,23 @@ struct Snap {
     history: usize,
 }
 
+/// 该帧是不是「裸清屏」：最后一个 2J/3J 之后只剩 ≤8 字节的光标残尾
+/// （典型：`\x1b[2J\x1b[3J\x1b[H` 独占一帧）。这样的帧渲染出来是全黑。
+fn batch_is_bare_clear(bytes: &[u8]) -> bool {
+    let find_last = |pat: &[u8]| {
+        bytes
+            .windows(pat.len())
+            .rposition(|w| w == pat)
+            .map(|p| p + pat.len())
+    };
+    let end2 = find_last(b"\x1b[2J");
+    let end3 = find_last(b"\x1b[3J");
+    match end2.max(end3) {
+        Some(end) => bytes.len() - end <= 8,
+        None => false,
+    }
+}
+
 /// Cmd-V 和 Ctrl-V 都粘贴：从 Linux/Windows 过来的手指记的是后者，而终端里
 /// 裸 Ctrl-V 本来是 literal-next，几乎没人用得上。Ctrl-C 不在此列——那是中断
 /// 信号，抢过来会让 agent 停不下来。
@@ -225,6 +248,9 @@ impl TerminalView {
             last_size: None,
             sb_drag: None,
             selecting: false,
+            sel_autoscroll: 0,
+            sel_scrolling: false,
+            last_drag_pos: None,
             links: Vec::new(),
             hover_link: None,
         }
@@ -236,6 +262,28 @@ impl TerminalView {
         for answer in self.model.advance(bytes) {
             self.attach.input(answer);
         }
+        // agy 这类 TUI 每几秒把「清屏」和「整屏重绘」拆成两个帧发：立刻渲染
+        // 清屏帧就是肉眼可见地黑一下（一直闪）。清屏帧压 50ms 与紧随的重绘
+        // 合帧；真正的 clear 也只是晚 50ms 显示。
+        if batch_is_bare_clear(bytes) {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(50))
+                    .await;
+                let _ = this.update(cx, |_, cx| cx.notify());
+            })
+            .detach();
+            return;
+        }
+        cx.notify();
+    }
+
+    /// attach（重）连接就绪：hello 后紧跟整屏 replay（含数百行历史）。
+    /// 不清模型的话每次断线重连都会往回滚缓冲再叠一份同样的历史（审查 P1）。
+    pub fn reset_for_replay(&mut self, cx: &mut Context<Self>) {
+        self.model = TermModel::new(self.model.cols, self.model.rows);
+        self.links.clear();
+        self.hover_link = None;
         cx.notify();
     }
 
@@ -363,11 +411,29 @@ impl TerminalView {
         }
         if self.selecting && ev.pressed_button == Some(MouseButton::Left) {
             // 拖选进行中不去管链接：一次手势只干一件事
+            self.last_drag_pos = Some(ev.position);
             if let Some((p, side)) = self.grid_point(ev.position)
                 && let Some(sel) = self.model.term.selection.as_mut()
             {
                 sel.update(p, side);
                 cx.notify();
+            }
+            // 拖出上/下边界 → 自动滚动翻历史（标准终端行为）；越远越快
+            if let (Some(origin), Some(size)) = (self.last_origin, self.last_size) {
+                let y = f32::from(ev.position.y);
+                let top = f32::from(origin.y);
+                let bot = top + f32::from(size.height);
+                let line_h = self.cell.map(|(_, h)| f32::from(h)).unwrap_or(18.);
+                self.sel_autoscroll = if y < top {
+                    (1. + (top - y) / line_h).min(6.) as i32
+                } else if y > bot {
+                    -((1. + (y - bot) / line_h).min(6.) as i32)
+                } else {
+                    0
+                };
+                if self.sel_autoscroll != 0 {
+                    self.spawn_sel_autoscroll(cx);
+                }
             }
             return;
         }
@@ -379,12 +445,53 @@ impl TerminalView {
         }
     }
 
+    /// 60ms 一拍的自动滚动循环：拖选压在边界外时持续翻页并把选区端点
+    /// 推到视口边缘。松手（selecting=false）或回到视口内自然停。
+    fn spawn_sel_autoscroll(&mut self, cx: &mut Context<Self>) {
+        if self.sel_scrolling {
+            return;
+        }
+        self.sel_scrolling = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(60))
+                    .await;
+                let cont = this
+                    .update(cx, |t: &mut TerminalView, cx| {
+                        if !t.selecting || t.sel_autoscroll == 0 {
+                            t.sel_scrolling = false;
+                            return false;
+                        }
+                        t.model.scroll_display(t.sel_autoscroll);
+                        // grid_point 会把边界外的点夹到视口边缘行；offset 变了，
+                        // 同一屏幕点对应的绝对行随之前移/后移，选区就跟着长
+                        if let Some(pos) = t.last_drag_pos
+                            && let Some((p, side)) = t.grid_point(pos)
+                            && let Some(sel) = t.model.term.selection.as_mut()
+                        {
+                            sel.update(p, side);
+                        }
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !cont {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
     fn on_mouse_up(&mut self, ev: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
         if self.sb_drag.take().is_some() {
             cx.notify();
             return;
         }
         self.selecting = false;
+        self.sel_autoscroll = 0;
+        self.last_drag_pos = None;
         let link = self.link_at(ev.position);
         match resolve_mouse_up(self.has_selection(), link.is_some()) {
             MouseUpAction::Copy => {
@@ -1083,18 +1190,18 @@ impl Render for TerminalView {
                             snap.display_offset,
                         ) {
                             let track_x =
-                                bounds.origin.x + bounds.size.width - px(10.);
+                                bounds.origin.x + bounds.size.width - px(16.);
                             window.paint_quad(fill(
                                 Bounds::new(
                                     point(track_x, bounds.origin.y),
-                                    size(px(8.), bounds.size.height),
+                                    size(px(14.), bounds.size.height),
                                 ),
                                 ca(theme::EDGE_LIGHT, 0.35),
                             ));
                             window.paint_quad(fill(
                                 Bounds::new(
-                                    point(track_x + px(1.), bounds.origin.y + px(top)),
-                                    size(px(6.), px(h)),
+                                    point(track_x + px(2.), bounds.origin.y + px(top)),
+                                    size(px(10.), px(h)),
                                 ),
                                 ca(theme::DIM, if sb_dragging { 0.85 } else { 0.45 }),
                             ));
@@ -1267,6 +1374,16 @@ mod tests {
         let osc8 = vec![(0u16, 1u16, "https://osc.io".to_string())];
         let links = line_links(0, text, &ascii_cols(text), &osc8);
         assert_eq!(links.len(), 2);
+    }
+
+    #[test]
+    fn bare_clear_frames_are_coalesced() {
+        // agy 实测帧：清屏独占一帧 → 压帧；带内容的帧照常立即渲染
+        assert!(batch_is_bare_clear(b"\x1b[2J\x1b[3J\x1b[H"));
+        assert!(batch_is_bare_clear(b"\x1b[2J"));
+        assert!(!batch_is_bare_clear(b"\x1b[2J\x1b[Hhello world, repaint"));
+        assert!(!batch_is_bare_clear(b"plain output"));
+        assert!(!batch_is_bare_clear(b""));
     }
 
     #[test]

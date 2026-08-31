@@ -173,9 +173,17 @@ fn run() {
                     iv.tick().await;
                     let app2 = Arc::clone(&app);
                     let _ = tokio::task::spawn_blocking(move || {
-                        for sess in app2.pool.all() {
+                        let sessions = app2.pool.all();
+                        for sess in &sessions {
+                            // 其他会话已认领的存储文件（同目录并发不许抢）
+                            let claimed: std::collections::HashSet<std::path::PathBuf> =
+                                sessions
+                                    .iter()
+                                    .filter(|s| s.id != sess.id)
+                                    .filter_map(|s| s.msgs.lock().unwrap().file.clone())
+                                    .collect();
                             if let Some(last_seq) =
-                                crate::messages::poll_session(&app2.paths, &sess)
+                                crate::messages::poll_session(&app2.paths, sess, &claimed)
                             {
                                 app2.hub.messages_changed(&sess.id, last_seq);
                             }

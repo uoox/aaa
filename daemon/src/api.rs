@@ -313,6 +313,7 @@ async fn projects_create(
     }
     std::fs::create_dir_all(&dir).map_err(|e| ApiError::internal(format!("mkdir: {e}")))?;
     if let Some(agent) = &body.agent {
+        let _reg_lock = crate::registry::lock();
         let mut reg = Registry::load(&app.cfg.project_root);
         reg.set(&dir.to_string_lossy(), agent)
             .map_err(|e| ApiError::internal(format!("registry: {e}")))?;
@@ -352,6 +353,7 @@ async fn projects_delete(
         let root_canon = std::fs::canonicalize(&app2.cfg.project_root)
             .unwrap_or_else(|_| app2.cfg.project_root.clone());
         let mut cache = CwdCache::load(&app2.paths.cwd_cache());
+        let _reg_lock = crate::registry::lock();
         let mut reg = Registry::load(&app2.cfg.project_root);
         let mut results = Vec::new();
         for p in &body.paths {
@@ -420,6 +422,7 @@ async fn projects_agent(
     if agents::get(&body.agent).is_none() {
         return Err(ApiError::agent_unknown(&body.agent));
     }
+    let _reg_lock = crate::registry::lock();
     let mut reg = Registry::load(&app.cfg.project_root);
     reg.set(&body.path, &body.agent)
         .map_err(|e| ApiError::internal(format!("registry: {e}")))?;
@@ -485,6 +488,7 @@ async fn sessions_create(
         let target = canon_str.clone();
         let agent_id = agent.id;
         blocking(move || {
+            let _reg_lock = crate::registry::lock();
             let mut reg = Registry::load(&app2.cfg.project_root);
             if reg.get(&target).is_none() {
                 reg.set(&target, agent_id)
@@ -510,6 +514,7 @@ async fn sessions_create(
                 let _g = app2.store_lock.lock().unwrap();
                 cache.save();
             }
+            let _reg_lock = crate::registry::lock();
             let mut reg = Registry::load(&app2.cfg.project_root);
             if sid.is_empty() {
                 // 项目根迁移后 agent 存储按旧 cwd 查不到会话；注册表第三列
@@ -757,8 +762,10 @@ fn migrate_root(paths: &Paths, old: &Path, new: &Path) -> Result<(), String> {
     }
     // ① 迁移前把每个项目当前的对话 id 落进注册表：迁走后 agent 存储按旧
     //    cwd 查不到会话，id 只能现在采
+    let _reg_lock = crate::registry::lock();
     let mut reg = Registry::load(old);
     let mut cache = CwdCache::load(&paths.cwd_cache());
+    let mut collected: Vec<(String, String, String)> = Vec::new();
     for (dir, agent, _id) in reg.entries() {
         if agent == "shell" || !Path::new(&dir).starts_with(old) {
             continue;
@@ -767,12 +774,13 @@ fn migrate_root(paths: &Paths, old: &Path, new: &Path) -> Result<(), String> {
         // 之后用 aaal / 裸 agent 在该目录开过更新的对话。find 落空才留旧 id。
         let sid = stores::find(paths, &mut cache, &agent, &dir);
         if !sid.is_empty() {
-            // 这一步失败必须中止：rename 之后就没有回头路了，id 会永远丢在
-            // 旧根的存储结构里
-            reg.set_id(&dir, &agent, &sid)
-                .map_err(|e| format!("采集对话 id 失败（未做任何移动）: {e}"))?;
+            collected.push((dir, agent, sid));
         }
     }
+    // 一次 flush 落盘。这一步失败必须中止：rename 之后就没有回头路了，
+    // id 会永远丢在旧根的存储结构里
+    reg.set_ids(&collected)
+        .map_err(|e| format!("采集对话 id 失败（未做任何移动）: {e}"))?;
     // ② 先把注册表键改成新前缀——趁文件还在旧根，这一步是原子写，失败就
     //    整体中止，什么都没动过。指向新根的键在 is_live 眼里是「根外路径」，
     //    会被原样保留。（评审教训：搬完再重写，失败就只剩打日志一条路，
@@ -1268,6 +1276,11 @@ async fn events_loop(app: SharedApp, mut socket: WebSocket) {
     if socket.send(Message::Text(snapshot.to_string().into())).await.is_err() {
         return;
     }
+    // 心跳：overlay 网络（tailscale 等）下 TCP 半开连接可以静默数分钟，
+    // 客户端收不到任何帧也不自知（审查 P1）。20s 一个 Ping——tungstenite
+    // 自动回 Pong，客户端也把收到的 Ping 当「链路活着」重置读超时。
+    let mut hb = tokio::time::interval(std::time::Duration::from_secs(20));
+    hb.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             ev = rx.recv() => match ev {
@@ -1286,6 +1299,11 @@ async fn events_loop(app: SharedApp, mut socket: WebSocket) {
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             },
+            _ = hb.tick() => {
+                if socket.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    break;
+                }
+            }
             msg = socket.recv() => match msg {
                 Some(Ok(Message::Close(_))) | None => break,
                 Some(Ok(_)) => {}
