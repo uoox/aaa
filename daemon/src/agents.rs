@@ -189,18 +189,27 @@ pub fn spawn_path() -> String {
     })
 }
 
-pub fn which(bin: &str, home: &std::path::Path) -> Option<std::path::PathBuf> {
+/// Absolute path to a tool on the agent PATH.
+///
+/// `Command::new("tailscale")` cannot find anything outside the launchd
+/// default PATH: program lookup happens against the *daemon's* environment,
+/// and `.env("PATH", …)` on the child does not change it. So resolve first,
+/// then spawn the absolute path.
+pub fn tool(bin: &str) -> Option<std::path::PathBuf> {
     if bin.contains('/') {
         let p = std::path::PathBuf::from(bin);
         return p.is_file().then_some(p);
     }
-    for dir in agent_path(home).split(':') {
-        let p = std::path::Path::new(dir).join(bin);
-        if is_executable(&p) {
-            return Some(p);
-        }
-    }
-    None
+    spawn_path()
+        .split(':')
+        .map(|dir| std::path::Path::new(dir).join(bin))
+        .find(|p| is_executable(p))
+}
+
+pub fn which(bin: &str, home: &std::path::Path) -> Option<std::path::PathBuf> {
+    // initialises the shared PATH if the daemon has not yet
+    let _ = agent_path(home);
+    tool(bin)
 }
 
 fn is_executable(p: &std::path::Path) -> bool {

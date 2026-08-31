@@ -89,8 +89,15 @@ fn run() {
         eprintln!("cannot create state dir: {e}");
         std::process::exit(1);
     }
-    // startup cleanup (only when the SSD is mounted; never mkdir the root)
-    if cfg.project_root.is_dir() {
+    // Never touch the root before proving it can be read without blocking:
+    // under launchd an unreadable external volume parks `opendir` forever on a
+    // consent dialog, and startup would never reach the listener.
+    let root_state = crate::rootcheck::check(&cfg.project_root);
+    if !root_state.is_ok() {
+        eprintln!("{}", crate::rootcheck::advice(root_state, &cfg.project_root));
+    }
+    // startup cleanup (only when the root is usable; never mkdir the root)
+    if root_state.is_ok() {
         crate::slug::cleanup_empty_timestamped(&cfg.project_root);
     }
 
@@ -118,6 +125,7 @@ fn run() {
         store_lock: std::sync::Mutex::new(()),
         bound_port: std::sync::atomic::AtomicU16::new(0),
         inbox: std::sync::Mutex::new(inbox),
+        root_state: std::sync::atomic::AtomicU8::new(root_state.as_u8()),
     });
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -276,14 +284,22 @@ fn run() {
         {
             let app = Arc::clone(&app);
             tokio::spawn(async move {
-                let mut last = app.cfg.project_root.is_dir();
+                let mut last = app.root_state();
                 let mut iv = tokio::time::interval(Duration::from_secs(5));
                 loop {
                     iv.tick().await;
-                    let now = app.cfg.project_root.is_dir();
+                    // off the reactor: the probe blocks a thread by design
+                    let root = app.cfg.project_root.clone();
+                    let now = tokio::task::spawn_blocking(move || crate::rootcheck::check(&root))
+                        .await
+                        .unwrap_or(crate::rootcheck::RootState::Denied);
                     if now != last {
+                        app.set_root_state(now);
+                        // a denial recovers the moment the grant lands, so
+                        // keep saying so rather than only complaining once
+                        eprintln!("{}", crate::rootcheck::advice(now, &app.cfg.project_root));
                         last = now;
-                        app.hub.health(now);
+                        app.hub.health(now.usable());
                     }
                 }
             });

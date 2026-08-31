@@ -41,6 +41,20 @@ pub struct App {
     pub bound_port: std::sync::atomic::AtomicU16,
     /// v1.1 task inbox
     pub inbox: std::sync::Mutex<crate::inbox::Inbox>,
+    /// Last known readability of the project root, refreshed by the health
+    /// watcher. Requests read this instead of probing: `is_dir()` lies under a
+    /// TCC denial (stat passes, `opendir` does not), and an honest probe costs
+    /// a thread and a deadline — not something to do per request.
+    pub root_state: std::sync::atomic::AtomicU8,
+}
+
+impl App {
+    pub fn root_state(&self) -> crate::rootcheck::RootState {
+        crate::rootcheck::RootState::from_u8(self.root_state.load(std::sync::atomic::Ordering::Relaxed))
+    }
+    pub fn set_root_state(&self, s: crate::rootcheck::RootState) {
+        self.root_state.store(s.as_u8(), std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 impl App {
@@ -78,10 +92,13 @@ impl ApiError {
         Self { status: StatusCode::BAD_REQUEST, code: "agent_unknown", message: format!("unknown agent: {agent}") }
     }
     pub fn ssd_unmounted() -> Self {
+        Self::ssd_unmounted_with("project root is not mounted; refusing writes")
+    }
+    pub fn ssd_unmounted_with(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
             code: "ssd_unmounted",
-            message: "project root is not mounted; refusing writes".into(),
+            message: message.into(),
         }
     }
     pub fn internal(msg: impl Into<String>) -> Self {
@@ -149,10 +166,13 @@ async fn auth_mw(
 // ---------- helpers ----------
 
 fn ssd_guard(app: &App) -> ApiResult<()> {
-    if app.cfg.project_root.is_dir() {
+    let state = app.root_state();
+    if state.is_ok() {
         Ok(())
     } else {
-        Err(ApiError::ssd_unmounted())
+        // carry the fix, not just the symptom: whoever hits this is often
+        // holding a phone and cannot see the Mac's log
+        Err(ApiError::ssd_unmounted_with(crate::rootcheck::advice(state, &app.cfg.project_root)))
     }
 }
 
@@ -177,7 +197,10 @@ where
 async fn health(State(app): State<SharedApp>) -> Json<Value> {
     Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
-        "ssd_mounted": app.cfg.project_root.is_dir(),
+        // kept as "mounted" for wire compatibility: to a client it has always
+        // meant "usable". root_state says *why* when it is not.
+        "ssd_mounted": app.root_state().usable(),
+        "root_state": app.root_state().code(),
         "project_root": app.cfg.project_root,
         "uptime_s": app.started.elapsed().as_secs(),
     }))

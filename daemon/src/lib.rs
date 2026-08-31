@@ -18,6 +18,7 @@ pub mod perms;
 pub mod pool;
 pub mod ports;
 pub mod registry;
+pub mod rootcheck;
 pub mod service;
 pub mod slug;
 pub mod statemachine;

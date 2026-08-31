@@ -39,7 +39,9 @@ fn prio_of(ip: &std::net::Ipv4Addr) -> Option<u8> {
 }
 
 fn magicdns_name() -> Option<String> {
-    let out = std::process::Command::new("tailscale")
+    // resolved rather than named: under launchd the daemon's own PATH is bare
+    // and would never reach /opt/homebrew/bin or ~/.local/bin
+    let out = std::process::Command::new(crate::agents::tool("tailscale")?)
         .args(["status", "--json"])
         .output()
         .ok()?;

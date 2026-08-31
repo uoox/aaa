@@ -235,6 +235,7 @@ fn build_app(root: &Path, home: &Path) -> aaa_daemon::api::SharedApp {
         store_lock: std::sync::Mutex::new(()),
         bound_port: std::sync::atomic::AtomicU16::new(0),
         inbox: std::sync::Mutex::new(inbox),
+        root_state: std::sync::atomic::AtomicU8::new(aaa_daemon::rootcheck::RootState::Ok.as_u8()),
     })
 }
 
