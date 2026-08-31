@@ -118,7 +118,7 @@ packaging/bundle.sh install    # → /Applications，之后 Spotlight 直接启�
 > 而非客户端持有的原因。
 
 左侧会话栏（状态点：绿=运行 黄=等待输入 灰=空闲 红=退出，行内 × 关闭，栏宽可拖）、
-终端（选区/选中复制/右键粘贴/链接点击/CJK）、waiting 选项胶囊直接点、项目表格、系统通知、设置页出配对二维码。
+终端（选区/选中复制/右键直接粘贴/Ctrl-V·Cmd-V/链接点击/CJK）、waiting 选项胶囊直接点、项目表格、系统通知、设置页出配对二维码。
 
 ## Android 客户端
 
@@ -134,7 +134,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 主视图为**消息流**（claude 完整解析；不支持的 agent 自动回落终端），右上可切终端，设置里改默认 UI。
 通知：等待输入 = 高优先级 + **通知栏内联回复** + 选项按钮；完成/空转分级；按项目静音。
 其余：diff 卡片 + 一键回滚、任务收件箱、系统分享 → 上传进项目 `_inbox/`、快捷短语 chips、前台服务保活、
-折叠屏展开自适应双栏。
+折叠屏/大屏展开后底栏收成左侧导航 rail（内容仍单栏）。
 
 ## 日常动线
 
@@ -153,9 +153,9 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 ## 开发
 
 ```bash
-cd daemon  && cargo test           # 106 tests（含 CLI）
-cd mac     && cargo test           # 46 tests
-cd android && ./gradlew test        # 181 tests
+cd daemon  && cargo test           # 109 tests（含 CLI）
+cd mac     && cargo test           # 47 tests
+cd android && ./gradlew test        # 178 tests
 ```
 
 契约变更流程：先改 `PROTOCOL.md`，再改三端。事件帧向前兼容（未知帧忽略）。
