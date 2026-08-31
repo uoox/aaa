@@ -58,8 +58,13 @@ config.toml 要点：`port=2730`（=0xAAA）、`project_root=/Volumes/SSD/projec
 > 替你 `git init` 不是 daemon 该做的事。已经是 git 仓库的项目照常有检查点/diff/回滚；
 > 想让非仓库目录也享受后悔药，再显式打开（届时 `auto_init_max_mb` 护栏仍生效）。
 
-> 部署提醒：`service install` 的 plist 记录二进制的当前绝对路径（`current_exe`），移动/覆盖二进制后需
-> `service uninstall && service install` 重新登记。
+> **升级二进制时先 `rm` 再 `cp`**：直接 `cp` 覆盖正在运行的二进制会写坏它的 ad-hoc 签名，
+> 之后每次执行都被 macOS 直接 `SIGKILL`（现象是命令无输出、退出码 137）。
+> ```bash
+> rm -f ~/.local/bin/aaa-daemon && cp daemon/target/release/aaa-daemon ~/.local/bin/aaa-daemon
+> codesign --force --sign - ~/.local/bin/aaa-daemon
+> aaa-daemon service uninstall && aaa-daemon service install   # plist 记的是绝对路径，重新登记
+> ```
 
 与旧 CLI 磁盘格式双向兼容（`.aaa-agents` 注册表、`~/.cache/aaa-cwds.json`）。
 SSD 未挂载时 daemon 只读降级、绝不 mkdir 项目根。

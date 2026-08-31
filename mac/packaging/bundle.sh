@@ -1,9 +1,9 @@
 #!/bin/bash
-# AAA UI 打包脚本：cargo release 构建 → 组装 .app → ad-hoc 签名 →（可选）安装到 /Applications
+# AAA 打包脚本：cargo release 构建 → 组装 .app → ad-hoc 签名 →（可选）安装到 /Applications
 #
 # 用法：
 #   packaging/bundle.sh              # = build
-#   packaging/bundle.sh build        # 产出 mac/target/AAA UI.app
+#   packaging/bundle.sh build        # 产出 mac/target/AAA.app
 #   packaging/bundle.sh install      # build + 覆盖安装到 /Applications（先退出正在运行的实例）
 #
 # 已知约束（本机无 Apple 开发者证书，仅 CommandLineTools）：
@@ -17,7 +17,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"   # 仓库根（…/aaa-ui）
 MAC="$ROOT/mac"
 ICNS="$ROOT/brand/out/aaa-ui.icns"
-APP_NAME="AAA UI"
+APP_NAME="AAA"
 APP="$MAC/target/$APP_NAME.app"
 BIN="aaa-ui-mac"
 BUNDLE_ID="cc.uoox.aaaui"
@@ -97,6 +97,8 @@ install_app() {
         pkill -x "$BIN" 2>/dev/null || true
     fi
     echo "==> 安装到 $dest"
+    # 2026-08-31 前叫 "AAA UI.app"；改名后清掉旧的，免得 Spotlight 里两个都在
+    rm -rf "/Applications/AAA UI.app"
     rm -rf "$dest"
     ditto "$APP" "$dest"
     codesign --verify --strict "$dest"
