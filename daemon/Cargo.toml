@@ -8,6 +8,13 @@ description = "AAA daemon: PTY pool + server-side VT for AI agent sessions (REST
 name = "aaa-daemon"
 path = "src/main.rs"
 
+# The CLI front end. Lives in this crate so it reads the daemon's own config
+# type for port and token — there is exactly one definition of where the
+# daemon lives and how to authenticate to it.
+[[bin]]
+name = "aaa"
+path = "src/cli/main.rs"
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["ws"] }
@@ -23,7 +30,10 @@ libc = "0.2"
 if-addrs = "0.13"
 percent-encoding = "2"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
-ureq = { version = "2", default-features = false, features = ["tls"] }
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+# sync WebSocket client for `aaa attach` (no TLS: the link is already
+# encrypted by the tailscale/easytier overlay)
+tungstenite = { version = "0.26", default-features = false, features = ["handshake"] }
 
 [dev-dependencies]
 tempfile = "3"

@@ -1,14 +1,17 @@
 # AAA 协议契约 v1
 
-三个组件的唯一协调契约。实现与本文冲突时，以本文为准；发现本文缺陷，先改本文再改代码。
+daemon 与三个客户端的唯一协调契约。实现与本文冲突时，以本文为准；发现本文缺陷，先改本文再改代码。
 
 ```
 ┌─────────────┐   tailscale / easytier    ┌──────────────────┐   spawn PTY    ┌─────────────┐
-│ aaa-ui-mac  │◄────── REST + WS ────────►│    aaa-daemon    │◄──────────────►│ agent CLIs  │
+│  AAA.app    │◄────── REST + WS ────────►│    aaa-daemon    │◄──────────────►│ agent CLIs  │
 │ (gpui 原生) │        Bearer token       │  Mac mini :2730  │   读会话存储    │ + zsh 终端  │
 ├─────────────┤                           │  launchd 常驻    │                └─────────────┘
-│ aaa-android │◄──────────────────────────│  PTY 池 + VT     │
+│ AAA android │◄──────────────────────────│  PTY 池 + VT     │
 │ (Kotlin 原生)│                          └──────────────────┘
+├─────────────┤                                    ▲
+│  aaa (CLI)  │◄───────────────────────────────────┘
+│ (Rust 终端) │  同一套 API，同一批会话
 └─────────────┘
 ```
 
@@ -177,7 +180,7 @@ Mac 客户端把 payload 渲染成二维码；Android 扫码解析后逐个 host
 
 ### git checkpoint + diff + 回滚（后悔药）
 
-- config：`[checkpoint] enabled=true, auto_init_git=true, interval_minutes=10, auto_init_max_mb=512`。agent 会话（≠shell）创建时打 `start` 检查点、退出时打 `end`、运行中每 interval 分钟有变更则打 `auto`。项目无 .git 且 auto_init_git=true 时先 `git init`——但**若目录内容超过 `auto_init_max_mb`（默认 512MB）则跳过 init 与检查点**（护栏：避免在大体量非代码目录里让 `.git/objects` 暴涨；探测超预算即早退，0 = 关闭护栏）。已有 .git 的项目不受体积护栏限制。
+- config：`[checkpoint] enabled=true, auto_init_git=false, interval_minutes=10, auto_init_max_mb=512`。agent 会话（≠shell）创建时打 `start` 检查点、退出时打 `end`、运行中每 interval 分钟有变更则打 `auto`。**已有 .git 的项目才有检查点**：项目常常只是一个任务目录（笔记、抓取、一堆 yml），替用户 `git init` 不是 daemon 该做的事，所以 `auto_init_git` 默认 **false**。显式开成 true 时，仍受 `auto_init_max_mb`（默认 512MB）护栏限制——超预算的无 .git 目录跳过 init 与检查点（避免 `.git/objects` 暴涨；0 = 关闭护栏）。已有 .git 的项目不受体积护栏限制。
 - 实现硬约束:**绝不触碰项目的 HEAD/index/工作区**：临时 `GIT_INDEX_FILE` + `git add -A` + `write-tree` + `commit-tree`，ref 收在 `refs/aaa-ckpt/<session_id>/<n>-<label>` 下（普通 git 界面不可见，`git log --all` 不污染分支）。
 - `GET /sessions/:id/diff` → `{"supported":bool,"base":"<ref>","files":[{"path","status":"added|modified|deleted","additions":N,"deletions":N,"patch":"…≤64KB","truncated":bool}]}`：start 检查点树 vs 当前工作区（含未跟踪文件，同样经临时 index）。
 - `POST /sessions/:id/rollback` body `{"confirm":true,"force":false}`：恢复工作区到 start 检查点（checkout 树 + 删除 start 后新增文件；`.git` 与忽略文件不动）。会话仍存活时必须 `force:true`（daemon 先 kill）。客户端必须二次确认。
@@ -200,6 +203,20 @@ Mac 客户端把 payload 渲染成二维码；Android 扫码解析后逐个 host
 - ntfy 消息带 priority：waiting / stalled = high，exited = default。
 - waiting 推送去重：同会话同 question 只推一次，且同会话冷却 5 分钟（避免 Claude 每回合结束常驻输入框导致刷屏）。
 - 客户端侧：通知渠道分级（等待输入=high、完成=default）、按项目静音列表、快捷短语 chips、**默认 UI 设置（消息流 / 终端）**——均为客户端本地配置，不进 daemon。
+
+## aaa CLI（第三个客户端）
+
+`aaa` 是 daemon 的终端前端，**不复制任何业务逻辑**：列表、新建、结束、回答全部走上面的 API，因此
+CLI 开的会话在 Mac App 和手机上同样可见、可接管。旧的 zsh 菜单脚本改名 `aaal` 保留，作为 daemon
+不可用时的兜底（它把 agent 直接跑在当前终端里，不常驻）。
+
+- 连接：默认读 `~/.config/aaa-daemon/config.toml` 取 port + token 连本机；`AAA_HOST=主机:2730`
+  + `AAA_TOKEN=…` 指向另一台机器的 daemon。本机连不上时尝试 `launchctl kickstart` 唤醒一次。
+- 无参数 = 交互菜单：**活会话在上**（等待输入的排最前）、其次「项目管理 / macOS 权限 / New \<agent\>」。
+- 动词：`ls` `ps` `wait` `status` `perms` `new` `open` `attach` `say` `kill` `rm` `rename`，
+  列表类均有 `--json`。目标可写会话 id / id 前缀 / `ls` 序号 / 项目名 / `.`（当前目录所属项目）。
+- `attach` = 直接连 `/sessions/:id/attach`：本地终端进 raw 模式，stdin 原样转发为二进制帧，
+  窗口大小变化发 `{"t":"resize"}`。**Ctrl-]** 脱离，会话继续留在 daemon 里。
 
 ## 设计令牌（两端 UI 必须一致，来源 prototype.html）
 

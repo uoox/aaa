@@ -18,7 +18,11 @@ pub struct NtfyConfig {
 pub struct CheckpointConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
-    #[serde(default = "default_true")]
+    /// Off by default: a project here is as often a task folder (notes, a
+    /// scrape, a pile of yml) as it is code, and `git init`-ing someone's
+    /// working directory behind their back is not ours to do. Checkpoints
+    /// still run in projects that already are repos.
+    #[serde(default)]
     pub auto_init_git: bool,
     #[serde(default = "default_interval")]
     pub interval_minutes: u64,
@@ -33,7 +37,7 @@ impl Default for CheckpointConfig {
     fn default() -> Self {
         CheckpointConfig {
             enabled: true,
-            auto_init_git: true,
+            auto_init_git: false,
             interval_minutes: 10,
             auto_init_max_mb: 512,
         }
@@ -166,7 +170,7 @@ mod tests {
         let cfg = load_or_create(&p).unwrap();
         assert_eq!(cfg.token, "aaa_tk_old");
         assert!(cfg.checkpoint.enabled);
-        assert!(cfg.checkpoint.auto_init_git);
+        assert!(!cfg.checkpoint.auto_init_git, "不替用户 git init");
         assert_eq!(cfg.checkpoint.interval_minutes, 10);
         assert_eq!(cfg.watchdog.stall_minutes, 10);
         assert!(!cfg.watchdog.auto_kill);

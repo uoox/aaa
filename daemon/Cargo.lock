@@ -22,6 +22,7 @@ dependencies = [
  "tokio-tungstenite 0.26.2",
  "toml",
  "tower",
+ "tungstenite 0.26.2",
  "ureq",
  "vt100",
 ]
@@ -1431,6 +1432,8 @@ dependencies = [
  "once_cell",
  "rustls",
  "rustls-pki-types",
+ "serde",
+ "serde_json",
  "url",
  "webpki-roots 0.26.11",
 ]
