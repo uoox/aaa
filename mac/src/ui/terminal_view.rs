@@ -37,6 +37,10 @@ pub struct TerminalView {
     scroll_accum: f32,
     /// canvas 内容区左上角（窗口坐标，prepaint 时回写；鼠标→格点换算用）
     last_origin: Option<gpui::Point<Pixels>>,
+    /// canvas 尺寸（prepaint 时回写；scrollbar 命中测试用）
+    last_size: Option<gpui::Size<Pixels>>,
+    /// scrollbar 拖拽中：抓住点相对 thumb 顶部的 y 偏移（px）
+    sb_drag: Option<f32>,
     selecting: bool,
     /// 上一帧算出的可点链接（鼠标命中用；snapshot 时回写）
     links: Vec<LinkSpan>,
@@ -51,6 +55,37 @@ struct LinkSpan {
     start: u16,
     end: u16,
     url: String,
+}
+
+/// scrollbar 命中带（右缘往里这么多像素内按下算抓滚动条，不开始选区）
+const SB_ZONE: f32 = 14.0;
+/// thumb 最小高度：历史很长时仍留得住指针
+const SB_MIN_THUMB: f32 = 24.0;
+
+/// 滚动条 thumb 几何：返回 (top, height)，px、相对视图顶部。
+/// 没有回滚历史时无滚动条（备用屏 history 恒为 0，自然隐藏）。
+fn scrollbar_thumb(view_h: f32, rows: usize, history: usize, offset: usize) -> Option<(f32, f32)> {
+    if history == 0 || view_h <= 0. {
+        return None;
+    }
+    let total = (history + rows) as f32;
+    let h = (view_h * rows as f32 / total).clamp(SB_MIN_THUMB.min(view_h), view_h);
+    let range = view_h - h;
+    let top = range * (history - offset.min(history)) as f32 / history as f32;
+    Some((top, h))
+}
+
+/// 拖拽反解：thumb 顶部 y → 回看深度（offset，0 = 底部）
+fn offset_for_thumb_top(view_h: f32, rows: usize, history: usize, top: f32) -> usize {
+    let Some((_, h)) = scrollbar_thumb(view_h, rows, history, 0) else {
+        return 0;
+    };
+    let range = view_h - h;
+    if range <= 0. {
+        return 0;
+    }
+    let frac = (top / range).clamp(0., 1.);
+    (history as f32 * (1. - frac)).round() as usize
 }
 
 #[derive(Debug, PartialEq)]
@@ -187,6 +222,8 @@ impl TerminalView {
             cell: None,
             scroll_accum: 0.,
             last_origin: None,
+            last_size: None,
+            sb_drag: None,
             selecting: false,
             links: Vec::new(),
             hover_link: None,
@@ -295,6 +332,9 @@ impl TerminalView {
 
     fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.focus_handle.focus(window, cx);
+        if self.sb_mouse_down(ev.position, cx) {
+            return;
+        }
         if let Some((p, side)) = self.grid_point(ev.position) {
             if ev.modifiers.shift && self.model.term.selection.is_some() {
                 if let Some(sel) = self.model.term.selection.as_mut() {
@@ -314,6 +354,13 @@ impl TerminalView {
     }
 
     fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.sb_drag.is_some() && ev.pressed_button == Some(MouseButton::Left) {
+            if let Some(origin) = self.last_origin {
+                let y = f32::from(ev.position.y) - f32::from(origin.y);
+                self.sb_drag_to(y, cx);
+            }
+            return;
+        }
         if self.selecting && ev.pressed_button == Some(MouseButton::Left) {
             // 拖选进行中不去管链接：一次手势只干一件事
             if let Some((p, side)) = self.grid_point(ev.position)
@@ -333,6 +380,10 @@ impl TerminalView {
     }
 
     fn on_mouse_up(&mut self, ev: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.sb_drag.take().is_some() {
+            cx.notify();
+            return;
+        }
         self.selecting = false;
         let link = self.link_at(ev.position);
         match resolve_mouse_up(self.has_selection(), link.is_some()) {
@@ -414,16 +465,104 @@ impl TerminalView {
             ScrollDelta::Pixels(p) => f32::from(p.y) / line_h,
             ScrollDelta::Lines(l) => l.y,
         };
-        // 滚轮永远只滚视口，绝不合成方向键：备用屏（vim/less）时代那套
-        // 「滚轮转 ↑↓」在 TUI agent 里会变成光标乱跳/选项乱选，比不滚更糟。
-        // 备用屏没有回滚缓冲，滚了就是没动静——这是诚实的行为。
         self.scroll_accum += dy;
         let n = self.scroll_accum.trunc() as i32;
-        if n != 0 {
-            self.scroll_accum -= n as f32;
-            self.model.scroll_display(n);
-            cx.notify();
+        if n == 0 {
+            return;
         }
+        self.scroll_accum -= n as f32;
+        let mode = self.model.mode();
+        // TUI 开了鼠标上报（claude code：1000+1006）→ 滚轮按鼠标协议转发，
+        // 内容由应用自己滚。这不是「合成方向键」：wheel 事件只表达滚动，
+        // TUI 的菜单/选项不会因此乱跳。真终端里 claude code 能滚全靠这个。
+        if mode.intersects(TermMode::MOUSE_MODE) && !ev.modifiers.shift {
+            let (row, col) = self.viewport_cell(ev.position).unwrap_or((0, 0));
+            let up = n > 0;
+            let mut bytes = Vec::new();
+            for _ in 0..n.unsigned_abs() {
+                if let Some(seq) = crate::term::encode_wheel(mode, up, col, row) {
+                    bytes.extend(seq);
+                }
+            }
+            // 直发 PTY：不走 send_input（那会重置视口/清选区）
+            self.attach.input(bytes);
+            return;
+        }
+        if mode.contains(TermMode::ALT_SCREEN) {
+            // 备用屏、无鼠标上报（less / man 这类分页器）：按 1007 alternate
+            // scroll 惯例转 ↑↓——分页器里这就是滚动。开了鼠标上报的 TUI 走不到
+            // 这里，不会出现「滚轮变方向键乱跳」。
+            if mode.contains(TermMode::ALTERNATE_SCROLL) {
+                let app_cursor = mode.contains(TermMode::APP_CURSOR);
+                let seq: &[u8] = match (n > 0, app_cursor) {
+                    (true, true) => b"\x1bOA",
+                    (true, false) => b"\x1b[A",
+                    (false, true) => b"\x1bOB",
+                    (false, false) => b"\x1b[B",
+                };
+                let mut bytes = Vec::new();
+                for _ in 0..n.unsigned_abs() {
+                    bytes.extend_from_slice(seq);
+                }
+                self.attach.input(bytes);
+            }
+            // 备用屏没有回滚缓冲，除此之外滚了就是没动静——诚实的行为
+            return;
+        }
+        // 主屏：滚视口（回滚缓冲）
+        self.model.scroll_display(n);
+        cx.notify();
+    }
+
+    // ── scrollbar ───────────────────────────────────────────────────────
+
+    /// 当前 scrollbar thumb 几何（窗口坐标系的 top 相对视图顶部）。
+    /// 备用屏 history=0 → None，滚动条自然隐藏。
+    fn sb_thumb(&self) -> Option<(f32, f32)> {
+        let view_h = f32::from(self.last_size?.height);
+        scrollbar_thumb(
+            view_h,
+            self.model.rows as usize,
+            self.model.history_len(),
+            self.model.display_offset(),
+        )
+    }
+
+    /// 按下点若落在 scrollbar 带内则接管（返回 true，不开始选区）
+    fn sb_mouse_down(&mut self, pos: gpui::Point<Pixels>, cx: &mut Context<Self>) -> bool {
+        let (Some(origin), Some(size)) = (self.last_origin, self.last_size) else {
+            return false;
+        };
+        let x = f32::from(pos.x) - f32::from(origin.x);
+        let y = f32::from(pos.y) - f32::from(origin.y);
+        if x < f32::from(size.width) - SB_ZONE {
+            return false;
+        }
+        let Some((top, h)) = self.sb_thumb() else {
+            return false;
+        };
+        let grab = if y >= top && y <= top + h {
+            y - top
+        } else {
+            // 点在轨道上：thumb 中心跳到点击处再进入拖拽
+            h / 2.
+        };
+        self.sb_drag = Some(grab);
+        self.sb_drag_to(y, cx);
+        true
+    }
+
+    fn sb_drag_to(&mut self, y_in_view: f32, cx: &mut Context<Self>) {
+        let Some(grab) = self.sb_drag else { return };
+        let Some(size) = self.last_size else { return };
+        let offset = offset_for_thumb_top(
+            f32::from(size.height),
+            self.model.rows as usize,
+            self.model.history_len(),
+            y_in_view - grab,
+        );
+        self.model.scroll_to(offset);
+        cx.notify();
     }
 
     fn metrics(&mut self, window: &mut Window) -> (Pixels, Pixels) {
@@ -716,6 +855,9 @@ impl Render for TerminalView {
         let marked = self.marked.clone();
         let last_sent = self.last_sent;
         let last_origin = self.last_origin;
+        let last_size = self.last_size;
+        let sb_dragging = self.sb_drag.is_some();
+        let term_rows = self.model.rows as usize;
         let conn_down = self.conn_down;
         let hover = self
             .hover_link
@@ -760,11 +902,16 @@ impl Render for TerminalView {
                             (((f32::from(bounds.size.height) - PAD * 2.0) / f32::from(line_h)).floor() as i32).max(2)
                                 as u16;
                         let origin = bounds.origin;
-                        if last_sent != Some((cols, rows)) || last_origin != Some(origin) {
+                        let bsize = bounds.size;
+                        if last_sent != Some((cols, rows))
+                            || last_origin != Some(origin)
+                            || last_size != Some(bsize)
+                        {
                             let e = entity2.clone();
                             cx.defer(move |cx| {
                                 e.update(cx, |t, cx| {
                                     t.last_origin = Some(origin);
+                                    t.last_size = Some(bsize);
                                     t.apply_view_size(cols, rows, cx);
                                 });
                             });
@@ -927,6 +1074,30 @@ impl Render for TerminalView {
                                 window,
                                 cx,
                             );
+                        }
+                        // 右侧滚动条（有回滚历史才画；备用屏 history=0 自然无）
+                        if let Some((top, h)) = scrollbar_thumb(
+                            f32::from(bounds.size.height),
+                            term_rows,
+                            snap.history,
+                            snap.display_offset,
+                        ) {
+                            let track_x =
+                                bounds.origin.x + bounds.size.width - px(10.);
+                            window.paint_quad(fill(
+                                Bounds::new(
+                                    point(track_x, bounds.origin.y),
+                                    size(px(8.), bounds.size.height),
+                                ),
+                                ca(theme::EDGE_LIGHT, 0.35),
+                            ));
+                            window.paint_quad(fill(
+                                Bounds::new(
+                                    point(track_x + px(1.), bounds.origin.y + px(top)),
+                                    size(px(6.), px(h)),
+                                ),
+                                ca(theme::DIM, if sb_dragging { 0.85 } else { 0.45 }),
+                            ));
                         }
                         // 回看指示
                         if snap.display_offset > 0 {
@@ -1096,6 +1267,25 @@ mod tests {
         let osc8 = vec![(0u16, 1u16, "https://osc.io".to_string())];
         let links = line_links(0, text, &ascii_cols(text), &osc8);
         assert_eq!(links.len(), 2);
+    }
+
+    #[test]
+    fn scrollbar_geometry_roundtrips() {
+        // 视图 600px、24 行、历史 976 行 → total 1000
+        let (top, h) = scrollbar_thumb(600., 24, 976, 0).unwrap();
+        assert!(h >= SB_MIN_THUMB);
+        // offset=0（底部）→ thumb 贴底
+        assert!((top + h - 600.).abs() < 0.5, "底部时贴底，top={top} h={h}");
+        // offset=history（顶部）→ thumb 贴顶
+        let (top2, _) = scrollbar_thumb(600., 24, 976, 976).unwrap();
+        assert!(top2.abs() < 0.5);
+        // 反解往返：任一 offset → top → offset 回到原值
+        for off in [0usize, 1, 488, 975, 976] {
+            let (t, _) = scrollbar_thumb(600., 24, 976, off).unwrap();
+            assert_eq!(offset_for_thumb_top(600., 24, 976, t), off, "off={off}");
+        }
+        // 无历史 → 无滚动条（备用屏）
+        assert!(scrollbar_thumb(600., 24, 0, 0).is_none());
     }
 
     #[test]

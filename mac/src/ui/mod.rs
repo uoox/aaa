@@ -1,12 +1,13 @@
 //! UI 根视图：侧栏（唯一的会话切换入口）+ 页面区 + 状态栏 + 模态框。
 
 mod kit;
+mod messages_view;
 mod mini_input;
 mod modals;
 mod settings;
 mod terminal_view;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use futures::StreamExt;
 use gpui::{
@@ -18,6 +19,7 @@ use crate::model::*;
 use crate::net::{ConnState, Net, UiEvent};
 use crate::theme;
 use kit::*;
+use messages_view::MessagesView;
 use mini_input::MiniInput;
 use terminal_view::TerminalView;
 
@@ -103,6 +105,10 @@ pub struct RootView {
     open_order: Vec<String>,
     pending_focus: Option<String>,
 
+    // v1.1 消息流：按需创建的视图 + 处于消息流模式的会话（⌘E 切换）
+    msg_views: HashMap<String, Entity<MessagesView>>,
+    msg_mode: HashSet<String>,
+
     // v1.1 watchdog：id → quiet_s
     pub stalled: HashMap<String, u64>,
     // 会话监听端口缓存（Web 预览）
@@ -171,6 +177,8 @@ impl RootView {
             terminals: HashMap::new(),
             open_order: Vec::new(),
             pending_focus: None,
+            msg_views: HashMap::new(),
+            msg_mode: HashSet::new(),
             stalled: HashMap::new(),
             ports_cache: HashMap::new(),
             last_notified_question: HashMap::new(),
@@ -250,6 +258,8 @@ impl RootView {
             DaemonEvent::SessionRemoved { id } => {
                 self.sessions.retain(|s| s.id != id);
                 self.terminals.remove(&id);
+                self.msg_views.remove(&id);
+                self.msg_mode.remove(&id);
                 self.open_order.retain(|x| x != &id);
                 self.stalled.remove(&id);
                 self.ports_cache.remove(&id);
@@ -272,8 +282,43 @@ impl RootView {
                 self.stalled.insert(id, quiet_s);
                 cx.notify();
             }
+            DaemonEvent::MessagesChanged { id, last_seq } => {
+                // 只有已打开消息流视图的会话才增量拉（不做无谓轮询）
+                if let Some(v) = self.msg_views.get(&id) {
+                    v.update(cx, |v, cx| v.fetch_if_behind(last_seq, cx));
+                }
+            }
             DaemonEvent::Unknown => {}
         }
+    }
+
+    /// ⌘E：当前会话在 终端 ⇄ 消息流 之间切换；视图按需创建
+    fn toggle_msg_mode(&mut self, cx: &mut Context<Self>) {
+        let Page::Session(id) = self.page.clone() else {
+            return;
+        };
+        if self.msg_mode.contains(&id) {
+            self.msg_mode.remove(&id);
+            self.pending_focus = Some(id);
+        } else {
+            let net = self.net.clone();
+            let sid = id.clone();
+            self.msg_views
+                .entry(id.clone())
+                .or_insert_with(|| cx.new(|cx| MessagesView::new(sid, net, cx)))
+                .update(cx, |v, cx| v.fetch(cx));
+            self.msg_mode.insert(id);
+        }
+        cx.notify();
+    }
+
+    /// 当前会话此刻是否显示消息流（不支持的会话自动回落终端）
+    fn msg_mode_active(&self, id: &str, cx: &Context<Self>) -> bool {
+        self.msg_mode.contains(id)
+            && self
+                .msg_views
+                .get(id)
+                .is_some_and(|v| v.read(cx).supported != Some(false))
     }
 
     /// 系统通知：进入 waiting（带 question，去重）与 running→exited
@@ -436,6 +481,8 @@ impl RootView {
     /// 先 kill 会话再调这里收 tab；删除会话、session_removed 也走这条清理。
     pub fn close_tab(&mut self, id: &str, cx: &mut Context<Self>) {
         self.terminals.remove(id);
+        self.msg_views.remove(id);
+        self.msg_mode.remove(id);
         self.open_order.retain(|x| x != id);
         self.page = page_after_close(&self.page, id, &self.open_order);
         cx.notify();
@@ -515,6 +562,13 @@ impl RootView {
         if ks.key == "tab" && m.control {
             if matches!(self.modal, Modal::None) {
                 self.cycle_session(cx);
+            }
+            cx.stop_propagation();
+            return;
+        }
+        if ks.key == "e" && m.platform {
+            if matches!(self.modal, Modal::None) {
+                self.toggle_msg_mode(cx);
             }
             cx.stop_propagation();
             return;
@@ -939,6 +993,29 @@ impl RootView {
                         )
                         .child(SharedString::from(agent_part));
 
+                    // 消息流 ⇄ 终端 切换（shell 无消息流；探明不支持后隐藏）
+                    let msg_supported = self
+                        .msg_views
+                        .get(&sid)
+                        .map(|v| v.read(cx).supported)
+                        .unwrap_or(None);
+                    if s.agent != "shell" && msg_supported != Some(false) {
+                        let on = self.msg_mode_active(&sid, cx);
+                        bar = bar.child(
+                            div()
+                                .id("view-toggle")
+                                .px(px(6.))
+                                .rounded(px(4.))
+                                .cursor_pointer()
+                                .text_color(c(if on { theme::CYAN } else { theme::FAINT }))
+                                .hover(|st| st.bg(c(theme::SURFACE_RAISED)))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.toggle_msg_mode(cx);
+                                }))
+                                .child(if on { "⌘E 终端" } else { "⌘E 消息流" }),
+                        );
+                    }
+
                     // Web 预览：进程树监听端口
                     if let Some(ports) = self.ports_cache.get(&s.id) {
                         for (ix, p) in ports.iter().take(4).enumerate() {
@@ -1086,10 +1163,15 @@ impl Render for RootView {
         let content = div().flex_1().min_h(px(0.)).flex().flex_col().map(|el| {
             match self.page.clone() {
                 Page::Session(id) => {
+                    let msg_view = self
+                        .msg_mode_active(&id, cx)
+                        .then(|| self.msg_views.get(&id).cloned())
+                        .flatten();
                     let term = self.terminals.get(&id).cloned();
-                    let el = match term {
-                        Some(t) => el.child(div().flex_1().min_h(px(0.)).child(t)),
-                        None => el.child(
+                    let el = match (msg_view, term) {
+                        (Some(mv), _) => el.child(div().flex_1().min_h(px(0.)).child(mv)),
+                        (None, Some(t)) => el.child(div().flex_1().min_h(px(0.)).child(t)),
+                        (None, None) => el.child(
                             div()
                                 .flex_1()
                                 .flex()

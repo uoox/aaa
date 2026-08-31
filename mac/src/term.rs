@@ -118,6 +118,38 @@ impl TermModel {
     pub fn mode(&self) -> TermMode {
         *self.term.mode()
     }
+
+    /// 滚动到指定回看深度（0 = 底部；scrollbar 拖拽用）
+    pub fn scroll_to(&mut self, offset: usize) {
+        let delta = offset as i64 - self.display_offset() as i64;
+        if delta != 0 {
+            self.term.scroll_display(Scroll::Delta(delta as i32));
+        }
+    }
+}
+
+/// 滚轮 → 鼠标上报序列。TUI（claude code 等）开了鼠标上报（1000/1002/1003）
+/// 时，滚轮必须按鼠标协议转发、由应用自己滚内容——真终端（iTerm 等）里 TUI
+/// 能滚就是靠这个；备用屏没有回滚缓冲，滚视口在那里是死路。
+/// 返回 None = 应用没开鼠标上报（调用方自行决定滚视口或转 ↑↓）。
+pub fn encode_wheel(mode: TermMode, up: bool, col: u16, row: u16) -> Option<Vec<u8>> {
+    if !mode.intersects(TermMode::MOUSE_MODE) {
+        return None;
+    }
+    let btn: u16 = if up { 64 } else { 65 };
+    if mode.contains(TermMode::SGR_MOUSE) {
+        Some(format!("\x1b[<{};{};{}M", btn, col + 1, row + 1).into_bytes())
+    } else {
+        // 传统 X10 编码：字节 = 32 + 值，坐标上限 223
+        Some(vec![
+            0x1b,
+            b'[',
+            b'M',
+            (32 + btn) as u8,
+            32 + (col + 1).min(223) as u8,
+            32 + (row + 1).min(223) as u8,
+        ])
+    }
 }
 
 // ── 键盘编码 ────────────────────────────────────────────────────────────────
@@ -601,5 +633,45 @@ mod tests {
         assert!(!tm.mode().contains(TermMode::ALT_SCREEN));
         tm.advance(b"\x1b[?1049h");
         assert!(tm.mode().contains(TermMode::ALT_SCREEN));
+    }
+
+    #[test]
+    fn wheel_reporting_follows_claude_code_modes() {
+        let mut tm = TermModel::new(10, 4);
+        // 未开鼠标上报：不产生序列（调用方滚视口）
+        assert!(encode_wheel(tm.mode(), true, 0, 0).is_none());
+        // claude code 实测开的组合：1049 + 1000 + 1006（SGR）
+        tm.advance(b"\x1b[?1049h\x1b[?1000h\x1b[?1006h");
+        assert_eq!(
+            encode_wheel(tm.mode(), true, 4, 2).unwrap(),
+            b"\x1b[<64;5;3M".to_vec(),
+            "SGR 上滚，坐标 1 起"
+        );
+        assert_eq!(
+            encode_wheel(tm.mode(), false, 0, 0).unwrap(),
+            b"\x1b[<65;1;1M".to_vec()
+        );
+        // 只开 1000 不开 1006：X10 编码（32+btn, 32+coord）
+        let mut tm = TermModel::new(10, 4);
+        tm.advance(b"\x1b[?1000h");
+        assert_eq!(
+            encode_wheel(tm.mode(), true, 0, 0).unwrap(),
+            vec![0x1b, b'[', b'M', 96, 33, 33]
+        );
+    }
+
+    #[test]
+    fn scroll_to_is_absolute() {
+        let mut tm = TermModel::new(10, 4);
+        for i in 0..40 {
+            tm.advance(format!("line {i}\r\n").as_bytes());
+        }
+        assert!(tm.history_len() >= 30);
+        tm.scroll_to(7);
+        assert_eq!(tm.display_offset(), 7);
+        tm.scroll_to(2);
+        assert_eq!(tm.display_offset(), 2);
+        tm.scroll_to(0);
+        assert_eq!(tm.display_offset(), 0);
     }
 }

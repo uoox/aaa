@@ -208,6 +208,41 @@ pub struct PortEntry {
 
 // ── 错误 ────────────────────────────────────────────────────────────────────
 
+// ── v1.1 消息流 ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ToolInfo {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub status: String, // ok|err|running
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ChatMessage {
+    pub seq: u64,
+    #[serde(default)]
+    pub role: String, // user|assistant|tool|system
+    #[serde(default)]
+    pub kind: String, // text|thinking|tool_use|tool_result|question
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub tool: Option<ToolInfo>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct MessagesResponse {
+    #[serde(default)]
+    pub supported: bool,
+    #[serde(default)]
+    pub last_seq: u64,
+    #[serde(default)]
+    pub messages: Vec<ChatMessage>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ApiErrorBody {
     #[serde(default)]
@@ -243,7 +278,13 @@ pub enum DaemonEvent {
         #[serde(default)]
         quiet_s: u64,
     },
-    /// 未知帧向前兼容（v1.1 的 messages_changed / inbox_changed 等本期忽略）
+    /// v1.1 消息流：该会话的 agent 存储有新消息（≥500ms 节流）
+    MessagesChanged {
+        id: String,
+        #[serde(default)]
+        last_seq: u64,
+    },
+    /// 未知帧向前兼容（inbox_changed 等本期忽略）
     #[serde(other)]
     Unknown,
 }
@@ -449,12 +490,14 @@ mod tests {
         let e: DaemonEvent =
             serde_json::from_str(r#"{"t":"session_stalled","id":"s_4","quiet_s":612}"#).unwrap();
         assert!(matches!(e, DaemonEvent::SessionStalled { ref id, quiet_s: 612 } if id == "s_4"));
-        // 向前兼容：未知帧不报错（含 v1.1 的 messages_changed / inbox_changed）
+        // 向前兼容：未知帧不报错（inbox_changed 等）
         let e: DaemonEvent = serde_json::from_str(r#"{"t":"future_frame","x":1}"#).unwrap();
         assert!(matches!(e, DaemonEvent::Unknown));
         let e: DaemonEvent =
             serde_json::from_str(r#"{"t":"messages_changed","id":"s_1","last_seq":42}"#).unwrap();
-        assert!(matches!(e, DaemonEvent::Unknown));
+        assert!(
+            matches!(e, DaemonEvent::MessagesChanged { ref id, last_seq: 42 } if id == "s_1")
+        );
         let e: DaemonEvent =
             serde_json::from_str(r#"{"t":"inbox_changed","path":"/p/x"}"#).unwrap();
         assert!(matches!(e, DaemonEvent::Unknown));

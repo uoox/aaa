@@ -251,6 +251,14 @@ impl Net {
     pub fn ports(&self, id: &str) -> impl Future<Output = Result<Vec<PortEntry>>> + use<> {
         self.get_json(&format!("/sessions/{id}/ports"))
     }
+    /// v1.1 消息流：after = 已见最大 seq，增量拉取
+    pub fn messages(
+        &self,
+        id: &str,
+        after: u64,
+    ) -> impl Future<Output = Result<MessagesResponse>> + use<> {
+        self.get_json(&format!("/sessions/{id}/messages?after={after}&limit=500"))
+    }
 
     // ── /events WS：断线指数退避重连 ─────────────────────────────────────
 
