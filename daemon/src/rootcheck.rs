@@ -67,20 +67,41 @@ pub fn check(root: &Path) -> RootState {
 fn probe_with_timeout(root: PathBuf, timeout: Duration) -> RootState {
     // read_dir, not metadata: stat is allowed through the TCC gate that
     // opendir is not, so only opening the directory proves readability.
-    with_deadline(timeout, move || match std::fs::read_dir(&root) {
+    with_deadline(&PROBE_PARKED, timeout, move || match std::fs::read_dir(&root) {
         Ok(_) => RootState::Ok,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => RootState::Missing,
         Err(_) => RootState::Denied,
     })
 }
 
+/// One parked probe at a time.
+///
+/// A blocked `open` cannot be cancelled, so a probe that misses its deadline
+/// leaves its thread parked on the syscall. The health watcher calls this
+/// every 5s: without this flag a persistent denial would leak a thread every
+/// tick — thousands a day, each with its own stack — and eventually take the
+/// daemon down with the thing it was supposed to report.
+static PROBE_PARKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Run `f` on a throwaway thread; a probe that misses the deadline counts as a
-/// denial. The thread stays parked on the syscall — there is no way to cancel
-/// a blocked `open` — but the daemon gets on with starting up.
-fn with_deadline(timeout: Duration, f: impl FnOnce() -> RootState + Send + 'static) -> RootState {
+/// denial. While an earlier probe is still parked we do not start another —
+/// a probe that has not answered *is* the denial, and it will clear the flag
+/// itself if the syscall ever returns (which is what happens the moment the
+/// grant lands), letting the next tick probe afresh.
+fn with_deadline(
+    parked: &'static std::sync::atomic::AtomicBool,
+    timeout: Duration,
+    f: impl FnOnce() -> RootState + Send + 'static,
+) -> RootState {
+    use std::sync::atomic::Ordering;
+    if parked.swap(true, Ordering::SeqCst) {
+        return RootState::Denied;
+    }
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(f());
+        let state = f();
+        parked.store(false, Ordering::SeqCst);
+        let _ = tx.send(state);
     });
     rx.recv_timeout(timeout).unwrap_or(RootState::Denied)
 }
@@ -122,8 +143,9 @@ mod tests {
     fn a_probe_that_never_answers_is_a_denial_not_a_hang() {
         // the TCC case: opendir parks forever waiting for a consent dialog
         let start = std::time::Instant::now();
-        let state = with_deadline(Duration::from_millis(80), || {
-            std::thread::sleep(Duration::from_secs(30));
+        static PARKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        let state = with_deadline(&PARKED, Duration::from_millis(80), || {
+            std::thread::sleep(Duration::from_secs(2));
             RootState::Ok
         });
         assert_eq!(state, RootState::Denied);
@@ -132,6 +154,36 @@ mod tests {
 
     #[test]
     fn a_probe_that_answers_in_time_wins() {
-        assert_eq!(with_deadline(Duration::from_secs(2), || RootState::Ok), RootState::Ok);
+        static PARKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        assert_eq!(with_deadline(&PARKED, Duration::from_secs(2), || RootState::Ok), RootState::Ok);
+    }
+
+    #[test]
+    fn a_parked_probe_is_never_joined_by_a_second_one() {
+        // 5s health ticks against a permanently blocked opendir would otherwise
+        // leak a thread per tick until the daemon fell over
+        static PARKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        let started = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let release = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        for _ in 0..5 {
+            let (s, r) = (started.clone(), release.clone());
+            with_deadline(&PARKED, Duration::from_millis(50), move || {
+                s.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                while !r.load(std::sync::atomic::Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                RootState::Ok
+            });
+        }
+        assert_eq!(started.load(std::sync::atomic::Ordering::SeqCst), 1, "只该有一个探测线程");
+        release.store(true, std::sync::atomic::Ordering::SeqCst);
+        // once it unparks, probing resumes
+        for _ in 0..40 {
+            if with_deadline(&PARKED, Duration::from_millis(200), || RootState::Ok) == RootState::Ok {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        panic!("探测线程解阻塞后没有恢复探测");
     }
 }
