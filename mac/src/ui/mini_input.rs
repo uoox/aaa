@@ -63,6 +63,11 @@ impl MiniInput {
             .unwrap_or(self.text.len())
     }
 
+    /// IME 组字中（有 marked text）——根节点的回车快捷键要避开这个状态
+    pub fn composing(&self) -> bool {
+        self.marked.is_some()
+    }
+
     fn on_key_down(&mut self, ev: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         if self.marked.is_some() {
             return; // IME 组字中不干预

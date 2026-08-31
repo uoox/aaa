@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -311,7 +312,12 @@ fun HomeScaffold(
             Box(Modifier.weight(1f).fillMaxSize()) {
                 tabs()
                 if (tab == 0) {
-                    Box(Modifier.align(Alignment.BottomEnd).padding(20.dp)) { newButton() }
+                    // safeDrawingPadding：手势条 / 展开态横屏的系统栏不吃掉 FAB
+                    Box(
+                        Modifier.align(Alignment.BottomEnd)
+                            .safeDrawingPadding()
+                            .padding(20.dp),
+                    ) { newButton() }
                 }
             }
         }

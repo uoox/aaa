@@ -456,7 +456,9 @@ fun MessagesView(messages: List<ChatMessage>, supported: Boolean?) {
     // 气泡宽度跟随实际可用宽度（按比例），不再写死 300/320dp——写死的数值在
     // 折叠屏内屏上只占半栏，看起来像被锁在小屏宽度。
     BoxWithConstraints(Modifier.fillMaxSize()) {
-        val bubbleMax = bubbleMaxWidth(maxWidth)
+        // 减去 LazyColumn 的左右 padding：按外层宽度算会让窄窗口下 260dp 的
+        // 下限顶到边（分屏/自由窗口实测得出的坑，评审指出）
+        val bubbleMax = bubbleMaxWidth(maxWidth - 20.dp)
         LazyColumn(state = listState, modifier = Modifier.fillMaxSize().padding(horizontal = 10.dp)) {
             // key: stable identity across refetches; contentType: reuse slots per row kind
             items(messages, key = { it.seq }, contentType = { it.kind.ifEmpty { it.role } }) { m -> MessageRow(m, bubbleMax) }
@@ -465,8 +467,10 @@ fun MessagesView(messages: List<ChatMessage>, supported: Boolean?) {
     }
 }
 
-/** 气泡上限 = 可用宽度的 82%，收在 [260dp, 720dp]：窄屏别挤成一列字，超宽别一行拉满难读。 */
-fun bubbleMaxWidth(available: Dp): Dp = (available * 0.82f).coerceIn(260.dp, 720.dp)
+/** 气泡上限 = 内容区宽度的 82%，夹在 [260dp, 720dp] 且绝不超过内容区本身：
+ *  窄屏别挤成一列字，超宽别一行拉满难读，极窄（分屏）时以不溢出为先。 */
+fun bubbleMaxWidth(available: Dp): Dp =
+    (available * 0.82f).coerceIn(260.dp, 720.dp).coerceAtMost(available.coerceAtLeast(0.dp))
 
 @Composable
 private fun MessageRow(m: ChatMessage, bubbleMax: Dp) {

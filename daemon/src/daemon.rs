@@ -141,6 +141,7 @@ fn run() {
         bound_port: std::sync::atomic::AtomicU16::new(0),
         inbox: std::sync::Mutex::new(inbox),
         root_state: std::sync::atomic::AtomicU8::new(root_state.as_u8()),
+        restarting: std::sync::atomic::AtomicBool::new(false),
     });
 
     let rt = tokio::runtime::Builder::new_multi_thread()

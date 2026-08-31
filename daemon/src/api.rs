@@ -46,6 +46,9 @@ pub struct App {
     /// TCC denial (stat passes, `opendir` does not), and an honest probe costs
     /// a thread and a deadline — not something to do per request.
     pub root_state: std::sync::atomic::AtomicU8,
+    /// `PUT /config` 已受理、self-exec 在倒计时：期间拒绝新建会话和第二个
+    /// 配置写——409 检查到 exec 之间开出来的 PTY 会被无声杀掉。
+    pub restarting: std::sync::atomic::AtomicBool,
 }
 
 impl App {
@@ -442,6 +445,10 @@ async fn sessions_create(
     State(app): State<SharedApp>,
     Json(body): Json<CreateSession>,
 ) -> ApiResult<Json<Value>> {
+    if app.restarting.load(std::sync::atomic::Ordering::SeqCst) {
+        // 409 检查到 exec 之间开出来的 PTY 会被无声杀掉，宁可让客户端重试
+        return Err(ApiError::conflict("daemon 正在重启（配置刚修改），稍候重试"));
+    }
     ssd_guard(&app)?;
     let agent = agents::get(&body.agent).ok_or_else(|| ApiError::agent_unknown(&body.agent))?;
     let dir = std::path::PathBuf::from(&body.project_path);
@@ -466,6 +473,7 @@ async fn sessions_create(
 
     // 名册维护：开会话的目录必须在注册表里（项目列表以注册表为准）。
     // 已登记的不动——用户手动设过的 agent 不被这次会话的选择覆盖。
+    // 登记失败就不开会话：一个跑着会话却不在名册里的项目治理不了。
     {
         let app2 = Arc::clone(&app);
         let target = canon_str.clone();
@@ -473,10 +481,13 @@ async fn sessions_create(
         blocking(move || {
             let mut reg = Registry::load(&app2.cfg.project_root);
             if reg.get(&target).is_none() {
-                let _ = reg.set(&target, agent_id);
+                reg.set(&target, agent_id)
+            } else {
+                Ok(())
             }
         })
-        .await?;
+        .await?
+        .map_err(|e| ApiError::internal(format!("项目登记失败: {e}")))?;
     }
 
     // resume: port of aaa launch_agent_in (find most recent session for cwd)
@@ -743,26 +754,36 @@ fn migrate_root(paths: &Paths, old: &Path, new: &Path) -> Result<(), String> {
         // 之后用 aaal / 裸 agent 在该目录开过更新的对话。find 落空才留旧 id。
         let sid = stores::find(paths, &mut cache, &agent, &dir);
         if !sid.is_empty() {
-            let _ = reg.set_id(&dir, &agent, &sid);
+            // 这一步失败必须中止：rename 之后就没有回头路了，id 会永远丢在
+            // 旧根的存储结构里
+            reg.set_id(&dir, &agent, &sid)
+                .map_err(|e| format!("采集对话 id 失败（未做任何移动）: {e}"))?;
         }
     }
-    // ② 整根 rename（同卷原子）。跨卷不装聪明——rename 会失败，明说手动拷
+    // ② 先把注册表键改成新前缀——趁文件还在旧根，这一步是原子写，失败就
+    //    整体中止，什么都没动过。指向新根的键在 is_live 眼里是「根外路径」，
+    //    会被原样保留。（评审教训：搬完再重写，失败就只剩打日志一条路，
+    //    而名册过滤会让整批项目从所有客户端消失。）
+    reg.rewrite_prefix(old, new)
+        .map_err(|e| format!("注册表预重写失败（未做任何移动）: {e}"))?;
+    // ③ 整根 rename（同卷原子）。目标若已存在必须是空目录——不删它，
+    //    rename(2) 本来就能原子替换空目录；非空直接拒绝。跨卷不装聪明——
+    //    rename 会失败，明说手动拷。
     if new.exists() {
         let empty = std::fs::read_dir(new).map(|mut d| d.next().is_none()).unwrap_or(false);
         if !empty {
+            // 恢复注册表再退出
+            let _ = Registry::load(old).rewrite_prefix(new, old);
             return Err(format!("目标已存在且非空：{}", new.display()));
         }
-        std::fs::remove_dir(new).map_err(|e| format!("清理空目标失败: {e}"))?;
     }
-    std::fs::rename(old, new)
-        .map_err(|e| format!("移动失败（跨卷迁移请手动 cp 后仅改配置）: {e}"))?;
-    // ③ 注册表键改前缀（文件已随根一起移动）。走到这里根已经搬完了，
-    // 重写失败绝不能再报 Err——否则配置不写、daemon 不重启，留下一个指着
-    // 已消失旧根的死局。旧键会被 is_live 当外部路径保留，损失只是 resume
-    // 兜底失效，降级为日志。
-    let mut reg = Registry::load(new);
-    if let Err(e) = reg.rewrite_prefix(old, new) {
-        eprintln!("migrate: 注册表重写失败（目录已移动，仅影响 resume 兜底）: {e}");
+    if let Err(e) = std::fs::rename(old, new) {
+        // 根没动，把注册表键改回旧前缀；这次重写失败的概率极低（同一文件
+        // 刚刚才成功原子写过），仍失败也只是 resume 兜底受损，根与配置一致。
+        if let Err(e2) = Registry::load(old).rewrite_prefix(new, old) {
+            eprintln!("migrate: 回滚注册表失败（根未移动，仅影响 resume 兜底）: {e2}");
+        }
+        return Err(format!("移动失败（跨卷迁移请手动 cp 后仅改配置）: {e}"));
     }
     Ok(())
 }
@@ -771,6 +792,21 @@ async fn config_put(
     State(app): State<SharedApp>,
     Json(body): Json<ConfigPut>,
 ) -> ApiResult<Json<Value>> {
+    // 单飞：第二个并发配置写直接拒绝（两次迁移抢同一个根、两个 exec 排队
+    // 都是灾难）。失败路径统统把标志放回去。
+    if app
+        .restarting
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        )
+        .is_err()
+    {
+        return Err(ApiError::conflict("已有一次配置修改在进行（daemon 即将重启）"));
+    }
+    let unlock = || app.restarting.store(false, std::sync::atomic::Ordering::SeqCst);
     // 重启会杀掉所有 PTY，有存活会话时一律拒绝，绝不悄悄断人家的 agent。
     let alive: Vec<String> = app
         .pool
@@ -779,53 +815,65 @@ async fn config_put(
         .filter(|s| s.state() != SState::Exited)
         .map(|s| s.meta.lock().unwrap().title.clone())
         .collect();
-    if !alive.is_empty() {
-        return Err(ApiError::conflict(format!(
-            "有 {} 个存活会话（{}）。改配置需要重启 daemon，先终止它们",
-            alive.len(),
-            alive.join("、")
-        )));
-    }
-    let cfg_path = app.paths.config_path();
-    let mut cfg = crate::config::load_or_create(&cfg_path)
-        .map_err(|e| ApiError::internal(format!("读配置: {e}")))?;
-    let mut migrated = false;
-    if let Some(root) = &body.project_root {
-        let new_root = std::path::PathBuf::from(root);
-        if !new_root.is_absolute() {
-            return Err(ApiError::conflict("project_root 必须是绝对路径"));
+    let result: ApiResult<(bool, Config)> = async {
+        if !alive.is_empty() {
+            return Err(ApiError::conflict(format!(
+                "有 {} 个存活会话（{}）。改配置需要重启 daemon，先终止它们",
+                alive.len(),
+                alive.join("、")
+            )));
         }
-        if new_root != cfg.project_root {
-            if body.migrate {
-                let paths = app.paths.clone();
-                let (o, n) = (cfg.project_root.clone(), new_root.clone());
-                blocking(move || migrate_root(&paths, &o, &n))
-                    .await?
-                    .map_err(ApiError::conflict)?;
-                migrated = true;
-            } else if !new_root.is_dir() {
-                return Err(ApiError::conflict(format!(
-                    "目录不存在：{}（或选择迁移现有项目）",
-                    new_root.display()
-                )));
+        let cfg_path = app.paths.config_path();
+        let mut cfg = crate::config::load_or_create(&cfg_path)
+            .map_err(|e| ApiError::internal(format!("读配置: {e}")))?;
+        let mut migrated = false;
+        if let Some(root) = &body.project_root {
+            let new_root = std::path::PathBuf::from(root);
+            if !new_root.is_absolute() {
+                return Err(ApiError::conflict("project_root 必须是绝对路径"));
             }
-            cfg.project_root = new_root;
+            if new_root != cfg.project_root {
+                if body.migrate {
+                    let paths = app.paths.clone();
+                    let (o, n) = (cfg.project_root.clone(), new_root.clone());
+                    blocking(move || migrate_root(&paths, &o, &n))
+                        .await?
+                        .map_err(ApiError::conflict)?;
+                    migrated = true;
+                } else if !new_root.is_dir() {
+                    return Err(ApiError::conflict(format!(
+                        "目录不存在：{}（或选择迁移现有项目）",
+                        new_root.display()
+                    )));
+                }
+                cfg.project_root = new_root;
+            }
         }
-    }
-    if let Some(p) = body.port {
-        if p == 0 {
-            return Err(ApiError::conflict("端口不能为 0"));
+        if let Some(p) = body.port {
+            if p == 0 {
+                return Err(ApiError::conflict("端口不能为 0"));
+            }
+            cfg.port = p;
         }
-        cfg.port = p;
-    }
-    if let Some(t) = &body.token {
-        if t.trim().is_empty() {
-            return Err(ApiError::conflict("token 不能为空"));
+        if let Some(t) = &body.token {
+            if t.trim().is_empty() {
+                return Err(ApiError::conflict("token 不能为空"));
+            }
+            cfg.token = t.trim().to_string();
         }
-        cfg.token = t.trim().to_string();
+        crate::config::write_config(&cfg_path, &cfg)
+            .map_err(|e| ApiError::internal(format!("写配置: {e}")))?;
+        Ok((migrated, cfg))
     }
-    crate::config::write_config(&cfg_path, &cfg)
-        .map_err(|e| ApiError::internal(format!("写配置: {e}")))?;
+    .await;
+    let (migrated, cfg) = match result {
+        Ok(v) => v,
+        Err(e) => {
+            unlock();
+            return Err(e);
+        }
+    };
+    // 标志保持 true 直到 exec：sessions_create 在此期间被拒
     crate::daemon::restart_self_after_ms(600);
     Ok(Json(json!({
         "ok": true,

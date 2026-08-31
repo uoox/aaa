@@ -524,6 +524,10 @@ impl RootView {
         if ks.key == "enter"
             && let Modal::NewProject { agent_idx, .. } = self.modal
         {
+            // IME 组字中的回车是「确认候选词」，不是「创建」——不能抢
+            if self.name_input.read(cx).composing() {
+                return;
+            }
             self.confirm_create_project(agent_idx, cx);
             cx.stop_propagation();
         }

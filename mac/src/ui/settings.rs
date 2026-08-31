@@ -27,13 +27,15 @@ pub(super) fn qr_encode(payload: &str) -> Option<(usize, Vec<bool>)> {
 impl RootView {
     /// 「保存到 daemon」：目录变了先问迁移，其余直接提交（daemon 会自我重启）
     fn save_daemon_config(&mut self, cx: &mut Context<Self>) {
-        let port: u16 = self
-            .port_input
-            .read(cx)
-            .text
-            .trim()
-            .parse()
-            .unwrap_or(2730);
+        // 不做 unwrap_or 静默兜底：填错端口却显示保存成功，比报错糟得多
+        let port_text = self.port_input.read(cx).text.trim().to_string();
+        let port: u16 = match port_text.parse() {
+            Ok(p) if p > 0 => p,
+            _ => {
+                self.set_error(format!("端口无效：「{port_text}」（1–65535）"), cx);
+                return;
+            }
+        };
         let token = self.token_input.read(cx).text.trim().to_string();
         if token.is_empty() {
             self.set_error("token 不能为空".into(), cx);

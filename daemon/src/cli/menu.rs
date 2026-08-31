@@ -263,6 +263,12 @@ fn perms_menu(c: &Client, raw: &Raw) -> Result<String, String> {
                     status = request(vec!["all".to_string()]);
                     // AAA.app 是独立的 TCC 主体：daemon 的授权覆盖不了它。
                     // 让 App 自己也把能弹的弹一遍（app 端 --request-permissions）。
+                    // `open --args` 对已运行实例只做激活、参数送不到——先礼貌
+                    // 退出再启动，行为才是确定的（会话都在 daemon，App 重启无损）。
+                    let _ = std::process::Command::new("osascript")
+                        .args(["-e", "quit app \"AAA\""])
+                        .status();
+                    std::thread::sleep(std::time::Duration::from_millis(800));
                     let app = std::process::Command::new("open")
                         .args(["-a", "AAA", "--args", "--request-permissions"])
                         .status();
