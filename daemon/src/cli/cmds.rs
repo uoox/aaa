@@ -14,7 +14,7 @@ use crate::tty::{self, BOLD, CYAN, DIM, GREY, RESET, YELLOW};
 pub const HELP: &str = "\
 aaa — AAA daemon 的命令行前端
 
-  aaa                      交互菜单（会话在上，新建在下）
+  aaa                      交互菜单（活会话在上；数字选会话，p 项目 m 权限 n 新建）
   aaa ls [-a] [--json]     会话列表（-a 含已退出）
   aaa ps [--json]          项目列表
   aaa new [名字] [-a AGENT]  新建项目目录 + 开一个会话并接入
@@ -59,7 +59,7 @@ pub fn ls(c: &Client, all: bool, json: bool) -> Result<(), String> {
         println!(
             "{DIM}{:>2}{RESET} {}",
             i + 1,
-            render::session_row(s, cols as usize - 4)
+            render::session_row(s, (cols as usize).saturating_sub(4))
         );
     }
     Ok(())
@@ -74,7 +74,7 @@ pub fn ps(c: &Client, json: bool) -> Result<(), String> {
     let projects = c.projects()?;
     let (cols, _) = tty::size();
     for (i, p) in projects.iter().enumerate() {
-        println!("{DIM}{:>2}{RESET} {}", i + 1, render::project_row(p, cols as usize - 4));
+        println!("{DIM}{:>2}{RESET} {}", i + 1, render::project_row(p, (cols as usize).saturating_sub(4)));
     }
     Ok(())
 }

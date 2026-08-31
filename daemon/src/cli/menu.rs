@@ -240,7 +240,7 @@ fn draw(
 
     out.push_str(&format!("{EOL}\n"));
     if !status.is_empty() {
-        out.push_str(&format!("  {CYAN}{}{RESET}{EOL}\n", tty::truncate(status, w - 4)));
+        out.push_str(&format!("  {CYAN}{}{RESET}{EOL}\n", tty::truncate(status, w.saturating_sub(4))));
     }
     out.push_str(&format!(
         "  {DIM}↑↓ · Enter 进入 · 数字选会话 · k 结束 · p 项目 · m 权限 · n 新建 · r 刷新 · q 退出{RESET}{EOL}\x1b[J"
@@ -495,7 +495,7 @@ fn draw_projects(projects: &[Project], idx: usize, status: &str) {
     }
     out.push_str(&format!("{EOL}\n"));
     if !status.is_empty() {
-        out.push_str(&format!("  {CYAN}{}{RESET}{EOL}\n", tty::truncate(status, w - 4)));
+        out.push_str(&format!("  {CYAN}{}{RESET}{EOL}\n", tty::truncate(status, w.saturating_sub(4))));
     }
     out.push_str(&format!(
         "  {DIM}Enter 进入 · a 换 agent · n 新建 · d 删除 · r 刷新 · q 返回{RESET}{EOL}\x1b[J"
