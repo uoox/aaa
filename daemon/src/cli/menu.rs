@@ -65,7 +65,7 @@ pub fn run(c: &Client) -> Result<(), String> {
     if !tty::is_tty() {
         return Err("交互菜单需要终端；试试 aaa ls / aaa help".into());
     }
-    let health = c.health()?;
+    let mut health = c.health()?;
     let agents: Vec<AgentInfo> = c.agents().unwrap_or_default();
     let raw = Raw::enter(true).ok_or("无法进入 raw 模式")?;
     tty::clear();
@@ -83,6 +83,9 @@ pub fn run(c: &Client) -> Result<(), String> {
         match tty::read_key(REFRESH_MS) {
             None => {
                 sessions = c.sessions().unwrap_or(sessions);
+                // health too: a grant landing (or the SSD coming back) should
+                // clear the banner without needing a restart
+                health = c.health().unwrap_or(health);
                 continue;
             }
             Some(Key::Up) => {
@@ -180,12 +183,17 @@ fn draw(
     tty::home();
     out.push_str(&format!("{BOLD}{MAGENTA}"));
     out.push_str("   ░█▀█░█▀█░█▀█\n");
+    // 不是「挂没挂上」而是「能不能用」：读不了的外置卷是挂着的，说成未挂载会把人
+    // 支到错误的地方去（和 aaa status 同一处教训）。
+    let root = match health.root_state.as_str() {
+        "" => if health.ssd_mounted { "SSD 已挂载" } else { "SSD 未挂载" },
+        "ok" => "SSD 已挂载",
+        "unmounted" => "SSD 未挂载",
+        _ => "项目根读不了 · 缺完全磁盘访问权限",
+    };
     out.push_str(&format!(
         "   ░█▀█░█▀█░█▀█{RESET}{DIM}    {}:{} · v{} · {}{EOL}\n",
-        c.host,
-        c.port,
-        health.version,
-        if health.ssd_mounted { "SSD 已挂载" } else { "SSD 未挂载" }
+        c.host, c.port, health.version, root
     ));
     out.push_str(&format!("{BOLD}{MAGENTA}   ░▀░▀░▀░▀░▀░▀{RESET}{EOL}\n\n"));
 

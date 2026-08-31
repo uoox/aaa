@@ -270,14 +270,22 @@ pub fn say(c: &Client, target: &str, text: &str) -> Result<(), String> {
 }
 
 pub fn kill(c: &Client, target: &str) -> Result<(), String> {
-    let s = resolve(c, target)?;
+    let (s, how) = resolve_for_destruction(c, target)?;
+    if !confirm_destructive(&s, how, "结束")? {
+        println!("{DIM}已取消{RESET}");
+        return Ok(());
+    }
     c.kill(&s.id)?;
     println!("已结束 {} · {}", s.project_name, s.id);
     Ok(())
 }
 
 pub fn remove(c: &Client, target: &str) -> Result<(), String> {
-    let s = resolve(c, target)?;
+    let (s, how) = resolve_for_destruction(c, target)?;
+    if !confirm_destructive(&s, how, "删除记录")? {
+        println!("{DIM}已取消{RESET}");
+        return Ok(());
+    }
     c.remove(&s.id)?;
     println!("已删除记录 {} · {}", s.project_name, s.id);
     Ok(())
@@ -316,24 +324,70 @@ pub fn resolve(c: &Client, target: &str) -> Result<Session, String> {
     let target = normalize(target, c)?;
     let mut ordered = c.sessions()?;
     sort_for_listing(&mut ordered);
+    resolve_in(&ordered, &target).map(|(s, _)| s)
+}
+
+/// Same, but keeping how the session was named — for the verbs that end it.
+fn resolve_for_destruction(c: &Client, target: &str) -> Result<(Session, Certainty), String> {
+    let target = normalize(target, c)?;
+    let mut ordered = c.sessions()?;
+    sort_for_listing(&mut ordered);
     resolve_in(&ordered, &target)
 }
 
-fn resolve_in(ordered: &[Session], target: &str) -> Result<Session, String> {
+/// Ask before ending something the user named by position.
+///
+/// `aaa kill 2` resolves against a list that reshuffles whenever an agent
+/// prints; the row you read and the row you type are not guaranteed to be the
+/// same session. So a positional target gets echoed and confirmed, and an id
+/// goes straight through. Non-interactive callers (scripts, the phone) get no
+/// prompt — they should be passing ids.
+fn confirm_destructive(s: &Session, how: Certainty, verb: &str) -> Result<bool, String> {
+    if how == Certainty::Exact || !tty::is_tty() {
+        return Ok(true);
+    }
+    print!(
+        "{verb} {BOLD}{}{RESET} · {} {DIM}{}{RESET} [y/N]: ",
+        s.project_name,
+        render::state_label(s),
+        s.id
+    );
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line).map_err(|e| e.to_string())?;
+    Ok(matches!(line.trim(), "y" | "Y" | "yes"))
+}
+
+/// How sure we are that the session we resolved is the one the user meant.
+///
+/// An id names a session for as long as it exists. A row number does not: the
+/// listing re-sorts by `last_output_at`, so between `aaa ls` and `aaa kill 2`
+/// any agent producing output can slide a different session into row 2. The
+/// destructive verbs use this to decide whether to ask first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Certainty {
+    /// named by id (or a unique id prefix) — stable
+    Exact,
+    /// named by row number or a fuzzy project match — could have moved
+    Positional,
+}
+
+fn resolve_in(ordered: &[Session], target: &str) -> Result<(Session, Certainty), String> {
     if let Some(s) = ordered.iter().find(|s| s.id == target) {
-        return Ok(s.clone());
+        return Ok((s.clone(), Certainty::Exact));
     }
 
     if let Ok(n) = target.parse::<usize>() {
         return ordered
             .get(n.wrapping_sub(1))
             .cloned()
+            .map(|s| (s, Certainty::Positional))
             .ok_or_else(|| format!("序号 {n} 超出范围（当前 {} 个会话）", ordered.len()));
     }
 
     let by_prefix: Vec<&Session> = ordered.iter().filter(|s| s.id.starts_with(target)).collect();
     match by_prefix.len() {
-        1 => return Ok(by_prefix[0].clone()),
+        1 => return Ok((by_prefix[0].clone(), Certainty::Exact)),
         // ambiguity is an error, never a silent pick: killing the wrong
         // session is not recoverable
         n if n > 1 => return Err(format!("{target} 匹配到 {n} 个会话，请写全 id")),
@@ -341,12 +395,28 @@ fn resolve_in(ordered: &[Session], target: &str) -> Result<Session, String> {
     }
 
     let lower = target.to_lowercase();
-    ordered
+    // an exact project name is unambiguous enough to act on; live sessions
+    // sort first, so this reaches the running one
+    if let Some(s) = ordered
         .iter()
         .find(|s| s.project_name.to_lowercase() == lower || s.project_path == target)
-        .or_else(|| ordered.iter().find(|s| s.project_name.to_lowercase().contains(&lower)))
-        .cloned()
-        .ok_or_else(|| format!("没有匹配 {target} 的会话（aaa ls -a 看看）"))
+    {
+        return Ok((s.clone(), Certainty::Positional));
+    }
+
+    let fuzzy: Vec<&Session> = ordered
+        .iter()
+        .filter(|s| s.project_name.to_lowercase().contains(&lower))
+        .collect();
+    match fuzzy.len() {
+        1 => Ok((fuzzy[0].clone(), Certainty::Positional)),
+        // substring matches were guessing silently; refuse like prefixes do
+        n if n > 1 => Err(format!(
+            "{target} 模糊匹配到 {n} 个会话（{}），写全项目名或 id",
+            fuzzy.iter().map(|s| s.project_name.as_str()).collect::<Vec<_>>().join(" ")
+        )),
+        _ => Err(format!("没有匹配 {target} 的会话（aaa ls -a 看看）")),
+    }
 }
 
 /// The order every listing and every index refers to: waiting first, then
@@ -402,9 +472,9 @@ mod tests {
             sess("s_dead", "beta", "exited", "2026-08-31T09:00:00Z"),
         ];
         sort_for_listing(&mut v);
-        assert_eq!(resolve_in(&v, "beta").unwrap().id, "s_dead");
-        assert_eq!(resolve_in(&v, "s_dead").unwrap().id, "s_dead");
-        assert_eq!(resolve_in(&v, "2").unwrap().id, "s_dead", "序号覆盖 exited");
+        assert_eq!(resolve_in(&v, "beta").unwrap().0.id, "s_dead");
+        assert_eq!(resolve_in(&v, "s_dead").unwrap().0.id, "s_dead");
+        assert_eq!(resolve_in(&v, "2").unwrap().0.id, "s_dead", "序号覆盖 exited");
     }
 
     #[test]
@@ -414,7 +484,7 @@ mod tests {
             sess("s_now", "aaa", "idle", "2026-08-31T01:00:00Z"),
         ];
         sort_for_listing(&mut v);
-        assert_eq!(resolve_in(&v, "aaa").unwrap().id, "s_now", "活的优先，哪怕更旧");
+        assert_eq!(resolve_in(&v, "aaa").unwrap().0.id, "s_now", "活的优先，哪怕更旧");
     }
 
     #[test]
@@ -450,6 +520,32 @@ mod tests {
             serde_json::from_value(serde_json::json!({"ssd_mounted": false})).unwrap();
         assert_eq!(root_state(&gone), "unmounted");
         assert!(root_note(&gone).contains("未挂载"));
+    }
+
+    #[test]
+    fn an_id_is_certain_and_a_row_number_is_not() {
+        // 序号解析的那份列表按 last_output_at 排序，两次命令之间任何 agent 有输出
+        // 都会把别的会话滑进这一行——所以 kill/rm 对序号要先问一句。
+        let mut v = vec![
+            sess("s_one", "alpha", "running", "2026-08-31T10:00:00Z"),
+            sess("s_two", "beta", "running", "2026-08-31T09:00:00Z"),
+        ];
+        sort_for_listing(&mut v);
+        assert_eq!(resolve_in(&v, "s_one").unwrap().1, Certainty::Exact);
+        assert_eq!(resolve_in(&v, "s_o").unwrap().1, Certainty::Exact, "唯一前缀也算确定");
+        assert_eq!(resolve_in(&v, "1").unwrap().1, Certainty::Positional);
+        assert_eq!(resolve_in(&v, "alpha").unwrap().1, Certainty::Positional);
+    }
+
+    #[test]
+    fn an_ambiguous_substring_refuses_instead_of_guessing() {
+        let v = vec![
+            sess("s_1", "aaa-ui", "running", "2026-08-31T10:00:00Z"),
+            sess("s_2", "aaa-daemon", "running", "2026-08-31T09:00:00Z"),
+        ];
+        let err = resolve_in(&v, "aaa-").unwrap_err();
+        assert!(err.contains("模糊匹配到 2"), "{err}");
+        assert_eq!(resolve_in(&v, "aaa-ui").unwrap().0.id, "s_1", "完整项目名仍然直达");
     }
 
     #[test]

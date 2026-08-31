@@ -79,11 +79,20 @@ fn pump(ws: &mut WebSocket<TcpStream>, fd: i32, cols: &mut u16, rows: &mut u16) 
                 }
                 return Outcome::Detached;
             }
-            if ws.write(Message::Binary(buf[..n].to_vec().into())).is_err() {
-                return Outcome::Ended;
+            if let Err(e) = ws.write(Message::Binary(buf[..n].to_vec().into())) {
+                // WouldBlock means the write buffer is full (a big paste over a
+                // slow link), not that the session ended — the bytes are queued
+                // and the flush below drains them.
+                if !is_would_block(&e) {
+                    return Outcome::Ended;
+                }
             }
-            ignore_would_block(ws.flush());
         }
+
+        // Flush every pass, not only after a keystroke: a flush that hit
+        // WouldBlock leaves bytes queued, and waiting for the next key to send
+        // them makes the terminal feel stuck.
+        ignore_would_block(ws.flush());
 
         if sock_ready {
             loop {
@@ -110,12 +119,11 @@ fn send_resize(ws: &mut WebSocket<TcpStream>, cols: u16, rows: u16) {
     ignore_would_block(ws.flush());
 }
 
+fn is_would_block(e: &tungstenite::Error) -> bool {
+    matches!(e, tungstenite::Error::Io(io) if io.kind() == std::io::ErrorKind::WouldBlock)
+}
+
 fn ignore_would_block(r: Result<(), tungstenite::Error>) {
-    if let Err(tungstenite::Error::Io(e)) = &r {
-        if e.kind() == std::io::ErrorKind::WouldBlock {
-            return;
-        }
-    }
     let _ = r;
 }
 
