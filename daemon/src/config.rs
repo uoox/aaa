@@ -1,0 +1,202 @@
+//! `~/.config/aaa-daemon/config.toml` — generated on first run.
+
+use std::io;
+use std::path::{Path, PathBuf};
+
+use rand::Rng;
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NtfyConfig {
+    pub url: String,
+    pub topic: String,
+}
+
+/// v1.1: git checkpoint settings (`[checkpoint]`, all defaulted for
+/// backward compatibility with v1.0 config files).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CheckpointConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub auto_init_git: bool,
+    #[serde(default = "default_interval")]
+    pub interval_minutes: u64,
+    /// Skip `git init` (and thus checkpointing) for a repo-less project whose
+    /// contents exceed this many MB, so opening a session in a large non-code
+    /// directory does not balloon `.git/objects`. 0 disables the guard.
+    #[serde(default = "default_auto_init_max_mb")]
+    pub auto_init_max_mb: u64,
+}
+
+impl Default for CheckpointConfig {
+    fn default() -> Self {
+        CheckpointConfig {
+            enabled: true,
+            auto_init_git: true,
+            interval_minutes: 10,
+            auto_init_max_mb: 512,
+        }
+    }
+}
+
+/// v1.1: watchdog settings (`[watchdog]`, defaulted).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WatchdogConfig {
+    #[serde(default = "default_stall")]
+    pub stall_minutes: u64,
+    #[serde(default)]
+    pub auto_kill: bool,
+}
+
+impl Default for WatchdogConfig {
+    fn default() -> Self {
+        WatchdogConfig { stall_minutes: 10, auto_kill: false }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Config {
+    #[serde(default = "default_port")]
+    pub port: u16,
+    pub token: String,
+    #[serde(default = "default_project_root")]
+    pub project_root: PathBuf,
+    #[serde(default = "default_true")]
+    pub namer: bool,
+    #[serde(default)]
+    pub ntfy: Option<NtfyConfig>,
+    #[serde(default)]
+    pub checkpoint: CheckpointConfig,
+    #[serde(default)]
+    pub watchdog: WatchdogConfig,
+}
+
+fn default_port() -> u16 {
+    2730
+}
+fn default_project_root() -> PathBuf {
+    PathBuf::from("/Volumes/SSD/project")
+}
+fn default_true() -> bool {
+    true
+}
+fn default_interval() -> u64 {
+    10
+}
+fn default_auto_init_max_mb() -> u64 {
+    512
+}
+fn default_stall() -> u64 {
+    10
+}
+
+pub fn generate_token() -> String {
+    let bytes: [u8; 16] = rand::rng().random();
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    format!("aaa_tk_{hex}")
+}
+
+impl Config {
+    fn fresh() -> Self {
+        Config {
+            port: default_port(),
+            token: generate_token(),
+            project_root: default_project_root(),
+            namer: true,
+            ntfy: None,
+            checkpoint: CheckpointConfig::default(),
+            watchdog: WatchdogConfig::default(),
+        }
+    }
+}
+
+/// Load config; create it (with a random token) on first run.
+pub fn load_or_create(path: &Path) -> io::Result<Config> {
+    match std::fs::read_to_string(path) {
+        Ok(s) => toml::from_str(&s)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{}: {e}", path.display()))),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            let cfg = Config::fresh();
+            write_config(path, &cfg)?;
+            Ok(cfg)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+pub fn write_config(path: &Path, cfg: &Config) -> io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let body = toml::to_string_pretty(cfg)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, &body)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    }
+    std::fs::rename(&tmp, path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_shape() {
+        let t = generate_token();
+        assert!(t.starts_with("aaa_tk_"));
+        assert_eq!(t.len(), "aaa_tk_".len() + 32);
+        assert!(t["aaa_tk_".len()..].chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn v1_0_config_without_new_sections_still_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("config.toml");
+        // exactly what a first-generation daemon wrote (no [checkpoint]/[watchdog])
+        std::fs::write(
+            &p,
+            "port = 2730\ntoken = \"aaa_tk_old\"\nproject_root = \"/Volumes/SSD/project\"\nnamer = true\n\n[ntfy]\nurl = \"https://ntfy.example.com\"\ntopic = \"aaa\"\n",
+        )
+        .unwrap();
+        let cfg = load_or_create(&p).unwrap();
+        assert_eq!(cfg.token, "aaa_tk_old");
+        assert!(cfg.checkpoint.enabled);
+        assert!(cfg.checkpoint.auto_init_git);
+        assert_eq!(cfg.checkpoint.interval_minutes, 10);
+        assert_eq!(cfg.watchdog.stall_minutes, 10);
+        assert!(!cfg.watchdog.auto_kill);
+        assert_eq!(cfg.ntfy.as_ref().unwrap().topic, "aaa");
+    }
+
+    #[test]
+    fn partial_new_sections_get_field_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("config.toml");
+        std::fs::write(
+            &p,
+            "token = \"aaa_tk_x\"\n[checkpoint]\nenabled = false\n[watchdog]\nauto_kill = true\n",
+        )
+        .unwrap();
+        let cfg = load_or_create(&p).unwrap();
+        assert!(!cfg.checkpoint.enabled);
+        assert_eq!(cfg.checkpoint.interval_minutes, 10, "missing fields default");
+        assert!(cfg.watchdog.auto_kill);
+        assert_eq!(cfg.watchdog.stall_minutes, 10);
+    }
+
+    #[test]
+    fn create_then_load_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("cfg").join("config.toml");
+        let cfg = load_or_create(&p).unwrap();
+        assert_eq!(cfg.port, 2730);
+        assert!(cfg.namer);
+        let again = load_or_create(&p).unwrap();
+        assert_eq!(cfg.token, again.token, "token must be stable across loads");
+    }
+}

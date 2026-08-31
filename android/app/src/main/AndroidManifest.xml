@@ -1,0 +1,50 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- The daemon speaks plain HTTP/WS: the link is already encrypted by the
+         tailscale/easytier overlay, and its address is whatever private IP the
+         user pairs with, so no host list can be pinned ahead of time. Without
+         usesCleartextTraffic the platform blocks every request and pairing
+         fails with "所有 host 均无法连接" even though the daemon is reachable. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <application
+        android:name=".AaaApplication"
+        android:theme="@style/Theme.AaaUi"
+        android:label="aaa-ui"
+        android:allowBackup="false"
+        android:supportsRtl="true"
+        android:usesCleartextTraffic="true">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|keyboardHidden">
+            <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
+        </activity>
+        <activity
+            android:name=".ShareTargetActivity"
+            android:exported="true"
+            android:label="发送到 aaa 项目"
+            android:theme="@style/Theme.AaaUi">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:mimeType="image/*"/>
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:mimeType="*/*"/>
+            </intent-filter>
+        </activity>
+        <service
+            android:name=".NotificationService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+        <receiver android:name=".ReplyReceiver" android:exported="false" />
+    </application>
+</manifest>

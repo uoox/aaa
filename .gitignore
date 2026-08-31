@@ -1,0 +1,16 @@
+# build outputs
+daemon/target/
+mac/target/
+android/build/
+android/app/build/
+android/.gradle/
+android/local.properties
+android/terminal-emulator/build/
+android/terminal-view/build/
+
+# os / editor
+.DS_Store
+*.swp
+
+# local scratch
+*.log

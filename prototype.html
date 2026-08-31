@@ -1,0 +1,1081 @@
+<title>AAA-UI 交互原型</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+/* ============ 基础令牌 —— 单主题深色（终端世界，颜色全部显式） ============ */
+:root{
+  --bg:#0e1216; --s0:#141a21; --s1:#1a222b; --s2:#212b36; --s3:#28343f;
+  --edge:#28323e; --edge2:#36434f;
+  --ink:#e3ebf3; --dim:#8b99a8; --faint:#5f6d7c;
+  --cyan:#53c6dd; --cyan-d:#2b7f92; --mag:#c583e0;
+  --grn:#5ecb8f; --amb:#e3b45c; --red:#e57373;
+  --term:#0a0e12;
+  --mono:'IBM Plex Mono',ui-monospace,'SF Mono',Menlo,'PingFang SC',monospace;
+  --sans:-apple-system,BlinkMacSystemFont,'PingFang SC','Noto Sans SC','Helvetica Neue',Arial,sans-serif;
+}
+html{background:var(--bg)}
+body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:15px;line-height:1.65;margin:0}
+*{box-sizing:border-box}
+button{font-family:inherit}
+button:focus-visible,a:focus-visible{outline:2px solid var(--cyan);outline-offset:2px}
+.wrap{max-width:1160px;margin:0 auto;padding:0 24px 80px}
+
+/* ============ Masthead ============ */
+.mast{padding:52px 0 8px}
+.banner{font-family:var(--mono);font-size:13px;line-height:1.35;color:var(--mag);white-space:pre;margin:0 0 14px;text-shadow:0 0 24px rgba(197,131,224,.35)}
+.eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.18em;color:var(--cyan);margin:0 0 10px}
+h1.pagetitle{font-size:34px;font-weight:700;letter-spacing:.01em;margin:0 0 10px;text-wrap:balance}
+h1 .mono{font-family:var(--mono)}
+.lede{color:var(--dim);max-width:46em;margin:0 0 20px}
+.metas{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px}
+.meta{font-family:var(--mono);font-size:12px;color:var(--dim);border:1px solid var(--edge);border-radius:99px;padding:4px 12px;background:var(--s0)}
+.meta b{color:var(--ink);font-weight:500}
+
+/* ============ 控制条（粘性） ============ */
+.ctl{position:sticky;top:0;z-index:50;background:rgba(14,18,22,.92);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);border-bottom:1px solid var(--edge);margin:20px -24px 26px;padding:12px 24px}
+.ctl-row{display:flex;flex-wrap:wrap;align-items:center;gap:10px;max-width:1112px;margin:0 auto}
+.ptabs{display:flex;gap:2px;background:var(--s0);border:1px solid var(--edge);border-radius:10px;padding:3px}
+.ptab{border:0;background:transparent;color:var(--dim);font-family:var(--mono);font-size:13px;padding:7px 18px;border-radius:8px;cursor:pointer}
+.ptab.on{background:var(--s2);color:var(--ink);box-shadow:inset 0 0 0 1px var(--edge2)}
+.chips{display:flex;gap:6px;flex-wrap:wrap;flex:1;min-width:260px}
+.chip-nav{border:1px solid var(--edge);background:var(--s0);color:var(--dim);font-size:12px;font-family:var(--mono);padding:5px 11px;border-radius:99px;cursor:pointer;white-space:nowrap}
+.chip-nav.on{color:#08252c;background:var(--cyan);border-color:var(--cyan);font-weight:600}
+.hotwrap{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--dim);font-family:var(--mono);cursor:pointer;user-select:none}
+.hotwrap input{appearance:none;width:34px;height:19px;border-radius:99px;background:var(--s2);border:1px solid var(--edge2);position:relative;cursor:pointer;margin:0;transition:background .15s}
+.hotwrap input::after{content:"";position:absolute;top:2px;left:2px;width:13px;height:13px;border-radius:50%;background:var(--dim);transition:transform .15s,background .15s}
+.hotwrap input:checked{background:var(--cyan-d)}
+.hotwrap input:checked::after{transform:translateX(15px);background:var(--cyan)}
+
+/* ============ 舞台 ============ */
+.stage{display:flex;justify-content:center;padding:8px 0 18px;overflow-x:auto}
+.caption{max-width:720px;margin:0 auto 56px;text-align:center}
+.caption .cap-name{font-family:var(--mono);font-size:13px;color:var(--cyan);letter-spacing:.08em;margin-bottom:6px}
+.caption .cap-note{color:var(--dim);font-size:13.5px}
+kbd{font-family:var(--mono);font-size:11px;border:1px solid var(--edge2);border-bottom-width:2px;border-radius:5px;padding:1px 6px;background:var(--s1);color:var(--ink)}
+
+/* 可点击热区 */
+[data-go]{cursor:pointer}
+.hot [data-go]{outline:1.5px dashed rgba(83,198,221,.75);outline-offset:-1.5px;border-radius:6px}
+
+/* ============ 手机框 ============ */
+.phone{width:342px;height:712px;flex:0 0 auto;border-radius:38px;border:1px solid var(--edge2);background:#0a0d11;padding:10px;box-shadow:0 30px 80px rgba(0,0,0,.55),0 0 0 6px rgba(255,255,255,.02)}
+.scr{width:100%;height:100%;border-radius:29px;background:var(--s0);overflow:hidden;display:flex;flex-direction:column;position:relative;font-size:13px}
+.p-status{display:flex;justify-content:space-between;align-items:center;padding:10px 20px 4px;font-family:var(--mono);font-size:11px;color:var(--dim);flex:0 0 auto}
+.p-top{display:flex;align-items:center;gap:10px;padding:8px 16px 10px;flex:0 0 auto}
+.p-title{font-size:19px;font-weight:700;flex:1}
+.p-body{flex:1;overflow:hidden;display:flex;flex-direction:column;min-height:0}
+.p-nav{flex:0 0 auto;display:flex;border-top:1px solid var(--edge);background:var(--s0);padding:6px 8px 14px}
+.p-nav .ni{flex:1;text-align:center;color:var(--faint);font-size:11px;padding:6px 0 2px;border-radius:10px}
+.p-nav .ni .g{display:block;font-size:17px;line-height:1.2;margin-bottom:1px}
+.p-nav .ni.on{color:var(--cyan)}
+.pill{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:10.5px;color:var(--dim);border:1px solid var(--edge);background:var(--s1);border-radius:99px;padding:3px 9px;white-space:nowrap}
+.dot{width:7px;height:7px;border-radius:50%;display:inline-block;flex:0 0 auto}
+.dot.g{background:var(--grn);box-shadow:0 0 6px var(--grn)}
+.dot.y{background:var(--amb);box-shadow:0 0 6px var(--amb)}
+.dot.r{background:var(--red)}
+.dot.w{background:var(--faint)}
+
+/* 卡片 / 列表 */
+.card{background:var(--s1);border:1px solid var(--edge);border-radius:14px;padding:11px 13px;margin:0 12px 10px}
+.card.warn{border-color:rgba(227,180,92,.55);background:linear-gradient(180deg,rgba(227,180,92,.08),var(--s1) 55%)}
+.c-head{display:flex;align-items:center;gap:7px;margin-bottom:3px}
+.c-title{font-weight:600;font-size:13.5px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.c-sub{color:var(--faint);font-size:11px;font-family:var(--mono);margin-bottom:7px}
+.c-time{color:var(--faint);font-size:10.5px;font-family:var(--mono);white-space:nowrap}
+.agchip{font-family:var(--mono);font-size:10px;padding:1px 7px;border-radius:5px;border:1px solid var(--edge2);color:var(--dim);white-space:nowrap}
+.agchip.claude{color:#e8b46a;border-color:#5c4a2c}
+.agchip.codex{color:#8fd0ff;border-color:#2c4a5c}
+.agchip.pi{color:#b5e08f;border-color:#3d5c2c}
+.agchip.reasonix{color:#e08fb5;border-color:#5c2c40}
+.agchip.agy{color:#c8a8f0;border-color:#452c5c}
+.agchip.term{color:var(--dim);border-color:var(--edge2)}
+.prev{font-family:var(--mono);font-size:10.5px;line-height:1.55;background:var(--term);border:1px solid #161c22;border-radius:9px;padding:8px 10px;color:var(--dim);overflow:hidden;white-space:pre}
+.tc{color:var(--cyan)}.tg{color:var(--grn)}.ta{color:var(--amb)}.tm{color:var(--mag)}.tr{color:var(--red)}.tw{color:var(--ink)}.td{color:var(--faint)}
+
+/* 终端屏 */
+.termfull{flex:1;background:var(--term);font-family:var(--mono);font-size:11.5px;line-height:1.62;padding:12px 14px;overflow:hidden;white-space:pre-wrap;color:#c6d2dd;min-height:0}
+.keybar{display:flex;gap:5px;padding:7px 10px;background:var(--s1);border-top:1px solid var(--edge);overflow-x:auto;flex:0 0 auto}
+.key{font-family:var(--mono);font-size:11px;color:var(--ink);background:var(--s2);border:1px solid var(--edge2);border-radius:7px;padding:4px 9px;white-space:nowrap}
+.composer{display:flex;gap:8px;align-items:center;padding:9px 12px 12px;background:var(--s1);flex:0 0 auto}
+.cin{flex:1;background:var(--s0);border:1px solid var(--edge2);border-radius:99px;padding:8px 14px;color:var(--faint);font-size:12.5px}
+.csend{background:var(--cyan);color:#08252c;font-weight:700;border-radius:99px;padding:8px 16px;font-size:12.5px}
+.qanswers{display:flex;gap:7px;padding:8px 12px 0;background:var(--s1);flex:0 0 auto}
+.qa{font-family:var(--mono);font-size:11.5px;border:1px solid rgba(227,180,92,.5);color:var(--amb);background:rgba(227,180,92,.08);border-radius:99px;padding:5px 13px}
+
+/* 表单件 */
+.field{background:var(--s1);border:1px solid var(--edge2);border-radius:11px;padding:10px 13px;margin:0 16px 10px;font-family:var(--mono);font-size:12.5px;color:var(--ink)}
+.field .lbl{display:block;font-size:10px;color:var(--faint);letter-spacing:.1em;margin-bottom:3px;font-family:var(--mono)}
+.btn{display:block;text-align:center;border-radius:12px;padding:12px;font-weight:700;font-size:14px;margin:0 16px 10px}
+.btn.pri{background:var(--cyan);color:#08252c}
+.btn.sec{background:var(--s2);color:var(--ink);border:1px solid var(--edge2)}
+.finenote{font-size:10.5px;color:var(--faint);text-align:center;padding:4px 24px;font-family:var(--mono);line-height:1.7}
+
+/* sheet / dialog */
+.scrim{position:absolute;inset:0;background:rgba(5,8,11,.62);display:flex;flex-direction:column;justify-content:flex-end;z-index:5}
+.scrim.center{justify-content:center;padding:0 22px}
+.sheet{background:var(--s1);border:1px solid var(--edge2);border-bottom:0;border-radius:20px 20px 0 0;padding:8px 0 22px}
+.sheet .grab{width:36px;height:4px;border-radius:4px;background:var(--edge2);margin:6px auto 10px}
+.sh-head{padding:2px 18px 10px;border-bottom:1px solid var(--edge)}
+.sh-title{font-weight:700;font-size:14.5px}
+.sh-sub{font-family:var(--mono);font-size:10.5px;color:var(--faint);margin-top:2px}
+.sh-item{display:flex;align-items:center;gap:11px;padding:11px 18px;font-size:13.5px;border-bottom:1px solid rgba(40,50,62,.5)}
+.sh-item .ic{width:20px;text-align:center;flex:0 0 auto;font-size:14px}
+.sh-item .note{margin-left:auto;font-family:var(--mono);font-size:10px;color:var(--faint)}
+.sh-item.danger{color:var(--red)}
+.dlg{background:var(--s1);border:1px solid var(--edge2);border-radius:16px;padding:18px}
+.dlg h4{margin:0 0 8px;font-size:15px}
+.dlg p{margin:0 0 6px;font-size:12.5px;color:var(--dim)}
+.dlg .row{display:flex;gap:9px;margin-top:14px}
+.dlg .row .btn{flex:1;margin:0;padding:10px;font-size:13px}
+.btn.dangr{background:var(--red);color:#2b0d0d}
+.under{position:absolute;inset:0;opacity:.32;filter:saturate(.6);pointer-events:none;display:flex;flex-direction:column}
+
+/* toggle 行 */
+.setgrp{margin:0 14px 14px;border:1px solid var(--edge);border-radius:14px;background:var(--s1);overflow:hidden}
+.setgrp .gt{font-family:var(--mono);font-size:10px;letter-spacing:.14em;color:var(--faint);padding:9px 14px 5px}
+.srow{display:flex;align-items:center;gap:10px;padding:9px 14px;border-top:1px solid rgba(40,50,62,.5);font-size:12.5px}
+.srow .sl{flex:1;min-width:0}
+.srow .sv{font-family:var(--mono);font-size:10.5px;color:var(--faint);text-align:right}
+.tgl{width:34px;height:19px;border-radius:99px;background:var(--s3);border:1px solid var(--edge2);position:relative;flex:0 0 auto}
+.tgl::after{content:"";position:absolute;top:2px;left:2px;width:13px;height:13px;border-radius:50%;background:var(--faint)}
+.tgl.on{background:var(--cyan-d);border-color:var(--cyan-d)}
+.tgl.on::after{left:auto;right:2px;background:var(--cyan)}
+
+/* ============ Mac 窗口 ============ */
+.macstage{width:1020px;flex:0 0 auto}
+.macwin{width:1020px;height:648px;border-radius:12px;border:1px solid var(--edge2);background:var(--s0);display:flex;flex-direction:column;overflow:hidden;box-shadow:0 30px 80px rgba(0,0,0,.55);position:relative;font-size:13px}
+.tbar{height:40px;display:flex;align-items:center;gap:8px;padding:0 14px;background:var(--s1);border-bottom:1px solid var(--edge);flex:0 0 auto}
+.tl{display:flex;gap:7px}
+.tl i{width:11px;height:11px;border-radius:50%;display:block}
+.tl i:nth-child(1){background:#f16a5d}.tl i:nth-child(2){background:#f5bf4f}.tl i:nth-child(3){background:#62c455}
+.tbar .wt{flex:1;text-align:center;font-size:12.5px;color:var(--dim);font-weight:600}
+.mbody{flex:1;display:flex;min-height:0}
+.sidebar{width:218px;flex:0 0 auto;border-right:1px solid var(--edge);background:#11161c;display:flex;flex-direction:column;padding:10px 8px}
+.sb-label{font-family:var(--mono);font-size:10px;letter-spacing:.14em;color:var(--faint);padding:10px 10px 4px}
+.sb-item{display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:8px;color:var(--dim);font-size:12.5px}
+.sb-item.on{background:var(--s2);color:var(--ink)}
+.sb-item .sbt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sb-item .mini{font-family:var(--mono);font-size:9.5px;color:var(--faint)}
+.sb-foot{margin-top:auto;border-top:1px solid var(--edge);padding:9px 10px 4px;display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:10.5px;color:var(--faint)}
+.main{flex:1;display:flex;flex-direction:column;min-width:0}
+.tabs{display:flex;gap:1px;background:#11161c;border-bottom:1px solid var(--edge);padding:6px 8px 0;flex:0 0 auto}
+.tab{display:flex;align-items:center;gap:7px;padding:7px 14px;border-radius:9px 9px 0 0;font-size:12px;color:var(--dim);background:transparent}
+.tab.on{background:var(--term);color:var(--ink)}
+.mterm{flex:1;background:var(--term);font-family:var(--mono);font-size:12.5px;line-height:1.66;padding:14px 18px;white-space:pre-wrap;overflow:hidden;color:#c6d2dd;min-height:0}
+.mstatus{flex:0 0 auto;display:flex;gap:16px;align-items:center;padding:6px 14px;border-top:1px solid var(--edge);background:var(--s1);font-family:var(--mono);font-size:10.5px;color:var(--faint)}
+
+/* mac 表格（对齐 aaa CLI 的列） */
+.toolbar{display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--edge);flex:0 0 auto}
+.tbtn{font-size:12px;color:var(--ink);background:var(--s2);border:1px solid var(--edge2);border-radius:8px;padding:5px 12px;white-space:nowrap}
+.tbtn.pri{background:var(--cyan);border-color:var(--cyan);color:#08252c;font-weight:700}
+.tbtn.dis{opacity:.45}
+.search{margin-left:auto;font-family:var(--mono);font-size:11.5px;color:var(--faint);background:var(--s0);border:1px solid var(--edge2);border-radius:8px;padding:5px 12px;width:180px}
+table.ptable{border-collapse:collapse;width:100%;font-size:12px}
+.ptable th{font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;color:var(--faint);text-align:left;padding:8px 12px;border-bottom:1px solid var(--edge);font-weight:500;white-space:nowrap}
+.ptable td{padding:7px 12px;border-bottom:1px solid rgba(40,50,62,.45);color:var(--dim);white-space:nowrap}
+.ptable td.name{color:var(--ink);font-weight:600}
+.ptable td.num{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:11px}
+.ptable tr.sel td{background:rgba(83,198,221,.10)}
+.ptable tr.sel td:first-child{box-shadow:inset 3px 0 0 var(--cyan)}
+.ctxmenu{position:absolute;background:#1d2630;border:1px solid var(--edge2);border-radius:11px;box-shadow:0 18px 50px rgba(0,0,0,.6);padding:5px;width:230px;z-index:6}
+.cm-item{display:flex;gap:9px;align-items:center;padding:7px 11px;border-radius:7px;font-size:12.5px;color:var(--ink)}
+.cm-item:hover{background:var(--s2)}
+.cm-item .note{margin-left:auto;font-family:var(--mono);font-size:9.5px;color:var(--faint)}
+.cm-sep{height:1px;background:var(--edge);margin:5px 8px}
+.cm-item.danger{color:var(--red)}
+
+/* mac 菜单栏 */
+.desk{flex:1;background:linear-gradient(160deg,#17222e 0%,#101823 45%,#0c1219 100%);position:relative;min-height:0}
+.mbar{height:30px;display:flex;align-items:center;gap:18px;padding:0 16px;background:rgba(20,26,33,.9);border-bottom:1px solid var(--edge);font-size:12px;color:var(--dim);flex:0 0 auto}
+.mbar .app{font-weight:700;color:var(--ink)}
+.mbar .right{margin-left:auto;display:flex;gap:14px;align-items:center;font-family:var(--mono);font-size:11px}
+.mbar .aaaicon{color:var(--amb);font-weight:700;background:rgba(227,180,92,.12);border:1px solid rgba(227,180,92,.4);border-radius:6px;padding:1px 8px}
+.dropdown{position:absolute;top:38px;right:118px;width:320px;background:#1d2630;border:1px solid var(--edge2);border-radius:13px;box-shadow:0 24px 70px rgba(0,0,0,.65);padding:7px;z-index:6}
+.dd-label{font-family:var(--mono);font-size:9.5px;letter-spacing:.14em;color:var(--faint);padding:7px 11px 3px}
+.dd-item{display:flex;gap:9px;align-items:flex-start;padding:8px 11px;border-radius:8px}
+.dd-item:hover{background:var(--s2)}
+.dd-item .dt{flex:1;min-width:0}
+.dd-item .dt b{display:block;font-size:12.5px;font-weight:600}
+.dd-item .dt span{display:block;font-family:var(--mono);font-size:10.5px;color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dd-item.hl{background:rgba(227,180,92,.09);border:1px solid rgba(227,180,92,.35)}
+
+/* mac 弹窗 */
+.mscrim{position:absolute;inset:0;background:rgba(5,8,11,.55);display:flex;align-items:center;justify-content:center;z-index:7}
+.modal{width:420px;background:var(--s1);border:1px solid var(--edge2);border-radius:14px;padding:20px}
+.modal h4{margin:0 0 12px;font-size:15px}
+.aglist .agrow{display:flex;align-items:center;gap:10px;padding:8px 11px;border:1px solid var(--edge);border-radius:10px;margin-bottom:7px;font-size:13px}
+.aglist .agrow.sel{border-color:var(--cyan);background:rgba(83,198,221,.07)}
+.aglist .agrow .cmd{margin-left:auto;font-family:var(--mono);font-size:10px;color:var(--faint)}
+.newtag{font-family:var(--mono);font-size:9px;color:var(--amb);border:1px solid rgba(227,180,92,.5);border-radius:4px;padding:0 5px}
+
+/* 设置窗口 */
+.setwin{display:flex;flex-direction:column;flex:1;min-height:0}
+.settabs{display:flex;gap:4px;justify-content:center;padding:9px;border-bottom:1px solid var(--edge)}
+.settab{font-size:12px;color:var(--dim);padding:5px 15px;border-radius:8px}
+.settab.on{background:var(--s2);color:var(--ink)}
+.setcols{flex:1;display:flex;gap:22px;padding:22px 26px;min-height:0}
+.setcol{flex:1;min-width:0}
+.qr{width:170px;height:170px;background:#0a0e12;border:1px solid var(--edge2);border-radius:12px;padding:12px;margin-bottom:10px}
+.kv{display:flex;align-items:center;gap:9px;padding:8px 0;border-bottom:1px solid rgba(40,50,62,.5);font-size:12.5px}
+.kv .k{color:var(--faint);width:96px;flex:0 0 auto;font-family:var(--mono);font-size:11px}
+.kv .v{color:var(--ink);font-family:var(--mono);font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.minibtn{font-family:var(--mono);font-size:10px;color:var(--cyan);border:1px solid var(--cyan-d);border-radius:6px;padding:1px 8px;margin-left:auto;white-space:nowrap}
+
+/* 通知横幅 */
+@keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(227,180,92,.0)}50%{box-shadow:0 0 0 5px rgba(227,180,92,.12)}}
+.notif{margin:4px 12px 10px;background:linear-gradient(180deg,rgba(227,180,92,.14),rgba(227,180,92,.05));border:1px solid rgba(227,180,92,.5);border-radius:13px;padding:9px 12px;animation:pulse 2.4s ease-in-out infinite}
+.notif .nt{display:flex;gap:7px;align-items:center;font-size:12px;font-weight:700;color:var(--amb)}
+.notif .nb{font-size:12px;color:var(--ink);margin-top:2px}
+.notif .ntime{margin-left:auto;font-family:var(--mono);font-size:9.5px;color:var(--faint);font-weight:400}
+
+/* ============ 页面下方章节 ============ */
+.sect{margin:26px 0 44px}
+.sect>h2{font-size:21px;margin:0 0 6px}
+.sect>.sub{color:var(--dim);font-size:13.5px;margin:0 0 22px;max-width:52em}
+.sect .eyebrow{margin-bottom:6px}
+.flowgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px}
+.flow{background:var(--s0);border:1px solid var(--edge);border-radius:14px;padding:16px 18px}
+.flow h3{margin:0 0 10px;font-size:14px}
+.flow .steps{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-family:var(--mono);font-size:11px}
+.flow .steps .st{background:var(--s2);border:1px solid var(--edge2);border-radius:7px;padding:3px 9px;color:var(--ink)}
+.flow .steps .ar{color:var(--faint)}
+.flow p{margin:10px 0 0;font-size:12.5px;color:var(--dim)}
+.flow .win{color:var(--grn);font-family:var(--mono);font-size:11px}
+
+.arch{display:grid;grid-template-columns:1fr auto 1.2fr auto 1fr;gap:0;align-items:stretch}
+.acol{background:var(--s0);border:1px solid var(--edge);border-radius:14px;padding:16px 18px;min-width:0}
+.acol.core{border-color:var(--cyan-d);background:linear-gradient(180deg,rgba(83,198,221,.05),var(--s0) 60%)}
+.acol h3{margin:0 0 2px;font-size:14px;font-family:var(--mono)}
+.acol .where{font-family:var(--mono);font-size:10.5px;color:var(--faint);margin-bottom:10px}
+.acol ul{margin:0;padding:0;list-style:none}
+.acol li{font-size:12.5px;color:var(--dim);padding:5px 0;border-top:1px solid rgba(40,50,62,.45)}
+.acol li b{color:var(--ink);font-weight:600}
+.alink{display:flex;flex-direction:column;justify-content:center;align-items:center;padding:0 10px;gap:4px}
+.alink .wire{font-family:var(--mono);font-size:10px;color:var(--cyan);white-space:nowrap}
+.alink .arrow{color:var(--faint);font-size:16px}
+@media (max-width:900px){.arch{grid-template-columns:1fr}.alink{flex-direction:row;padding:8px 0}.macstage{width:auto}}
+
+.decisions{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}
+.dec{background:var(--s0);border:1px solid var(--edge);border-radius:12px;padding:13px 16px;font-size:13px;color:var(--dim)}
+.dec b{color:var(--ink)}
+.dec .no{font-family:var(--mono);color:var(--cyan);font-size:11px;margin-right:6px}
+footer.ft{border-top:1px solid var(--edge);margin-top:30px;padding-top:18px;font-family:var(--mono);font-size:11px;color:var(--faint);display:flex;flex-wrap:wrap;gap:16px}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+
+<div class="wrap">
+
+<!-- ================= Masthead ================= -->
+<header class="mast">
+  <pre class="banner">░█▀█░█▀█░█▀█
+░█▀█░█▀█░█▀█    daemon + ui
+░▀░▀░▀░▀░▀░▀</pre>
+  <p class="eyebrow">AAA-DAEMON × AAA-UI · 双端交互原型 · 2026-08-30</p>
+  <h1 class="pagetitle">让 <span class="mono">aaa</span> 的菜单长出双端界面</h1>
+  <p class="lede">Mac 上 aaa-daemon 常驻持有 PTY，会话断线不死；Android 与 macOS 客户端经 tailscale / easytier 直连同一批会话。菜单结构继承 aaa CLI，另加「普通终端」入口。点击画面中的元素可在屏幕间跳转。</p>
+  <div class="metas">
+    <span class="meta"><b>5 个 agent</b> + 终端</span>
+    <span class="meta">Android <b>9 屏</b> · macOS <b>7 屏</b></span>
+    <span class="meta">端口 <b>2730</b> = 0xAAA</span>
+    <span class="meta">tailscale / easytier 直连</span>
+  </div>
+</header>
+
+<!-- ================= 控制条 ================= -->
+<nav class="ctl">
+  <div class="ctl-row">
+    <div class="ptabs" role="tablist">
+      <button class="ptab on" id="ptab-android" onclick="showPlatform('android')">Android</button>
+      <button class="ptab" id="ptab-mac" onclick="showPlatform('mac')">macOS</button>
+    </div>
+    <div class="chips" id="chips"></div>
+    <label class="hotwrap"><input type="checkbox" id="hotck" onchange="document.documentElement.classList.toggle('hot',this.checked)">显示热区</label>
+  </div>
+</nav>
+
+<!-- ================= 舞台 ================= -->
+<div class="stage" id="stage">
+
+<!-- ============================================================ -->
+<!-- Android                                                       -->
+<!-- ============================================================ -->
+
+<!-- A1 配对连接 -->
+<div class="phone proto-screen" id="a-connect">
+  <div class="scr">
+    <div class="p-status"><span>21:47</span><span>tailscale ▲ · 82%</span></div>
+    <div style="flex:1;display:flex;flex-direction:column;justify-content:center">
+      <pre class="banner" style="font-size:10px;text-align:center;margin:0 0 8px">░█▀█░█▀█░█▀█
+░█▀█░█▀█░█▀█
+░▀░▀░▀░▀░▀░▀</pre>
+      <div style="text-align:center;font-weight:700;font-size:20px">AAA-UI</div>
+      <div style="text-align:center;color:var(--faint);font-size:11.5px;font-family:var(--mono);margin-bottom:22px">连接 Mac 上的 aaa-daemon</div>
+      <div class="field" style="border-color:var(--cyan-d)">
+        <span class="lbl">发现的服务器</span>
+        <div style="display:flex;align-items:center;gap:7px"><span class="dot g"></span>mac-mini.tail3f8a.ts.net:2730<span style="margin-left:auto;color:var(--faint);font-size:10px">tailscale · 14ms</span></div>
+      </div>
+      <div class="field">
+        <span class="lbl">备用线路</span>
+        <div style="display:flex;align-items:center;gap:7px;color:var(--dim)"><span class="dot w"></span>10.144.144.1:2730<span style="margin-left:auto;color:var(--faint);font-size:10px">easytier · 待命</span></div>
+      </div>
+      <div class="field">
+        <span class="lbl">配对 Token</span>
+        <div>aaa_tk_••••••••••••c21b</div>
+      </div>
+      <div class="btn sec" data-go="a-settings">⌘ 扫码配对（Mac 设置页出码）</div>
+      <div class="btn pri" data-go="a-sessions">连接 →</div>
+      <p class="finenote">daemon 仅监听 localhost + tailscale / easytier 网卡<br>链路经 WireGuard 加密，Token 防误连</p>
+    </div>
+  </div>
+</div>
+
+<!-- A2 会话（首页） -->
+<div class="phone proto-screen" id="a-sessions" hidden>
+  <div class="scr">
+    <div class="p-status"><span>21:47</span><span>tailscale ▲ · 82%</span></div>
+    <div class="p-top">
+      <div class="p-title">会话</div>
+      <span class="pill" data-go="a-settings"><span class="dot g"></span>tailscale · 14ms</span>
+    </div>
+    <div class="notif" data-go="a-term">
+      <div class="nt">⚡ Claude 等待输入 · aaa-ui<span class="ntime">刚刚</span></div>
+      <div class="nb">原型是否需要包含 iPad 布局？</div>
+    </div>
+    <div style="display:flex;gap:6px;padding:0 12px 10px">
+      <span class="pill" style="color:var(--ink);border-color:var(--edge2)">全部 4</span>
+      <span class="pill"><span class="dot y"></span>等待输入 1</span>
+      <span class="pill"><span class="dot g"></span>运行中 1</span>
+    </div>
+    <div class="p-body" style="overflow:hidden">
+      <div class="card warn" data-go="a-term">
+        <div class="c-head"><span class="dot y"></span><span class="c-title">aaa-ui 交互原型设计</span><span class="agchip claude">claude</span></div>
+        <div class="c-sub">aaa-ui · resume 9f2c81 · <span style="color:var(--amb)">等待输入</span></div>
+        <div class="prev"><span class="tg">●</span> 已生成 Android 端 9 个界面
+<span class="ta">?</span> <span class="tw">原型是否需要包含 iPad 布局？</span>
+  <span class="tc">❯ 1. 需要</span>   <span class="td">2. 不需要</span></div>
+      </div>
+      <div class="card" data-go="a-term">
+        <div class="c-head"><span class="dot g"></span><span class="c-title">播放内核换 mpv 重构</span><span class="agchip codex">codex</span></div>
+        <div class="c-sub">decoTV · <span style="color:var(--grn)">运行中 · 3s 前有输出</span></div>
+        <div class="prev"><span class="td">$</span> cargo build --release
+   <span class="tg">Compiling</span> decotv v0.4.2</div>
+      </div>
+      <div class="card" data-go="a-term">
+        <div class="c-head"><span class="dot w"></span><span class="c-title">zsh</span><span class="agchip term">终端</span></div>
+        <div class="c-sub">/Volumes/SSD/project · 空闲 26 分钟</div>
+        <div class="prev"><span class="tc">➜</span>  project <span class="tm">git:(</span><span class="tr">main</span><span class="tm">)</span></div>
+      </div>
+      <div class="card" style="opacity:.62" data-go="a-term">
+        <div class="c-head"><span class="dot r"></span><span class="c-title">exit node 切换脚本</span><span class="agchip pi">pi</span></div>
+        <div class="c-sub">tailscale · 已退出 2 小时 · 回放已保留</div>
+      </div>
+    </div>
+    <div style="position:absolute;right:16px;bottom:78px;width:50px;height:50px;border-radius:50%;background:var(--cyan);color:#08252c;font-size:26px;font-weight:700;display:flex;align-items:center;justify-content:center;box-shadow:0 8px 24px rgba(83,198,221,.35)" data-go="a-new">＋</div>
+    <div class="p-nav">
+      <div class="ni on"><span class="g">▣</span>会话</div>
+      <div class="ni" data-go="a-projects"><span class="g">▤</span>项目</div>
+      <div class="ni" data-go="a-settings"><span class="g">⚙</span>设置</div>
+    </div>
+  </div>
+</div>
+
+<!-- A3 会话终端 -->
+<div class="phone proto-screen" id="a-term" hidden>
+  <div class="scr">
+    <div class="p-status"><span>21:48</span><span>tailscale ▲ · 82%</span></div>
+    <div class="p-top" style="padding-bottom:6px">
+      <span style="font-size:18px;color:var(--dim)" data-go="a-sessions">‹</span>
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:700;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">aaa-ui 交互原型设计</div>
+        <div style="font-family:var(--mono);font-size:9.5px;color:var(--faint)">aaa-ui · claude · resume 9f2c81</div>
+      </div>
+      <span class="dot y"></span>
+      <span style="font-size:18px;color:var(--dim);padding:0 2px" data-go="a-term-menu">⋮</span>
+    </div>
+    <div class="termfull"><span class="tg">●</span> <span class="tw">Read</span><span class="td">(~/.local/bin/aaa · 1388 行)</span>
+<span class="tg">●</span> <span class="tw">Write</span><span class="td">(prototype.html)</span>
+  <span class="td">⎿ 已生成 Android 端 9 个界面</span>
+  <span class="td">⎿ 配对 / 会话 / 终端 / 项目 / 新建 / 设置</span>
+
+<span class="ta">?</span> <span class="tw">原型是否需要包含 iPad 布局？</span>
+
+  <span class="tc">❯ 1. 需要</span>
+    <span class="td">2. 不需要</span>
+
+<span class="td">  按数字选择 · Esc 取消</span></div>
+    <div class="qanswers">
+      <span class="qa" data-go="a-sessions">1 · 需要</span>
+      <span class="qa" data-go="a-sessions">2 · 不需要</span>
+      <span class="qa" style="color:var(--dim);border-color:var(--edge2);background:transparent">Esc</span>
+    </div>
+    <div class="keybar">
+      <span class="key">Esc</span><span class="key">Tab</span><span class="key">Ctrl</span><span class="key">↑</span><span class="key">↓</span><span class="key">←</span><span class="key">→</span><span class="key">⏎</span><span class="key">/</span>
+    </div>
+    <div class="composer">
+      <div class="cin">输入消息，⏎ 发送（支持语音键盘）</div>
+      <div class="csend">发送</div>
+    </div>
+  </div>
+</div>
+
+<!-- A4 会话操作菜单 -->
+<div class="phone proto-screen" id="a-term-menu" hidden>
+  <div class="scr">
+    <div class="under">
+      <div class="p-status"><span>21:48</span><span>▲ 82%</span></div>
+      <div class="termfull"><span class="ta">?</span> 原型是否需要包含 iPad 布局？
+  <span class="tc">❯ 1. 需要</span>   2. 不需要</div>
+    </div>
+    <div class="scrim">
+      <div class="sheet">
+        <div class="grab"></div>
+        <div class="sh-head">
+          <div class="sh-title">aaa-ui 交互原型设计</div>
+          <div class="sh-sub">claude · /Volumes/SSD/project/aaa-ui</div>
+        </div>
+        <div class="sh-item" data-go="a-term"><span class="ic">🌐</span>打开 Web 预览<span class="note">检测到 :5173 · tailnet 直连</span></div>
+        <div class="sh-item" data-go="a-term"><span class="ic">✏️</span>重命名会话<span class="note">当前为 AI 命名</span></div>
+        <div class="sh-item" data-go="a-term"><span class="ic">📋</span>复制屏幕内容</div>
+        <div class="sh-item" data-go="a-term"><span class="ic">🔁</span>重启 agent<span class="note">resume 同一会话</span></div>
+        <div class="sh-item" data-go="a-term"><span class="ic">Aa</span>字号<span class="note">− 14 ＋</span></div>
+        <div class="sh-item" data-go="a-sessions"><span class="ic">⛔</span>结束进程<span class="note">保留回放</span></div>
+        <div class="sh-item danger" data-go="a-sessions"><span class="ic">🗑</span>删除会话记录</div>
+        <div class="sh-item" style="justify-content:center;border:0;color:var(--dim)" data-go="a-term">取消</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- A5 新建 -->
+<div class="phone proto-screen" id="a-new" hidden>
+  <div class="scr">
+    <div class="under">
+      <div class="p-status"><span>21:48</span><span>▲ 82%</span></div>
+      <div class="p-top"><div class="p-title">会话</div></div>
+    </div>
+    <div class="scrim">
+      <div class="sheet">
+        <div class="grab"></div>
+        <div class="sh-head" style="border:0">
+          <div class="sh-title">新建</div>
+          <div class="sh-sub">/Volumes/SSD/project/&lt;名称&gt;</div>
+        </div>
+        <div class="field" style="margin:6px 16px 12px">
+          <span class="lbl">项目名称</span>
+          <div style="color:var(--faint)">留空 = 2026-08-30-2148</div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:0 16px 12px">
+          <div class="agrow sel" style="display:flex;gap:8px;align-items:center;padding:10px 12px;border:1px solid var(--cyan);border-radius:11px;background:rgba(83,198,221,.07)" data-go="a-term"><span class="agchip claude">claude</span>Claude</div>
+          <div style="display:flex;gap:8px;align-items:center;padding:10px 12px;border:1px solid var(--edge);border-radius:11px" data-go="a-term"><span class="agchip codex">codex</span>Codex</div>
+          <div style="display:flex;gap:8px;align-items:center;padding:10px 12px;border:1px solid var(--edge);border-radius:11px" data-go="a-term"><span class="agchip pi">pi</span>Pi</div>
+          <div style="display:flex;gap:8px;align-items:center;padding:10px 12px;border:1px solid var(--edge);border-radius:11px" data-go="a-term"><span class="agchip reasonix">rnx</span>Reasonix</div>
+          <div style="display:flex;gap:8px;align-items:center;padding:10px 12px;border:1px solid var(--edge);border-radius:11px" data-go="a-term"><span class="agchip agy">agy</span>Antigravity</div>
+          <div style="display:flex;gap:8px;align-items:center;padding:10px 12px;border:1px dashed var(--edge2);border-radius:11px" data-go="a-term"><span class="agchip term">zsh</span>普通终端<span class="newtag">新增</span></div>
+        </div>
+        <div class="btn pri" data-go="a-term">创建并进入 →</div>
+        <div class="sh-item" style="justify-content:center;border:0;color:var(--dim)" data-go="a-sessions">取消</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- A6 项目 -->
+<div class="phone proto-screen" id="a-projects" hidden>
+  <div class="scr">
+    <div class="p-status"><span>21:49</span><span>tailscale ▲ · 82%</span></div>
+    <div class="p-top">
+      <div class="p-title">项目</div>
+      <span class="pill">53 个 · SSD ✓</span>
+    </div>
+    <div class="field" style="margin:0 12px 10px;padding:8px 13px;color:var(--faint)">🔍 搜索项目 / 会话命名…</div>
+    <div class="p-body" style="overflow:hidden">
+      <div class="card" data-go="a-proj-actions">
+        <div class="c-head"><span class="c-title">aaa-ui</span><span class="agchip claude">claude</span></div>
+        <div class="c-sub" style="margin-bottom:4px">「aaa-ui 交互原型设计」</div>
+        <div class="c-time">上下文 1.2M · 目录 4.1K · 今天 21:47</div>
+      </div>
+      <div class="card" data-go="a-proj-actions">
+        <div class="c-head"><span class="c-title">decoTV</span><span class="agchip codex">codex</span></div>
+        <div class="c-sub" style="margin-bottom:4px">「播放内核换 mpv 重构」</div>
+        <div class="c-time">上下文 3.4M · 目录 128M · 今天 21:32</div>
+      </div>
+      <div class="card" data-go="a-proj-actions">
+        <div class="c-head"><span class="c-title">dinotty</span><span class="agchip claude">claude</span></div>
+        <div class="c-sub" style="margin-bottom:4px">「源码架构梳理」</div>
+        <div class="c-time">上下文 860K · 目录 96M · 昨天 23:10</div>
+      </div>
+      <div class="card" data-go="a-proj-actions">
+        <div class="c-head"><span class="c-title">lab-链上分析</span><span class="agchip codex">codex</span></div>
+        <div class="c-sub" style="margin-bottom:4px">「链上转账图谱脚本」</div>
+        <div class="c-time">上下文 2.1M · 目录 12M · 08-27</div>
+      </div>
+      <div class="card" data-go="a-proj-actions">
+        <div class="c-head"><span class="c-title">fanbianyisoga</span><span class="agchip reasonix">reasonix</span></div>
+        <div class="c-sub" style="margin-bottom:4px">「反编译产物比对」</div>
+        <div class="c-time">上下文 640K · 目录 2.3G · 08-26</div>
+      </div>
+      <div class="card" data-go="a-proj-actions">
+        <div class="c-head"><span class="c-title">配置</span><span class="agchip agy">agy</span></div>
+        <div class="c-sub" style="margin-bottom:4px">「dotfiles 整理」</div>
+        <div class="c-time">上下文 210K · 目录 1.1M · 08-24</div>
+      </div>
+      <div class="finenote">长按进入多选 · 批量删除与 CLI 的 <span style="color:var(--ink)">a / d</span> 键同义</div>
+    </div>
+    <div class="p-nav">
+      <div class="ni" data-go="a-sessions"><span class="g">▣</span>会话</div>
+      <div class="ni on"><span class="g">▤</span>项目</div>
+      <div class="ni" data-go="a-settings"><span class="g">⚙</span>设置</div>
+    </div>
+  </div>
+</div>
+
+<!-- A7 项目操作 -->
+<div class="phone proto-screen" id="a-proj-actions" hidden>
+  <div class="scr">
+    <div class="under">
+      <div class="p-status"><span>21:49</span><span>▲ 82%</span></div>
+      <div class="p-top"><div class="p-title">项目</div></div>
+    </div>
+    <div class="scrim">
+      <div class="sheet">
+        <div class="grab"></div>
+        <div class="sh-head">
+          <div class="sh-title">decoTV</div>
+          <div class="sh-sub">codex · /Volumes/SSD/project/decoTV · 128M</div>
+        </div>
+        <div class="sh-item" data-go="a-term"><span class="ic">▶</span>继续会话<span class="note">codex resume 4be1…</span></div>
+        <div class="sh-item" data-go="a-new"><span class="ic">✳</span>用其它 agent 打开…</div>
+        <div class="sh-item" data-go="a-term"><span class="ic">＞</span>在此目录开终端<span class="note">zsh</span></div>
+        <div class="sh-item" data-go="a-projects"><span class="ic">⚙</span>更换默认 agent<span class="note">当前 codex</span></div>
+        <div class="sh-item danger" data-go="a-delete"><span class="ic">🗑</span>删除项目…<span class="note">目录 + 全部会话</span></div>
+        <div class="sh-item" style="justify-content:center;border:0;color:var(--dim)" data-go="a-projects">取消</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- A8 删除确认 -->
+<div class="phone proto-screen" id="a-delete" hidden>
+  <div class="scr">
+    <div class="under">
+      <div class="p-status"><span>21:49</span><span>▲ 82%</span></div>
+      <div class="p-top"><div class="p-title">项目</div></div>
+    </div>
+    <div class="scrim center">
+      <div class="dlg">
+        <h4>删除项目 decoTV？</h4>
+        <p>将删除目录（128M）并清除所有 agent 的会话存储：</p>
+        <p style="font-family:var(--mono);font-size:11.5px;color:var(--ink)">Codex 6 条 · Claude 2 条</p>
+        <p style="color:var(--faint);font-size:11px">与 aaa CLI 的 <kbd>d</kbd> 行为一致，不可恢复。</p>
+        <div class="row">
+          <div class="btn sec" data-go="a-projects">取消</div>
+          <div class="btn dangr" data-go="a-projects">删除</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- A9 设置 -->
+<div class="phone proto-screen" id="a-settings" hidden>
+  <div class="scr">
+    <div class="p-status"><span>21:50</span><span>tailscale ▲ · 82%</span></div>
+    <div class="p-top"><div class="p-title">设置</div></div>
+    <div class="p-body" style="overflow:hidden">
+      <div class="setgrp">
+        <div class="gt">服务器</div>
+        <div class="srow"><span class="dot g"></span><div class="sl">mac-mini.tail3f8a.ts.net:2730</div><div class="sv">tailscale · 14ms</div></div>
+        <div class="srow"><span class="dot w"></span><div class="sl">10.144.144.1:2730</div><div class="sv">easytier · 备用</div></div>
+        <div class="srow"><div class="sl">Token</div><div class="sv">····c21b</div><span class="minibtn" data-go="a-connect">重新配对</span></div>
+      </div>
+      <div class="setgrp">
+        <div class="gt">通知</div>
+        <div class="srow"><div class="sl">agent 等待输入时推送</div><span class="tgl on"></span></div>
+        <div class="srow"><div class="sl">任务完成时推送</div><span class="tgl on"></span></div>
+        <div class="srow"><div class="sl">会话异常退出时推送</div><span class="tgl"></span></div>
+        <div class="srow"><div class="sl">离线兜底渠道</div><div class="sv">ntfy（自托管）</div></div>
+      </div>
+      <div class="setgrp">
+        <div class="gt">终端</div>
+        <div class="srow"><div class="sl">字号</div><div class="sv">14</div></div>
+        <div class="srow"><div class="sl">快捷键条</div><div class="sv">自定义…</div></div>
+      </div>
+      <div class="setgrp">
+        <div class="gt">关于</div>
+        <div class="srow"><div class="sl">aaa-daemon</div><div class="sv">v0.1.0 · launchd 常驻</div></div>
+        <div class="srow"><div class="sl">SSD 挂载状态</div><div class="sv" style="color:var(--grn)">已挂载 ✓</div></div>
+        <div class="srow"><div class="sl">重启 daemon</div><span class="minibtn">执行</span></div>
+      </div>
+    </div>
+    <div class="p-nav">
+      <div class="ni" data-go="a-sessions"><span class="g">▣</span>会话</div>
+      <div class="ni" data-go="a-projects"><span class="g">▤</span>项目</div>
+      <div class="ni on"><span class="g">⚙</span>设置</div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- macOS                                                         -->
+<!-- ============================================================ -->
+
+<!-- M1 菜单栏 -->
+<div class="macstage proto-screen" id="m-menubar" hidden>
+<div class="macwin">
+  <div class="desk" style="display:flex;flex-direction:column">
+    <div class="mbar">
+      <span class="app"> Finder</span><span>文件</span><span>编辑</span><span>显示</span><span>窗口</span>
+      <div class="right"><span class="aaaicon" title="等待输入时变黄">▲AAA 1</span><span>📶</span><span>🔋</span><span>周六 21:51</span></div>
+    </div>
+    <div class="dropdown">
+      <div class="dd-label">等待输入 — 1</div>
+      <div class="dd-item hl" data-go="m-main"><span class="dot y" style="margin-top:5px"></span><div class="dt"><b>aaa-ui 交互原型设计</b><span>原型是否需要包含 iPad 布局？</span></div></div>
+      <div class="dd-label">运行中</div>
+      <div class="dd-item" data-go="m-main"><span class="dot g" style="margin-top:5px"></span><div class="dt"><b>播放内核换 mpv 重构</b><span>decoTV · cargo build --release</span></div></div>
+      <div class="dd-label">空闲</div>
+      <div class="dd-item" data-go="m-main"><span class="dot w" style="margin-top:5px"></span><div class="dt"><b>zsh</b><span>/Volumes/SSD/project</span></div></div>
+      <div class="cm-sep"></div>
+      <div class="dd-item" data-go="m-new"><span style="color:var(--cyan)">＋</span><div class="dt"><b>新建…</b><span>Claude / Codex / … / 普通终端</span></div></div>
+      <div class="dd-item" data-go="m-dashboard"><span>◱</span><div class="dt"><b>打开 AAA-UI</b></div></div>
+      <div class="dd-item" data-go="m-settings"><span>⚙</span><div class="dt"><b>设置…</b></div></div>
+    </div>
+    <div style="margin-top:auto;padding:18px;font-family:var(--mono);font-size:11px;color:var(--faint)">菜单栏常驻 · 有会话等待输入时图标计数变黄 · 点击条目直达该会话</div>
+  </div>
+</div>
+</div>
+
+<!-- M2 主窗口（终端） -->
+<div class="macstage proto-screen" id="m-main" hidden>
+<div class="macwin">
+  <div class="tbar"><div class="tl"><i></i><i></i><i></i></div><div class="wt">AAA-UI — aaa-ui</div><div style="width:47px"></div></div>
+  <div class="mbody">
+    <div class="sidebar">
+      <div class="sb-item" data-go="m-dashboard"><span>◱</span><span class="sbt">总览</span></div>
+      <div class="sb-label">会话</div>
+      <div class="sb-item on"><span class="dot y"></span><span class="sbt">aaa-ui 交互原型设计</span><span class="mini">claude</span></div>
+      <div class="sb-item"><span class="dot g"></span><span class="sbt">播放内核换 mpv 重构</span><span class="mini">codex</span></div>
+      <div class="sb-item"><span class="dot w"></span><span class="sbt">zsh</span><span class="mini">term</span></div>
+      <div class="sb-label">资料库</div>
+      <div class="sb-item" data-go="m-projects"><span>▤</span><span class="sbt">项目</span><span class="mini">53</span></div>
+      <div class="sb-item" data-go="m-new"><span style="color:var(--cyan)">＋</span><span class="sbt">新建…</span></div>
+      <div class="sb-foot"><span class="dot g"></span>daemon v0.1.0<span style="margin-left:auto" data-go="m-settings">⚙</span></div>
+    </div>
+    <div class="main">
+      <div class="tabs">
+        <div class="tab on"><span class="dot y"></span>aaa-ui</div>
+        <div class="tab"><span class="dot g"></span>decoTV</div>
+        <div class="tab"><span class="dot w"></span>zsh</div>
+      </div>
+      <div class="mterm"><span class="tg">●</span> <span class="tw">Read</span><span class="td">(~/.local/bin/aaa · 1388 行)</span>
+<span class="tg">●</span> <span class="tw">Write</span><span class="td">(prototype.html)</span>
+  <span class="td">⎿ 已生成 Android 端 9 个界面</span>
+  <span class="td">⎿ 配对 / 会话 / 终端 / 项目 / 新建 / 设置</span>
+
+<span class="ta">?</span> <span class="tw">原型是否需要包含 iPad 布局？</span>
+
+  <span class="tc">❯ 1. 需要</span>
+    <span class="td">2. 不需要</span>
+
+<span class="td">  数字键直接作答 · 与手机看到的是同一个 PTY</span></div>
+      <div class="mstatus">
+        <span>/Volumes/SSD/project/aaa-ui</span>
+        <span>claude · resume 9f2c81</span>
+        <span style="margin-left:auto;color:var(--amb)">● 等待输入</span>
+        <span data-go="m-menubar" style="color:var(--cyan)">菜单栏视图 →</span>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+<!-- M3 总览 -->
+<div class="macstage proto-screen" id="m-dashboard" hidden>
+<div class="macwin">
+  <div class="tbar"><div class="tl"><i></i><i></i><i></i></div><div class="wt">AAA-UI — 总览</div><div style="width:47px"></div></div>
+  <div class="mbody">
+    <div class="sidebar">
+      <div class="sb-item on"><span>◱</span><span class="sbt">总览</span></div>
+      <div class="sb-label">会话</div>
+      <div class="sb-item" data-go="m-main"><span class="dot y"></span><span class="sbt">aaa-ui 交互原型设计</span><span class="mini">claude</span></div>
+      <div class="sb-item" data-go="m-main"><span class="dot g"></span><span class="sbt">播放内核换 mpv 重构</span><span class="mini">codex</span></div>
+      <div class="sb-item" data-go="m-main"><span class="dot w"></span><span class="sbt">zsh</span><span class="mini">term</span></div>
+      <div class="sb-label">资料库</div>
+      <div class="sb-item" data-go="m-projects"><span>▤</span><span class="sbt">项目</span><span class="mini">53</span></div>
+      <div class="sb-item" data-go="m-new"><span style="color:var(--cyan)">＋</span><span class="sbt">新建…</span></div>
+      <div class="sb-foot"><span class="dot g"></span>daemon v0.1.0<span style="margin-left:auto" data-go="m-settings">⚙</span></div>
+    </div>
+    <div class="main" style="padding:18px;overflow:hidden">
+      <div style="font-weight:700;font-size:16px;margin-bottom:12px">会话总览 <span style="font-family:var(--mono);font-size:11px;color:var(--amb)">· 1 个等待输入</span></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+        <div class="card warn" style="margin:0" data-go="m-main">
+          <div class="c-head"><span class="dot y"></span><span class="c-title">aaa-ui 交互原型设计</span><span class="agchip claude">claude</span></div>
+          <div class="c-sub">aaa-ui · 等待输入</div>
+          <div class="prev"><span class="ta">?</span> 原型是否需要包含 iPad 布局？
+  <span class="tc">❯ 1. 需要</span>   2. 不需要</div>
+        </div>
+        <div class="card" style="margin:0" data-go="m-main">
+          <div class="c-head"><span class="dot g"></span><span class="c-title">播放内核换 mpv 重构</span><span class="agchip codex">codex</span></div>
+          <div class="c-sub">decoTV · 运行中</div>
+          <div class="prev"><span class="td">$</span> cargo build --release
+   <span class="tg">Compiling</span> decotv v0.4.2</div>
+        </div>
+        <div class="card" style="margin:0" data-go="m-main">
+          <div class="c-head"><span class="dot w"></span><span class="c-title">zsh</span><span class="agchip term">终端</span></div>
+          <div class="c-sub">/Volumes/SSD/project · 空闲 26 分钟</div>
+          <div class="prev"><span class="tc">➜</span>  project <span class="tm">git:(</span><span class="tr">main</span><span class="tm">)</span></div>
+        </div>
+        <div class="card" style="margin:0;opacity:.62" data-go="m-main">
+          <div class="c-head"><span class="dot r"></span><span class="c-title">exit node 切换脚本</span><span class="agchip pi">pi</span></div>
+          <div class="c-sub">tailscale · 已退出 2 小时 · 回放已保留</div>
+          <div class="prev"><span class="td">进程已结束 (exit 0) · 点击查看回放</span></div>
+        </div>
+      </div>
+      <div style="margin-top:14px;font-family:var(--mono);font-size:10.5px;color:var(--faint)">卡片实时刷新最近输出 · 等待输入的会话置顶并高亮</div>
+    </div>
+  </div>
+</div>
+</div>
+
+<!-- M4 项目表格 -->
+<div class="macstage proto-screen" id="m-projects" hidden>
+<div class="macwin">
+  <div class="tbar"><div class="tl"><i></i><i></i><i></i></div><div class="wt">AAA-UI — 项目</div><div style="width:47px"></div></div>
+  <div class="mbody">
+    <div class="sidebar">
+      <div class="sb-item" data-go="m-dashboard"><span>◱</span><span class="sbt">总览</span></div>
+      <div class="sb-label">会话</div>
+      <div class="sb-item" data-go="m-main"><span class="dot y"></span><span class="sbt">aaa-ui 交互原型设计</span><span class="mini">claude</span></div>
+      <div class="sb-item" data-go="m-main"><span class="dot g"></span><span class="sbt">播放内核换 mpv 重构</span><span class="mini">codex</span></div>
+      <div class="sb-label">资料库</div>
+      <div class="sb-item on"><span>▤</span><span class="sbt">项目</span><span class="mini">53</span></div>
+      <div class="sb-item" data-go="m-new"><span style="color:var(--cyan)">＋</span><span class="sbt">新建…</span></div>
+      <div class="sb-foot"><span class="dot g"></span>daemon v0.1.0<span style="margin-left:auto" data-go="m-settings">⚙</span></div>
+    </div>
+    <div class="main" style="position:relative">
+      <div class="toolbar">
+        <span class="tbtn pri" data-go="m-new">＋ 新建 ▾</span>
+        <span class="tbtn" data-go="m-main">▶ 打开</span>
+        <span class="tbtn">⚙ 换 agent</span>
+        <span class="tbtn" data-go="m-delete" style="color:var(--red)">🗑 删除</span>
+        <span class="search">🔍 搜索…</span>
+      </div>
+      <div style="flex:1;overflow:hidden">
+      <table class="ptable">
+        <tr><th>#</th><th>会话命名</th><th>上下文</th><th>目录</th><th>名称</th><th>agent</th><th>修改时间</th></tr>
+        <tr data-go="m-main"><td class="num">1</td><td>aaa-ui 交互原型设计</td><td class="num">1.2M</td><td class="num">4.1K</td><td class="name">aaa-ui</td><td><span class="agchip claude">claude</span></td><td class="num">2026-08-30 21:47</td></tr>
+        <tr class="sel" data-go="m-main"><td class="num">2</td><td>播放内核换 mpv 重构</td><td class="num">3.4M</td><td class="num">128M</td><td class="name">decoTV</td><td><span class="agchip codex">codex</span></td><td class="num">2026-08-30 21:32</td></tr>
+        <tr data-go="m-main"><td class="num">3</td><td>源码架构梳理</td><td class="num">860K</td><td class="num">96M</td><td class="name">dinotty</td><td><span class="agchip claude">claude</span></td><td class="num">2026-08-29 23:10</td></tr>
+        <tr data-go="m-main"><td class="num">4</td><td>链上转账图谱脚本</td><td class="num">2.1M</td><td class="num">12M</td><td class="name">lab-链上分析</td><td><span class="agchip codex">codex</span></td><td class="num">2026-08-27 15:02</td></tr>
+        <tr data-go="m-main"><td class="num">5</td><td>反编译产物比对</td><td class="num">640K</td><td class="num">2.3G</td><td class="name">fanbianyisoga</td><td><span class="agchip reasonix">reasonix</span></td><td class="num">2026-08-26 11:40</td></tr>
+        <tr data-go="m-main"><td class="num">6</td><td>exit node 切换脚本</td><td class="num">380K</td><td class="num">840K</td><td class="name">tailscale</td><td><span class="agchip pi">pi</span></td><td class="num">2026-08-25 19:23</td></tr>
+        <tr data-go="m-main"><td class="num">7</td><td>dotfiles 整理</td><td class="num">210K</td><td class="num">1.1M</td><td class="name">配置</td><td><span class="agchip agy">agy</span></td><td class="num">2026-08-24 09:12</td></tr>
+        <tr data-go="m-main"><td class="num">8</td><td>tg 频道监控 bot</td><td class="num">1.8M</td><td class="num">36M</td><td class="name">telegram-监控</td><td><span class="agchip agy">agy</span></td><td class="num">2026-08-22 20:05</td></tr>
+      </table>
+      </div>
+      <div class="ctxmenu" style="top:150px;right:60px">
+        <div class="cm-item" data-go="m-main">▶ 打开<span class="note">codex resume</span></div>
+        <div class="cm-item" data-go="m-new">✳ 用其它 agent 打开 ▸</div>
+        <div class="cm-item" data-go="m-main">＞ 在此新建终端</div>
+        <div class="cm-item">⚙ 更换默认 agent ▸</div>
+        <div class="cm-sep"></div>
+        <div class="cm-item danger" data-go="m-delete">🗑 删除项目…</div>
+      </div>
+      <div class="mstatus"><span>53 个项目</span><span>/Volumes/SSD/project</span><span style="color:var(--grn)">SSD 已挂载 ✓</span><span style="margin-left:auto">列结构与 aaa CLI 项目表一致</span></div>
+    </div>
+  </div>
+</div>
+</div>
+
+<!-- M5 新建 -->
+<div class="macstage proto-screen" id="m-new" hidden>
+<div class="macwin">
+  <div class="tbar"><div class="tl"><i></i><i></i><i></i></div><div class="wt">AAA-UI</div><div style="width:47px"></div></div>
+  <div class="under" style="position:absolute;inset:40px 0 0">
+    <div class="mbody" style="height:100%">
+      <div class="sidebar"><div class="sb-label">会话</div></div>
+      <div class="main"><div class="mterm"></div></div>
+    </div>
+  </div>
+  <div class="mscrim">
+    <div class="modal">
+      <h4>新项目</h4>
+      <div class="field" style="margin:0 0 12px">
+        <span class="lbl">名称 · /Volumes/SSD/project/&lt;名称&gt;</span>
+        <div style="color:var(--faint)">留空 = 2026-08-30-2152</div>
+      </div>
+      <div class="aglist">
+        <div class="agrow sel" data-go="m-main"><span class="agchip claude">claude</span>Claude<span class="cmd">claude --dangerously-skip-permissions</span></div>
+        <div class="agrow" data-go="m-main"><span class="agchip codex">codex</span>Codex<span class="cmd">codex --dangerously-bypass…</span></div>
+        <div class="agrow" data-go="m-main"><span class="agchip pi">pi</span>Pi<span class="cmd">pi</span></div>
+        <div class="agrow" data-go="m-main"><span class="agchip reasonix">rnx</span>Reasonix<span class="cmd">reasonix --permission-mode bypass…</span></div>
+        <div class="agrow" data-go="m-main"><span class="agchip agy">agy</span>Antigravity<span class="cmd">agy --dangerously-skip-permissions</span></div>
+        <div class="agrow" style="border-style:dashed" data-go="m-main"><span class="agchip term">zsh</span>普通终端 <span class="newtag">新增</span><span class="cmd">zsh -l</span></div>
+      </div>
+      <div class="dlg" style="border:0;padding:0;background:transparent">
+        <div class="row">
+          <div class="btn sec" data-go="m-main">取消</div>
+          <div class="btn pri" data-go="m-main">创建并进入</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+<!-- M6 删除确认 -->
+<div class="macstage proto-screen" id="m-delete" hidden>
+<div class="macwin">
+  <div class="tbar"><div class="tl"><i></i><i></i><i></i></div><div class="wt">AAA-UI — 项目</div><div style="width:47px"></div></div>
+  <div class="under" style="position:absolute;inset:40px 0 0">
+    <div class="mbody" style="height:100%">
+      <div class="sidebar"><div class="sb-label">资料库</div><div class="sb-item on"><span>▤</span><span class="sbt">项目</span></div></div>
+      <div class="main"></div>
+    </div>
+  </div>
+  <div class="mscrim">
+    <div class="modal" style="width:440px">
+      <h4>批量删除 2 个项目？</h4>
+      <p style="margin:0 0 4px;font-size:12.5px;color:var(--dim)">— sogadecompile（46M）<br>— 2026-07-09-2356（空目录）</p>
+      <p style="margin:8px 0 4px;font-size:12.5px;color:var(--dim)">将同时清除各 agent 会话存储：</p>
+      <p style="font-family:var(--mono);font-size:11.5px;color:var(--ink);margin:0">Claude 14 条 · Codex 3 条 · Grok 1 条（历史遗留）</p>
+      <p style="color:var(--faint);font-size:11px;margin:8px 0 0">purge 语义与 aaa CLI 完全一致，不可恢复。</p>
+      <div class="dlg" style="border:0;padding:0;background:transparent">
+        <div class="row">
+          <div class="btn sec" data-go="m-projects">取消</div>
+          <div class="btn dangr" data-go="m-projects">删除</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+<!-- M7 设置 -->
+<div class="macstage proto-screen" id="m-settings" hidden>
+<div class="macwin">
+  <div class="tbar"><div class="tl"><i></i><i></i><i></i></div><div class="wt">AAA-UI — 设置</div><div style="width:47px"></div></div>
+  <div class="setwin">
+    <div class="settabs">
+      <span class="settab">通用</span><span class="settab on">配对</span><span class="settab">通知</span><span class="settab">终端</span>
+    </div>
+    <div class="setcols">
+      <div class="setcol" style="flex:0 0 220px">
+        <canvas class="qr" id="qrc" width="146" height="146"></canvas>
+        <div style="font-size:12px;color:var(--dim);line-height:1.6">Android 端扫码，自动填入服务器地址与 Token。</div>
+      </div>
+      <div class="setcol">
+        <div class="kv"><span class="k">TOKEN</span><span class="v">aaa_tk_9f3e••••••••c21b</span><span class="minibtn">复制</span><span class="minibtn">轮换</span></div>
+        <div class="kv"><span class="k">侦听</span><span class="v">127.0.0.1 · tailscale0 (100.71.22.8) · easytier (10.144.144.1)</span></div>
+        <div class="kv"><span class="k">端口</span><span class="v">2730 <span style="color:var(--faint)">(= 0xAAA)</span></span></div>
+        <div class="kv"><span class="k">LAUNCHD</span><span class="v">com.aaa.daemon 已加载 · KeepAlive ✓</span></div>
+        <div class="kv"><span class="k">项目根</span><span class="v">/Volumes/SSD/project <span style="color:var(--grn)">SSD ✓</span></span></div>
+        <div class="kv"><span class="k">未挂载时</span><span class="v" style="color:var(--amb)">拒绝启动会话，绝不 mkdir 占位</span></div>
+        <div style="font-family:var(--mono);font-size:10px;letter-spacing:.14em;color:var(--faint);padding:16px 0 6px">已配对设备</div>
+        <div class="kv"><span class="k">Pixel 8</span><span class="v">tailscale · 2 小时前活跃</span><span class="minibtn" style="color:var(--red);border-color:#5c2c2c">吊销</span></div>
+        <div style="margin-top:18px"><span class="tbtn" data-go="m-main">← 返回主窗口</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+</div><!-- /stage -->
+
+<div class="caption">
+  <div class="cap-name" id="cap-name"></div>
+  <div class="cap-note" id="cap-note"></div>
+  <div style="margin-top:10px;font-size:11px;color:var(--faint);font-family:var(--mono)"><kbd>←</kbd> <kbd>→</kbd> 切换屏幕</div>
+</div>
+
+<!-- ================= 关键路径 ================= -->
+<section class="sect">
+  <p class="eyebrow">KEY FLOWS</p>
+  <h2>四条关键路径</h2>
+  <p class="sub">设计目标只有一个：把「手机上答 agent 一句话」的成本降到两步。</p>
+  <div class="flowgrid">
+    <div class="flow">
+      <h3>① 手机答一句</h3>
+      <div class="steps"><span class="st">推送到达</span><span class="ar">→</span><span class="st">点开</span><span class="ar">→</span><span class="st">快捷作答</span></div>
+      <p>agent 等待输入时 daemon 推送到手机；点通知直达会话，问题选项变成可点的胶囊按钮。</p>
+      <p class="win">对比现状 ssh → aaa → 找项目 → resume ≈ 6 步</p>
+    </div>
+    <div class="flow">
+      <h3>② 无缝接力</h3>
+      <div class="steps"><span class="st">Mac 开会话</span><span class="ar">→</span><span class="st">出门</span><span class="ar">→</span><span class="st">手机续</span></div>
+      <p>会话 = daemon 里的一个 PTY + 服务端 VT。任何设备连上都是同一现场，断线重连秒级重绘。</p>
+    </div>
+    <div class="flow">
+      <h3>③ 随手开新活</h3>
+      <div class="steps"><span class="st">＋</span><span class="ar">→</span><span class="st">选 agent / 终端</span><span class="ar">→</span><span class="st">秒进</span></div>
+      <p>与 CLI 的 New &lt;agent&gt; 同义：留空名称用时间戳、写入注册表、bypass 权限启动；「普通终端」是新增的第 6 个选项。</p>
+    </div>
+    <div class="flow">
+      <h3>④ 项目治理</h3>
+      <div class="steps"><span class="st">项目表</span><span class="ar">→</span><span class="st">多选</span><span class="ar">→</span><span class="st">删除 + purge</span></div>
+      <p>换 agent / 删除 / 批量操作完全复用 aaa 的注册表与 purge 语义，删前列明各 agent 会话条数。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 架构 ================= -->
+<section class="sect">
+  <p class="eyebrow">ARCHITECTURE</p>
+  <h2>架构一页图</h2>
+  <p class="sub">daemon 是唯一的会话所有者；CLI 的项目扫描 / 会话查找 / AI 命名 / purge 逻辑整体移植进来。</p>
+  <div class="arch">
+    <div class="acol">
+      <h3>客户端 ×2</h3>
+      <div class="where">Android · macOS（同一套代码）</div>
+      <ul>
+        <li><b>Tauri v2 壳</b> + xterm.js 渲染</li>
+        <li>只画像素，不存状态</li>
+        <li>快捷键条 / 消息式输入 / 快捷作答</li>
+        <li>浏览器 PWA 兜底（daemon 直接 serve）</li>
+      </ul>
+    </div>
+    <div class="alink">
+      <span class="wire">tailscale / easytier</span>
+      <span class="arrow">⇄</span>
+      <span class="wire">WS + REST · token</span>
+    </div>
+    <div class="acol core">
+      <h3>aaa-daemon</h3>
+      <div class="where">Mac mini · launchd 常驻 · :2730</div>
+      <ul>
+        <li><b>PTY 池</b>：会话跨断线存活</li>
+        <li><b>服务端 VT</b>：重连即整屏重绘</li>
+        <li>项目扫描 / AI 会话命名 / purge（移植自 aaa）</li>
+        <li><b>等待输入检测</b> → 推送（WS / ntfy 兜底）</li>
+        <li>SSD 未挂载 → 只读降级，绝不 mkdir</li>
+      </ul>
+    </div>
+    <div class="alink">
+      <span class="wire">spawn PTY</span>
+      <span class="arrow">⇄</span>
+      <span class="wire">读会话存储</span>
+    </div>
+    <div class="acol">
+      <h3>Agent CLI 层</h3>
+      <div class="where">本机进程与 ~/.* 存储</div>
+      <ul>
+        <li>claude / codex / pi / reasonix / agy / zsh</li>
+        <li>resume 模板沿用 AGENT_CMD_RESUME</li>
+        <li>Claude 走 <b>Notification hook</b> 精确报「等待输入」</li>
+        <li>其余 agent 用输出静默 + 提示行启发式</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 设计决策 ================= -->
+<section class="sect">
+  <p class="eyebrow">DECISIONS</p>
+  <h2>六个设计决策</h2>
+  <div class="decisions">
+    <div class="dec"><span class="no">01</span><b>首页是会话，不是菜单。</b>daemon 让会话常驻后，手机上最高频的动作是「看 agent 卡在哪、回一句」，菜单入口降级为 FAB 与底栏。</div>
+    <div class="dec"><span class="no">02</span><b>等待输入是一等状态。</b>黄点、置顶、推送、快捷作答胶囊，全链路围绕它设计；这是移动端相对 ssh 的最大增益。</div>
+    <div class="dec"><span class="no">03</span><b>消息式输入。</b>长 prompt 用输入框＋发送（享受语音键盘与中文输入法），短操作用快捷键条直捅 PTY，两种模式并存。</div>
+    <div class="dec"><span class="no">04</span><b>Mac 端菜单栏优先。</b>本机已有 iTerm，主窗口不抢戏；菜单栏图标带等待计数，点条目直达会话才是日常动线。</div>
+    <div class="dec"><span class="no">05</span><b>语义完全对齐 CLI。</b>注册表、resume 模板、purge、时间戳命名、SSD 挂载保护——UI 不发明新行为，只换交互皮肤。</div>
+    <div class="dec"><span class="no">06</span><b>网络交给 overlay。</b>不做公网暴露、不做账号体系；tailscale/easytier + 静态 token + 扫码配对，个人使用刚好够。</div>
+  </div>
+</section>
+
+<footer class="ft">
+  <span>AAA-UI PROTOTYPE v1</span>
+  <span>基于 ~/.local/bin/aaa @ 2026-08</span>
+  <span>参考: dinotty 服务端 VT 架构</span>
+</footer>
+
+</div><!-- /wrap -->
+
+<script>
+const SCREENS = {
+  android: [
+    {id:'a-connect',   name:'01 配对连接', note:'首次启动自动发现 tailscale MagicDNS 与 easytier 地址；扫 Mac 设置页的二维码免手输 Token。点「连接」进入会话列表。'},
+    {id:'a-sessions',  name:'02 会话（首页）', note:'常驻会话卡片带实时输出预览；等待输入的会话琥珀色高亮并伴随推送横幅。点卡片进终端，右下角 ＋ 新建，底栏切换。'},
+    {id:'a-term',      name:'03 会话终端', note:'上：终端画面（与 Mac 同一 PTY）。中：agent 提问自动解析成快捷作答胶囊。下：快捷键条 + 消息式输入框（支持语音键盘）。右上 ⋮ 打开会话操作。'},
+    {id:'a-term-menu', name:'04 会话操作', note:'Web 预览（检测到 agent 起的 dev server，经 tailnet 直连）、重命名、重启 agent、结束进程（保留回放）、删除记录。'},
+    {id:'a-new',       name:'05 新建', note:'与 CLI 的 New <agent> 同义：名称留空用时间戳；六宫格 = 5 个 agent + 新增的「普通终端」。创建即写注册表并进入会话。'},
+    {id:'a-projects',  name:'06 项目', note:'对应 aaa 的项目管理表：名称 / AI 会话命名 / agent / 上下文 / 目录大小 / 修改时间。点行弹操作，长按多选批量删除。'},
+    {id:'a-proj-actions',name:'07 项目操作', note:'继续会话（自动 resume 最近一条）、换 agent 打开、在此开终端、更换默认 agent、删除项目。'},
+    {id:'a-delete',    name:'08 删除确认', note:'删前列明目录大小与各 agent 会话条数，purge 语义与 CLI 的 d 键一致。'},
+    {id:'a-settings',  name:'09 设置', note:'服务器与备用线路、Token 重配对；通知开关（等待输入 / 完成 / 异常，ntfy 离线兜底）；终端外观；daemon 状态与 SSD 挂载指示。'},
+  ],
+  mac: [
+    {id:'m-menubar',  name:'01 菜单栏（日常动线）', note:'菜单栏常驻图标带等待计数，等待输入时变黄。下拉按状态分组，点条目直达会话；新建与设置也在这里。'},
+    {id:'m-main',     name:'02 主窗口 · 终端', note:'左侧会话/项目导航，顶部多标签，中间即真终端（xterm.js）。状态栏显示 cwd / agent / resume id。与手机是同一个 PTY。'},
+    {id:'m-dashboard',name:'03 总览', note:'全部会话卡片墙，实时预览最近输出；等待输入置顶高亮。适合多任务并行时扫一眼全局。'},
+    {id:'m-new',      name:'04 新建', note:'名称 + agent 列表（含各自的启动命令预览）+ 新增「普通终端」；留空名称用时间戳，与 CLI 完全同义。'},
+    {id:'m-projects', name:'05 项目表格', note:'列结构照搬 aaa CLI：# / 会话命名 / 上下文 / 目录 / 名称 / agent / 修改时间。工具栏 + 右键菜单承接换 agent、删除、批量操作。'},
+    {id:'m-delete',   name:'06 删除确认', note:'批量删除列明每个项目与各 agent 会话条数（含 Grok 历史遗留），与 CLI purge 一致。'},
+    {id:'m-settings', name:'07 设置 · 配对', note:'二维码配对（手机扫码自动填地址+Token）、侦听网卡与端口 2730 (0xAAA)、launchd 状态、已配对设备吊销、SSD 未挂载保护策略。'},
+  ]
+};
+let platform = 'android';
+let cur = { android:'a-connect', mac:'m-menubar' };
+
+function renderChips(){
+  const box = document.getElementById('chips');
+  box.innerHTML = '';
+  SCREENS[platform].forEach(s=>{
+    const b = document.createElement('button');
+    b.className = 'chip-nav' + (s.id===cur[platform]?' on':'');
+    b.textContent = s.name.replace(/^\d+ /,'');
+    b.onclick = ()=>go(s.id);
+    box.appendChild(b);
+  });
+}
+function findScreen(id){
+  for(const p of ['android','mac']){
+    const s = SCREENS[p].find(x=>x.id===id);
+    if(s) return {p,s};
+  }
+  return null;
+}
+function go(id){
+  const hit = findScreen(id);
+  if(!hit) return;
+  platform = hit.p;
+  cur[platform] = id;
+  document.getElementById('ptab-android').classList.toggle('on', platform==='android');
+  document.getElementById('ptab-mac').classList.toggle('on', platform==='mac');
+  document.querySelectorAll('.proto-screen').forEach(el=>{ el.hidden = (el.id!==id); });
+  document.getElementById('cap-name').textContent = (platform==='android'?'Android · ':'macOS · ') + hit.s.name;
+  document.getElementById('cap-note').textContent = hit.s.note;
+  renderChips();
+}
+function showPlatform(p){ platform = p; go(cur[p]); }
+document.addEventListener('click', e=>{
+  const t = e.target.closest('[data-go]');
+  if(t && findScreen(t.dataset.go)) go(t.dataset.go);
+});
+document.addEventListener('keydown', e=>{
+  if(e.key!=='ArrowLeft' && e.key!=='ArrowRight') return;
+  const list = SCREENS[platform];
+  let i = list.findIndex(s=>s.id===cur[platform]);
+  i = (i + (e.key==='ArrowRight'?1:-1) + list.length) % list.length;
+  go(list[i].id);
+});
+/* 伪二维码（示意用） */
+(function(){
+  const c = document.getElementById('qrc');
+  if(!c) return;
+  const x = c.getContext('2d'), n=21, s=146/n;
+  x.fillStyle='#0a0e12'; x.fillRect(0,0,146,146);
+  x.fillStyle='#dfe7ee';
+  let seed=2730;
+  const rnd=()=> (seed=(seed*48271)%2147483647)/2147483647;
+  for(let i=0;i<n;i++)for(let j=0;j<n;j++){
+    const fin=(i<7&&j<7)||(i<7&&j>=n-7)||(i>=n-7&&j<7);
+    if(fin) continue;
+    if(rnd()>.55) x.fillRect(j*s,i*s,s-1,s-1);
+  }
+  const F=(ox,oy)=>{
+    x.fillRect(ox,oy,7*s,s);x.fillRect(ox,oy+6*s,7*s,s);
+    x.fillRect(ox,oy,s,7*s);x.fillRect(ox+6*s,oy,s,7*s);
+    x.fillRect(ox+2*s,oy+2*s,3*s,3*s);
+  };
+  F(0,0);F((n-7)*s,0);F(0,(n-7)*s);
+})();
+go('a-connect');
+</script>

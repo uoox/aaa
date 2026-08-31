@@ -1,0 +1,45 @@
+[package]
+name = "aaa-ui-mac"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[dependencies]
+# gpui 锁定 zed tag v1.17.2 = commit c8e44cfa7bda9b2e22c8d6934d78969352e7f61a
+# 该 rev 上 gpui 已拆分为 gpui + gpui_platform/gpui_macos/gpui_apple；
+# runtime_shaders feature 位于 gpui_platform（转发到 gpui_macos -> gpui_apple），
+# 作用等价于旧版 gpui 的 runtime_shaders：运行时拼接/编译 Metal shader，
+# 无需完整 Xcode 的 `xcrun metal`（本机仅 CommandLineTools）。
+gpui = { git = "https://github.com/zed-industries/zed", tag = "v1.17.2" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", tag = "v1.17.2", features = [
+    "runtime_shaders",
+    "font-kit",
+] }
+
+# 终端 VT 模型（Apache-2.0，Zed/tty7 同款）；渲染层自研，不使用 Zed 的 GPL terminal_view
+alacritty_terminal = "0.26"
+
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "time",
+    "sync",
+    "net",
+    "io-util",
+] }
+tokio-tungstenite = "0.30"
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+futures = "0.3"
+anyhow = "1"
+qrcode = { version = "0.14", default-features = false }
+dirs = "6"
+chrono = "0.4"
+log = "0.4"
+env_logger = "0.11"
+
+[profile.dev]
+# gpui 全量 debug 信息体积巨大，行号足够排错
+debug = "line-tables-only"
