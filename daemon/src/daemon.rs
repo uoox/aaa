@@ -94,6 +94,11 @@ fn run() {
         crate::slug::cleanup_empty_timestamped(&cfg.project_root);
     }
 
+    // Resolve the PATH agents get before anything can ask for a session, so
+    // the login-shell probe never shows up as spawn latency.
+    let agent_path = crate::agents::agent_path(&paths.home);
+    println!("agent PATH: {agent_path}");
+
     let hub = EventHub::new();
     let pool = SessionPool::new(PoolCtx {
         hub: hub.clone(),

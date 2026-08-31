@@ -433,6 +433,10 @@ impl SessionPool {
         cmd.cwd(&spec.project_path);
         cmd.env("TERM", "xterm-256color");
         cmd.env("LANG", "en_US.UTF-8");
+        // Without this every agent dies with "command not found" under
+        // launchd: the inherited PATH is bare, and `zsh -lc` does not source
+        // .zshrc to fix it. See agents::agent_path.
+        cmd.env("PATH", crate::agents::spawn_path());
         // Agents must start as if launched by hand. When the daemon itself was
         // started from inside an agent (running it in the foreground to debug,
         // say), it inherits that agent's session markers, and a child Claude
