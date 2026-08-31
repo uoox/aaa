@@ -42,11 +42,14 @@ pub fn ls(c: &Client, all: bool, json: bool) -> Result<(), String> {
         println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
         return Ok(());
     }
+    // Number over the *full* sorted list, then drop the exited tail. Exited
+    // sessions always sort last, so a live row keeps the same number whether
+    // or not `-a` is given — the number you read is the number you can type.
     let mut sessions = c.sessions()?;
+    sort_for_listing(&mut sessions);
     if !all {
         sessions.retain(|s| s.is_live());
     }
-    sort_for_listing(&mut sessions);
     if sessions.is_empty() {
         println!("{DIM}没有会话{RESET}");
         return Ok(());
@@ -273,46 +276,47 @@ fn normalize(target: &str, c: &Client) -> Result<String, String> {
         .ok_or_else(|| "当前目录就是项目根".to_string())
 }
 
-/// id → id prefix → `aaa ls` index → project name. Ambiguity is an error,
-/// never a silent pick: killing the wrong session is not recoverable.
+/// id → id prefix → `aaa ls` index → project name.
+///
+/// Everything resolves against the same order `ls` prints, over *all*
+/// sessions including exited ones — `rm` exists precisely to clear an exited
+/// record, so refusing to name one would be absurd. Live sessions sort first,
+/// so a bare project name still reaches the running session.
 pub fn resolve(c: &Client, target: &str) -> Result<Session, String> {
     let target = normalize(target, c)?;
-    let all = c.sessions()?;
-    if let Some(s) = all.iter().find(|s| s.id == target) {
+    let mut ordered = c.sessions()?;
+    sort_for_listing(&mut ordered);
+    resolve_in(&ordered, &target)
+}
+
+fn resolve_in(ordered: &[Session], target: &str) -> Result<Session, String> {
+    if let Some(s) = ordered.iter().find(|s| s.id == target) {
         return Ok(s.clone());
     }
-    let mut live: Vec<Session> = all.iter().filter(|s| s.is_live()).cloned().collect();
-    sort_for_listing(&mut live);
 
     if let Ok(n) = target.parse::<usize>() {
-        if n >= 1 && n <= live.len() {
-            return Ok(live[n - 1].clone());
-        }
-        return Err(format!("序号 {n} 超出范围（当前 {} 个会话）", live.len()));
+        return ordered
+            .get(n.wrapping_sub(1))
+            .cloned()
+            .ok_or_else(|| format!("序号 {n} 超出范围（当前 {} 个会话）", ordered.len()));
     }
 
-    let by_prefix: Vec<&Session> = all.iter().filter(|s| s.id.starts_with(&target)).collect();
+    let by_prefix: Vec<&Session> = ordered.iter().filter(|s| s.id.starts_with(target)).collect();
     match by_prefix.len() {
         1 => return Ok(by_prefix[0].clone()),
+        // ambiguity is an error, never a silent pick: killing the wrong
+        // session is not recoverable
         n if n > 1 => return Err(format!("{target} 匹配到 {n} 个会话，请写全 id")),
         _ => {}
     }
 
     let lower = target.to_lowercase();
-    let mut by_project: Vec<&Session> = live
+    ordered
         .iter()
-        .filter(|s| s.project_name.to_lowercase() == lower || s.project_path == target)
-        .collect();
-    if by_project.is_empty() {
-        by_project = live.iter().filter(|s| s.project_name.to_lowercase().contains(&lower)).collect();
-    }
-    match by_project.len() {
-        1 => Ok(by_project[0].clone()),
-        0 => Err(format!("没有匹配 {target} 的会话（aaa ls 看看）")),
-        // several sessions in one project is normal; the newest is the one
-        // you just left, so that is the useful default
-        _ => Ok(by_project[0].clone()),
-    }
+        .find(|s| s.project_name.to_lowercase() == lower || s.project_path == target)
+        .or_else(|| ordered.iter().find(|s| s.project_name.to_lowercase().contains(&lower)))
+        .cloned()
+        .ok_or_else(|| format!("没有匹配 {target} 的会话（aaa ls -a 看看）"))
 }
 
 /// The order every listing and every index refers to: waiting first, then
@@ -357,6 +361,41 @@ mod tests {
         sort_for_listing(&mut v);
         let ids: Vec<&str> = v.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(ids, ["s_3", "s_4", "s_1", "s_2"]);
+    }
+
+    #[test]
+    fn an_exited_session_is_still_addressable() {
+        // `rm` exists to clear exactly these records; resolving only over live
+        // sessions made the one verb that needs them unable to name them.
+        let mut v = vec![
+            sess("s_live", "alpha", "running", "2026-08-31T10:00:00Z"),
+            sess("s_dead", "beta", "exited", "2026-08-31T09:00:00Z"),
+        ];
+        sort_for_listing(&mut v);
+        assert_eq!(resolve_in(&v, "beta").unwrap().id, "s_dead");
+        assert_eq!(resolve_in(&v, "s_dead").unwrap().id, "s_dead");
+        assert_eq!(resolve_in(&v, "2").unwrap().id, "s_dead", "序号覆盖 exited");
+    }
+
+    #[test]
+    fn a_project_name_reaches_the_live_session_first() {
+        let mut v = vec![
+            sess("s_old", "aaa", "exited", "2026-08-31T23:00:00Z"),
+            sess("s_now", "aaa", "idle", "2026-08-31T01:00:00Z"),
+        ];
+        sort_for_listing(&mut v);
+        assert_eq!(resolve_in(&v, "aaa").unwrap().id, "s_now", "活的优先，哪怕更旧");
+    }
+
+    #[test]
+    fn ambiguous_id_prefix_refuses_rather_than_guesses() {
+        let v = vec![
+            sess("s_ab1", "a", "idle", ""),
+            sess("s_ab2", "b", "idle", ""),
+        ];
+        assert!(resolve_in(&v, "s_ab").is_err());
+        assert!(resolve_in(&v, "9").unwrap_err().contains("超出范围"));
+        assert!(resolve_in(&v, "0").is_err(), "序号从 1 开始，0 不能回绕");
     }
 
     #[test]
