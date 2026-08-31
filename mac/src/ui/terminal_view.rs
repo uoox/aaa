@@ -42,8 +42,6 @@ pub struct TerminalView {
     links: Vec<LinkSpan>,
     /// 悬停中的链接（存跨度本身而非下标：重算后下标会错位）
     hover_link: Option<LinkSpan>,
-    /// 右键菜单锚点，相对内容区左上角（窗口挪动/滚动后仍然对）
-    menu: Option<(f32, f32)>,
 }
 
 /// 一段可点链接：viewport 行 + 列区间 [start, end) + 目标地址
@@ -169,6 +167,13 @@ struct Snap {
     history: usize,
 }
 
+/// Cmd-V 和 Ctrl-V 都粘贴：从 Linux/Windows 过来的手指记的是后者，而终端里
+/// 裸 Ctrl-V 本来是 literal-next，几乎没人用得上。Ctrl-C 不在此列——那是中断
+/// 信号，抢过来会让 agent 停不下来。
+fn is_paste_chord(key: &str, platform: bool, control: bool) -> bool {
+    key == "v" && (platform || control)
+}
+
 impl TerminalView {
     pub fn new(session_id: String, net: &Net, cx: &mut Context<Self>) -> Self {
         let attach = net.attach(&session_id);
@@ -185,7 +190,6 @@ impl TerminalView {
             selecting: false,
             links: Vec::new(),
             hover_link: None,
-            menu: None,
         }
     }
 
@@ -291,7 +295,6 @@ impl TerminalView {
 
     fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.focus_handle.focus(window, cx);
-        self.menu = None; // 菜单已 occlude，能走到这里的左键都是菜单外的
         if let Some((p, side)) = self.grid_point(ev.position) {
             if ev.modifiers.shift && self.model.term.selection.is_some() {
                 if let Some(sel) = self.model.term.selection.as_mut() {
@@ -346,17 +349,13 @@ impl TerminalView {
         cx.notify();
     }
 
-    fn on_right_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        // 右键不碰选区（左键才注册了 on_mouse_down），「复制」才有东西可复制
+    /// 右键 = 直接粘贴，不弹菜单。终端里右键几乎只为了这一件事，多一次点击
+    /// 就多一次打断；复制已经由「选中即复制」承担了。
+    /// 右键不碰选区（左键才注册了 on_mouse_down），所以粘贴不会清掉刚选的东西。
+    fn on_right_down(&mut self, _ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.focus_handle.focus(window, cx);
-        if let Some(origin) = self.last_origin {
-            self.menu = Some((
-                f32::from(ev.position.x - origin.x),
-                f32::from(ev.position.y - origin.y),
-            ));
-            cx.stop_propagation();
-            cx.notify();
-        }
+        self.paste_from_clipboard(cx);
+        cx.stop_propagation();
     }
 
     fn copy_selection(&mut self, cx: &mut Context<Self>) -> bool {
@@ -376,76 +375,16 @@ impl TerminalView {
             .is_some_and(|s| !s.is_empty())
     }
 
-    /// 右键菜单。用 occlude 挡住底下的终端，免得点菜单顺手清了选区。
-    fn render_context_menu(
-        &self,
-        at: (f32, f32),
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
-        const W: f32 = 132.0;
-        const H: f32 = 62.0;
-        // 贴着右/下边缘弹出时往回收，别把菜单顶到状态栏外面去
-        let (cell_w, line_h) = self.cell.unwrap_or((px(8.), px(18.)));
-        let max_x = (self.model.cols as f32 * f32::from(cell_w) + PAD * 2.0 - W).max(0.);
-        let max_y = (self.model.rows as f32 * f32::from(line_h) + PAD * 2.0 - H).max(0.);
-        let has_sel = self.has_selection();
-
-        let item = |id: &'static str, label: &'static str, enabled: bool| {
-            div()
-                .id(id)
-                .px(px(12.))
-                .py(px(4.))
-                .text_color(c(if enabled { theme::INK } else { theme::FAINT }))
-                .when(enabled, |el| {
-                    el.cursor_pointer().hover(|st| st.bg(ca(theme::CYAN, 0.18)))
-                })
-                .child(label)
-        };
-
-        div()
-            .absolute()
-            .left(px(at.0.min(max_x)))
-            .top(px(at.1.min(max_y)))
-            .occlude()
-            .w(px(W))
-            .py(px(4.))
-            .rounded(px(8.))
-            .bg(c(theme::SURFACE_RAISED))
-            .border_1()
-            .border_color(c(theme::EDGE_LIGHT))
-            .text_size(px(12.))
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                this.menu = None;
-                cx.notify();
-            }))
-            .child(
-                item("term-menu-copy", "复制", has_sel).on_click(cx.listener(
-                    |this, _, _, cx| {
-                        this.copy_selection(cx);
-                        this.menu = None;
-                        cx.notify();
-                    },
-                )),
-            )
-            .child(
-                item("term-menu-paste", "粘贴", true).on_click(cx.listener(
-                    |this, _, _, cx| {
-                        this.paste_from_clipboard(cx);
-                        this.menu = None;
-                        cx.notify();
-                    },
-                )),
-            )
-    }
-
     fn on_key_down(&mut self, ev: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let ks = &ev.keystroke;
         let m = ks.modifiers;
+        if is_paste_chord(ks.key.as_str(), m.platform, m.control) {
+            self.paste_from_clipboard(cx);
+            cx.stop_propagation();
+            return;
+        }
         if m.platform {
-            if ks.key == "v" {
-                self.paste_from_clipboard(cx);
-                cx.stop_propagation();
-            } else if ks.key == "c" && self.copy_selection(cx) {
+            if ks.key == "c" && self.copy_selection(cx) {
                 cx.stop_propagation();
             }
             return; // 其余 cmd 组合留给 App
@@ -786,7 +725,6 @@ impl Render for TerminalView {
             .hover_link
             .as_ref()
             .map(|l| (l.row, l.start, l.end));
-        let menu = self.menu;
 
         // 4 个字体变体一次构建（seg 循环内只 clone，不重复走 font()/SharedString 分配）
         let fonts: [gpui::Font; 4] = std::array::from_fn(|i| {
@@ -1053,12 +991,19 @@ impl Render for TerminalView {
                         .child("连接已断开 · 自动重连中…"),
                 )
             })
-            .children(menu.map(|at| self.render_context_menu(at, cx)))
     }
 }
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn both_paste_chords_work_and_ctrl_c_is_left_alone() {
+        assert!(is_paste_chord("v", true, false), "cmd-V");
+        assert!(is_paste_chord("v", false, true), "ctrl-V");
+        assert!(!is_paste_chord("c", false, true), "ctrl-C 必须留给中断信号");
+        assert!(!is_paste_chord("v", false, false), "裸 v 是普通输入");
+    }
     use super::*;
 
     fn style(fg: u32) -> SegStyle {

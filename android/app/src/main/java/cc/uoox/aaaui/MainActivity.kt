@@ -89,8 +89,8 @@ class MainActivity : ComponentActivity() {
         setContent {
             // 折叠/展开只是配置变化（manifest 里已接管），calculateWindowSizeClass
             // 会跟着 LocalConfiguration 重算，整棵 composition 不重建
-            val pane = paneLayoutFor(calculateWindowSizeClass(this).widthSizeClass)
-            AaaTheme { AaaApp(store, pendingSessionId, pendingPrefill, pane) }
+            val placement = navPlacementFor(calculateWindowSizeClass(this).widthSizeClass)
+            AaaTheme { AaaApp(store, pendingSessionId, pendingPrefill, placement) }
         }
     }
 
@@ -115,32 +115,16 @@ fun AaaApp(
     store: AppStore,
     pendingSessionId: androidx.compose.runtime.MutableState<String?>,
     pendingPrefill: androidx.compose.runtime.MutableState<String?>,
-    pane: PaneLayout,
+    placement: NavPlacement,
 ) {
     val nav = rememberNavController()
     val settings by store.settings.flow.collectAsState(initial = null)
     val sessions by store.sessions.collectAsState()
     val loaded = settings != null
 
-    // 两栏时右栏显示哪个会话——唯一真源。用 rememberSaveable 是保底：manifest 已
-    // 接管折叠相关的配置变化，但系统仍可能因别的原因重建 Activity。
-    var selectedId by rememberSaveable { mutableStateOf<String?>(null) }
-    var selectedPrefill by rememberSaveable { mutableStateOf("") }
-    // 选中的会话被删掉后右栏要回空态。只认「出现过又消失」：刚 createSession
-    // 出来的会话还没进 sessions（要等 /events 推 session_update），若直接按
-    // 「不在列表里」清掉，新建完右栏会是空的。
-    var selectionSeen by remember(selectedId) { mutableStateOf(false) }
-    LaunchedEffect(sessions, selectedId) {
-        if (retainSelection(selectedId, sessions) != null) selectionSeen = true
-        else if (selectionSeen) selectedId = null
-    }
-
+    // 一个入口：会话卡片、通知深链、项目页「继续会话」都走这里，行为不会各走各的。
     val openSession: (String, String) -> Unit = { id, prefill ->
-        when (val target = openTargetFor(pane, id, prefill)) {
-            is OpenTarget.Select -> { selectedId = target.id; selectedPrefill = target.prefill }
-            is OpenTarget.Push ->
-                nav.navigate("session/${target.id}?prefill=${Uri.encode(target.prefill)}") { launchSingleTop = true }
-        }
+        nav.navigate("session/$id?prefill=${Uri.encode(prefill)}") { launchSingleTop = true }
     }
 
     // deep link from notifications
@@ -166,7 +150,7 @@ fun AaaApp(
             }
             composable("pair") { PairScreen(store) { nav.navigate("home") { popUpTo("pair") { inclusive = true } } } }
             composable("home") {
-                HomeScaffold(store, nav, pane, selectedId, selectedPrefill, onCloseDetail = { selectedId = null })
+                HomeScaffold(store, nav, placement)
             }
             composable(
                 "session/{id}?prefill={prefill}",
@@ -183,26 +167,6 @@ fun AaaApp(
             }
             composable("inbox/{path}") { entry ->
                 InboxScreen(store, nav, Uri.decode(entry.arguments?.getString("path").orEmpty()))
-            }
-        }
-    }
-
-    // 折叠状态一变，当前正在看的会话要在两种承载方式之间接力：折起来变成压栈的
-    // session/{id}，展开则收回右栏。attach 由 AppStore 持有并有宽限期，所以这一
-    // 来一回不会断线重连（见 AppStore.releaseAttachmentSoon）。
-    LaunchedEffect(pane) {
-        val entry = nav.currentBackStackEntry
-        val onSessionRoute = entry?.destination?.route?.startsWith("session/") == true
-        when {
-            pane == PaneLayout.Single && selectedId != null -> {
-                val id = selectedId!!
-                selectedId = null
-                nav.navigate("session/$id?prefill=${Uri.encode(selectedPrefill)}") { launchSingleTop = true }
-            }
-            pane == PaneLayout.Dual && onSessionRoute -> {
-                selectedId = entry?.arguments?.getString("id")
-                selectedPrefill = Uri.decode(entry?.arguments?.getString("prefill").orEmpty())
-                nav.popBackStack()
             }
         }
     }
@@ -310,10 +274,7 @@ fun PairScreen(store: AppStore, onConnected: () -> Unit) {
 fun HomeScaffold(
     store: AppStore,
     nav: NavHostController,
-    pane: PaneLayout,
-    selectedId: String?,
-    selectedPrefill: String,
-    onCloseDetail: () -> Unit,
+    placement: NavPlacement,
 ) {
     var tab by rememberSaveable { mutableStateOf(0) }
     var showNewSheet by remember { mutableStateOf(false) }
@@ -326,7 +287,7 @@ fun HomeScaffold(
 
     val tabs = @Composable {
         when (tab) {
-            0 -> SessionsTab(store, nav, selectedId)
+            0 -> SessionsTab(store, nav)
             1 -> ProjectsTab(store, nav)
             2 -> SettingsTab(store, nav)
         }
@@ -337,9 +298,9 @@ fun HomeScaffold(
         }
     }
 
-    if (pane == PaneLayout.Dual) {
-        // 内屏展开：导航移到左侧 rail，列表定宽，终端拿走剩下的宽度。底部导航栏
-        // 横跨 2000px 只为了三个 tab 太浪费，rail 还能把列表推高一整条。
+    // 宽屏只把底栏换成左侧 rail，内容仍是单栏——横跨整屏只装三个 tab 的底栏是纯浪费，
+    // 但把列表和会话拆成两栏在实机上信息太碎，试过之后收回来了。
+    if (placement == NavPlacement.Rail) {
         Row(Modifier.fillMaxSize().background(Tok.Bg)) {
             NavigationRail(
                 containerColor = Tok.Surface,
@@ -349,22 +310,7 @@ fun HomeScaffold(
                 NavigationRailItem(tab == 1, { tab = 1 }, icon = { Text("▤", fontSize = 16.sp) }, label = { Text("项目") })
                 NavigationRailItem(tab == 2, { tab = 2 }, icon = { Text("⚙", fontSize = 16.sp) }, label = { Text("设置") })
             }
-            Box(Modifier.width(ListPaneWidth).fillMaxSize()) { tabs() }
-            VerticalDivider(color = Tok.Edge)
-            Box(Modifier.weight(1f).fillMaxSize().background(Tok.Bg)) {
-                if (selectedId == null) {
-                    Column(
-                        Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center,
-                    ) {
-                        Text("选一个会话", color = Tok.Faint)
-                        Text("左侧列表点开，终端与消息流都在这一栏", color = Tok.Faint, fontSize = 12.sp)
-                    }
-                } else {
-                    // key：换会话时整棵子树重建，composer / 视图模式不会串台
-                    key(selectedId) { SessionScreen(store, nav, selectedId, selectedPrefill, onClose = onCloseDetail) }
-                }
-            }
+            Box(Modifier.weight(1f).fillMaxSize()) { tabs() }
         }
     } else {
         Scaffold(
@@ -390,7 +336,7 @@ private val STATE_RANK = mapOf("waiting" to 0, "running" to 1, "idle" to 2, "exi
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SessionsTab(store: AppStore, nav: NavHostController, selectedId: String? = null) {
+fun SessionsTab(store: AppStore, nav: NavHostController) {
     val scope = rememberCoroutineScope()
     val openSession = LocalOpenSession.current
     val sessions by store.sessions.collectAsState()
@@ -467,7 +413,7 @@ fun SessionsTab(store: AppStore, nav: NavHostController, selectedId: String? = n
             }
             LazyColumn(Modifier.fillMaxSize()) {
                 items(filtered, key = { it.id }) { s ->
-                    SessionCard(s, selected = s.id == selectedId) { openSession(s.id, "") }
+                    SessionCard(s) { openSession(s.id, "") }
                 }
                 item { Spacer(Modifier.height(80.dp)) }
             }
@@ -600,9 +546,12 @@ fun NewSessionSheet(store: AppStore, nav: NavHostController, initialPath: String
                     scope.launch {
                         try {
                             val api = store.client ?: throw IllegalStateException("未连接 daemon")
+                            // 连 shell 也写进注册表：不写的话 daemon 那边「没有登记」
+                            // 会回落到默认的 claude，从普通终端建的文件夹一转头就
+                            // 变成 claude 项目了。改 agent 只该由人来做。
                             val path = initialPath ?: api.createProject(
                                 name.trim().ifBlank { null },
-                                if (selected == "shell") null else selected,
+                                selected,
                             ).path
                             val sess = api.createSession(path, selected, resume = initialPath != null)
                             onDismiss()
