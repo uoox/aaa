@@ -223,6 +223,7 @@ fun ProjectActionsSheet(
 ) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    val openSession = LocalOpenSession.current
     val settings by store.settings.flow.collectAsState(initial = AppSettings())
     var agentPicker by remember { mutableStateOf<String?>(null) } // "open" | "default"
     var deleteConfirm by remember { mutableStateOf(false) }
@@ -246,7 +247,7 @@ fun ProjectActionsSheet(
                 scope.launch {
                     try {
                         val sess = store.client?.createSession(p.path, agent, resume = true) ?: return@launch
-                        onDismiss(); nav.navigate("session/${sess.id}")
+                        onDismiss(); openSession(sess.id, "")
                     } catch (e: Exception) { toast("失败：${e.message}") }
                 }
             }
@@ -255,7 +256,7 @@ fun ProjectActionsSheet(
                 scope.launch {
                     try {
                         val sess = store.client?.createSession(p.path, "shell", resume = false) ?: return@launch
-                        onDismiss(); nav.navigate("session/${sess.id}")
+                        onDismiss(); openSession(sess.id, "")
                     } catch (e: Exception) { toast("失败：${e.message}") }
                 }
             }

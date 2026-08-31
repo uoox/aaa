@@ -51,7 +51,7 @@ fun SettingsTab(store: AppStore, nav: NavHostController) {
 
     LaunchedEffect(conn) { if (conn is ConnState.Connected) store.refreshHealth() }
 
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 90.dp)) {
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 24.dp)) {
         Text("设置", color = Tok.Ink, fontSize = 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(16.dp))
 
         // ---------- 服务器 ----------
@@ -61,6 +61,8 @@ fun SettingsTab(store: AppStore, nav: NavHostController) {
             if (server == null) {
                 SettingRow("未配对") { TextButton(onClick = { nav.navigate("pair") }) { Text("去配对") } }
             } else {
+                // 每个 host 一行，右侧直接写状态——原来另有一行「连接状态」重复说
+                // 同一件事，删掉了；连接失败时的重试按钮挪到当前 host 这一行上。
                 server.hosts.forEach { host ->
                     val active = (conn as? ConnState.Connected)?.host == host
                     Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -73,21 +75,19 @@ fun SettingsTab(store: AppStore, nav: NavHostController) {
                         )
                     }
                 }
-                SettingRow("Token") {
-                    Text("····" + server.token.takeLast(4), color = Tok.Dim, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
-                    Spacer(Modifier.width(10.dp))
-                    TextButton(onClick = { nav.navigate("pair") }) { Text("重新配对") }
-                }
-                SettingRow("连接状态") {
-                    when (val c = conn) {
-                        is ConnState.Connected -> Text("正常", color = Tok.Green, fontSize = 13.sp)
-                        is ConnState.Connecting -> Text("连接中…", color = Tok.Amber, fontSize = 13.sp)
-                        is ConnState.Failed -> Row {
-                            Text(c.message, color = Tok.Red, fontSize = 12.sp)
-                            TextButton(onClick = { store.kickReconnect() }) { Text("重试") }
-                        }
-                        ConnState.NoServer -> Text("未配对", color = Tok.Dim, fontSize = 13.sp)
+                when (val c = conn) {
+                    is ConnState.Connecting -> SettingRow("连接中…") {}
+                    is ConnState.Failed -> Row(
+                        Modifier.fillMaxWidth().padding(start = 14.dp, end = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(c.message, color = Tok.Red, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                        TextButton(onClick = { store.kickReconnect() }) { Text("重试") }
                     }
+                    else -> {}
+                }
+                SettingRow("Token ····${server.token.takeLast(4)}") {
+                    TextButton(onClick = { nav.navigate("pair") }) { Text("重新配对") }
                 }
             }
         }
@@ -142,18 +142,24 @@ fun SettingsTab(store: AppStore, nav: NavHostController) {
             }
         }
 
-        // ---------- 关于 ----------
-        GroupTitle("关于")
+        // ---------- daemon 状态 ----------
+        GroupTitle("daemon")
         Group {
-            SettingRow("aaa-daemon") { Text(health?.version?.let { "v$it" } ?: "—", color = Tok.Dim, fontSize = 13.sp, fontFamily = FontFamily.Monospace) }
-            SettingRow("SSD 挂载状态") {
-                Text(
-                    if (health?.ssd_mounted == true) "已挂载 ✓" else if (health == null) "—" else "未挂载 ✗",
-                    color = if (health?.ssd_mounted == true) Tok.Green else Tok.Red, fontSize = 13.sp,
-                )
+            val h = health
+            // 没连上时这四行全是「—」，与其摆四行破折号不如说清楚现在拿不到
+            if (h == null) {
+                SettingRow("尚未拿到 daemon 状态") {}
+            } else {
+                SettingRow("版本") { Text("v${h.version}", color = Tok.Dim, fontSize = 13.sp, fontFamily = FontFamily.Monospace) }
+                SettingRow("SSD") {
+                    Text(
+                        if (h.ssd_mounted) "已挂载 ✓" else "未挂载 ✗",
+                        color = if (h.ssd_mounted) Tok.Green else Tok.Red, fontSize = 13.sp,
+                    )
+                }
+                SettingRow("项目根") { Text(h.project_root, color = Tok.Dim, fontSize = 12.sp, fontFamily = FontFamily.Monospace) }
+                SettingRow("运行时长") { Text(formatUptime(h.uptime_s), color = Tok.Dim, fontSize = 13.sp) }
             }
-            SettingRow("项目根") { Text(health?.project_root ?: "—", color = Tok.Dim, fontSize = 12.sp, fontFamily = FontFamily.Monospace) }
-            SettingRow("daemon 运行时长") { Text(health?.uptime_s?.let { formatUptime(it) } ?: "—", color = Tok.Dim, fontSize = 13.sp) }
         }
     }
 

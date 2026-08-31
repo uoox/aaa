@@ -34,6 +34,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -58,6 +59,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
@@ -73,6 +75,7 @@ import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
 import com.termux.view.TerminalView
 import com.termux.view.TerminalViewClient
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
@@ -82,15 +85,18 @@ import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SessionScreen(store: AppStore, nav: NavHostController, sessionId: String, prefill: String) {
+fun SessionScreen(
+    store: AppStore,
+    nav: NavHostController,
+    sessionId: String,
+    prefill: String,
+    onClose: () -> Unit = { nav.popBackStack() },
+) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val sessions by store.sessions.collectAsState()
     val settings by store.settings.flow.collectAsState(initial = AppSettings())
     val session = sessions.find { it.id == sessionId }
-
-    var helloSession by remember { mutableStateOf<Session?>(null) }
-    val s = session ?: helloSession
 
     // 消息流支持探测：null=未知，true/false=已知
     var messagesSupported by remember { mutableStateOf<Boolean?>(null) }
@@ -106,22 +112,17 @@ fun SessionScreen(store: AppStore, nav: NavHostController, sessionId: String, pr
     var showMenu by remember { mutableStateOf(false) }
     var ctrlSticky by remember { mutableStateOf(false) }
 
-    // 终端 attach（惰性创建，跨模式切换保留；daemon 重连后换新 client 重建）
+    // 终端 attach：实例归 AppStore 管（折叠/展开会重建本 composable），这里只负责
+    // 把当前这份 TerminalView / Context 绑上去，并跟着 daemon 重连重新取一次。
     val terminalViewRef = remember { mutableStateOf<TerminalView?>(null) }
-    var wsConnected by remember { mutableStateOf(false) }
     val conn by store.connState.collectAsState()
-    val attachmentHolder = remember(sessionId) { mutableStateOf<TerminalAttachment?>(null) }
     val terminalClient = remember(sessionId) {
         object : TerminalSessionClient {
                 override fun onTextChanged(changedSession: TerminalSession) { terminalViewRef.value?.onScreenUpdated() }
                 override fun onTitleChanged(changedSession: TerminalSession) {}
                 override fun onSessionFinished(finishedSession: TerminalSession) {}
                 override fun onCopyTextToClipboard(session: TerminalSession, text: String) { copyToClipboard(context, text) }
-                override fun onPasteTextFromClipboard(session: TerminalSession?) {
-                    val clip = (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).primaryClip
-                    val text = clip?.getItemAt(0)?.coerceToText(context)?.toString()
-                    if (!text.isNullOrEmpty()) session?.write(text)
-                }
+                override fun onPasteTextFromClipboard(session: TerminalSession?) { pasteIntoPty(context, session) }
                 override fun onBell(session: TerminalSession) {}
                 override fun onColorsChanged(session: TerminalSession) {}
                 override fun onTerminalCursorStateChange(state: Boolean) {}
@@ -136,21 +137,19 @@ fun SessionScreen(store: AppStore, nav: NavHostController, sessionId: String, pr
                 override fun logStackTrace(tag: String?, e: Exception?) {}
             }
     }
-    LaunchedEffect(conn, sessionId) {
-        val api = store.client
-        if (api != null && attachmentHolder.value?.api !== api) {
-            attachmentHolder.value?.stop()
-            attachmentHolder.value = TerminalAttachment(
-                api, sessionId, terminalClient,
-                onHello = { helloSession = it },
-                onConnectionChange = { wsConnected = it },
-            ).also { it.start() }
-        }
-    }
-    val attachment = attachmentHolder.value
+    var attachment by remember(sessionId) { mutableStateOf<TerminalAttachment?>(null) }
+    LaunchedEffect(conn, sessionId) { attachment = store.attachmentFor(sessionId, terminalClient) }
     DisposableEffect(sessionId) {
-        onDispose { attachmentHolder.value?.stop() }
+        // 只是预约关闭：折叠屏重建在宽限期内会把它取消掉，见 AppStore
+        onDispose { store.releaseAttachmentSoon(sessionId) }
     }
+    // attach 还没建好时的占位流（remember 不能写在 elvis 右边——那是条件式 remember）
+    val noAttachConnected = remember { MutableStateFlow(false) }
+    val noAttachHello = remember { MutableStateFlow<Session?>(null) }
+    val wsConnected by (attachment?.connected ?: noAttachConnected).collectAsState()
+    val helloSession by (attachment?.hello ?: noAttachHello).collectAsState()
+    val s = session ?: helloSession
+
     LaunchedEffect(sessionId) { if (session == null) store.refreshSessions() }
 
     // 消息流状态
@@ -212,7 +211,7 @@ fun SessionScreen(store: AppStore, nav: NavHostController, sessionId: String, pr
             Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text("‹", color = Tok.Dim, fontSize = 26.sp, modifier = Modifier.clickable { nav.popBackStack() }.padding(horizontal = 8.dp))
+            Text("‹", color = Tok.Dim, fontSize = 26.sp, modifier = Modifier.clickable(onClick = onClose).padding(horizontal = 8.dp))
             Column(Modifier.weight(1f)) {
                 Text(
                     s?.title?.ifBlank { s.project_name } ?: sessionId,
@@ -258,6 +257,9 @@ fun SessionScreen(store: AppStore, nav: NavHostController, sessionId: String, pr
                                 return scale
                             }
                             override fun onSingleTapUp(e: MotionEvent?) {
+                                // 点在链接上就打开它，不弹键盘。命中测试借 vendored
+                                // 的 getWordAtLocation：它已经处理了换行折叠的长行。
+                                if (e != null && openTappedUrl(context, view, e)) return
                                 view.requestFocus()
                                 (context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
                                     .showSoftInput(view, InputMethodManager.SHOW_IMPLICIT)
@@ -331,6 +333,8 @@ fun SessionScreen(store: AppStore, nav: NavHostController, sessionId: String, pr
                 KeyChip("→") { terminalViewRef.value?.handleKeyCode(KeyEvent.KEYCODE_DPAD_RIGHT, 0) }
                 KeyChip("⏎") { terminalViewRef.value?.handleKeyCode(KeyEvent.KEYCODE_ENTER, 0) }
                 KeyChip("/") { attachment?.session?.write("/") }
+                // 长按选区工具条里也有粘贴，但那要先长按选中；这里给一个直达入口
+                KeyChip("粘贴") { pasteIntoPty(context, attachment?.session) }
             }
         }
 
@@ -462,25 +466,32 @@ private fun MessageRow(m: ChatMessage) {
         m.kind == "question" -> QuestionRow(m)
         m.role == "user" -> Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.End) {
             Text(
-                m.text, color = Tok.Ink, fontSize = 14.sp,
+                rememberLinkified(m), color = Tok.Ink, fontSize = 14.sp,
                 modifier = Modifier.widthIn(max = 300.dp)
                     .background(Tok.Cyan.copy(alpha = 0.16f), RoundedCornerShape(14.dp, 14.dp, 4.dp, 14.dp))
                     .padding(horizontal = 12.dp, vertical = 8.dp),
             )
         }
         m.role == "system" -> Text(
-            m.text, color = Tok.Faint, fontSize = 11.sp,
+            rememberLinkified(m), color = Tok.Faint, fontSize = 11.sp,
             modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
         )
         else -> Row(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
             Text(
-                m.text, color = Tok.Ink, fontSize = 14.sp,
+                rememberLinkified(m), color = Tok.Ink, fontSize = 14.sp,
                 modifier = Modifier.widthIn(max = 320.dp)
                     .background(Tok.Surface, RoundedCornerShape(14.dp, 14.dp, 14.dp, 4.dp))
                     .padding(horizontal = 12.dp, vertical = 8.dp),
             )
         }
     }
+}
+
+/** 消息正文 → 带可点链接的富文本。只在文本变化时重扫，滚动时不重复做正则。 */
+@Composable
+private fun rememberLinkified(m: ChatMessage): AnnotatedString {
+    val context = LocalContext.current
+    return remember(m.seq, m.text) { linkified(m.text) { url -> openUrl(context, url) } }
 }
 
 @Composable
@@ -525,8 +536,9 @@ private fun ToolRow(m: ChatMessage) {
             )
         }
         if (expanded && m.text.isNotBlank()) {
+            // 工具输出（curl、报错里的文档地址）是链接最集中的地方，展开后要能点
             Text(
-                m.text, color = Tok.Dim, fontSize = 11.sp, fontFamily = FontFamily.Monospace,
+                rememberLinkified(m), color = Tok.Dim, fontSize = 11.sp, fontFamily = FontFamily.Monospace,
                 modifier = Modifier.fillMaxWidth().padding(start = 13.dp, top = 3.dp)
                     .background(Tok.TermBg, RoundedCornerShape(8.dp)).padding(8.dp),
             )
@@ -560,11 +572,13 @@ fun SessionMenuSheet(
 ) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    val openSession = LocalOpenSession.current
     val settings by store.settings.flow.collectAsState(initial = AppSettings())
     var renameDialog by remember { mutableStateOf(false) }
     var killDialog by remember { mutableStateOf(false) }
     var deleteDialog by remember { mutableStateOf(false) }
     var portsDialog by remember { mutableStateOf<List<PortInfo>?>(null) }
+    var urlsDialog by remember { mutableStateOf<List<String>?>(null) }
 
     fun toast(msg: String) = Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
 
@@ -590,6 +604,12 @@ fun SessionMenuSheet(
                 if (text.isNullOrBlank()) toast("屏幕为空") else { copyToClipboard(context, text); toast("已复制") }
                 onDismiss()
             }
+            // 直接点链接要点得准；回放里翻出来的地址（编译报错、dev server URL）
+            // 常常已经滚上去了，给一个列表入口
+            if (!showMessagesMode) SheetItem("🔗", "打开链接…", null) {
+                val urls = urlsOnScreen(attachment?.session)
+                if (urls.isEmpty()) toast("回放里没有链接") else urlsDialog = urls
+            }
             SheetItem("±", "本次改动", "diff · 回滚") { onDismiss(); nav.navigate("diff/${s.id}") }
             SheetItem("📥", "任务收件箱", s.project_name) { onDismiss(); nav.navigate("inbox/${Uri.encode(s.project_path)}") }
             SheetItem("🔁", "重启 agent", "resume 同一会话") {
@@ -598,8 +618,9 @@ fun SessionMenuSheet(
                         val api = store.client ?: return@launch
                         runCatching { api.kill(s.id) }
                         val fresh = api.createSession(s.project_path, s.agent, resume = true)
+                        store.releaseAttachmentNow(s.id) // 老会话已经没了，别让它继续重连
                         onDismiss()
-                        nav.navigate("session/${fresh.id}") { popUpTo("home") }
+                        openSession(fresh.id, "")
                     } catch (e: Exception) { toast("重启失败：${e.message}") }
                 }
             }
@@ -653,11 +674,34 @@ fun SessionMenuSheet(
             onConfirm = {
                 scope.launch {
                     runCatching { store.client?.deleteSession(s.id) }.onFailure { toast("失败：${it.message}") }
+                    store.releaseAttachmentNow(s.id)
                     store.refreshSessions()
                 }
                 deleteDialog = false; onDismiss()
+                // 两栏时已经在 home 了，pop 是空操作；右栏靠 retainSelection 自己清空
                 nav.popBackStack("home", inclusive = false)
             }, onCancel = { deleteDialog = false })
+    }
+    urlsDialog?.let { urls ->
+        AlertDialog(
+            onDismissRequest = { urlsDialog = null },
+            containerColor = Tok.Raised,
+            title = { Text("回放里的链接", color = Tok.Ink) },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    urls.forEach { url ->
+                        Text(
+                            url, color = Tok.Cyan, fontSize = 13.sp, fontFamily = FontFamily.Monospace,
+                            maxLines = 2, overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.fillMaxWidth().clickable {
+                                openUrl(context, url); urlsDialog = null; onDismiss()
+                            }.padding(vertical = 8.dp),
+                        )
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { urlsDialog = null }) { Text("取消", color = Tok.Dim) } },
+        )
     }
     portsDialog?.let { ports ->
         AlertDialog(
@@ -839,6 +883,45 @@ private fun PatchView(patch: String, truncated: Boolean) {
 fun copyToClipboard(context: Context, text: String) {
     (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
         .setPrimaryClip(ClipData.newPlainText("aaa-ui", text))
+}
+
+/**
+ * 剪贴板 → 远端 PTY。走 emulator.paste 而不是 session.write：前者会剥掉 ESC 与
+ * C1、把 CRLF 归一成 CR，并在 DECSET 2004 打开时补上 bracketed-paste 包裹——
+ * Claude Code 这类 TUI 正是靠它区分「粘进来的多行」和「一行行敲的回车」，
+ * 直接 write 会被当成连着按了好几次提交。
+ */
+fun pasteIntoPty(context: Context, session: TerminalSession?) {
+    if (session == null) return
+    val clip = (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).primaryClip
+    val text = clip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(context)?.toString()
+    if (text.isNullOrEmpty()) return
+    val emulator = session.emulator
+    if (emulator != null) emulator.paste(text) else session.write(text)
+}
+
+/**
+ * 终端里点到的那个词若是链接就打开，返回是否命中。getWordAtLocation 按列算
+ * 偏移，所以同一行里链接前面有全角字符时可能偏几列——URL 本身是 ASCII，
+ * 真点偏了顶多是没反应，退回弹键盘，不会打开错的地址。
+ *
+ * 注意：TUI 打开鼠标追踪（DECSET 1000/1002）时，vendored 视图在 onUp 里就把
+ * 单指点击变成鼠标事件发给远端了，根本走不到这里——和原本「点一下弹键盘」
+ * 是同一个限制。那种情况下走会话菜单的「打开链接…」。
+ */
+private fun openTappedUrl(context: Context, view: TerminalView, e: MotionEvent): Boolean {
+    val screen = view.currentSession?.emulator?.screen ?: return false
+    val (col, row) = view.getColumnAndRow(e, true).let { it[0] to it[1] }
+    val word = runCatching { screen.getWordAtLocation(col, row) }.getOrNull().orEmpty()
+    val url = urlInWord(word) ?: return false
+    openUrl(context, url)
+    return true
+}
+
+/** 整屏回放里出现过的链接，去重后按出现顺序返回（会话菜单的「打开链接」用）。 */
+fun urlsOnScreen(session: TerminalSession?): List<String> {
+    val text = session?.emulator?.screen?.transcriptText ?: return emptyList()
+    return findUrls(text).map { it.url }.distinct()
 }
 
 private fun openPort(context: Context, store: AppStore, port: Int) {

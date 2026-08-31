@@ -10,6 +10,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -35,16 +37,23 @@ import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationRail
+import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.VerticalDivider
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.windowsizeclass.ExperimentalMaterial3WindowSizeClassApi
+import androidx.compose.material3.windowsizeclass.calculateWindowSizeClass
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -71,13 +80,17 @@ class MainActivity : ComponentActivity() {
     private val pendingSessionId = mutableStateOf<String?>(null)
     private val pendingPrefill = mutableStateOf<String?>(null)
 
+    @OptIn(ExperimentalMaterial3WindowSizeClassApi::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val store = AppStore.get(this)
         store.ensureStarted()
         consumeIntent(intent)
         setContent {
-            AaaTheme { AaaApp(store, pendingSessionId, pendingPrefill) }
+            // 折叠/展开只是配置变化（manifest 里已接管），calculateWindowSizeClass
+            // 会跟着 LocalConfiguration 重算，整棵 composition 不重建
+            val pane = paneLayoutFor(calculateWindowSizeClass(this).widthSizeClass)
+            AaaTheme { AaaApp(store, pendingSessionId, pendingPrefill, pane) }
         }
     }
 
@@ -102,10 +115,33 @@ fun AaaApp(
     store: AppStore,
     pendingSessionId: androidx.compose.runtime.MutableState<String?>,
     pendingPrefill: androidx.compose.runtime.MutableState<String?>,
+    pane: PaneLayout,
 ) {
     val nav = rememberNavController()
     val settings by store.settings.flow.collectAsState(initial = null)
+    val sessions by store.sessions.collectAsState()
     val loaded = settings != null
+
+    // 两栏时右栏显示哪个会话——唯一真源。用 rememberSaveable 是保底：manifest 已
+    // 接管折叠相关的配置变化，但系统仍可能因别的原因重建 Activity。
+    var selectedId by rememberSaveable { mutableStateOf<String?>(null) }
+    var selectedPrefill by rememberSaveable { mutableStateOf("") }
+    // 选中的会话被删掉后右栏要回空态。只认「出现过又消失」：刚 createSession
+    // 出来的会话还没进 sessions（要等 /events 推 session_update），若直接按
+    // 「不在列表里」清掉，新建完右栏会是空的。
+    var selectionSeen by remember(selectedId) { mutableStateOf(false) }
+    LaunchedEffect(sessions, selectedId) {
+        if (retainSelection(selectedId, sessions) != null) selectionSeen = true
+        else if (selectionSeen) selectedId = null
+    }
+
+    val openSession: (String, String) -> Unit = { id, prefill ->
+        when (val target = openTargetFor(pane, id, prefill)) {
+            is OpenTarget.Select -> { selectedId = target.id; selectedPrefill = target.prefill }
+            is OpenTarget.Push ->
+                nav.navigate("session/${target.id}?prefill=${Uri.encode(target.prefill)}") { launchSingleTop = true }
+        }
+    }
 
     // deep link from notifications
     LaunchedEffect(pendingSessionId.value, loaded) {
@@ -113,37 +149,61 @@ fun AaaApp(
         if (loaded && id != null) {
             pendingSessionId.value = null
             val prefill = pendingPrefill.value.orEmpty(); pendingPrefill.value = null
-            nav.navigate("session/$id?prefill=${Uri.encode(prefill)}") { launchSingleTop = true }
+            openSession(id, prefill)
         }
     }
 
-    NavHost(nav, startDestination = "gate") {
-        composable("gate") {
-            LaunchedEffect(loaded) {
-                if (loaded) {
-                    if (settings?.server == null) nav.navigate("pair") { popUpTo("gate") { inclusive = true } }
-                    else nav.navigate("home") { popUpTo("gate") { inclusive = true } }
+    CompositionLocalProvider(LocalOpenSession provides openSession) {
+        NavHost(nav, startDestination = "gate") {
+            composable("gate") {
+                LaunchedEffect(loaded) {
+                    if (loaded) {
+                        if (settings?.server == null) nav.navigate("pair") { popUpTo("gate") { inclusive = true } }
+                        else nav.navigate("home") { popUpTo("gate") { inclusive = true } }
+                    }
                 }
+                Box(Modifier.fillMaxSize().background(Tok.Bg))
             }
-            Box(Modifier.fillMaxSize().background(Tok.Bg))
+            composable("pair") { PairScreen(store) { nav.navigate("home") { popUpTo("pair") { inclusive = true } } } }
+            composable("home") {
+                HomeScaffold(store, nav, pane, selectedId, selectedPrefill, onCloseDetail = { selectedId = null })
+            }
+            composable(
+                "session/{id}?prefill={prefill}",
+                arguments = listOf(
+                    androidx.navigation.navArgument("prefill") { type = androidx.navigation.NavType.StringType; defaultValue = "" },
+                ),
+            ) { entry ->
+                val id = entry.arguments?.getString("id").orEmpty()
+                val prefill = entry.arguments?.getString("prefill").orEmpty()
+                SessionScreen(store, nav, id, Uri.decode(prefill))
+            }
+            composable("diff/{id}") { entry ->
+                DiffScreen(store, nav, entry.arguments?.getString("id").orEmpty())
+            }
+            composable("inbox/{path}") { entry ->
+                InboxScreen(store, nav, Uri.decode(entry.arguments?.getString("path").orEmpty()))
+            }
         }
-        composable("pair") { PairScreen(store) { nav.navigate("home") { popUpTo("pair") { inclusive = true } } } }
-        composable("home") { HomeScaffold(store, nav) }
-        composable(
-            "session/{id}?prefill={prefill}",
-            arguments = listOf(
-                androidx.navigation.navArgument("prefill") { type = androidx.navigation.NavType.StringType; defaultValue = "" },
-            ),
-        ) { entry ->
-            val id = entry.arguments?.getString("id").orEmpty()
-            val prefill = entry.arguments?.getString("prefill").orEmpty()
-            SessionScreen(store, nav, id, Uri.decode(prefill))
-        }
-        composable("diff/{id}") { entry ->
-            DiffScreen(store, nav, entry.arguments?.getString("id").orEmpty())
-        }
-        composable("inbox/{path}") { entry ->
-            InboxScreen(store, nav, Uri.decode(entry.arguments?.getString("path").orEmpty()))
+    }
+
+    // 折叠状态一变，当前正在看的会话要在两种承载方式之间接力：折起来变成压栈的
+    // session/{id}，展开则收回右栏。attach 由 AppStore 持有并有宽限期，所以这一
+    // 来一回不会断线重连（见 AppStore.releaseAttachmentSoon）。
+    LaunchedEffect(pane) {
+        val entry = nav.currentBackStackEntry
+        val onSessionRoute = entry?.destination?.route?.startsWith("session/") == true
+        when {
+            pane == PaneLayout.Single && selectedId != null -> {
+                val id = selectedId!!
+                selectedId = null
+                nav.navigate("session/$id?prefill=${Uri.encode(selectedPrefill)}") { launchSingleTop = true }
+            }
+            pane == PaneLayout.Dual && onSessionRoute -> {
+                selectedId = entry?.arguments?.getString("id")
+                selectedPrefill = Uri.decode(entry?.arguments?.getString("prefill").orEmpty())
+                nav.popBackStack()
+            }
         }
     }
 }
@@ -247,7 +307,14 @@ fun PairScreen(store: AppStore, onConnected: () -> Unit) {
 // ---------- home（会话 / 项目 / 设置 三 tab） ----------
 
 @Composable
-fun HomeScaffold(store: AppStore, nav: NavHostController) {
+fun HomeScaffold(
+    store: AppStore,
+    nav: NavHostController,
+    pane: PaneLayout,
+    selectedId: String?,
+    selectedPrefill: String,
+    onCloseDetail: () -> Unit,
+) {
     var tab by rememberSaveable { mutableStateOf(0) }
     var showNewSheet by remember { mutableStateOf(false) }
 
@@ -257,27 +324,61 @@ fun HomeScaffold(store: AppStore, nav: NavHostController) {
         if (Build.VERSION.SDK_INT >= 33) permLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
 
-    Scaffold(
-        containerColor = Tok.Bg,
-        bottomBar = {
-            NavigationBar(containerColor = Tok.Surface) {
-                NavigationBarItem(tab == 0, { tab = 0 }, icon = { Text("▣", fontSize = 16.sp) }, label = { Text("会话") })
-                NavigationBarItem(tab == 1, { tab = 1 }, icon = { Text("▤", fontSize = 16.sp) }, label = { Text("项目") })
-                NavigationBarItem(tab == 2, { tab = 2 }, icon = { Text("⚙", fontSize = 16.sp) }, label = { Text("设置") })
+    val tabs = @Composable {
+        when (tab) {
+            0 -> SessionsTab(store, nav, selectedId)
+            1 -> ProjectsTab(store, nav)
+            2 -> SettingsTab(store, nav)
+        }
+    }
+    val newButton = @Composable {
+        FloatingActionButton(onClick = { showNewSheet = true }, containerColor = Tok.Cyan) {
+            Text("＋", color = Color(0xFF08252C), fontSize = 24.sp)
+        }
+    }
+
+    if (pane == PaneLayout.Dual) {
+        // 内屏展开：导航移到左侧 rail，列表定宽，终端拿走剩下的宽度。底部导航栏
+        // 横跨 2000px 只为了三个 tab 太浪费，rail 还能把列表推高一整条。
+        Row(Modifier.fillMaxSize().background(Tok.Bg)) {
+            NavigationRail(
+                containerColor = Tok.Surface,
+                header = { if (tab == 0) newButton() },
+            ) {
+                NavigationRailItem(tab == 0, { tab = 0 }, icon = { Text("▣", fontSize = 16.sp) }, label = { Text("会话") })
+                NavigationRailItem(tab == 1, { tab = 1 }, icon = { Text("▤", fontSize = 16.sp) }, label = { Text("项目") })
+                NavigationRailItem(tab == 2, { tab = 2 }, icon = { Text("⚙", fontSize = 16.sp) }, label = { Text("设置") })
             }
-        },
-        floatingActionButton = {
-            if (tab == 0) FloatingActionButton(onClick = { showNewSheet = true }, containerColor = Tok.Cyan) {
-                Text("＋", color = Color(0xFF08252C), fontSize = 24.sp)
+            Box(Modifier.width(ListPaneWidth).fillMaxSize()) { tabs() }
+            VerticalDivider(color = Tok.Edge)
+            Box(Modifier.weight(1f).fillMaxSize().background(Tok.Bg)) {
+                if (selectedId == null) {
+                    Column(
+                        Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center,
+                    ) {
+                        Text("选一个会话", color = Tok.Faint)
+                        Text("左侧列表点开，终端与消息流都在这一栏", color = Tok.Faint, fontSize = 12.sp)
+                    }
+                } else {
+                    // key：换会话时整棵子树重建，composer / 视图模式不会串台
+                    key(selectedId) { SessionScreen(store, nav, selectedId, selectedPrefill, onClose = onCloseDetail) }
+                }
             }
-        },
-    ) { pad ->
-        Box(Modifier.padding(pad)) {
-            when (tab) {
-                0 -> SessionsTab(store, nav)
-                1 -> ProjectsTab(store, nav)
-                2 -> SettingsTab(store, nav)
-            }
+        }
+    } else {
+        Scaffold(
+            containerColor = Tok.Bg,
+            bottomBar = {
+                NavigationBar(containerColor = Tok.Surface) {
+                    NavigationBarItem(tab == 0, { tab = 0 }, icon = { Text("▣", fontSize = 16.sp) }, label = { Text("会话") })
+                    NavigationBarItem(tab == 1, { tab = 1 }, icon = { Text("▤", fontSize = 16.sp) }, label = { Text("项目") })
+                    NavigationBarItem(tab == 2, { tab = 2 }, icon = { Text("⚙", fontSize = 16.sp) }, label = { Text("设置") })
+                }
+            },
+            floatingActionButton = { if (tab == 0) newButton() },
+        ) { pad ->
+            Box(Modifier.padding(pad)) { tabs() }
         }
     }
     if (showNewSheet) NewSessionSheet(store, nav, initialPath = null) { showNewSheet = false }
@@ -289,8 +390,9 @@ private val STATE_RANK = mapOf("waiting" to 0, "running" to 1, "idle" to 2, "exi
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SessionsTab(store: AppStore, nav: NavHostController) {
+fun SessionsTab(store: AppStore, nav: NavHostController, selectedId: String? = null) {
     val scope = rememberCoroutineScope()
+    val openSession = LocalOpenSession.current
     val sessions by store.sessions.collectAsState()
     val conn by store.connState.collectAsState()
     var filter by rememberSaveable { mutableStateOf("all") }
@@ -325,7 +427,7 @@ fun SessionsTab(store: AppStore, nav: NavHostController) {
 
         sessions.firstOrNull { it.state == "waiting" }?.let { w ->
             Card(
-                onClick = { nav.navigate("session/${w.id}") },
+                onClick = { openSession(w.id, "") },
                 colors = CardDefaults.cardColors(containerColor = Tok.Amber.copy(alpha = 0.12f)),
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp),
             ) {
@@ -336,7 +438,14 @@ fun SessionsTab(store: AppStore, nav: NavHostController) {
             }
         }
 
-        Row(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        // 横向可滚：两栏模式下列表栏只有 280dp，三个筛选片放不下时 Row 会把最后一个
+        // 压成一列一个字。滚动比换行好——筛选是一条带子，不是一块区域。
+        Row(
+            Modifier
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
             FilterChip(filter == "all", { filter = "all" }, label = { Text("全部 ${sessions.size}") })
             FilterChip(filter == "waiting", { filter = "waiting" }, label = { DotWithText(Tok.Amber, "等待输入 $waitingCount", Tok.Ink) })
             FilterChip(filter == "running", { filter = "running" }, label = { DotWithText(Tok.Green, "运行中 $runningCount", Tok.Ink) })
@@ -357,7 +466,9 @@ fun SessionsTab(store: AppStore, nav: NavHostController) {
                 }
             }
             LazyColumn(Modifier.fillMaxSize()) {
-                items(filtered, key = { it.id }) { s -> SessionCard(s) { nav.navigate("session/${s.id}") } }
+                items(filtered, key = { it.id }) { s ->
+                    SessionCard(s, selected = s.id == selectedId) { openSession(s.id, "") }
+                }
                 item { Spacer(Modifier.height(80.dp)) }
             }
         }
@@ -365,13 +476,19 @@ fun SessionsTab(store: AppStore, nav: NavHostController) {
 }
 
 @Composable
-fun SessionCard(s: Session, onClick: () -> Unit) {
+fun SessionCard(s: Session, selected: Boolean = false, onClick: () -> Unit) {
     val stateColor = Tok.stateColor(s.state)
     val isWaiting = s.state == "waiting"
+    // 两栏时右栏挂着哪一个，列表上要看得出来（单栏永远 selected=false）
+    val border = when {
+        selected -> androidx.compose.foundation.BorderStroke(1.dp, Tok.Cyan)
+        isWaiting -> androidx.compose.foundation.BorderStroke(1.dp, Tok.Amber.copy(alpha = 0.6f))
+        else -> null
+    }
     Card(
         onClick = onClick,
-        colors = CardDefaults.cardColors(containerColor = if (isWaiting) Tok.Raised else Tok.Surface),
-        border = if (isWaiting) androidx.compose.foundation.BorderStroke(1.dp, Tok.Amber.copy(alpha = 0.6f)) else null,
+        colors = CardDefaults.cardColors(containerColor = if (isWaiting || selected) Tok.Raised else Tok.Surface),
+        border = border,
         modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 5.dp),
     ) {
         Column(Modifier.padding(13.dp)) {
@@ -429,6 +546,7 @@ private val NEW_AGENTS = listOf("claude", "codex", "pi", "reasonix", "agy", "she
 @Composable
 fun NewSessionSheet(store: AppStore, nav: NavHostController, initialPath: String?, onDismiss: () -> Unit) {
     val scope = rememberCoroutineScope()
+    val openSession = LocalOpenSession.current
     var name by rememberSaveable { mutableStateOf("") }
     var selected by rememberSaveable { mutableStateOf("claude") }
     var busy by remember { mutableStateOf(false) }
@@ -488,7 +606,7 @@ fun NewSessionSheet(store: AppStore, nav: NavHostController, initialPath: String
                             ).path
                             val sess = api.createSession(path, selected, resume = initialPath != null)
                             onDismiss()
-                            nav.navigate("session/${sess.id}")
+                            openSession(sess.id, "")
                         } catch (e: Exception) {
                             error = if (e is DaemonHttpException && e.errorCode == "conflict") "项目已存在" else e.message
                         } finally { busy = false }

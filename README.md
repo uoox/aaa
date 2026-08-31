@@ -153,9 +153,9 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 ## 开发
 
 ```bash
-cd daemon  && cargo test           # 92 tests（含 CLI）
-cd mac     && cargo test
-cd android && ./gradlew test
+cd daemon  && cargo test           # 106 tests（含 CLI）
+cd mac     && cargo test           # 46 tests
+cd android && ./gradlew test        # 181 tests
 ```
 
 契约变更流程：先改 `PROTOCOL.md`，再改三端。事件帧向前兼容（未知帧忽略）。

@@ -15,7 +15,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.windowsizeclass.WindowWidthSizeClass
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -99,6 +101,55 @@ fun AaaTheme(content: @Composable () -> Unit) {
                 .systemBarsPadding(),
         ) { content() }
     }
+}
+
+// ---------- 折叠屏 / 大屏布局 ----------
+
+/** 列表与会话详情的排布：单栏（直板机、外屏、半折）或左右两栏（内屏展开）。 */
+enum class PaneLayout { Single, Dual }
+
+/**
+ * Medium（≥600dp）起进两栏。
+ *
+ * 门槛不是 Expanded：实测 OnePlus Open 内屏展开是 **sw698dp**（2268px ÷ 3.25），
+ * 落在 Medium 里——按 Expanded 判，这台机器上双栏永远不会出现，等于这个功能对
+ * 它要服务的设备无效。外屏 343dp、9R 直板都还在 Compact，行为不变。
+ */
+fun paneLayoutFor(width: WindowWidthSizeClass): PaneLayout =
+    if (width == WindowWidthSizeClass.Compact) PaneLayout.Single else PaneLayout.Dual
+
+/**
+ * 两栏时左侧列表的固定宽度；右侧终端拿走剩下的，保证它总是最宽的那一栏。
+ * 280 而不是更宽：698dp 的内屏减掉之后终端还剩 418dp，12sp 等宽字体下约 58 列，
+ * 够看；列表这边放得下项目名 + 状态点 + 相对时间，本来也不需要更多。
+ */
+val ListPaneWidth = 280.dp
+
+/** 「打开某个会话」的去向。单栏压栈到 session/{id}，两栏只换右栏选中项。 */
+sealed class OpenTarget {
+    data class Push(val id: String, val prefill: String) : OpenTarget()
+    data class Select(val id: String, val prefill: String) : OpenTarget()
+}
+
+/**
+ * 会话卡片、通知深链、项目页「继续会话」全都走这里算去向，折叠状态一变
+ * 三处行为才不会各走各的。拼路由（要 Uri.encode）留给调用方，这里保持纯函数。
+ */
+fun openTargetFor(pane: PaneLayout, id: String, prefill: String = ""): OpenTarget = when (pane) {
+    PaneLayout.Dual -> OpenTarget.Select(id, prefill)
+    PaneLayout.Single -> OpenTarget.Push(id, prefill)
+}
+
+/**
+ * 右栏选中项在会话列表刷新后的取舍：会话被删掉就回空态，否则原样保留。
+ * 单栏↔两栏来回切时列表会重排，不能因为重排就丢掉当前会话。
+ */
+fun retainSelection(selected: String?, sessions: List<Session>): String? =
+    selected?.takeIf { id -> sessions.any { it.id == id } }
+
+/** 打开会话的统一入口，由 AaaApp 按当前 [PaneLayout] 提供。 */
+val LocalOpenSession = staticCompositionLocalOf<(String, String) -> Unit> {
+    error("LocalOpenSession 未提供")
 }
 
 @Composable

@@ -127,6 +127,35 @@ class RemoteTerminalSessionTest {
         assertEquals(3, r.sentControls.size)
     }
 
+    /**
+     * 粘贴走 emulator.paste 而不是 session.write：这条路径负责剥控制字符、
+     * 归一换行、以及 DECSET 2004 打开时补 bracketed-paste 包裹。
+     */
+    @Test fun pasteSanitizesAndBracketsWhenTuiAsksForIt() {
+        val r = Recorder()
+        r.session.updateSize(20, 5, 10, 20)
+        val emu = r.session.emulator
+
+        // 默认不带包裹，CRLF 归一成 CR
+        emu.paste("a\r\nb")
+        assertEquals("a\rb", r.sentBytes.single().toString(StandardCharsets.UTF_8))
+
+        // TUI 开 DECSET 2004 后要带包裹：Claude Code 靠它区分「粘进来的多行」
+        // 和「一行行敲的回车」，直接 write 会被当成连着提交了好几次
+        r.session.pushBytes("\u001b[?2004h".toByteArray(StandardCharsets.UTF_8))
+        r.sentBytes.clear()
+        emu.paste("x\ny")
+        assertEquals(
+            listOf("\u001b[200~", "x\ry", "\u001b[201~"),
+            r.sentBytes.map { it.toString(StandardCharsets.UTF_8) },
+        )
+
+        // ESC 必须被剥掉，否则粘贴内容可以伪造控制序列
+        r.sentBytes.clear()
+        emu.paste("\u001b[31mred")
+        assertTrue(r.sentBytes.none { it.toString(StandardCharsets.UTF_8).contains("\u001b[31m") })
+    }
+
     @Test fun finishReportsExitStatusOnce() {
         val r = Recorder()
         r.session.updateSize(20, 5, 10, 20)

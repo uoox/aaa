@@ -2,11 +2,13 @@ package cc.uoox.aaaui
 
 import android.annotation.SuppressLint
 import android.content.Context
+import com.termux.terminal.TerminalSessionClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -39,6 +41,9 @@ class AppStore private constructor(context: Context) {
         @Volatile private var instance: AppStore? = null
         fun get(context: Context): AppStore =
             instance ?: synchronized(this) { instance ?: AppStore(context.applicationContext).also { instance = it } }
+
+        /** 折叠屏重建 SessionScreen 只要几十毫秒，留够宽限就不会误伤 attach。 */
+        private const val RELEASE_GRACE_MS = 5_000L
     }
 
     val settings = SettingsStore(context)
@@ -66,6 +71,8 @@ class AppStore private constructor(context: Context) {
     private var loopJob: Job? = null
     private val reconnectKick = Channel<Unit>(Channel.CONFLATED)
     private val prevStates = HashMap<String, String>()
+    private val attachments = HashMap<String, TerminalAttachment>()
+    private val pendingRelease = HashMap<String, Job>()
 
     fun ensureStarted() {
         synchronized(this) {
@@ -177,6 +184,7 @@ class AppStore private constructor(context: Context) {
             is EventFrame.SessionRemoved -> {
                 synchronized(prevStates) { prevStates.remove(frame.id) }
                 _sessions.value = _sessions.value.filter { it.id != frame.id }
+                releaseAttachmentNow(frame.id) // 会话没了，attach 再重连也只会一直失败
             }
             is EventFrame.ProjectsChanged -> scope.launch { refreshProjects() }
             is EventFrame.HealthUpdate -> {
@@ -188,6 +196,56 @@ class AppStore private constructor(context: Context) {
             }
             is EventFrame.MessagesChanged, is EventFrame.InboxChanged -> _frames.tryEmit(frame)
             is EventFrame.Unknown -> { }
+        }
+    }
+
+    // ---------- 终端 attach 注册表 ----------
+
+    /**
+     * 拿到某个会话的 attach，没有就建一个。attach 由 store 持有而不是由
+     * SessionScreen 持有：折叠/展开会重建 SessionScreen（单栏挂在 nav 的
+     * session/{id}，两栏挂在 HomeScaffold 右栏），attach 若跟着 composable 生死，
+     * 每折一次屏就断线重连一次——PTY 在 daemon 上不会丢，但整屏 replay 肉眼可见。
+     *
+     * [sessionClient] 每次都重新绑：回调对象里存着当前那份 TerminalView 与 Context。
+     */
+    fun attachmentFor(sessionId: String, sessionClient: TerminalSessionClient): TerminalAttachment? {
+        val api = client ?: return null
+        return synchronized(attachments) {
+            pendingRelease.remove(sessionId)?.cancel()
+            val cur = attachments[sessionId]
+            // daemon 重连后换了 DaemonClient，旧 socket 指向的 base 可能已经不对了
+            if (cur != null && cur.api === api) {
+                cur.rebind(sessionClient)
+                cur
+            } else {
+                cur?.stop()
+                TerminalAttachment(api, sessionId, sessionClient).also { attachments[sessionId] = it; it.start() }
+            }
+        }
+    }
+
+    /**
+     * 预约关闭：SessionScreen 被销毁时叫，但宽限 [RELEASE_GRACE_MS] 再真的收——
+     * 折叠屏配置变化里重建只隔几十毫秒，宽限期内重新出现就当无事发生；真的离开
+     * 会话才会把 socket 收掉，不留着无限重连。
+     */
+    fun releaseAttachmentSoon(sessionId: String) {
+        synchronized(attachments) {
+            if (!attachments.containsKey(sessionId)) return
+            pendingRelease.remove(sessionId)?.cancel()
+            pendingRelease[sessionId] = scope.launch {
+                delay(RELEASE_GRACE_MS)
+                releaseAttachmentNow(sessionId)
+            }
+        }
+    }
+
+    /** 会话被删/被结束时立刻收，否则 attach 会对着不存在的会话一直重连。 */
+    fun releaseAttachmentNow(sessionId: String) {
+        synchronized(attachments) {
+            pendingRelease.remove(sessionId)?.cancel()
+            attachments.remove(sessionId)?.stop()
         }
     }
 

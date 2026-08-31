@@ -13,18 +13,24 @@
     <application
         android:name=".AaaApplication"
         android:theme="@style/Theme.AaaUi"
-        android:label="aaa-ui"
+        android:label="AAA"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:allowBackup="false"
         android:supportsRtl="true"
         android:usesCleartextTraffic="true">
+        <!-- 展开/合上 OnePlus Open 改变的是 screenLayout 与 smallestScreenSize，
+             只声明 orientation|screenSize 挡不住，Activity 会被重建：整棵
+             composition 连同终端 attach 一起没了，每折一次屏就要重连一次
+             WebSocket 并整屏 replay。Compose 自己跟着 LocalConfiguration 走，
+             所以把这些配置变化接过来自己处理是安全的。 -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTask"
             android:windowSoftInputMode="adjustResize"
-            android:configChanges="orientation|screenSize|keyboardHidden">
+            android:resizeableActivity="true"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|density|keyboardHidden">
             <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
         </activity>
         <activity
