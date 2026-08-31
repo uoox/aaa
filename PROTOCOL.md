@@ -53,7 +53,12 @@ topic = "aaa"
 | agy | Antigravity | `agy --dangerously-skip-permissions` | `agy --conversation %ID% --dangerously-skip-permissions` |
 | shell | 终端 | `exec zsh -l` | —（shell 无 resume） |
 
-启动方式：`zsh -lc 'cd <dir> && <cmd>'`（login shell，继承用户 PATH；agent 都装在 `~/.local/bin` 等处）。
+启动方式：`zsh -lc 'cd <dir> && <cmd>'`，并**由 daemon 显式设置 `PATH`**。
+不能指望 login shell：非交互的 `zsh -l` 只读 `.zprofile`、不读 `.zshrc`，而 PATH 通常维护在后者——
+launchd 起的 daemon 因此会让每个 agent 都 `command not found`，`shell` 却照常工作。
+daemon 在启动时用 `zsh -lic` 问一次「终端里应有的 PATH」（带超时），再把 `~/.local/bin`、
+`~/.npm-global/bin` 等常见安装位置并进去兜底；`/agents` 的 `available` 用**同一份** PATH 判断，
+所以「显示可用」与「真能启动」不会打架。
 会话查找（resume 用）、cwd 探测、purge 的具体逻辑**逐条移植** `~/.local/bin/aaa` 内嵌 Python（AAA_PY 的 find/detect/collect/purge），存储布局见该脚本注释。
 
 ## 会话模型
@@ -85,7 +90,7 @@ Claude 的 hook 事件（见下）可精确覆盖启发式。
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/health` | `{version, ssd_mounted, project_root, uptime_s}` |
+| GET | `/health` | `{version, ssd_mounted, root_state, project_root, uptime_s}`；`root_state ∈ ok\|unmounted\|denied`，`ssd_mounted = (root_state==ok)`（向后兼容：对客户端它一直就是「能不能用」） |
 | GET | `/agents` | agent 表 + `available`（which 检查） |
 | GET | `/projects` | collect 移植：`[{path,name,mtime,dir_size,ctx_size,agent,session_title}]`，按 mtime 降序 |
 | POST | `/projects` | `{name?, agent?}`；name 经 slugify，空则 `YYYY-MM-DD-HHMM`；已存在 → 409；agent 给了就写注册表。**响应 = 完整项目对象（至少 `{path,name,agent}`）**，客户端依赖 `path` 直接开会话 |
@@ -168,6 +173,12 @@ Mac 客户端把 payload 渲染成二维码；Android 扫码解析后逐个 host
 ## SSD 守卫（硬性约束）
 
 `project_root` 不存在时：**绝不 mkdir**（防止在系统盘建占位目录挤掉真 SSD 挂载点）。`/health.ssd_mounted=false`；一切创建/启动/删除类 API 返回 503 `ssd_unmounted`；已有会话不受影响。挂载恢复后自动解除。
+
+**可读性与挂载是两件事**：外置卷被 macOS 的 TCC 挡住时 `stat` 能过而 `opendir` 会**无限阻塞**（等一个没人去点的授权弹窗）。因此：
+
+- 探测一律 `read_dir` 而非 `metadata`，且跑在带超时（3s）的独立线程上——**daemon 永不因权限弹窗卡在启动**，超时即判为 `denied`。
+- `root_state` 区分 `unmounted`（挂上就好）与 `denied`（要给 daemon 完全磁盘访问权限），两者修法完全不同，503 的 `message` 直接带上修法（手机端看不到 Mac 的日志）。
+- 状态由 5s 健康轮询维护；请求只读缓存值，不逐次探测。
 
 ## v1.1 扩展（2026-08-30 用户拍板：消息流 / checkpoint+diff / 收件箱 / 上传 / watchdog / 通知细化）
 

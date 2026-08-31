@@ -42,6 +42,9 @@ aaa-daemon run
 # 3. launchd 常驻（KeepAlive；日志在 ~/.local/state/aaa-daemon/）
 aaa-daemon service install        # 对应 uninstall / status
 
+# 3.5 项目根在外置卷上时，这一步是必须的（见下）
+open "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
+
 # 4. 一键申请全部 macOS 权限（弹窗在 Mac 上逐个允许；授权归到 daemon，所有 agent 子进程共享，
 #    此后手机远程操作不再被权限弹窗卡死）。也可以在 `aaa` 菜单里的「macOS 权限」进
 aaa perms all                     # 或 aaa perms 只看状态
@@ -57,6 +60,16 @@ config.toml 要点：`port=2730`（=0xAAA）、`project_root=/Volumes/SSD/projec
 > **`auto_init_git` 默认 false**：项目常常只是一个任务目录（笔记、抓取、一堆 yml），
 > 替你 `git init` 不是 daemon 该做的事。已经是 git 仓库的项目照常有检查点/diff/回滚；
 > 想让非仓库目录也享受后悔药，再显式打开（届时 `auto_init_max_mb` 护栏仍生效）。
+
+> **项目根在外置卷（`/Volumes/…`）上时，daemon 需要「完全磁盘访问权限」。**
+> macOS 把可移动卷挡在 TCC 后面，而 launchd 起的进程没有任何「负责 App」持有这个授权——
+> 现象不是报错而是**卡死**：`stat` 能过，`opendir` 一直等一个没人去点的授权弹窗。
+> （拿 `/bin/ls` 做成 launchd job 一样会 `Operation not permitted`，这是系统策略不是 daemon 的锅。）
+> 到「系统设置 → 隐私与安全性 → 完全磁盘访问权限」把 `~/.local/bin/aaa-daemon` 加进去打开，
+> 然后 `aaa-daemon service uninstall && aaa-daemon service install`。
+> daemon 自身不会因此卡住：读不到项目根时它照常监听、`/health.root_state=denied`，并在日志和 API
+> 错误里直接给出这段修法。
+> 注意 ad-hoc 签名每次重新构建都会让这个授权失效，需要重新勾一次。
 
 > **升级二进制时先 `rm` 再 `cp`**：直接 `cp` 覆盖正在运行的二进制会写坏它的 ad-hoc 签名，
 > 之后每次执行都被 macOS 直接 `SIGKILL`（现象是命令无输出、退出码 137）。
