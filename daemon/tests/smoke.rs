@@ -229,6 +229,37 @@ async fn full_session_lifecycle() {
         c.to_string_lossy().into_owned()
     });
 
+    // ---- 幂等：同项目+同 agent 再 POST 返回同一个会话，不孵第二个进程 ----
+    // （实测事故：双击「没反应」再点一次 → 两个进程 resume 同一对话）
+    let (code, again) = http(
+        "POST",
+        port,
+        "/api/v1/sessions",
+        Some(TOKEN),
+        Some(serde_json::json!({"project_path": proj_path, "agent": "shell", "resume": false})),
+    );
+    assert_eq!(code, 200);
+    assert_eq!(again["id"].as_str().unwrap(), sid, "重复 create 必须复用存活会话");
+    // fresh:true 才允许并行开第二个
+    let (code, second) = http(
+        "POST",
+        port,
+        "/api/v1/sessions",
+        Some(TOKEN),
+        Some(serde_json::json!({"project_path": proj_path, "agent": "shell", "fresh": true})),
+    );
+    assert_eq!(code, 200);
+    let sid2 = second["id"].as_str().unwrap().to_string();
+    assert_ne!(sid2, sid, "fresh:true 必须开新会话");
+    let (code, _) = http(
+        "POST",
+        port,
+        &format!("/api/v1/sessions/{sid2}/kill"),
+        Some(TOKEN),
+        Some(serde_json::json!({})),
+    );
+    assert_eq!(code, 200);
+
     // ---- WS attach: hello frame, echo roundtrip ----
     let ws_url = format!("ws://127.0.0.1:{port}/api/v1/sessions/{sid}/attach?token={TOKEN}");
     let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url)

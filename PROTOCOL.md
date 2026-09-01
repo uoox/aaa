@@ -202,7 +202,8 @@ Mac 客户端把 payload 渲染成二维码；Android 扫码解析后逐个 host
 ### 任务收件箱
 
 - `GET /inbox?path=<proj>` → `[{"id","text","created_at"}]`；`POST /inbox` `{path,text}`；`DELETE /inbox/:id`。
-- 自动喂入：项目会话**首次进入 waiting** 且收件箱非空时，daemon 把条目拼成一条消息（`任务清单：\n1. …\n2. …` + `\r`）写入 PTY 并删除条目。`POST /sessions` 可带 `"feed_inbox":false` 禁用。事件 `{"t":"inbox_changed","path"}`。
+- 自动喂入：项目会话**首次进入 waiting** 且收件箱非空时，daemon 把条目拼成一条消息（`任务清单：\n1. …\n2. …` + `\r`）写入 PTY 并删除条目。`POST /sessions` 可带 `"feed_inbox":false` 禁用。喂入只发生在接受自由文本的 waiting（输入框/无选项问题），带选项的对话框不喂。
+- `POST /sessions` **幂等**：同项目 + 同 agent 已有存活会话时直接返回该会话（不孵第二个进程）；显式并行开第二个用 `"fresh":true`。事件 `{"t":"inbox_changed","path"}`。
 
 ### 手机→项目文件通道
 

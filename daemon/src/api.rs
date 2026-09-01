@@ -448,6 +448,10 @@ struct CreateSession {
     /// v1.1: disable inbox auto-feed for this session
     #[serde(default = "default_true")]
     feed_inbox: bool,
+    /// 显式要求开新会话（默认幂等：同项目+同 agent 已有存活会话就返回它。
+    /// 实测事故：双击「没反应」再点一次 → 两个进程 resume 同一个对话）
+    #[serde(default)]
+    fresh: bool,
 }
 
 async fn sessions_create(
@@ -479,6 +483,19 @@ async fn sessions_create(
     }
     let canon = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
     let canon_str = canon.to_string_lossy().into_owned();
+
+    // 幂等：同项目 + 同 agent 已有存活会话时直接返回它，不再孵第二个进程
+    // （两个进程 resume 同一对话还会互抢存储）。要并行开第二个用 fresh:true。
+    if !body.fresh {
+        if let Some(existing) = app.pool.all().into_iter().find(|s| {
+            let meta = s.meta.lock().unwrap();
+            meta.project_path == canon_str
+                && meta.agent == body.agent
+                && meta.state != SState::Exited
+        }) {
+            return Ok(Json(existing.to_json()));
+        }
+    }
 
     // 名册维护：开会话的目录必须在注册表里（项目列表以注册表为准）。
     // 已登记的不动——用户手动设过的 agent 不被这次会话的选择覆盖。

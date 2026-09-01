@@ -352,15 +352,17 @@ fun SessionsTab(store: AppStore, nav: NavHostController) {
     val conn by store.connState.collectAsState()
     var refreshing by remember { mutableStateOf(false) }
 
-    // 三态分组（open-agent-view 式心智模型）：需要输入 / 进行中 / 已完成。
+    // 三态分组（用户拍板口径）：执行中=running；待回复=waiting 且弹出了
+    // 问题/选项；已完成=其余（停在输入框的 waiting、idle、exited）。
     // Group only when the inputs change, not on every recomposition
     // (conn latency updates and pull-to-refresh recompose this tab too).
     val groups = remember(sessions) {
         val sorted = sessions.sortedByDescending { it.last_output_at }
+        fun needsReply(s: Session) = s.state == "waiting" && s.question != null
         listOf(
-            Triple("需要输入", Tok.Amber, sorted.filter { it.state == "waiting" }),
-            Triple("进行中", Tok.Green, sorted.filter { it.state == "running" }),
-            Triple("已完成", Tok.Faint, sorted.filter { it.state == "idle" || it.state == "exited" }),
+            Triple("执行中", Tok.Green, sorted.filter { it.state == "running" }),
+            Triple("待回复", Tok.Amber, sorted.filter { needsReply(it) }),
+            Triple("已完成", Tok.Faint, sorted.filter { it.state != "running" && !needsReply(it) }),
         ).filter { it.third.isNotEmpty() }
     }
 

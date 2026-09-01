@@ -360,7 +360,8 @@ impl RootView {
                     .is_none_or(|t| t.elapsed().as_secs() >= 300);
                 if self.last_notified_question.get(&new.id) != Some(&key) && cooled {
                     if !watching {
-                        let body = if key.is_empty() { "等待输入" } else { &key };
+                        // 无具体问题 = 这轮跑完了（用户口径里的「已完成」）
+                        let body = if key.is_empty() { "已完成 · 等你下一步" } else { &key };
                         crate::notify::send(&new.display_title(), body);
                         self.last_notify_at
                             .insert(new.id.clone(), std::time::Instant::now());
@@ -639,10 +640,10 @@ impl RootView {
                 .cursor_pointer()
         };
 
-        // ── 上分区：会话按三态分组（open-agent-view 式心智模型）────────
-        //   需要输入 = waiting（最顶，急事）
-        //   进行中   = running
-        //   已完成   = idle / exited（agent 说完了这轮）
+        // ── 上分区：会话按三态分组（用户拍板的口径，2026-09-02）────────
+        //   执行中 = running（任务没跑完）
+        //   待回复 = waiting 且弹出了问题/选项（对话在等一个具体回答）
+        //   已完成 = 其余：停在输入框的 waiting（这轮说完了）、idle、exited
         let alive_paths: Vec<&str> = self
             .sessions
             .iter()
@@ -746,25 +747,25 @@ impl RootView {
                 )
         };
 
+        let needs_reply =
+            |s: &&Session| s.state == SessionState::Waiting && s.question.is_some();
         let buckets: [(&'static str, u32, Vec<&Session>); 3] = [
             (
-                "需要输入",
-                theme::AMBER,
-                self.sessions.iter().filter(|s| s.state == SessionState::Waiting).collect(),
-            ),
-            (
-                "进行中",
+                "执行中",
                 theme::GREEN,
                 self.sessions.iter().filter(|s| s.state == SessionState::Running).collect(),
+            ),
+            (
+                "待回复",
+                theme::AMBER,
+                self.sessions.iter().filter(needs_reply).collect(),
             ),
             (
                 "已完成",
                 theme::FAINT,
                 self.sessions
                     .iter()
-                    .filter(|s| {
-                        matches!(s.state, SessionState::Idle | SessionState::Exited)
-                    })
+                    .filter(|s| s.state != SessionState::Running && !needs_reply(s))
                     .collect(),
             ),
         ];
