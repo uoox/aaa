@@ -218,7 +218,7 @@ fun Palette.materialScheme(): ColorScheme {
 }
 
 /** termux 出厂的 ANSI 16 色，第一次改表之前抄一份，切回黑暗主题时用它还原。 */
-private val termuxDefaultAnsi: IntArray by lazy { TerminalColors.COLOR_SCHEME.mDefaultColors.copyOf(16) }
+internal val termuxDefaultAnsi: IntArray by lazy { TerminalColors.COLOR_SCHEME.mDefaultColors.copyOf(16) }
 
 /**
  * 把主题的终端前景/背景和 ANSI 16 色写进 termux 的全局配色表（新建的模拟器从这里拷贝
@@ -236,6 +236,13 @@ fun applyTerminalPalette(p: Palette, session: TerminalSession? = null) {
     scheme.mDefaultColors[TextStyle.COLOR_INDEX_BACKGROUND] = p.termBg.toArgb()
     scheme.setCursorColorForBackground()
     session?.emulator?.mColors?.reset()
+}
+
+/** 同一套配色喂给 termlib（libvterm）：16 色 + 默认前景/背景，暗色主题同样沿用 termux 的 xterm 默认 16 色。 */
+fun applyTermlibPalette(p: Palette, emulator: org.connectbot.terminal.TerminalEmulator) {
+    val defaults = termuxDefaultAnsi
+    val ansi = IntArray(16) { i -> p.ansi?.get(i)?.toArgb() ?: defaults[i] }
+    emulator.applyColorScheme(ansi, p.termFg.toArgb(), p.termBg.toArgb())
 }
 
 /** 读设置里的主题，交给 [AaaTheme]。两个 Activity（主界面、分享目标）都走这里。 */

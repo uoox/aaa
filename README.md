@@ -24,7 +24,7 @@ Mac 上会话常驻不掉线，手机上两步答一句，终端里 `aaa` 依然
 | `daemon/` | Rust 常驻服务：PTY 池 + 服务端 VT + 全套 API + Claude 会话存储读取 + TCC 权限 + checkpoint/消息流/收件箱/表单作答 |
 | `cli/` | `aaa` 终端客户端：一个可移植 bash 脚本（bash ≥ 3.2 + curl + python3 标准库），`curl` 下来即用，不用编译 |
 | `mac/` | gpui 原生客户端（tty7 路线，alacritty_terminal + 自绘渲染） |
-| `android/` | Kotlin/Compose 原生客户端（vendor Termux 终端引擎，无 WebView） |
+| `android/` | Kotlin/Compose 原生客户端（Termux / termlib 两套终端引擎可切，无 WebView） |
 | `brand/` | 品牌标志：`logo.py` 一次运行导出 macOS `.icns` 与 Android 各密度自适应图标 |
 | `PROTOCOL.md` | 四方唯一契约（API/状态机/CLI/设计令牌） |
 | `prototype.html` | 双端交互原型（已确认） |
@@ -147,7 +147,8 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
 配对：扫 Mac 设置页二维码，或手输 `host:2730` + token（多 host 依次试连，tailscale 优先）。
-主视图为**消息流**（claude 完整解析；不支持的 agent 自动回落终端），右上可切终端，设置里改默认 UI。
+主视图为**消息流**（claude 完整解析；不支持的 agent 自动回落终端），右上的视图按钮在 消息流 → Termux → Termlib 之间轮换，设置里改默认 UI 与终端引擎。
+终端引擎有两套并存对比：vendored **Termux**（Java 解析 + 自绘 View）与 ConnectBot **termlib**（libvterm 走 JNI，Compose Canvas 渲染，Maven `org.connectbot:termlib`，不需要 NDK）。
 通知只有一种：agent 这轮跑完（或退出）时「完成」一条，点开直达会话；按项目静音。
 agent 的提问在消息流里是**原生表单**：单选、复选、「其它」自填，提交由 daemon 翻译成对话框按键；回复按 Markdown 渲染。
 终端是首页右上角的常驻多标签面板，不再是新建时的一个「agent」选项。

@@ -76,14 +76,16 @@ fun TerminalScreen(store: AppStore, nav: NavHostController, focusId: String) {
         }
         if (effectiveId.isEmpty()) Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) { Text("还没有终端", color = Tok.Faint); Button(onClick = { createTerminal() }, modifier = Modifier.padding(top = 12.dp)) { Text("开一个") } }
-        } else TerminalPane(store, context, conn, effectiveId, settings.fontSize, Modifier.weight(1f))
+        } else TerminalPane(store, context, conn, effectiveId, settings.fontSize, TerminalEngine.forName(settings.terminalEngine), Modifier.weight(1f))
     }
 }
 
 @Composable
-private fun TerminalPane(store: AppStore, context: Context, conn: ConnState, sessionId: String, fontSize: Int, modifier: Modifier) {
+private fun TerminalPane(store: AppStore, context: Context, conn: ConnState, sessionId: String, fontSize: Int, engine: TerminalEngine, modifier: Modifier) {
+    val scope = rememberCoroutineScope()
     val viewRef = remember { mutableStateOf<TerminalView?>(null) }
-    var ctrlSticky by remember { mutableStateOf(false) }
+    val ctrlStickyState = remember { mutableStateOf(false) }
+    var ctrlSticky by ctrlStickyState
     val terminalClient = remember(sessionId) { object : TerminalSessionClient {
         override fun onTextChanged(changedSession: TerminalSession) { viewRef.value?.onScreenUpdated() }
         override fun onTitleChanged(changedSession: TerminalSession) {}
@@ -105,9 +107,17 @@ private fun TerminalPane(store: AppStore, context: Context, conn: ConnState, ses
     } }
     var attachment by remember(sessionId) { mutableStateOf<TerminalAttachment?>(null) }
     LaunchedEffect(conn, sessionId) { attachment = store.attachmentFor(sessionId, terminalClient) }
+    LaunchedEffect(attachment, engine) { attachment?.switchEngine(engine) }
     DisposableEffect(sessionId) { onDispose { store.releaseAttachmentSoon(sessionId) } }
+    fun pasteViaDaemon() {
+        val clip = (context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager).primaryClip
+        val text = clip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(context)?.toString()
+        if (!text.isNullOrEmpty()) scope.launch { runCatching { store.client?.input(sessionId, text, false) } }
+    }
     Column(modifier) {
-        TerminalHost(attachment, viewRef, fontSize) { view -> object : TerminalViewClient {
+        if (engine == TerminalEngine.Termlib) Box(Modifier.weight(1f).fillMaxWidth()) {
+            TermlibHost(attachment, fontSize, ctrlStickyState, onHyperlinkClick = { openUrl(context, it) }, onPasteRequest = { pasteViaDaemon() })
+        } else Box(Modifier.weight(1f).fillMaxWidth()) { TerminalHost(attachment, viewRef, fontSize) { view -> object : TerminalViewClient {
             override fun onScale(scale: Float) = scale
             override fun onSingleTapUp(e: MotionEvent?) { view.requestFocus(); (context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager).showSoftInput(view, InputMethodManager.SHOW_IMPLICIT) }
             override fun shouldBackButtonBeMappedToEscape() = false
@@ -131,13 +141,18 @@ private fun TerminalPane(store: AppStore, context: Context, conn: ConnState, ses
             override fun logVerbose(tag: String?, message: String?) {}
             override fun logStackTraceWithMessage(tag: String?, message: String?, e: Exception?) {}
             override fun logStackTrace(tag: String?, e: Exception?) {}
-        } }
+        } } }
         Row(Modifier.fillMaxWidth().background(Tok.Surface).horizontalScroll(rememberScrollState()).padding(8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            fun key(code: Int) = { viewRef.value?.handleKeyCode(code, 0); Unit }
-            fun lit(s: String) = { attachment?.session?.write(s); Unit }
+            fun key(code: Int) = {
+                if (engine == TerminalEngine.Termlib) {
+                    vtermKeyFor(code)?.let { k -> attachment?.termlib?.dispatchKey(if (ctrlSticky) VTERM_MOD_CTRL else 0, k); ctrlSticky = false }
+                } else viewRef.value?.handleKeyCode(code, 0)
+                Unit
+            }
+            fun lit(s: String) = { attachment?.write(s); Unit }
             KeyChip("Esc", onClick = key(KeyEvent.KEYCODE_ESCAPE)); KeyChip("Tab", onClick = key(KeyEvent.KEYCODE_TAB)); KeyChip("Ctrl", active = ctrlSticky) { ctrlSticky = !ctrlSticky }
             KeyChip("↑", onClick = key(KeyEvent.KEYCODE_DPAD_UP)); KeyChip("↓", onClick = key(KeyEvent.KEYCODE_DPAD_DOWN)); KeyChip("←", onClick = key(KeyEvent.KEYCODE_DPAD_LEFT)); KeyChip("→", onClick = key(KeyEvent.KEYCODE_DPAD_RIGHT))
-            KeyChip("Home", onClick = key(KeyEvent.KEYCODE_MOVE_HOME)); KeyChip("End", onClick = key(KeyEvent.KEYCODE_MOVE_END)); KeyChip("⏎", onClick = key(KeyEvent.KEYCODE_ENTER)); KeyChip("-", onClick = lit("-")); KeyChip("/", onClick = lit("/")); KeyChip("|", onClick = lit("|")); KeyChip("~", onClick = lit("~")); KeyChip("粘贴") { pasteIntoPty(context, attachment?.session) }
+            KeyChip("Home", onClick = key(KeyEvent.KEYCODE_MOVE_HOME)); KeyChip("End", onClick = key(KeyEvent.KEYCODE_MOVE_END)); KeyChip("⏎", onClick = key(KeyEvent.KEYCODE_ENTER)); KeyChip("-", onClick = lit("-")); KeyChip("/", onClick = lit("/")); KeyChip("|", onClick = lit("|")); KeyChip("~", onClick = lit("~")); KeyChip("粘贴") { if (engine == TerminalEngine.Termlib) pasteViaDaemon() else pasteIntoPty(context, attachment?.session) }
         }
     }
 }

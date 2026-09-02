@@ -18,6 +18,7 @@ data class AppSettings(
     val notifyDone: Boolean = true,
     val serviceEnabled: Boolean = false,
     val defaultUi: String = "messages", // "messages" | "terminal"
+    val terminalEngine: String = "termux", // "termux" | "termlib"，见 TerminalEngine
     val fontSize: Int = 14,
     /** 终端视图下收起预输入框，直接在 shell 里打字；全局记住用户的选择。 */
     val terminalComposerHidden: Boolean = false,
@@ -35,6 +36,7 @@ class SettingsStore(private val context: Context) {
         val NOTIFY_DONE = booleanPreferencesKey("notify_done")
         val SERVICE_ENABLED = booleanPreferencesKey("service_enabled")
         val DEFAULT_UI = stringPreferencesKey("default_ui")
+        val TERMINAL_ENGINE = stringPreferencesKey("terminal_engine")
         val FONT_SIZE = intPreferencesKey("font_size")
         val TERMINAL_COMPOSER_HIDDEN = booleanPreferencesKey("terminal_composer_hidden")
         val MUTED_PROJECTS = stringSetPreferencesKey("muted_projects")
@@ -49,6 +51,7 @@ class SettingsStore(private val context: Context) {
             notifyDone = p[K.NOTIFY_DONE] ?: true,
             serviceEnabled = p[K.SERVICE_ENABLED] ?: false,
             defaultUi = p[K.DEFAULT_UI] ?: "messages",
+            terminalEngine = p[K.TERMINAL_ENGINE] ?: "termux",
             fontSize = p[K.FONT_SIZE] ?: 14,
             terminalComposerHidden = p[K.TERMINAL_COMPOSER_HIDDEN] ?: false,
             mutedProjects = p[K.MUTED_PROJECTS] ?: emptySet(),
@@ -71,6 +74,7 @@ class SettingsStore(private val context: Context) {
     suspend fun setNotifyDone(v: Boolean) = context.dataStore.edit { it[K.NOTIFY_DONE] = v }
     suspend fun setServiceEnabled(v: Boolean) = context.dataStore.edit { it[K.SERVICE_ENABLED] = v }
     suspend fun setDefaultUi(v: String) = context.dataStore.edit { it[K.DEFAULT_UI] = v }
+    suspend fun setTerminalEngine(v: String) = context.dataStore.edit { it[K.TERMINAL_ENGINE] = TerminalEngine.forName(v).key }
     suspend fun setFontSize(v: Int) = context.dataStore.edit { it[K.FONT_SIZE] = v.coerceIn(8, 28) }
     suspend fun setTerminalComposerHidden(v: Boolean) = context.dataStore.edit { it[K.TERMINAL_COMPOSER_HIDDEN] = v }
     /** 只存认识的名字：不认识的落回黑暗，读的那头就不用再兜底。 */

@@ -123,10 +123,17 @@ fun SessionScreen(
         else -> settings.defaultUi
     }
     val showMessages = effectiveMode == "messages" && messagesSupported != false
+    // 终端用哪套模拟器：顶栏临时切的优先，否则跟设置
+    val engine = when (effectiveMode) {
+        "termux" -> TerminalEngine.Termux
+        "termlib" -> TerminalEngine.Termlib
+        else -> TerminalEngine.forName(settings.terminalEngine)
+    }
 
     var composer by rememberSaveable { mutableStateOf(prefill) }
     var showMenu by remember { mutableStateOf(false) }
-    var ctrlSticky by remember { mutableStateOf(false) }
+    val ctrlStickyState = remember { mutableStateOf(false) }
+    var ctrlSticky by ctrlStickyState
     // 终端视图的键位条 + 输入框：默认收起，右下角 ⌨ 放出来；不持久化，每次进来都是收起的
     var keysOpen by rememberSaveable { mutableStateOf(false) }
 
@@ -157,6 +164,8 @@ fun SessionScreen(
     }
     var attachment by remember(sessionId) { mutableStateOf<TerminalAttachment?>(null) }
     LaunchedEffect(conn, sessionId) { attachment = store.attachmentFor(sessionId, terminalClient) }
+    // 模拟器切换：attach 断开重连，daemon replay 整屏进新的那套
+    LaunchedEffect(attachment, engine) { attachment?.switchEngine(engine) }
     DisposableEffect(sessionId) {
         // 只是预约关闭：折叠屏重建在宽限期内会把它取消掉，见 AppStore
         onDispose { store.releaseAttachmentSoon(sessionId) }
@@ -205,6 +214,15 @@ fun SessionScreen(
             catch (e: Exception) { Toast.makeText(context, "发送失败：${e.message}", Toast.LENGTH_SHORT).show() }
         }
     }
+    /**
+     * termlib 视图下的粘贴：libvterm 这边没有 paste()，剪贴板文本走 daemon 的 /input——
+     * 它在 TUI 开了 DECSET 2004 时会补 bracketed-paste 包裹，效果与 termux 的 emulator.paste 一致。
+     */
+    fun pasteViaDaemon() {
+        val clip = (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).primaryClip
+        val text = clip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(context)?.toString()
+        if (!text.isNullOrEmpty()) sendInput(text, enter = false)
+    }
 
     // 附件上传（composer 📎）
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
@@ -241,17 +259,16 @@ fun SessionScreen(
                     color = Tok.Faint, fontSize = 10.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )
             }
-            if (messagesSupported != false) {
-                Text(
-                    if (showMessages) ">_" else "💬",
-                    color = Tok.Accent, fontSize = 15.sp, fontFamily = FontFamily.Monospace,
-                    modifier = Modifier
-                        .clickable { uiMode = if (showMessages) "terminal" else "messages" }
-                        .border(1.dp, Tok.Edge2, RoundedCornerShape(8.dp))
-                        .padding(horizontal = 8.dp, vertical = 4.dp),
-                )
-                Spacer(Modifier.width(8.dp))
-            }
+            // 视图切换：显示当前视图名，点一下轮到下一种（消息流 → Termux → Termlib）
+            Text(
+                if (showMessages) "消息流" else engine.label,
+                color = Tok.Accent, fontSize = 12.sp, fontFamily = FontFamily.Monospace,
+                modifier = Modifier
+                    .clickable { uiMode = nextUiMode(if (showMessages) "messages" else engine.key, messagesSupported != false) }
+                    .border(1.dp, Tok.Edge2, RoundedCornerShape(8.dp))
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+            )
+            Spacer(Modifier.width(8.dp))
             StateDot(Tok.stateColor(s?.state ?: ""))
             Text("⋮", color = Tok.Dim, fontSize = 22.sp, modifier = Modifier.clickable { showMenu = true }.padding(horizontal = 10.dp))
         }
@@ -277,6 +294,12 @@ fun SessionScreen(
                             throw e
                         }
                     },
+                )
+            } else if (engine == TerminalEngine.Termlib) {
+                TermlibHost(
+                    attachment, settings.fontSize, ctrlStickyState,
+                    onHyperlinkClick = { openUrl(context, it) },
+                    onPasteRequest = { pasteViaDaemon() },
                 )
             } else {
                 TerminalHost(attachment, terminalViewRef, settings.fontSize,
@@ -339,10 +362,18 @@ fun SessionScreen(
                     .padding(horizontal = 8.dp, vertical = 5.dp),
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                // 键码走 handleKeyCode：termux 的 KeyHandler 会按当前 keypad /
-                // cursor 模式给出正确的转义序列；字面符号直接写进 PTY。
-                fun key(code: Int) = { terminalViewRef.value?.handleKeyCode(code, 0); Unit }
-                fun lit(ch: String) = { attachment?.session?.write(ch); Unit }
+                // 键码交给模拟器（termux 的 KeyHandler / libvterm 的 dispatchKey），它们会按当前
+                // keypad / cursor 模式给出正确的转义序列；字面符号直接写进 PTY。
+                fun key(code: Int) = {
+                    if (engine == TerminalEngine.Termlib) {
+                        vtermKeyFor(code)?.let { k ->
+                            attachment?.termlib?.dispatchKey(if (ctrlSticky) VTERM_MOD_CTRL else 0, k)
+                            ctrlSticky = false
+                        }
+                    } else terminalViewRef.value?.handleKeyCode(code, 0)
+                    Unit
+                }
+                fun lit(ch: String) = { attachment?.write(ch); Unit }
                 KeyChip("⌨", active = true) { keysOpen = false }
                 KeyChip("Esc", onClick = key(KeyEvent.KEYCODE_ESCAPE))
                 KeyChip("Tab", onClick = key(KeyEvent.KEYCODE_TAB))
@@ -363,7 +394,7 @@ fun SessionScreen(
                 KeyChip("|", onClick = lit("|"))
                 KeyChip("~", onClick = lit("~"))
                 // 长按选区工具条里也有粘贴，但那要先长按选中；这里给一个直达入口
-                KeyChip("粘贴") { pasteIntoPty(context, attachment?.session) }
+                KeyChip("粘贴") { if (engine == TerminalEngine.Termlib) pasteViaDaemon() else pasteIntoPty(context, attachment?.session) }
             }
         }
 
@@ -397,7 +428,7 @@ fun SessionScreen(
     }
 
     if (showMenu && s != null) {
-        SessionMenuSheet(store, nav, s, attachment, showMessagesMode = showMessages, onDismiss = { showMenu = false })
+        SessionMenuSheet(store, nav, s, attachment, showMessagesMode = showMessages, engine = engine, onDismiss = { showMenu = false })
     }
 }
 
@@ -844,6 +875,7 @@ fun SessionMenuSheet(
     s: Session,
     attachment: TerminalAttachment?,
     showMessagesMode: Boolean,
+    engine: TerminalEngine = TerminalEngine.Termux,
     onDismiss: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
@@ -883,7 +915,8 @@ fun SessionMenuSheet(
                 }
             }
             SheetItem("✏️", "重命名会话", if (s.resume_id != null) "当前为 AI 命名" else null) { renameDialog = true }
-            if (!showMessagesMode) SheetItem("📋", "复制屏幕内容", null) {
+            // termlib 0.1.0 没把整屏文本暴露出来（有自带的长按选区），先只给 termux 这套
+            if (!showMessagesMode && engine == TerminalEngine.Termux) SheetItem("📋", "复制屏幕内容", null) {
                 val text = attachment?.session?.emulator?.screen?.transcriptText?.trim()
                 if (text.isNullOrBlank()) toast("屏幕为空") else { copyToClipboard(context, text); toast("已复制") }
                 onDismiss()
@@ -891,7 +924,9 @@ fun SessionMenuSheet(
             // 直接点链接要点得准；回放里翻出来的地址（编译报错、dev server URL）
             // 常常已经滚上去了，给一个列表入口
             if (!showMessagesMode) SheetItem("🔗", "打开链接…", null) {
-                val urls = urlsOnScreen(attachment?.session)
+                val urls = if (engine == TerminalEngine.Termlib) {
+                    attachment?.termlib?.getUrls(org.connectbot.terminal.UrlScanScope.ScreenAndScrollback)?.map { it.url }?.distinct().orEmpty()
+                } else urlsOnScreen(attachment?.session)
                 if (urls.isEmpty()) toast("回放里没有链接") else urlsDialog = urls
             }
             SheetItem("±", "本次改动", "diff · 回滚") { onDismiss(); nav.navigate("diff/${s.id}") }
