@@ -3,7 +3,7 @@
 //!
 //! 2026-09-03 起有三套主题（黑暗 / 明亮 / Claude 橙），进程内可切换：
 //! - 下面的 `pub const` 是黑暗主题的原值，原样保留——终端渲染（terminal_view /
-//!   term）仍直接读它们，等那边接上调色板后再统一（见 `Palette::indexed_color`）；
+//!   term）已改走调色板；常量只剩测试钉黑暗主题值用；
 //! - 其余 UI 一律走 `palette()` 或各令牌的小函数（`bg()`、`accent()`…），读的是
 //!   `set_current` 选定的那一套；每帧调用，代价只是一次原子读；
 //! - 选定的主题持久化在 `~/.config/aaa-ui/ui.toml` 的 `theme` 字段（model::UiState）。
@@ -460,7 +460,7 @@ mod tests {
 
     #[test]
     fn dark_palette_matches_legacy_consts() {
-        // terminal_view 还在直接读常量：黑暗调色板必须逐字段等于它们，否则两处会打架
+        // 黑暗主题 = 原始设计令牌：调色板必须逐字段等于这些常量，改一处就得改两处
         let p = Palette::for_kind(ThemeKind::Dark);
         assert_eq!(p.bg, BG);
         assert_eq!(p.surface, SURFACE);

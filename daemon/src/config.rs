@@ -51,6 +51,10 @@ pub struct Config {
     /// (phone session list reads as project names). See agents::with_remote_control_name.
     #[serde(default = "default_true")]
     pub remote_control_name: bool,
+    /// Press Enter on Claude Code's「Do you trust the files in this folder?」
+    /// for the user — they already picked the folder in AAA. See trust.rs.
+    #[serde(default = "default_true")]
+    pub auto_trust: bool,
     #[serde(default)]
     pub checkpoint: CheckpointConfig,
 }
@@ -85,6 +89,7 @@ impl Config {
             project_root: default_project_root(),
             namer: true,
             remote_control_name: true,
+            auto_trust: true,
             checkpoint: CheckpointConfig::default(),
         }
     }

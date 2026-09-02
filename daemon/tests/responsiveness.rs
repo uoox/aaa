@@ -20,6 +20,7 @@ fn build_app(root: &Path, home: &Path) -> aaa_daemon::api::SharedApp {
         project_root: root.to_path_buf(),
         namer: true, // naming enabled, as in production
         remote_control_name: true,
+        auto_trust: true,
         checkpoint: CheckpointConfig::default(),
     };
     let paths = aaa_daemon::paths::Paths::new(home);

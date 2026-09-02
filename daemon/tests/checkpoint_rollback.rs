@@ -214,6 +214,7 @@ fn build_app(root: &Path, home: &Path) -> aaa_daemon::api::SharedApp {
         project_root: root.to_path_buf(),
         namer: false,
         remote_control_name: true,
+        auto_trust: true,
         checkpoint: CheckpointConfig::default(),
     };
     let paths = aaa_daemon::paths::Paths::new(home);
@@ -266,6 +267,8 @@ fn synthetic_session(app: &aaa_daemon::api::SharedApp, proj: &Path, start_ref: O
         screen_changed_inst: None,
         asking: false,
         user_killed: false,
+        trust_presses: 0,
+        trust_pressed_inst: None,
     };
     let (tx, _) = tokio::sync::broadcast::channel(8);
     let id = "s_router01".to_string();

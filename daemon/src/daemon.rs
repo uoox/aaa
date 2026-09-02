@@ -138,6 +138,15 @@ fn run() {
                 let mut iv = tokio::time::interval(Duration::from_secs(1));
                 loop {
                     iv.tick().await;
+                    {
+                        let app2 = Arc::clone(&app);
+                        let _ = tokio::task::spawn_blocking(move || {
+                            for sess in app2.pool.all() {
+                                crate::trust::on_tick(&app2, &sess);
+                            }
+                        })
+                        .await;
+                    }
                     for sess in app.pool.tick_states() {
                         let app2 = Arc::clone(&app);
                         let _ = tokio::task::spawn_blocking(move || {

@@ -85,6 +85,11 @@ pub struct Meta {
     /// 用户主动 kill：客户端据此不弹「退出」通知（自己动的手，不用报告）
     #[serde(skip)]
     pub user_killed: bool,
+    /// trust::on_tick 已替用户按过几次 Enter / 上次何时（只对 claude 会话）
+    #[serde(skip)]
+    pub trust_presses: u8,
+    #[serde(skip)]
+    pub trust_pressed_inst: Option<Instant>,
 }
 
 fn default_true() -> bool {
@@ -509,6 +514,8 @@ impl SessionPool {
             screen_changed_inst: None,
             asking: false,
             user_killed: false,
+            trust_presses: 0,
+            trust_pressed_inst: None,
         };
         // Backpressure: send never blocks; a client that can't keep up drops
         // to Lagged and gets a fresh full redraw (api::attach_loop), so a slow
