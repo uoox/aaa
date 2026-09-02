@@ -10,8 +10,6 @@ import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
-import kotlinx.serialization.builtins.ListSerializer
-import kotlinx.serialization.builtins.serializer
 
 private val Context.dataStore by preferencesDataStore(name = "aaa_settings")
 
@@ -23,13 +21,12 @@ data class AppSettings(
     val serviceEnabled: Boolean = false,
     val defaultUi: String = "messages", // "messages" | "terminal"
     val fontSize: Int = 14,
-    val quickPhrases: List<String> = DEFAULT_PHRASES,
+    /** 终端视图下收起预输入框，直接在 shell 里打字；全局记住用户的选择。 */
+    val terminalComposerHidden: Boolean = false,
     val mutedProjects: Set<String> = emptySet(),
 ) {
     val notifySettings: NotifySettings
         get() = NotifySettings(notifyWaiting, notifyExited, notifyStalled, mutedProjects)
-
-    companion object { val DEFAULT_PHRASES = listOf("继续", "跑测试", "提交并推送") }
 }
 
 class SettingsStore(private val context: Context) {
@@ -41,7 +38,7 @@ class SettingsStore(private val context: Context) {
         val SERVICE_ENABLED = booleanPreferencesKey("service_enabled")
         val DEFAULT_UI = stringPreferencesKey("default_ui")
         val FONT_SIZE = intPreferencesKey("font_size")
-        val QUICK_PHRASES = stringPreferencesKey("quick_phrases")
+        val TERMINAL_COMPOSER_HIDDEN = booleanPreferencesKey("terminal_composer_hidden")
         val MUTED_PROJECTS = stringSetPreferencesKey("muted_projects")
     }
 
@@ -56,9 +53,7 @@ class SettingsStore(private val context: Context) {
             serviceEnabled = p[K.SERVICE_ENABLED] ?: false,
             defaultUi = p[K.DEFAULT_UI] ?: "messages",
             fontSize = p[K.FONT_SIZE] ?: 14,
-            quickPhrases = p[K.QUICK_PHRASES]?.let {
-                runCatching { json.decodeFromString(ListSerializer(String.serializer()), it) }.getOrNull()
-            } ?: AppSettings.DEFAULT_PHRASES,
+            terminalComposerHidden = p[K.TERMINAL_COMPOSER_HIDDEN] ?: false,
             mutedProjects = p[K.MUTED_PROJECTS] ?: emptySet(),
         )
     }
@@ -81,10 +76,7 @@ class SettingsStore(private val context: Context) {
     suspend fun setServiceEnabled(v: Boolean) = context.dataStore.edit { it[K.SERVICE_ENABLED] = v }
     suspend fun setDefaultUi(v: String) = context.dataStore.edit { it[K.DEFAULT_UI] = v }
     suspend fun setFontSize(v: Int) = context.dataStore.edit { it[K.FONT_SIZE] = v.coerceIn(8, 28) }
-
-    suspend fun setQuickPhrases(phrases: List<String>) = context.dataStore.edit {
-        it[K.QUICK_PHRASES] = json.encodeToString(ListSerializer(String.serializer()), phrases)
-    }
+    suspend fun setTerminalComposerHidden(v: Boolean) = context.dataStore.edit { it[K.TERMINAL_COMPOSER_HIDDEN] = v }
 
     suspend fun setProjectMuted(path: String, muted: Boolean) = context.dataStore.edit { p ->
         val cur = p[K.MUTED_PROJECTS] ?: emptySet()

@@ -11,34 +11,41 @@ import android.view.inputmethod.InputMethodManager
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
@@ -48,14 +55,19 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -67,7 +79,6 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -244,7 +255,7 @@ fun SessionScreen(
         // 主体
         Box(Modifier.weight(1f).fillMaxWidth()) {
             if (showMessages) {
-                MessagesView(messages.value, messagesSupported)
+                MessagesView(messages.value, messagesSupported, live = s?.state == "running")
             } else {
                 TerminalHost(attachment, terminalViewRef, settings.fontSize,
                     viewClientFactory = { view ->
@@ -329,6 +340,10 @@ fun SessionScreen(
                 // cursor 模式给出正确的转义序列；字面符号直接写进 PTY。
                 fun key(code: Int) = { terminalViewRef.value?.handleKeyCode(code, 0); Unit }
                 fun lit(ch: String) = { attachment?.session?.write(ch); Unit }
+                // ⌨ 收起 / 放出预输入框。收起后点终端直接拉软键盘、键入直达 PTY；选择全局记住。
+                KeyChip("⌨", active = !settings.terminalComposerHidden) {
+                    scope.launch { store.settings.setTerminalComposerHidden(!settings.terminalComposerHidden) }
+                }
                 KeyChip("Esc", onClick = key(KeyEvent.KEYCODE_ESCAPE))
                 KeyChip("Tab", onClick = key(KeyEvent.KEYCODE_TAB))
                 KeyChip("Ctrl", active = ctrlSticky) { ctrlSticky = !ctrlSticky }
@@ -349,43 +364,26 @@ fun SessionScreen(
             }
         }
 
-        // 快捷短语 chips
-        if (settings.quickPhrases.isNotEmpty() && s?.state != "exited") {
+        // composer（终端视图下可用键位条的 ⌨ 收起；消息流视图始终在）
+        if (showMessages || !settings.terminalComposerHidden) {
             Row(
-                Modifier.fillMaxWidth().background(Tok.Bg).horizontalScroll(rememberScrollState())
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                Modifier.fillMaxWidth().background(Tok.Surface).padding(horizontal = 8.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                settings.quickPhrases.forEach { phrase ->
-                    Text(
-                        phrase, color = Tok.Dim, fontSize = 12.sp,
-                        modifier = Modifier
-                            .border(1.dp, Tok.Edge, RoundedCornerShape(50))
-                            .clickable { sendInput(phrase, enter = true) }
-                            .padding(horizontal = 10.dp, vertical = 4.dp),
-                    )
-                }
+                Text("📎", fontSize = 18.sp, modifier = Modifier.clickable { filePicker.launch("*/*") }.padding(6.dp))
+                OutlinedTextField(
+                    composer, { composer = it },
+                    placeholder = { Text("输入消息，⏎ 发送", color = Tok.Faint, fontSize = 13.sp) },
+                    modifier = Modifier.weight(1f),
+                    maxLines = 4,
+                    textStyle = androidx.compose.ui.text.TextStyle(color = Tok.Ink, fontSize = 14.sp),
+                )
+                Spacer(Modifier.width(6.dp))
+                Button(
+                    enabled = composer.isNotBlank() && s?.state != "exited",
+                    onClick = { sendInput(composer, enter = true); composer = "" },
+                ) { Text("发送") }
             }
-        }
-
-        // composer
-        Row(
-            Modifier.fillMaxWidth().background(Tok.Surface).padding(horizontal = 8.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text("📎", fontSize = 18.sp, modifier = Modifier.clickable { filePicker.launch("*/*") }.padding(6.dp))
-            OutlinedTextField(
-                composer, { composer = it },
-                placeholder = { Text("输入消息，⏎ 发送", color = Tok.Faint, fontSize = 13.sp) },
-                modifier = Modifier.weight(1f),
-                maxLines = 4,
-                textStyle = androidx.compose.ui.text.TextStyle(color = Tok.Ink, fontSize = 14.sp),
-            )
-            Spacer(Modifier.width(6.dp))
-            Button(
-                enabled = composer.isNotBlank() && s?.state != "exited",
-                onClick = { sendInput(composer, enter = true); composer = "" },
-            ) { Text("发送") }
         }
     }
 
@@ -428,6 +426,11 @@ private fun TerminalHost(
         factory = { ctx ->
             TerminalView(ctx, null).apply {
                 setBackgroundColor(android.graphics.Color.parseColor("#0A0E12"))
+                // 代码里 new 出来的 View 默认不可聚焦（termux 原本靠布局 XML 里的
+                // focusable / focusableInTouchMode）。不设这两项 requestFocus() 直接
+                // 返回 false，软键盘弹不出来，IME 输入也就永远到不了 PTY。
+                isFocusable = true
+                isFocusableInTouchMode = true
                 setTerminalViewClient(viewClientFactory(this))
                 // setTextSize must come first: it constructs the renderer (and
                 // is null-safe), while setTypeface reads the existing one and
@@ -452,11 +455,41 @@ private fun TerminalHost(
 
 // ---------- 消息流视图 ----------
 
+/**
+ * 整宽、按轮折叠的消息流。数据形状由 StreamFold.kt 的纯函数决定，这里只管画和滚。
+ *
+ * 滚动：新消息到来时只有「之前就在底部」才跟到底，用户翻历史时不拽；首批数据到底。
+ * 右下角浮动 ↓ 在没到底时出现，点一下滚到底。
+ */
 @Composable
-fun MessagesView(messages: List<ChatMessage>, supported: Boolean?) {
+fun MessagesView(messages: List<ChatMessage>, supported: Boolean?, live: Boolean) {
+    val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
-    LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) listState.scrollToItem(messages.size - 1)
+    // 展开状态按轮 key 记；live 尾轮也默认折叠
+    val expanded = remember { mutableStateMapOf<Long, Boolean>() }
+    val expandedKeys = expanded.filterValues { it }.keys.toSet()
+    val items = remember(messages, live, expandedKeys) { flattenForList(foldTurns(messages, live), expandedKeys) }
+    // 空列表算在底部：没东西可滚，浮动按钮也不该出现
+    val atBottom by remember { derivedStateOf { !listState.canScrollForward } }
+    val latestMessages by rememberUpdatedState(messages)
+    val latestItems by rememberUpdatedState(items)
+    LaunchedEffect(Unit) {
+        // 跟不跟到底看的是变化**之前**的位置：wasAtBottom 取自上一次快照，而不是新条目
+        // 已经排进布局之后再读（那时 canScrollForward 必然为 true）。观察的是消息集
+        // （条数 + 末条 seq）而不是列表项数：展开 / 收起过程不是新消息，不触发滚动。
+        var wasAtBottom = true
+        var seen = -1L to -1L
+        snapshotFlow { Triple(latestMessages.size, latestMessages.lastOrNull()?.seq ?: -1L, atBottom) }
+            .collect { (size, lastSeq, bottom) ->
+                val sig = size.toLong() to lastSeq
+                if (sig != seen) {
+                    if (shouldFollowTail(wasAtBottom, hadMessages = seen.first > 0, hasMessages = size > 0)) {
+                        listState.scrollToItem(latestItems.size) // 尾部占位项才是真正的底
+                    }
+                    seen = sig
+                }
+                wasAtBottom = bottom
+            }
     }
     if (messages.isEmpty()) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -464,51 +497,112 @@ fun MessagesView(messages: List<ChatMessage>, supported: Boolean?) {
         }
         return
     }
-    // 气泡宽度跟随实际可用宽度（按比例），不再写死 300/320dp——写死的数值在
-    // 折叠屏内屏上只占半栏，看起来像被锁在小屏宽度。
-    BoxWithConstraints(Modifier.fillMaxSize()) {
-        // 减去 LazyColumn 的左右 padding：按外层宽度算会让窄窗口下 260dp 的
-        // 下限顶到边（分屏/自由窗口实测得出的坑，评审指出）
-        val bubbleMax = bubbleMaxWidth(maxWidth - 20.dp)
-        LazyColumn(state = listState, modifier = Modifier.fillMaxSize().padding(horizontal = 10.dp)) {
-            // key: stable identity across refetches; contentType: reuse slots per row kind
-            items(messages, key = { it.seq }, contentType = { it.kind.ifEmpty { it.role } }) { m -> MessageRow(m, bubbleMax) }
-            item { Spacer(Modifier.height(8.dp)) }
+    Box(Modifier.fillMaxSize()) {
+        LazyColumn(state = listState, modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp)) {
+            itemsIndexed(items, key = { _, it -> it.key }, contentType = { _, it -> it::class }) { i, item ->
+                // 轮与轮之间 14dp（新一轮从用户消息开始），同轮内 User→Fold→Reply 8dp，展开的步骤间 3dp
+                val gap = when {
+                    i == 0 -> 0.dp
+                    item is StreamItem.User -> 14.dp
+                    item is StreamItem.Step -> 3.dp
+                    else -> 8.dp
+                }
+                Box(Modifier.padding(top = gap)) { StreamRow(item, expanded) }
+            }
+            item(key = "tail") { Spacer(Modifier.height(14.dp)) }
+        }
+        ScrollToEndButton(
+            visible = !atBottom,
+            modifier = Modifier.align(Alignment.BottomEnd).padding(14.dp),
+        ) { scope.launch { listState.animateScrollToItem(latestItems.size) } }
+    }
+}
+
+@Composable
+private fun StreamRow(item: StreamItem, expanded: MutableMap<Long, Boolean>) {
+    when (item) {
+        is StreamItem.User -> UserBlock(item.msg)
+        is StreamItem.Fold -> FoldRow(item, open = expanded[item.turnKey] == true) {
+            expanded[item.turnKey] = expanded[item.turnKey] != true
+        }
+        is StreamItem.Step -> StepRow(item.msg)
+        is StreamItem.Reply -> Text(
+            rememberLinkified(item.msg), color = Tok.Ink, fontSize = 15.sp, lineHeight = 21.75.sp,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        is StreamItem.Question -> QuestionRow(item.msg)
+    }
+}
+
+/** 用户消息：整宽块，左侧青色竖条，上方一行时间。 */
+@Composable
+private fun UserBlock(m: ChatMessage) {
+    val time = remember(m.ts) { clockTime(m.ts) }
+    Column(Modifier.fillMaxWidth()) {
+        if (time.isNotEmpty()) Text(time, color = Tok.Faint, fontSize = 10.sp, modifier = Modifier.padding(bottom = 3.dp))
+        Row(
+            Modifier.fillMaxWidth().height(IntrinsicSize.Min)
+                .clip(RoundedCornerShape(8.dp)).background(Tok.Surface),
+        ) {
+            Spacer(Modifier.width(3.dp).fillMaxHeight().background(Tok.Cyan))
+            Text(
+                rememberLinkified(m), color = Tok.Ink, fontSize = 14.5.sp,
+                modifier = Modifier.weight(1f).padding(horizontal = 12.dp, vertical = 10.dp),
+            )
         }
     }
 }
 
-/** 气泡上限 = 内容区宽度的 82%，夹在 [260dp, 720dp] 且绝不超过内容区本身：
- *  窄屏别挤成一列字，超宽别一行拉满难读，极窄（分屏）时以不溢出为先。 */
-fun bubbleMaxWidth(available: Dp): Dp =
-    (available * 0.82f).coerceIn(260.dp, 720.dp).coerceAtMost(available.coerceAtLeast(0.dp))
-
+/** 折叠行。live 尾轮用旋转指示代替 ▸，折叠着也报最近一步在干什么。 */
 @Composable
-private fun MessageRow(m: ChatMessage, bubbleMax: Dp) {
-    when {
-        m.kind == "thinking" -> ThinkingRow(m)
-        m.kind == "tool_use" || m.kind == "tool_result" -> ToolRow(m)
-        m.kind == "question" -> QuestionRow(m)
-        m.role == "user" -> Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.End) {
-            Text(
-                rememberLinkified(m), color = Tok.Ink, fontSize = 14.sp,
-                modifier = Modifier.widthIn(max = bubbleMax)
-                    .background(Tok.Cyan.copy(alpha = 0.16f), RoundedCornerShape(14.dp, 14.dp, 4.dp, 14.dp))
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
+private fun FoldRow(f: StreamItem.Fold, open: Boolean, onToggle: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clickable(onClick = onToggle).padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.size(10.dp), contentAlignment = Alignment.Center) {
+            if (f.live) CircularProgressIndicator(Modifier.size(10.dp), color = Tok.Cyan, strokeWidth = 1.5.dp)
+            else StateDot(Tok.Faint, 6)
+        }
+        Spacer(Modifier.width(6.dp))
+        val label = when {
+            f.live && open -> "进行中 · ${stepCount(f.steps)} 步"
+            f.live -> liveLabel(f.steps, f.liveTail)
+            open -> "▾ 过程 · ${stepCount(f.steps)} 步"
+            else -> "▸ ${foldLabel(f.steps)}"
+        }
+        Text(label, color = if (f.live) Tok.Dim else Tok.Faint, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+/** 展开后的单步：思考 / 工具复用原有行，中途文本压成 13sp 淡字，system 沿用淡字。 */
+@Composable
+private fun StepRow(m: ChatMessage) {
+    Box(Modifier.fillMaxWidth().padding(start = 12.dp)) {
+        when {
+            m.kind == "thinking" -> ThinkingRow(m)
+            m.kind == "tool_use" || m.kind == "tool_result" -> ToolRow(m)
+            m.role == "system" -> Text(
+                rememberLinkified(m), color = Tok.Faint, fontSize = 11.sp,
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+            )
+            else -> Text(
+                rememberLinkified(m), color = Tok.Dim, fontSize = 13.sp,
+                modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
             )
         }
-        m.role == "system" -> Text(
-            rememberLinkified(m), color = Tok.Faint, fontSize = 11.sp,
-            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-        )
-        else -> Row(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-            Text(
-                rememberLinkified(m), color = Tok.Ink, fontSize = 14.sp,
-                modifier = Modifier.widthIn(max = bubbleMax)
-                    .background(Tok.Surface, RoundedCornerShape(14.dp, 14.dp, 14.dp, 4.dp))
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
-            )
-        }
+    }
+}
+
+/** 右下角「滚到最新」：到底了就淡出。 */
+@Composable
+private fun ScrollToEndButton(visible: Boolean, modifier: Modifier, onClick: () -> Unit) {
+    AnimatedVisibility(visible, modifier = modifier, enter = fadeIn(), exit = fadeOut()) {
+        Box(
+            Modifier.size(40.dp).clip(CircleShape).background(Tok.Raised)
+                .border(1.dp, Tok.Edge2, CircleShape).clickable(onClick = onClick),
+            contentAlignment = Alignment.Center,
+        ) { Text("↓", color = Tok.Cyan, fontSize = 18.sp) }
     }
 }
 

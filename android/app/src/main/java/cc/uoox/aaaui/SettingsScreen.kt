@@ -14,8 +14,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
@@ -26,10 +24,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -48,7 +43,6 @@ fun SettingsScreen(store: AppStore, nav: NavHostController) {
     val settings by store.settings.flow.collectAsState(initial = AppSettings())
     val conn by store.connState.collectAsState()
     val health by store.health.collectAsState()
-    var phraseDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(conn) { if (conn is ConnState.Connected) store.refreshHealth() }
 
@@ -142,10 +136,6 @@ fun SettingsScreen(store: AppStore, nav: NavHostController) {
                 Text("${settings.fontSize}", color = Tok.Ink, fontFamily = FontFamily.Monospace)
                 TextButton(onClick = { scope.launch { store.settings.setFontSize(settings.fontSize + 1) } }) { Text("＋", fontSize = 16.sp) }
             }
-            SettingRow("快捷短语") {
-                Text(settings.quickPhrases.joinToString(" · ").ifBlank { "无" }, color = Tok.Faint, fontSize = 11.sp, modifier = Modifier.weight(1f, fill = false))
-                TextButton(onClick = { phraseDialog = true }) { Text("编辑") }
-            }
         }
 
         // ---------- daemon 状态 ----------
@@ -168,39 +158,6 @@ fun SettingsScreen(store: AppStore, nav: NavHostController) {
             }
         }
         }
-    }
-
-    if (phraseDialog) {
-        var phrases by remember { mutableStateOf(settings.quickPhrases) }
-        var newPhrase by remember { mutableStateOf("") }
-        AlertDialog(
-            onDismissRequest = { phraseDialog = false },
-            containerColor = Tok.Raised,
-            title = { Text("快捷短语", color = Tok.Ink) },
-            text = {
-                Column {
-                    phrases.forEach { ph ->
-                        Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Text(ph, color = Tok.Ink, fontSize = 14.sp, modifier = Modifier.weight(1f))
-                            Text("✕", color = Tok.Faint, modifier = Modifier.clickable { phrases = phrases - ph }.padding(6.dp))
-                        }
-                    }
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        OutlinedTextField(newPhrase, { newPhrase = it }, modifier = Modifier.weight(1f), singleLine = true, placeholder = { Text("新短语", fontSize = 13.sp) })
-                        TextButton(
-                            onClick = { if (newPhrase.isNotBlank()) { phrases = phrases + newPhrase.trim(); newPhrase = "" } },
-                        ) { Text("添加") }
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    scope.launch { store.settings.setQuickPhrases(phrases) }
-                    phraseDialog = false
-                }) { Text("保存") }
-            },
-            dismissButton = { TextButton(onClick = { phraseDialog = false }) { Text("取消", color = Tok.Dim) } },
-        )
     }
 }
 

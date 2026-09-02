@@ -213,3 +213,8 @@ fun relativeTime(iso: String): String {
         }
     } catch (_: Exception) { iso }
 }
+
+/** ISO 时间戳 → 本地 HH:mm（消息流用户块上方的小时间）；解析不了给空串。 */
+fun clockTime(iso: String): String = try {
+    Instant.parse(iso).atZone(ZoneId.systemDefault()).format(DateTimeFormatter.ofPattern("HH:mm"))
+} catch (_: Exception) { "" }
