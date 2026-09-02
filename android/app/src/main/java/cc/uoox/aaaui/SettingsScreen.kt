@@ -40,8 +40,9 @@ import androidx.compose.ui.unit.sp
 import androidx.navigation.NavHostController
 import kotlinx.coroutines.launch
 
+/** 设置：从首页右上角齿轮压栈进来的独立路由，不再是 tab。 */
 @Composable
-fun SettingsTab(store: AppStore, nav: NavHostController) {
+fun SettingsScreen(store: AppStore, nav: NavHostController) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val settings by store.settings.flow.collectAsState(initial = AppSettings())
@@ -51,8 +52,13 @@ fun SettingsTab(store: AppStore, nav: NavHostController) {
 
     LaunchedEffect(conn) { if (conn is ConnState.Connected) store.refreshHealth() }
 
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 24.dp)) {
-        Text("设置", color = Tok.Ink, fontSize = 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(16.dp))
+    Column(Modifier.fillMaxSize().background(Tok.Bg)) {
+        // 顶栏：与 InboxScreen / SessionScreen 同一套「‹ + 标题」写法，不引 TopAppBar
+        Row(Modifier.fillMaxWidth().padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("‹", color = Tok.Dim, fontSize = 26.sp, modifier = Modifier.clickable { nav.popBackStack() }.padding(horizontal = 8.dp))
+            Text("设置", color = Tok.Ink, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+        }
+        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 24.dp)) {
 
         // ---------- 服务器 ----------
         GroupTitle("服务器")
@@ -160,6 +166,7 @@ fun SettingsTab(store: AppStore, nav: NavHostController) {
                 SettingRow("项目根") { Text(h.project_root, color = Tok.Dim, fontSize = 12.sp, fontFamily = FontFamily.Monospace) }
                 SettingRow("运行时长") { Text(formatUptime(h.uptime_s), color = Tok.Dim, fontSize = 13.sp) }
             }
+        }
         }
     }
 

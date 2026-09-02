@@ -14,8 +14,14 @@ class BubbleWidthTest {
     }
 
     @Test fun clampedAtBothEnds() {
-        assertEquals(260.dp, bubbleMaxWidth(200.dp), "窄屏下限：别挤成一列字")
+        // 300dp 可用：82% = 246dp，被下限抬到 260dp（仍不超过可用宽度）
+        assertEquals(260.dp, bubbleMaxWidth(300.dp), "窄屏下限：别挤成一列字")
         assertEquals(720.dp, bubbleMaxWidth(2000.dp), "超宽上限：一行拉满难读")
+    }
+
+    @Test fun neverWiderThanAvailable() {
+        // 可用宽度比下限还窄（分屏/极窄机）：下限让位，气泡不能溢出
+        assertEquals(200.dp, bubbleMaxWidth(200.dp), "气泡不得超过可用宽度")
     }
 
     private fun assertEquals(expected: androidx.compose.ui.unit.Dp, actual: androidx.compose.ui.unit.Dp, msg: String) {

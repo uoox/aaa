@@ -215,7 +215,7 @@ class AppStore private constructor(context: Context) {
     /**
      * 拿到某个会话的 attach，没有就建一个。attach 由 store 持有而不是由
      * SessionScreen 持有：折叠/展开会重建 SessionScreen（单栏挂在 nav 的
-     * session/{id}，两栏挂在 HomeScaffold 右栏），attach 若跟着 composable 生死，
+     * session/{id}，宽屏时两栏并排），attach 若跟着 composable 生死，
      * 每折一次屏就断线重连一次——PTY 在 daemon 上不会丢，但整屏 replay 肉眼可见。
      *
      * [sessionClient] 每次都重新绑：回调对象里存着当前那份 TerminalView 与 Context。

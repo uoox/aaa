@@ -10,8 +10,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -25,36 +23,21 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.NavigationRail
-import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.VerticalDivider
-import androidx.compose.material3.pulltorefresh.PullToRefreshBox
-import androidx.compose.material3.windowsizeclass.ExperimentalMaterial3WindowSizeClassApi
-import androidx.compose.material3.windowsizeclass.calculateWindowSizeClass
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -63,10 +46,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavHostController
@@ -81,17 +62,15 @@ class MainActivity : ComponentActivity() {
     private val pendingSessionId = mutableStateOf<String?>(null)
     private val pendingPrefill = mutableStateOf<String?>(null)
 
-    @OptIn(ExperimentalMaterial3WindowSizeClassApi::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val store = AppStore.get(this)
         store.ensureStarted()
         consumeIntent(intent)
         setContent {
-            // 折叠/展开只是配置变化（manifest 里已接管），calculateWindowSizeClass
-            // 会跟着 LocalConfiguration 重算，整棵 composition 不重建
-            val placement = navPlacementFor(calculateWindowSizeClass(this).widthSizeClass)
-            AaaTheme { AaaApp(store, pendingSessionId, pendingPrefill, placement) }
+            // 折叠/展开只是配置变化（manifest 里已接管），整棵 composition 不重建。
+            // 首页是单栏项目列表，宽窄屏同一套布局，不再按窗口宽度切导航位置。
+            AaaTheme { AaaApp(store, pendingSessionId, pendingPrefill) }
         }
     }
 
@@ -116,11 +95,9 @@ fun AaaApp(
     store: AppStore,
     pendingSessionId: androidx.compose.runtime.MutableState<String?>,
     pendingPrefill: androidx.compose.runtime.MutableState<String?>,
-    placement: NavPlacement,
 ) {
     val nav = rememberNavController()
     val settings by store.settings.flow.collectAsState(initial = null)
-    val sessions by store.sessions.collectAsState()
     val loaded = settings != null
 
     // 一个入口：会话卡片、通知深链、项目页「继续会话」都走这里，行为不会各走各的。
@@ -150,9 +127,8 @@ fun AaaApp(
                 Box(Modifier.fillMaxSize().background(Tok.Bg))
             }
             composable("pair") { PairScreen(store) { nav.navigate("home") { popUpTo("pair") { inclusive = true } } } }
-            composable("home") {
-                HomeScaffold(store, nav, placement)
-            }
+            composable("home") { HomeScreen(store, nav) }
+            composable("settings") { SettingsScreen(store, nav) }
             composable(
                 "session/{id}?prefill={prefill}",
                 arguments = listOf(
@@ -269,15 +245,15 @@ fun PairScreen(store: AppStore, onConnected: () -> Unit) {
     }
 }
 
-// ---------- home（会话 / 项目 / 设置 三 tab） ----------
+// ---------- home：项目列表就是首页 ----------
 
+/**
+ * 首页只有一屏：项目列表（含每个项目的会话三态），右上角齿轮进设置，右下角 ＋ 新建。
+ * 原来的「会话 / 项目 / 设置」三 tab 收掉了——一个项目一个 agent，项目即会话，
+ * 两张列表说的是同一件事。宽屏也不摆 rail：没有 tab 就没有导航可放。
+ */
 @Composable
-fun HomeScaffold(
-    store: AppStore,
-    nav: NavHostController,
-    placement: NavPlacement,
-) {
-    var tab by rememberSaveable { mutableStateOf(0) }
+fun HomeScreen(store: AppStore, nav: NavHostController) {
     var showNewSheet by remember { mutableStateOf(false) }
 
     // POST_NOTIFICATIONS runtime permission (Android 13+)
@@ -286,200 +262,20 @@ fun HomeScaffold(
         if (Build.VERSION.SDK_INT >= 33) permLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
 
-    val tabs = @Composable {
-        when (tab) {
-            0 -> SessionsTab(store, nav)
-            1 -> ProjectsTab(store, nav)
-            2 -> SettingsTab(store, nav)
-        }
-    }
-    val newButton = @Composable {
-        FloatingActionButton(onClick = { showNewSheet = true }, containerColor = Tok.Cyan) {
-            Text("＋", color = Color(0xFF08252C), fontSize = 24.sp)
-        }
-    }
-
-    // 宽屏只把底栏换成左侧 rail，内容仍是单栏——横跨整屏只装三个 tab 的底栏是纯浪费，
-    // 但把列表和会话拆成两栏在实机上信息太碎，试过之后收回来了。
-    // 新建按钮两种布局统一悬浮在右下角：rail 的 header 位在左上，拇指够不着。
-    if (placement == NavPlacement.Rail) {
-        Row(Modifier.fillMaxSize().background(Tok.Bg)) {
-            NavigationRail(containerColor = Tok.Surface) {
-                NavigationRailItem(tab == 0, { tab = 0 }, icon = { Text("▣", fontSize = 16.sp) }, label = { Text("会话") })
-                NavigationRailItem(tab == 1, { tab = 1 }, icon = { Text("▤", fontSize = 16.sp) }, label = { Text("项目") })
-                NavigationRailItem(tab == 2, { tab = 2 }, icon = { Text("⚙", fontSize = 16.sp) }, label = { Text("设置") })
+    Box(Modifier.fillMaxSize().background(Tok.Bg)) {
+        ProjectsHome(store, nav)
+        // safeDrawingPadding：手势条 / 展开态横屏的系统栏不吃掉 FAB
+        Box(
+            Modifier.align(Alignment.BottomEnd)
+                .safeDrawingPadding()
+                .padding(20.dp),
+        ) {
+            FloatingActionButton(onClick = { showNewSheet = true }, containerColor = Tok.Cyan) {
+                Text("＋", color = Color(0xFF08252C), fontSize = 24.sp)
             }
-            Box(Modifier.weight(1f).fillMaxSize()) {
-                tabs()
-                if (tab == 0) {
-                    // safeDrawingPadding：手势条 / 展开态横屏的系统栏不吃掉 FAB
-                    Box(
-                        Modifier.align(Alignment.BottomEnd)
-                            .safeDrawingPadding()
-                            .padding(20.dp),
-                    ) { newButton() }
-                }
-            }
-        }
-    } else {
-        Scaffold(
-            containerColor = Tok.Bg,
-            bottomBar = {
-                NavigationBar(containerColor = Tok.Surface) {
-                    NavigationBarItem(tab == 0, { tab = 0 }, icon = { Text("▣", fontSize = 16.sp) }, label = { Text("会话") })
-                    NavigationBarItem(tab == 1, { tab = 1 }, icon = { Text("▤", fontSize = 16.sp) }, label = { Text("项目") })
-                    NavigationBarItem(tab == 2, { tab = 2 }, icon = { Text("⚙", fontSize = 16.sp) }, label = { Text("设置") })
-                }
-            },
-            floatingActionButton = { if (tab == 0) newButton() },
-        ) { pad ->
-            Box(Modifier.padding(pad)) { tabs() }
         }
     }
     if (showNewSheet) NewSessionSheet(store, nav, initialPath = null) { showNewSheet = false }
-}
-
-// ---------- A2 会话首页 ----------
-
-private val STATE_RANK = mapOf("waiting" to 0, "running" to 1, "idle" to 2, "exited" to 3)
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun SessionsTab(store: AppStore, nav: NavHostController) {
-    val scope = rememberCoroutineScope()
-    val openSession = LocalOpenSession.current
-    val sessions by store.sessions.collectAsState()
-    val conn by store.connState.collectAsState()
-    var refreshing by remember { mutableStateOf(false) }
-
-    // 三态分组（用户拍板口径）：执行中=running；待回复=waiting 且弹出了
-    // 问题/选项；已完成=其余（停在输入框的 waiting、idle、exited）。
-    // Group only when the inputs change, not on every recomposition
-    // (conn latency updates and pull-to-refresh recompose this tab too).
-    val groups = remember(sessions) {
-        val sorted = sessions.sortedByDescending { it.last_output_at }
-        fun needsReply(s: Session) = s.state == "waiting" && s.question != null
-        listOf(
-            Triple("执行中", Tok.Green, sorted.filter { it.state == "running" }),
-            Triple("待回复", Tok.Amber, sorted.filter { needsReply(it) }),
-            Triple("已完成", Tok.Faint, sorted.filter { it.state != "running" && !needsReply(it) }),
-        ).filter { it.third.isNotEmpty() }
-    }
-
-    Column(Modifier.fillMaxSize()) {
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
-            horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text("会话", color = Tok.Ink, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-            when (val c = conn) {
-                is ConnState.Connected -> DotWithText(Tok.Green, "${c.host.substringBefore(':')} · ${c.latencyMs}ms")
-                is ConnState.Connecting -> DotWithText(Tok.Amber, "连接中…")
-                is ConnState.Failed -> DotWithText(Tok.Red, "已断开")
-                ConnState.NoServer -> DotWithText(Tok.Dim, "未配对")
-            }
-        }
-
-        PullToRefreshBox(
-            isRefreshing = refreshing,
-            onRefresh = {
-                refreshing = true
-                scope.launch { store.refreshSessions(); store.refreshHealth(); refreshing = false }
-            },
-            modifier = Modifier.fillMaxSize(),
-        ) {
-            if (groups.isEmpty()) {
-                Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                    Text("暂无会话", color = Tok.Faint)
-                    Text("点右下 ＋ 新建", color = Tok.Faint, fontSize = 12.sp)
-                }
-            }
-            LazyColumn(Modifier.fillMaxSize()) {
-                groups.forEach { (label, color, list) ->
-                    item(key = "hdr-$label") {
-                        Row(
-                            Modifier.padding(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 2.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            StateDot(color, 6)
-                            Spacer(Modifier.width(7.dp))
-                            Text(
-                                "$label ${list.size}", color = Tok.Faint, fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace,
-                            )
-                        }
-                    }
-                    items(list, key = { it.id }) { s ->
-                        SessionCard(s) { openSession(s.id, "") }
-                    }
-                }
-                item { Spacer(Modifier.height(80.dp)) }
-            }
-        }
-    }
-}
-
-@Composable
-fun SessionCard(s: Session, selected: Boolean = false, onClick: () -> Unit) {
-    val stateColor = Tok.stateColor(s.state)
-    val isWaiting = s.state == "waiting"
-    // 两栏时右栏挂着哪一个，列表上要看得出来（单栏永远 selected=false）
-    val border = when {
-        selected -> androidx.compose.foundation.BorderStroke(1.dp, Tok.Cyan)
-        isWaiting -> androidx.compose.foundation.BorderStroke(1.dp, Tok.Amber.copy(alpha = 0.6f))
-        else -> null
-    }
-    Card(
-        onClick = onClick,
-        colors = CardDefaults.cardColors(containerColor = if (isWaiting || selected) Tok.Raised else Tok.Surface),
-        border = border,
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 5.dp),
-    ) {
-        Column(Modifier.padding(13.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                StateDot(stateColor)
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    s.title.ifBlank { s.project_name }, color = Tok.Ink, fontSize = 15.sp, fontWeight = FontWeight.Bold,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
-                )
-                AgentChip(s.agent)
-            }
-            val stateText = when (s.state) {
-                "running" -> "运行中 · ${relativeTime(s.last_output_at)}有输出"
-                "waiting" -> "等待输入"
-                "idle" -> "空闲 · ${relativeTime(s.last_output_at)}"
-                "exited" -> "已退出 · 回放已保留"
-                else -> s.state
-            }
-            Row(Modifier.padding(top = 3.dp)) {
-                Text(s.project_name, color = Tok.Dim, fontSize = 12.sp)
-                s.resume_id?.let { Text(" · resume ${it.take(6)}", color = Tok.Dim, fontSize = 12.sp) }
-                Text(" · ", color = Tok.Dim, fontSize = 12.sp)
-                Text(stateText, color = if (isWaiting) Tok.Amber else Tok.Dim, fontSize = 12.sp)
-            }
-            if (s.preview.isNotBlank() && s.state != "exited") {
-                Text(
-                    s.preview.trimEnd(), color = Tok.Dim, fontFamily = FontFamily.Monospace, fontSize = 11.sp,
-                    maxLines = 4, overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(top = 8.dp).fillMaxWidth()
-                        .background(Tok.TermBg, RoundedCornerShape(8.dp)).padding(8.dp),
-                )
-            }
-            s.question?.let { q ->
-                if (isWaiting && q.options.isNotEmpty()) {
-                    Row(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        q.options.take(3).forEach { opt ->
-                            Text(
-                                "${opt.key} · ${opt.label}", color = Tok.Cyan, fontSize = 12.sp,
-                                modifier = Modifier.background(Tok.Cyan.copy(alpha = 0.12f), RoundedCornerShape(50)).padding(horizontal = 10.dp, vertical = 3.dp),
-                            )
-                        }
-                    }
-                }
-            }
-        }
-    }
 }
 
 // ---------- A5 新建（也用于「用其它 agent 打开」） ----------

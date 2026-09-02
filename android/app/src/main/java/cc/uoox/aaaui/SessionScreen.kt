@@ -4,7 +4,6 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
-import android.graphics.Typeface
 import android.net.Uri
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -326,15 +325,25 @@ fun SessionScreen(
                     .padding(horizontal = 8.dp, vertical = 5.dp),
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                KeyChip("Esc") { terminalViewRef.value?.handleKeyCode(KeyEvent.KEYCODE_ESCAPE, 0) }
-                KeyChip("Tab") { terminalViewRef.value?.handleKeyCode(KeyEvent.KEYCODE_TAB, 0) }
+                // 键码走 handleKeyCode：termux 的 KeyHandler 会按当前 keypad /
+                // cursor 模式给出正确的转义序列；字面符号直接写进 PTY。
+                fun key(code: Int) = { terminalViewRef.value?.handleKeyCode(code, 0); Unit }
+                fun lit(ch: String) = { attachment?.session?.write(ch); Unit }
+                KeyChip("Esc", onClick = key(KeyEvent.KEYCODE_ESCAPE))
+                KeyChip("Tab", onClick = key(KeyEvent.KEYCODE_TAB))
                 KeyChip("Ctrl", active = ctrlSticky) { ctrlSticky = !ctrlSticky }
-                KeyChip("↑") { terminalViewRef.value?.handleKeyCode(KeyEvent.KEYCODE_DPAD_UP, 0) }
-                KeyChip("↓") { terminalViewRef.value?.handleKeyCode(KeyEvent.KEYCODE_DPAD_DOWN, 0) }
-                KeyChip("←") { terminalViewRef.value?.handleKeyCode(KeyEvent.KEYCODE_DPAD_LEFT, 0) }
-                KeyChip("→") { terminalViewRef.value?.handleKeyCode(KeyEvent.KEYCODE_DPAD_RIGHT, 0) }
-                KeyChip("⏎") { terminalViewRef.value?.handleKeyCode(KeyEvent.KEYCODE_ENTER, 0) }
-                KeyChip("/") { attachment?.session?.write("/") }
+                KeyChip("↑", onClick = key(KeyEvent.KEYCODE_DPAD_UP))
+                KeyChip("↓", onClick = key(KeyEvent.KEYCODE_DPAD_DOWN))
+                KeyChip("←", onClick = key(KeyEvent.KEYCODE_DPAD_LEFT))
+                KeyChip("→", onClick = key(KeyEvent.KEYCODE_DPAD_RIGHT))
+                KeyChip("Home", onClick = key(KeyEvent.KEYCODE_MOVE_HOME))
+                KeyChip("End", onClick = key(KeyEvent.KEYCODE_MOVE_END))
+                KeyChip("⏎", onClick = key(KeyEvent.KEYCODE_ENTER))
+                // 手机键盘上最难摸到的几个：flag 的 -、路径与 slash 命令的 /、管道、家目录
+                KeyChip("-", onClick = lit("-"))
+                KeyChip("/", onClick = lit("/"))
+                KeyChip("|", onClick = lit("|"))
+                KeyChip("~", onClick = lit("~"))
                 // 长按选区工具条里也有粘贴，但那要先长按选中；这里给一个直达入口
                 KeyChip("粘贴") { pasteIntoPty(context, attachment?.session) }
             }
@@ -424,7 +433,9 @@ private fun TerminalHost(
                 // is null-safe), while setTypeface reads the existing one and
                 // would NPE on a freshly built view.
                 setTextSize(with(density) { fontSize.sp.toPx() }.toInt())
-                setTypeface(Typeface.MONOSPACE)
+                // 随包的 JetBrains Mono，比系统等宽字体窄一截（见 Fonts）。后续
+                // update 里的 setTextSize 会沿用现有渲染器的字体，不用再设。
+                setTypeface(Fonts.terminal(ctx))
                 attachSession(attachment.session)
                 keepScreenOn = true
                 viewRef.value = this

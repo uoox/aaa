@@ -24,6 +24,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.content.Context
+import android.graphics.Typeface
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -115,6 +117,9 @@ enum class NavPlacement { Bottom, Rail }
  * 屏幕、只装三个 tab 的底栏收成左侧 rail，顺便把内容推高一整条。断点取 Medium
  * (600dp)：OnePlus Open 内屏实测 sw698dp（2268px ÷ 3.25），外屏 343dp 和直板机
  * 都留在底栏。
+ *
+ * 首页收成单页（项目列表就是首页，设置是压栈路由）之后没有 tab 可摆，首页不再
+ * 按这个值切布局；断点本身保留给 PaneLayoutTest 与以后可能的宽屏两栏。
  */
 fun navPlacementFor(width: WindowWidthSizeClass): NavPlacement =
     if (width == WindowWidthSizeClass.Compact) NavPlacement.Bottom else NavPlacement.Rail
@@ -152,6 +157,32 @@ fun DotWithText(color: Color, text: String, textColor: Color = Tok.Dim) {
         Spacer(Modifier.width(6.dp))
         Text(text, color = textColor, fontSize = 12.sp)
     }
+}
+
+// ---------- fonts ----------
+
+/**
+ * 终端字体：随包带的 JetBrains Mono（OFL 1.1）。系统 Typeface.MONOSPACE 在两台
+ * 测试机上都是 Droid Sans Mono，字宽偏大，同一屏能放下的列数明显少。termux 渲染器
+ * 用 measureText("X") 定格宽，换字体本身就是把格子变窄的修法。
+ *
+ * 用的是官方 **NL（No Ligatures）** 变体：字形与度量完全一样，只去掉了连字表。
+ * 带连字的那版在 9R 上实测把 `|-` 画成 ⊢、`->` 画成 →——终端里 `!=` `||` `//`
+ * 这些都会被吞掉，看着像另一个字符；渲染器一段同色文字一次 drawText，Paint 会
+ * 默认套 liga/calt，又没有暴露 setFontFeatureSettings，所以从字体源头去掉。
+ * Typeface.createFromAsset 走磁盘，进程内缓存一份——折叠/展开重建 SessionScreen 不重读。
+ */
+object Fonts {
+    const val TERMINAL_ASSET = "fonts/JetBrainsMonoNL-Regular.ttf"
+
+    @Volatile private var terminal: Typeface? = null
+
+    fun terminal(context: Context): Typeface =
+        terminal ?: synchronized(this) {
+            terminal ?: runCatching { Typeface.createFromAsset(context.assets, TERMINAL_ASSET) }
+                .getOrDefault(Typeface.MONOSPACE)
+                .also { terminal = it }
+        }
 }
 
 // ---------- formatting ----------
