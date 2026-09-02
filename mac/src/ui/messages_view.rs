@@ -8,14 +8,17 @@
 //! reasonix 等）或 404（v1 daemon）→ 上层自动回落终端并隐藏切换入口。
 
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 
 use gpui::{
-    Context, ElementId, Entity, KeyDownEvent, ScrollHandle, SharedString, Window, div, prelude::*,
-    px, relative,
+    AnyElement, Context, ElementId, Entity, FontStyle, FontWeight, HighlightStyle,
+    InteractiveText, KeyDownEvent, ScrollHandle, SharedString, StrikethroughStyle, StyledText,
+    UnderlineStyle, Window, div, prelude::*, px, relative,
 };
 
 use super::kit::{c, ca};
 use super::mini_input::MiniInput;
+use crate::markdown::{self, Block, Span};
 use crate::model::{AnswerItem, ChatMessage, QuestionItem, QuestionSpec};
 use crate::net::Net;
 use crate::theme;
@@ -140,6 +143,9 @@ pub struct MessagesView {
     loading: bool,
     /// 已展开的 thinking / tool 消息 seq（点击切换）
     expanded: HashSet<u64>,
+    /// assistant text 消息的 Markdown 块缓存（seq → blocks）：fetch 到达时解析一次，
+    /// 渲染帧只读。seq 的正文不会变（dedup 保留首次到达的版本），所以不需要失效逻辑。
+    md: HashMap<u64, Vec<Block>>,
     scroll: ScrollHandle,
     /// 底部输入框：消息流里直接对 agent 说话（POST /input，text+回车）
     input: Entity<MiniInput>,
@@ -173,6 +179,7 @@ impl MessagesView {
             supported: None,
             loading: false,
             expanded: HashSet::new(),
+            md: HashMap::new(),
             scroll: ScrollHandle::new(),
             input,
             wants_focus: true,
@@ -275,12 +282,18 @@ impl MessagesView {
                     Ok(r) => {
                         v.supported = Some(r.supported);
                         if !r.messages.is_empty() {
+                            // assistant 文本按 CommonMark 解析一次进缓存；其余角色 / 种类保持纯文本
+                            for m in r.messages.iter().filter(|m| is_markdown(m)) {
+                                v.md.entry(m.seq).or_insert_with(|| markdown::parse(&m.text));
+                            }
                             v.msgs.extend(r.messages);
                             v.msgs.sort_by_key(|m| m.seq);
                             v.msgs.dedup_by_key(|m| m.seq);
                             if v.msgs.len() > KEEP {
                                 let cut = v.msgs.len() - KEEP;
                                 v.msgs.drain(..cut);
+                                let min_seq = v.msgs.first().map(|m| m.seq).unwrap_or(0);
+                                v.md.retain(|seq, _| *seq >= min_seq);
                             }
                             v.last_seq = v.msgs.last().map(|m| m.seq).unwrap_or(0);
                             v.scroll.scroll_to_bottom();
@@ -630,7 +643,45 @@ impl MessagesView {
                 .text_color(c(theme::FAINT))
                 .child(text)
                 .into_any_element(),
-            _ => assistant_bubble(text),
+            _ => {
+                // assistant 文本 = CommonMark：气泡（SURFACE、宽度上限）不变，里面换成块列。
+                // 缓存未命中（理论上不会）就现场解析；解析结果为空 → 回落纯文本气泡。
+                let parsed;
+                let blocks: &[Block] = if is_markdown(m) {
+                    match self.md.get(&m.seq) {
+                        Some(b) => b,
+                        None => {
+                            parsed = markdown::parse(&m.text);
+                            &parsed
+                        }
+                    }
+                } else {
+                    &[]
+                };
+                if blocks.is_empty() {
+                    assistant_bubble(text)
+                } else {
+                    let mut ids = MdIds { seq: m.seq, next: 0 };
+                    div()
+                        .w_full()
+                        .flex()
+                        .child(
+                            div()
+                                .max_w(relative(0.86))
+                                .px(px(12.))
+                                .py(px(7.))
+                                .rounded(px(12.))
+                                .bg(c(theme::SURFACE))
+                                .text_size(px(12.5))
+                                .text_color(c(theme::INK))
+                                .flex()
+                                .flex_col()
+                                .gap(px(6.))
+                                .children(md_blocks(blocks, &mut ids)),
+                        )
+                        .into_any_element()
+                }
+            }
         }
     }
 
@@ -897,6 +948,224 @@ fn user_bubble(text: SharedString) -> gpui::Div {
         .text_size(px(12.5))
         .text_color(c(theme::INK))
         .child(text)
+}
+
+/// 只有 assistant 的 text 走 Markdown；user / tool / thinking / system / question 保持纯文本
+fn is_markdown(m: &ChatMessage) -> bool {
+    m.role == "assistant" && m.kind == "text"
+}
+
+// ── Markdown 块渲染 ────────────────────────────────────────────────────────────
+//
+// 输入是 crate::markdown 的纯数据块，这里只负责映射到 gpui 元素。
+// 需要 id 的元素（横向滚动容器、可点链接段落）用 (seq, 计数) 生成稳定且唯一的 id。
+
+/// 一条消息内的 id 发号器
+struct MdIds {
+    seq: u64,
+    next: usize,
+}
+
+impl MdIds {
+    fn next(&mut self, kind: &str) -> ElementId {
+        self.next += 1;
+        ElementId::from(format!("md-{kind}-{}-{}", self.seq, self.next))
+    }
+}
+
+/// 代码 span 的文字色：亮青（ANSI 14），在 TERM_BG 上可读且与链接的 CYAN 区分
+const CODE_INK: u32 = 0x7fdbef;
+
+fn md_blocks(blocks: &[Block], ids: &mut MdIds) -> Vec<AnyElement> {
+    blocks.iter().map(|b| md_block(b, ids)).collect()
+}
+
+fn md_block(b: &Block, ids: &mut MdIds) -> AnyElement {
+    match b {
+        Block::Heading { level, spans } => {
+            let size = match level {
+                1 => 16.,
+                2 => 14.5,
+                _ => 13.5,
+            };
+            div()
+                .text_size(px(size))
+                .font_weight(FontWeight::BOLD)
+                .child(md_inline(spans, ids))
+                .into_any_element()
+        }
+        Block::Paragraph(spans) => div()
+            .text_size(px(12.5))
+            .child(md_inline(spans, ids))
+            .into_any_element(),
+        Block::Code { lang, text } => md_mono_block(ids, "code", text, 11.5, lang),
+        Block::Table { header, rows } => {
+            md_mono_block(ids, "table", &markdown::table_text(header, rows), 11., "")
+        }
+        Block::List {
+            ordered,
+            start,
+            items,
+        } => {
+            // 标记列定宽：无序 14px（嵌套列表由此缩进 14px），有序留够两位数 + 点
+            let marker_w = if *ordered { 22. } else { 14. };
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(3.))
+                .children(items.iter().enumerate().map(|(i, item)| {
+                    let marker: SharedString = if *ordered {
+                        format!("{}.", start + i as u64).into()
+                    } else {
+                        "•".into()
+                    };
+                    div()
+                        .flex()
+                        .items_start()
+                        .child(
+                            div()
+                                .flex_none()
+                                .w(px(marker_w))
+                                .text_size(px(12.5))
+                                .text_color(c(theme::DIM))
+                                .child(marker),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .flex()
+                                .flex_col()
+                                .gap(px(4.))
+                                .children(md_blocks(item, ids)),
+                        )
+                }))
+                .into_any_element()
+        }
+        Block::Quote(children) => div()
+            .border_l(px(3.))
+            .border_color(ca(theme::FAINT, 0.6))
+            .pl(px(10.))
+            .text_color(c(theme::DIM))
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .children(md_blocks(children, ids))
+            .into_any_element(),
+        Block::Rule => div()
+            .w_full()
+            .h(px(1.))
+            .my(px(4.))
+            .bg(c(theme::EDGE))
+            .into_any_element(),
+    }
+}
+
+/// 行内片段 → 单个 StyledText（粗/斜/删除线/代码/链接为 highlight 区间）。
+/// 含链接时包成 InteractiveText，点击区间打开 URL。
+fn md_inline(spans: &[Span], ids: &mut MdIds) -> AnyElement {
+    let mut text = String::new();
+    let mut highlights: Vec<(Range<usize>, HighlightStyle)> = Vec::new();
+    let mut families: Vec<(Range<usize>, SharedString)> = Vec::new();
+    let mut link_ranges: Vec<Range<usize>> = Vec::new();
+    let mut urls: Vec<String> = Vec::new();
+    for s in spans {
+        if s.text.is_empty() {
+            continue;
+        }
+        let start = text.len();
+        text.push_str(&s.text);
+        let range = start..text.len();
+        let mut hl = HighlightStyle::default();
+        let mut styled = false;
+        if s.bold {
+            hl.font_weight = Some(FontWeight::BOLD);
+            styled = true;
+        }
+        if s.italic {
+            hl.font_style = Some(FontStyle::Italic);
+            styled = true;
+        }
+        if s.strike {
+            hl.strikethrough = Some(StrikethroughStyle {
+                thickness: px(1.),
+                color: None,
+            });
+            styled = true;
+        }
+        if s.code {
+            hl.background_color = Some(c(theme::TERM_BG).into());
+            hl.color = Some(c(CODE_INK).into());
+            families.push((range.clone(), "Menlo".into()));
+            styled = true;
+        }
+        if let Some(url) = &s.link {
+            hl.color = Some(c(theme::CYAN).into());
+            hl.underline = Some(UnderlineStyle {
+                thickness: px(1.),
+                color: Some(c(theme::CYAN).into()),
+                wavy: false,
+            });
+            link_ranges.push(range.clone());
+            urls.push(url.clone());
+            styled = true;
+        }
+        if styled {
+            highlights.push((range, hl));
+        }
+    }
+    let styled = StyledText::new(text)
+        .with_highlights(highlights)
+        .with_font_family_overrides(families);
+    if urls.is_empty() {
+        styled.into_any_element()
+    } else {
+        InteractiveText::new(ids.next("link"), styled)
+            .on_click(link_ranges, move |ix, _window, cx| {
+                if let Some(url) = urls.get(ix) {
+                    cx.open_url(url);
+                }
+            })
+            .into_any_element()
+    }
+}
+
+/// 等宽块（代码 / 表格）：TERM_BG 圆角底、横向滚动、每个源行一行不折行；
+/// `lang` 非空时右上角浮一个 FAINT 语言标签（不随内容横向滚动）。
+fn md_mono_block(ids: &mut MdIds, kind: &str, text: &str, size: f32, lang: &str) -> AnyElement {
+    let body = div()
+        .id(ids.next(kind))
+        .w_full()
+        .overflow_x_scroll()
+        .px(px(10.))
+        .py(px(8.))
+        .child(
+            div()
+                .font_family("Menlo")
+                .text_size(px(size))
+                .text_color(c(theme::TERM_FG))
+                .whitespace_nowrap()
+                .child(SharedString::from(text.to_string())),
+        );
+    div()
+        .relative()
+        .w_full()
+        .rounded(px(8.))
+        .bg(c(theme::TERM_BG))
+        .child(body)
+        .when(!lang.is_empty(), |el| {
+            el.child(
+                div()
+                    .absolute()
+                    .top(px(3.))
+                    .right(px(8.))
+                    .text_size(px(9.5))
+                    .font_family("Menlo")
+                    .text_color(c(theme::FAINT))
+                    .child(SharedString::from(lang.to_string())),
+            )
+        })
+        .into_any_element()
 }
 
 impl Render for MessagesView {

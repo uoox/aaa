@@ -1,3 +1,4 @@
+mod markdown;
 mod model;
 mod net;
 mod notify;
