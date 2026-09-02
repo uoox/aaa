@@ -49,6 +49,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -332,19 +333,27 @@ fun SessionScreen(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text("📎", fontSize = 18.sp, modifier = Modifier.clickable { filePicker.launch("*/*") }.padding(6.dp))
-                OutlinedTextField(
-                    composer, { composer = it },
-                    // 键盘回车是换行；多行文本 daemon 会包成一次粘贴发进去，不会在第一行就提交
-                    placeholder = { Text("输入消息，可多行", color = Tok.Faint, fontSize = 13.sp) },
-                    modifier = Modifier.weight(1f),
-                    maxLines = 4,
-                    textStyle = androidx.compose.ui.text.TextStyle(color = Tok.Ink, fontSize = 14.sp),
-                )
+                // 无边框的矮输入框：一块圆角底色，单行时一行高，最多长到 4 行。
+                // 键盘回车是换行；多行文本 daemon 会包成一次粘贴发进去，不会在第一行就提交
+                Box(
+                    Modifier.weight(1f).background(Tok.Raised, RoundedCornerShape(10.dp)).padding(horizontal = 12.dp, vertical = 8.dp),
+                    contentAlignment = Alignment.CenterStart,
+                ) {
+                    if (composer.isEmpty()) Text("输入消息，可多行", color = Tok.Faint, fontSize = 14.sp)
+                    BasicTextField(
+                        composer, { composer = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        maxLines = 4,
+                        textStyle = androidx.compose.ui.text.TextStyle(color = Tok.Ink, fontSize = 14.sp),
+                        cursorBrush = SolidColor(Tok.Accent),
+                    )
+                }
                 Spacer(Modifier.width(6.dp))
-                Button(
+                TextButton(
                     enabled = composer.isNotBlank() && s?.state != "exited",
                     onClick = { sendInput(composer, enter = true); composer = "" },
-                ) { Text("发送") }
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                ) { Text("发送", color = if (composer.isNotBlank() && s?.state != "exited") Tok.Accent else Tok.Faint, fontSize = 14.sp) }
             }
         }
     }
