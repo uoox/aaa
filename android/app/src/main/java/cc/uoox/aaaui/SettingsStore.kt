@@ -22,6 +22,8 @@ data class AppSettings(
     /** 终端视图下收起预输入框，直接在 shell 里打字；全局记住用户的选择。 */
     val terminalComposerHidden: Boolean = false,
     val mutedProjects: Set<String> = emptySet(),
+    /** 界面主题：dark | light | claude（见 Palette）。 */
+    val theme: String = "dark",
 ) {
     val notifySettings: NotifySettings
         get() = NotifySettings(notifyDone, mutedProjects)
@@ -36,6 +38,7 @@ class SettingsStore(private val context: Context) {
         val FONT_SIZE = intPreferencesKey("font_size")
         val TERMINAL_COMPOSER_HIDDEN = booleanPreferencesKey("terminal_composer_hidden")
         val MUTED_PROJECTS = stringSetPreferencesKey("muted_projects")
+        val THEME = stringPreferencesKey("theme")
     }
 
     private val json = ProtocolJson.instance
@@ -49,6 +52,7 @@ class SettingsStore(private val context: Context) {
             fontSize = p[K.FONT_SIZE] ?: 14,
             terminalComposerHidden = p[K.TERMINAL_COMPOSER_HIDDEN] ?: false,
             mutedProjects = p[K.MUTED_PROJECTS] ?: emptySet(),
+            theme = p[K.THEME] ?: "dark",
         )
     }
 
@@ -69,6 +73,8 @@ class SettingsStore(private val context: Context) {
     suspend fun setDefaultUi(v: String) = context.dataStore.edit { it[K.DEFAULT_UI] = v }
     suspend fun setFontSize(v: Int) = context.dataStore.edit { it[K.FONT_SIZE] = v.coerceIn(8, 28) }
     suspend fun setTerminalComposerHidden(v: Boolean) = context.dataStore.edit { it[K.TERMINAL_COMPOSER_HIDDEN] = v }
+    /** 只存认识的名字：不认识的落回黑暗，读的那头就不用再兜底。 */
+    suspend fun setTheme(v: String) = context.dataStore.edit { it[K.THEME] = Palette.forName(v).name }
 
     suspend fun setProjectMuted(path: String, muted: Boolean) = context.dataStore.edit { p ->
         val cur = p[K.MUTED_PROJECTS] ?: emptySet()

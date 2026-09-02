@@ -58,6 +58,9 @@ import kotlinx.coroutines.launch
 
 // ---------- A6 首页 = 项目列表 ----------
 
+/** 这个 app 只跑 Claude Code：新建项目、没登记 agent 的旧项目都用它。 */
+const val DEFAULT_AGENT = "claude"
+
 /**
  * 项目行的三态。一个项目只有一个 agent（建项目时定死，从不切换），项目 ↔ 会话
  * 事实上一对一，所以会话状态直接挂在项目行上，首页不再单开会话页。终端永远不代表项目。全部由客户端
@@ -206,11 +209,9 @@ fun ProjectsHome(store: AppStore, nav: NavHostController) {
         val p = row.project
         val primary = row.primary
         if (primary != null && primary.state != "exited") { openSession(primary.id, ""); return }
-        val agent = p.agent ?: primary?.agent
-        if (agent.isNullOrBlank()) {
-            // 注册表里没登记 agent：让人先在操作单里选一个，不替他猜
-            toast("项目未设置 agent，先在菜单里选一个"); actionsFor = p; return
-        }
+        // 注册表里登记了什么就跑什么（旧项目可能还是别的 agent，daemon 那头照样认）；
+        // 没登记的一律 claude——这个 app 只跑 Claude Code，没有别的可选
+        val agent = p.agent ?: primary?.agent ?: DEFAULT_AGENT
         if (p.path in busy) return
         busy = busy + p.path
         scope.launch {
@@ -253,7 +254,7 @@ fun ProjectsHome(store: AppStore, nav: NavHostController) {
                     Text(">_", color = Tok.Dim, fontSize = 16.sp, fontFamily = FontFamily.Monospace)
                 }
                 val terminalCount = terminalSessions(sessions).size
-                if (terminalCount > 0) Text(terminalCount.toString(), color = Tok.Cyan, fontSize = 10.sp)
+                if (terminalCount > 0) Text(terminalCount.toString(), color = Tok.Accent, fontSize = 10.sp)
             }
             IconButton(onClick = { nav.navigate("settings") }) {
                 Text("⚙", color = Tok.Dim, fontSize = 20.sp)
@@ -326,7 +327,7 @@ fun ProjectsHome(store: AppStore, nav: NavHostController) {
     purgeReport?.let { results -> PurgeReportDialog(results) { purgeReport = null } }
 }
 
-/** 一行：色点 + 项目名 + agent 徽记 + 时间；第二行一句摘要。目录大小等细节在长按单里。 */
+/** 一行：色点 + 项目名 + 时间；第二行一句摘要。目录大小等细节在长按单里。 */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ProjectRowItem(row: ProjectRow, busy: Boolean, onClick: () -> Unit, onLongClick: () -> Unit) {
@@ -338,7 +339,7 @@ private fun ProjectRowItem(row: ProjectRow, busy: Boolean, onClick: () -> Unit, 
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.width(12.dp), contentAlignment = Alignment.CenterStart) {
-                if (busy) CircularProgressIndicator(Modifier.width(10.dp).height(10.dp), strokeWidth = 1.5.dp, color = Tok.Cyan)
+                if (busy) CircularProgressIndicator(Modifier.width(10.dp).height(10.dp), strokeWidth = 1.5.dp, color = Tok.Accent)
                 else StateDot(row.state.dotColor())
             }
             Spacer(Modifier.width(8.dp))
@@ -347,11 +348,6 @@ private fun ProjectRowItem(row: ProjectRow, busy: Boolean, onClick: () -> Unit, 
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
             )
             Spacer(Modifier.width(8.dp))
-            // agent 只用着色小字，不画边框：列表里十几个方块叠起来比项目名还抢眼
-            p.agent?.let {
-                Text(if (it == "shell") "终端" else it, color = Tok.agentColor(it).copy(alpha = 0.85f), fontSize = 11.sp)
-                Text(" · ", color = Tok.Faint, fontSize = 11.sp)
-            }
             Text(relativeTime(row.timeIso), color = Tok.Faint, fontSize = 11.sp)
         }
         Text(
@@ -417,13 +413,12 @@ fun ProjectActionsSheet(
             Column(Modifier.padding(horizontal = 18.dp, vertical = 4.dp)) {
                 Text(p.name, color = Tok.Ink, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                 Text(
-                    "${p.agent ?: "无默认 agent"} · ${p.path} · ${humanBytes(p.dir_size)}",
+                    "${p.path} · ${humanBytes(p.dir_size)}",
                     color = Tok.Faint, fontSize = 11.sp, fontFamily = FontFamily.Monospace,
                 )
             }
-            SheetItem("▶", "继续会话", p.agent?.let { "${it} resume" } ?: "无默认 agent") {
-                val agent = p.agent
-                if (agent == null) { toast("未设置默认 agent"); return@SheetItem }
+            SheetItem("▶", "继续会话", "resume") {
+                val agent = p.agent ?: DEFAULT_AGENT
                 scope.launch {
                     try {
                         val sess = store.client?.createSession(p.path, agent, resume = true) ?: return@launch

@@ -161,9 +161,11 @@ class DaemonRoundtripTest {
                 val listed = api.projects()
                 assertTrue(listed.any { it.path == proj.path && it.agent == "claude" })
 
-                // 项目操作：更换默认 agent
-                api.setProjectAgent(proj.path, "codex")
-                assertTrue(api.projects().first { it.path == proj.path }.agent == "codex")
+                // 项目操作：设置 agent（只认 claude；其它 agent 自 2026-09-03 起被 daemon 拒绝）
+                api.setProjectAgent(proj.path, "claude")
+                assertTrue(api.projects().first { it.path == proj.path }.agent == "claude")
+                val rejected = runCatching { api.setProjectAgent(proj.path, "codex") }.exceptionOrNull()
+                assertTrue(rejected is DaemonHttpException && rejected.code == 400)
 
                 // 会话：shell 会话 + 重命名 + ports + 列表
                 val sess = api.createSession(proj.path, "shell", resume = false)

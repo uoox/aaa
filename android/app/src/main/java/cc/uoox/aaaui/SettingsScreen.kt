@@ -111,6 +111,24 @@ fun SettingsScreen(store: AppStore, nav: NavHostController) {
             }
         }
 
+        // ---------- 外观 ----------
+        GroupTitle("外观")
+        Group {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("主题", color = Tok.Ink, fontSize = 14.sp, modifier = Modifier.weight(1f))
+                // 点下去立刻生效：Tok.current 是 snapshot state，凡是画过颜色的地方自动重组
+                SingleChoiceSegmentedButtonRow {
+                    Palette.all.forEachIndexed { i, p ->
+                        SegmentedButton(
+                            selected = settings.theme == p.name,
+                            onClick = { scope.launch { store.settings.setTheme(p.name) } },
+                            shape = SegmentedButtonDefaults.itemShape(i, Palette.all.size),
+                        ) { Text(p.label, fontSize = 12.sp, maxLines = 1) }
+                    }
+                }
+            }
+        }
+
         // ---------- 界面 ----------
         GroupTitle("界面")
         Group {

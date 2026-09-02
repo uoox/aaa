@@ -48,7 +48,7 @@ class ShareTargetActivity : ComponentActivity() {
         @Suppress("DEPRECATION")
         val uri: Uri? = if (intent?.action == Intent.ACTION_SEND) intent.getParcelableExtra(Intent.EXTRA_STREAM) else null
         val sharedText: String? = if (intent?.action == Intent.ACTION_SEND) intent.getStringExtra(Intent.EXTRA_TEXT) else null
-        setContent { AaaTheme { ShareScreen(store, uri, sharedText) { finish() } } }
+        setContent { AaaTheme(store) { ShareScreen(store, uri, sharedText) { finish() } } }
     }
 }
 
@@ -100,7 +100,6 @@ private fun ShareScreen(store: AppStore, uri: Uri?, sharedText: String?, onDone:
                         ) {
                             Row(Modifier.padding(13.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Text(p.name, color = Tok.Ink, fontSize = 15.sp, modifier = Modifier.weight(1f))
-                                p.agent?.let { AgentChip(it) }
                             }
                         }
                     }

@@ -21,10 +21,8 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -72,6 +70,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
@@ -94,6 +93,7 @@ import com.termux.view.TerminalViewClient
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
 // ============================================================
 // 会话屏：消息流 ⇄ 终端 双视图 + 共用 composer
@@ -234,14 +234,14 @@ fun SessionScreen(
                     color = Tok.Ink, fontSize = 15.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )
                 Text(
-                    listOfNotNull(s?.project_name, s?.agent, s?.resume_id?.let { "resume ${it.take(6)}" }).joinToString(" · "),
+                    listOfNotNull(s?.project_name, s?.resume_id?.let { "resume ${it.take(6)}" }).joinToString(" · "),
                     color = Tok.Faint, fontSize = 10.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )
             }
             if (messagesSupported != false) {
                 Text(
                     if (showMessages) ">_" else "💬",
-                    color = Tok.Cyan, fontSize = 15.sp, fontFamily = FontFamily.Monospace,
+                    color = Tok.Accent, fontSize = 15.sp, fontFamily = FontFamily.Monospace,
                     modifier = Modifier
                         .clickable { uiMode = if (showMessages) "terminal" else "messages" }
                         .border(1.dp, Tok.Edge2, RoundedCornerShape(8.dp))
@@ -492,29 +492,65 @@ private fun StreamRow(
             expanded[item.turnKey] = expanded[item.turnKey] != true
         }
         is StreamItem.Step -> StepRow(item.msg)
-        is StreamItem.Reply -> MarkdownBody(item.msg.text, 15.sp, Tok.Ink, modifier = Modifier.fillMaxWidth())
+        is StreamItem.Reply -> ReplyBlock(item.msg)
         is StreamItem.Question -> QuestionCard(item.msg, formState(item.msg)) { answers -> onAnswer(item.msg.seq, answers) }
         is StreamItem.Answer -> AnswerBlock(item.msg)
     }
 }
 
-/** 用户消息：整宽块，左侧青色竖条，上方一行时间。 */
+/** 用户消息：右对齐气泡（最宽 86%），强调色淡底 + 细边，右下角收小；时间在气泡上方靠右。 */
 @Composable
 private fun UserBlock(m: ChatMessage) {
     val time = remember(m.ts) { clockTime(m.ts) }
-    Column(Modifier.fillMaxWidth()) {
-        if (time.isNotEmpty()) Text(time, color = Tok.Faint, fontSize = 10.sp, modifier = Modifier.padding(bottom = 3.dp))
-        Row(
-            Modifier.fillMaxWidth().height(IntrinsicSize.Min)
-                .clip(RoundedCornerShape(8.dp)).background(Tok.Surface),
-        ) {
-            Spacer(Modifier.width(3.dp).fillMaxHeight().background(Tok.Cyan))
-            Text(
-                rememberLinkified(m), color = Tok.Ink, fontSize = 14.5.sp,
-                modifier = Modifier.weight(1f).padding(horizontal = 12.dp, vertical = 10.dp),
-            )
+    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End) {
+        if (time.isNotEmpty()) BubbleCaption(time, Tok.Faint)
+        UserBubble {
+            Text(rememberLinkified(m), color = Tok.Ink, fontSize = 14.5.sp, lineHeight = 21.sp)
         }
     }
+}
+
+/** Claude 的回复：左对齐整宽、不画气泡；上方一行强调色的「✻ Claude」小字，正文仍是 Markdown。 */
+@Composable
+private fun ReplyBlock(m: ChatMessage) {
+    Column(Modifier.fillMaxWidth()) {
+        Text(
+            "✻ Claude", color = Tok.Accent, fontSize = 10.5.sp, fontWeight = FontWeight.Medium,
+            modifier = Modifier.padding(bottom = 4.dp),
+        )
+        MarkdownBody(m.text, 15.sp, Tok.Ink, modifier = Modifier.fillMaxWidth())
+    }
+}
+
+/** 气泡上方那行小字（时间 / 「回答」），与气泡同在右侧。 */
+@Composable
+private fun BubbleCaption(text: String, color: Color) {
+    Text(text, color = color, fontSize = 10.sp, modifier = Modifier.padding(bottom = 3.dp, end = 2.dp))
+}
+
+/** 右下角收小的气泡：说话的人在右边。 */
+private val UserBubbleShape = RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp, bottomEnd = 6.dp, bottomStart = 14.dp)
+
+/**
+ * 用户一侧的气泡：[tint] 淡底（暗主题 0.18、亮主题 0.14——亮底上同样的透明度会显得脏）
+ * 加 0.35 的一像素边。宽度跟着内容走，最多占父宽 86%。
+ */
+@Composable
+private fun UserBubble(tint: Color = Tok.Accent, content: @Composable () -> Unit) {
+    val fill = tint.copy(alpha = if (Tok.current.isDark) 0.18f else 0.14f)
+    Box(
+        Modifier.maxWidthFraction(0.86f)
+            .background(fill, UserBubbleShape)
+            .border(1.dp, tint.copy(alpha = 0.35f), UserBubbleShape)
+            .padding(horizontal = 12.dp, vertical = 9.dp),
+    ) { content() }
+}
+
+/** 只压最大宽度为父宽的 [fraction]，内容短就跟着窄——fillMaxWidth(f) 会把每个气泡都撑到一样宽。 */
+private fun Modifier.maxWidthFraction(fraction: Float): Modifier = layout { measurable, constraints ->
+    val max = if (constraints.hasBoundedWidth) (constraints.maxWidth * fraction).roundToInt() else constraints.maxWidth
+    val placeable = measurable.measure(constraints.copy(minWidth = 0, maxWidth = max))
+    layout(placeable.width, placeable.height) { placeable.placeRelative(0, 0) }
 }
 
 /** 折叠行。live 尾轮用旋转指示代替 ▸，折叠着也报最近一步在干什么。 */
@@ -525,7 +561,7 @@ private fun FoldRow(f: StreamItem.Fold, open: Boolean, onToggle: () -> Unit) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(Modifier.size(10.dp), contentAlignment = Alignment.Center) {
-            if (f.live) CircularProgressIndicator(Modifier.size(10.dp), color = Tok.Cyan, strokeWidth = 1.5.dp)
+            if (f.live) CircularProgressIndicator(Modifier.size(10.dp), color = Tok.Accent, strokeWidth = 1.5.dp)
             else StateDot(Tok.Faint, 6)
         }
         Spacer(Modifier.width(6.dp))
@@ -566,7 +602,7 @@ private fun ScrollToEndButton(visible: Boolean, modifier: Modifier, onClick: () 
             Modifier.size(40.dp).clip(CircleShape).background(Tok.Raised)
                 .border(1.dp, Tok.Edge2, CircleShape).clickable(onClick = onClick),
             contentAlignment = Alignment.Center,
-        ) { Text("↓", color = Tok.Cyan, fontSize = 18.sp) }
+        ) { Text("↓", color = Tok.Accent, fontSize = 18.sp) }
     }
 }
 
@@ -574,7 +610,8 @@ private fun ScrollToEndButton(visible: Boolean, modifier: Modifier, onClick: () 
 @Composable
 private fun rememberLinkified(m: ChatMessage): AnnotatedString {
     val context = LocalContext.current
-    return remember(m.seq, m.text) { linkified(m.text) { url -> openUrl(context, url) } }
+    // 链接色烙在 AnnotatedString 里，换主题要重扫一遍
+    return remember(m.seq, m.text, Tok.current) { linkified(m.text) { url -> openUrl(context, url) } }
 }
 
 @Composable
@@ -582,7 +619,7 @@ private fun ThinkingRow(m: ChatMessage) {
     var expanded by remember { mutableStateOf(false) }
     Column(
         Modifier.fillMaxWidth().padding(vertical = 3.dp)
-            .background(Tok.TermBg, RoundedCornerShape(10.dp))
+            .background(Tok.Inset, RoundedCornerShape(10.dp))
             .clickable { expanded = !expanded }
             .padding(horizontal = 10.dp, vertical = 6.dp),
     ) {
@@ -623,7 +660,7 @@ private fun ToolRow(m: ChatMessage) {
             Text(
                 rememberLinkified(m), color = Tok.Dim, fontSize = 11.sp, fontFamily = FontFamily.Monospace,
                 modifier = Modifier.fillMaxWidth().padding(start = 13.dp, top = 3.dp)
-                    .background(Tok.TermBg, RoundedCornerShape(8.dp)).padding(8.dp),
+                    .background(Tok.Inset, RoundedCornerShape(8.dp)).padding(8.dp),
             )
         }
     }
@@ -687,7 +724,7 @@ private fun QuestionCard(m: ChatMessage, state: FormState, onSubmit: suspend (Li
                     ) {
                         Text(
                             if (q.multi_select) (if (selected) "☑" else "☐") else (if (selected) "●" else "○"),
-                            color = if (selected) Tok.Cyan else Tok.Dim, fontSize = 15.sp, fontFamily = FontFamily.Monospace,
+                            color = if (selected) Tok.Accent else Tok.Dim, fontSize = 15.sp, fontFamily = FontFamily.Monospace,
                             modifier = Modifier.padding(end = 10.dp, top = 1.dp),
                         )
                         Column(Modifier.weight(1f)) {
@@ -702,7 +739,7 @@ private fun QuestionCard(m: ChatMessage, state: FormState, onSubmit: suspend (Li
                     val otherOn = other.isNotBlank()
                     Text(
                         if (q.multi_select) (if (otherOn) "☑" else "☐") else (if (otherOn) "●" else "○"),
-                        color = if (otherOn) Tok.Cyan else Tok.Dim, fontSize = 15.sp, fontFamily = FontFamily.Monospace,
+                        color = if (otherOn) Tok.Accent else Tok.Dim, fontSize = 15.sp, fontFamily = FontFamily.Monospace,
                         modifier = Modifier.padding(end = 10.dp),
                     )
                     BasicTextField(
@@ -715,8 +752,8 @@ private fun QuestionCard(m: ChatMessage, state: FormState, onSubmit: suspend (Li
                         enabled = pending,
                         singleLine = true,
                         textStyle = TextStyle(color = Tok.Ink, fontSize = 14.sp),
-                        cursorBrush = SolidColor(Tok.Cyan),
-                        modifier = Modifier.weight(1f).background(Tok.TermBg, RoundedCornerShape(6.dp)).padding(horizontal = 10.dp, vertical = 7.dp),
+                        cursorBrush = SolidColor(Tok.Accent),
+                        modifier = Modifier.weight(1f).background(Tok.Inset, RoundedCornerShape(6.dp)).padding(horizontal = 10.dp, vertical = 7.dp),
                         decorationBox = { inner ->
                             if (other.isEmpty()) Text("其它…", color = Tok.Faint, fontSize = 14.sp)
                             inner()
@@ -738,9 +775,9 @@ private fun QuestionCard(m: ChatMessage, state: FormState, onSubmit: suspend (Li
                 val enabled = allComplete && !submitting
                 Text(
                     if (submitting) "提交中…" else "提交",
-                    color = if (enabled) Tok.Bg else Tok.Faint, fontSize = 13.sp, fontWeight = FontWeight.Bold,
+                    color = if (enabled) Tok.OnAccent else Tok.Faint, fontSize = 13.sp, fontWeight = FontWeight.Bold,
                     modifier = Modifier
-                        .background(if (enabled) Tok.Cyan else Tok.Edge2, RoundedCornerShape(8.dp))
+                        .background(if (enabled) Tok.Accent else Tok.Edge2, RoundedCornerShape(8.dp))
                         .then(if (enabled) Modifier.clickable {
                             val answers = spec.questions.indices.map { i ->
                                 AnswerItem(selected = selections[i].sorted(), other = others[i].trim().ifBlank { null })
@@ -767,25 +804,18 @@ private fun Tag(label: String) {
     )
 }
 
-/** 用户对表单的回答：画在用户一侧，与 UserBlock 同款，多一行「回答」小字。 */
+/** 用户对表单的回答：与 UserBlock 同一侧同一款气泡，小字写「回答」；出错时边与小字用红。 */
 @Composable
 private fun AnswerBlock(m: ChatMessage) {
     val time = remember(m.ts) { clockTime(m.ts) }
     val err = m.tool?.status == "err"
-    Column(Modifier.fillMaxWidth()) {
-        Text(
+    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End) {
+        BubbleCaption(
             listOf(time, if (err) "回答 · 出错" else "回答").filter { it.isNotEmpty() }.joinToString(" · "),
-            color = if (err) Tok.Red else Tok.Faint, fontSize = 10.sp, modifier = Modifier.padding(bottom = 3.dp),
+            if (err) Tok.Red else Tok.Faint,
         )
-        Row(
-            Modifier.fillMaxWidth().height(IntrinsicSize.Min)
-                .clip(RoundedCornerShape(8.dp)).background(Tok.Surface),
-        ) {
-            Spacer(Modifier.width(3.dp).fillMaxHeight().background(if (err) Tok.Red else Tok.Cyan))
-            Text(
-                m.text, color = Tok.Ink, fontSize = 14.sp, lineHeight = 20.sp,
-                modifier = Modifier.weight(1f).padding(horizontal = 12.dp, vertical = 10.dp),
-            )
+        UserBubble(tint = if (err) Tok.Red else Tok.Accent) {
+            Text(m.text, color = Tok.Ink, fontSize = 14.sp, lineHeight = 20.sp)
         }
     }
 }
@@ -818,7 +848,7 @@ fun SessionMenuSheet(
         Column(Modifier.padding(bottom = 20.dp)) {
             Column(Modifier.padding(horizontal = 18.dp, vertical = 4.dp)) {
                 Text(s.title.ifBlank { s.project_name }, color = Tok.Ink, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                Text("${s.agent} · ${s.project_path}", color = Tok.Faint, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                Text(s.project_path, color = Tok.Faint, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
             }
             SheetItem("🌐", "打开 Web 预览", "检测端口 · 内网直连") {
                 scope.launch {
@@ -927,7 +957,7 @@ fun SessionMenuSheet(
                 Column(Modifier.verticalScroll(rememberScrollState())) {
                     urls.forEach { url ->
                         Text(
-                            url, color = Tok.Cyan, fontSize = 13.sp, fontFamily = FontFamily.Monospace,
+                            url, color = Tok.Accent, fontSize = 13.sp, fontFamily = FontFamily.Monospace,
                             maxLines = 2, overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.fillMaxWidth().clickable {
                                 openUrl(context, url); urlsDialog = null; onDismiss()
@@ -948,7 +978,7 @@ fun SessionMenuSheet(
                 Column {
                     ports.forEach { p ->
                         Text(
-                            ":${p.port}  ${p.cmd}", color = Tok.Cyan, fontFamily = FontFamily.Monospace,
+                            ":${p.port}  ${p.cmd}", color = Tok.Accent, fontFamily = FontFamily.Monospace,
                             modifier = Modifier.fillMaxWidth().clickable {
                                 openPort(context, store, p.port); portsDialog = null; onDismiss()
                             }.padding(vertical = 8.dp),
@@ -1088,12 +1118,12 @@ private fun PatchView(patch: String, truncated: Boolean) {
     // One Text over an AnnotatedString instead of one Text per line: a 64KB
     // patch is ~2k lines, and 2k composables in a non-lazy Column froze the
     // expand animation. Built once per patch, not per recomposition.
-    val colored = remember(patch) {
+    val colored = remember(patch, Tok.current) {
         buildAnnotatedString {
             patch.lineSequence().forEachIndexed { i, line ->
                 val color = when {
                     line.startsWith("+++") || line.startsWith("---") -> Tok.Dim
-                    line.startsWith("@@") -> Tok.Cyan
+                    line.startsWith("@@") -> Tok.Accent
                     line.startsWith("+") -> Tok.Green
                     line.startsWith("-") -> Tok.Red
                     else -> Tok.Dim
@@ -1105,7 +1135,7 @@ private fun PatchView(patch: String, truncated: Boolean) {
     }
     Column(
         Modifier.fillMaxWidth().padding(top = 8.dp)
-            .background(Tok.TermBg, RoundedCornerShape(8.dp))
+            .background(Tok.Inset, RoundedCornerShape(8.dp))
             .horizontalScroll(rememberScrollState())
             .padding(8.dp),
     ) {

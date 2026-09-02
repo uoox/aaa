@@ -61,7 +61,7 @@ fun TerminalScreen(store: AppStore, nav: NavHostController, focusId: String) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("‹", color = Tok.Dim, fontSize = 28.sp, modifier = Modifier.clickable { nav.popBackStack() }.padding(horizontal = 8.dp))
             Text("终端", color = Tok.Ink, fontSize = 18.sp, modifier = Modifier.weight(1f))
-            TextButton(onClick = { createTerminal() }) { Text("+", color = Tok.Cyan, fontSize = 22.sp) }
+            TextButton(onClick = { createTerminal() }) { Text("+", color = Tok.Accent, fontSize = 22.sp) }
         }
         Row(Modifier.fillMaxWidth().background(Tok.Surface).horizontalScroll(rememberScrollState()).padding(8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             tabs.forEachIndexed { index, session ->

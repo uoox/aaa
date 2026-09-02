@@ -181,7 +181,7 @@ private fun MarkdownBlock(block: MdBlock, size: TextUnit, color: Color, mono: Fo
             lineHeight = size.plus(when (block.level) { 1 -> 3f; 2 -> 1.5f; else -> 0.5f }).times(1.35f),
         )
         is MdBlock.Paragraph -> Text(styled(block.spans, mono, onLink), color = color, fontSize = size, lineHeight = size.times(1.45f))
-        is MdBlock.Code -> Box(Modifier.fillMaxWidth().background(Tok.TermBg, RoundedCornerShape(8.dp)).padding(horizontal = 10.dp, vertical = 8.dp)) {
+        is MdBlock.Code -> Box(Modifier.fillMaxWidth().background(Tok.Inset, RoundedCornerShape(8.dp)).padding(horizontal = 10.dp, vertical = 8.dp)) {
             Row(Modifier.horizontalScroll(rememberScrollState())) {
                 Text(block.text, color = Tok.Ink, fontFamily = mono, fontSize = size.plus(-1.5f), lineHeight = size.plus(-1.5f).times(1.4f), softWrap = false)
             }
@@ -207,15 +207,15 @@ private fun MarkdownBlock(block: MdBlock, size: TextUnit, color: Color, mono: Fo
     }
 }
 
-/** 行内片段 → AnnotatedString：粗 / 斜 / 行内代码（等宽 + 底色）/ 删除线 / 链接（青色下划线，可点）。 */
+/** 行内片段 → AnnotatedString：粗 / 斜 / 行内代码（等宽 + 底色）/ 删除线 / 链接（强调色下划线，可点）。 */
 private fun styled(spans: List<MdSpan>, mono: FontFamily, onLink: (String) -> Unit): AnnotatedString = buildAnnotatedString {
     spans.forEach { s ->
         val style = SpanStyle(
             fontWeight = if (s.bold) FontWeight.Bold else null,
             fontStyle = if (s.italic) FontStyle.Italic else null,
             fontFamily = if (s.code) mono else null,
-            background = if (s.code) Tok.TermBg else Color.Unspecified,
-            color = if (s.code || s.link != null) Tok.Cyan else Color.Unspecified,
+            background = if (s.code) Tok.Inset else Color.Unspecified,
+            color = if (s.code || s.link != null) Tok.Accent else Color.Unspecified,
             textDecoration = when {
                 s.strike && s.link != null -> TextDecoration.combine(listOf(TextDecoration.LineThrough, TextDecoration.Underline))
                 s.strike -> TextDecoration.LineThrough
@@ -246,7 +246,7 @@ private fun MarkdownTable(table: MdBlock.Table, size: TextUnit, mono: FontFamily
         append(widths.joinToString("─┼─") { "─".repeat(it) })
         table.rows.forEach { append('\n'); append(render(it)) }
     }
-    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).background(Tok.TermBg, RoundedCornerShape(8.dp)).padding(horizontal = 10.dp, vertical = 8.dp)) {
+    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).background(Tok.Inset, RoundedCornerShape(8.dp)).padding(horizontal = 10.dp, vertical = 8.dp)) {
         Text(output, color = Tok.Ink, fontFamily = mono, fontSize = size.plus(-1.5f), lineHeight = size.plus(-1.5f).times(1.4f), softWrap = false)
     }
 }

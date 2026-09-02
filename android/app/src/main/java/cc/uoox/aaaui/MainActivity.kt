@@ -10,12 +10,9 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -23,7 +20,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -45,7 +41,6 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -70,7 +65,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             // 折叠/展开只是配置变化（manifest 里已接管），整棵 composition 不重建。
             // 首页是单栏项目列表，宽窄屏同一套布局，不再按窗口宽度切导航位置。
-            AaaTheme { AaaApp(store, pendingSessionId, pendingPrefill) }
+            AaaTheme(store) { AaaApp(store, pendingSessionId, pendingPrefill) }
         }
     }
 
@@ -277,67 +272,39 @@ fun HomeScreen(store: AppStore, nav: NavHostController) {
                 .safeDrawingPadding()
                 .padding(20.dp),
         ) {
-            FloatingActionButton(onClick = { showNewSheet = true }, containerColor = Tok.Cyan) {
-                Text("＋", color = Color(0xFF08252C), fontSize = 24.sp)
+            FloatingActionButton(onClick = { showNewSheet = true }, containerColor = Tok.Accent) {
+                Text("＋", color = Tok.OnAccent, fontSize = 24.sp)
             }
         }
     }
-    if (showNewSheet) NewSessionSheet(store, nav, initialPath = null) { showNewSheet = false }
+    if (showNewSheet) NewSessionSheet(store) { showNewSheet = false }
 }
 
-// ---------- A5 新建（也用于「用其它 agent 打开」） ----------
+// ---------- A5 新建 ----------
 
-private val NEW_AGENTS = listOf("claude", "codex", "pi", "reasonix", "agy")
-
+/** 新建项目：只问名字。agent 固定 claude——这个 app 只跑 Claude Code，终端是另外那个面板。 */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun NewSessionSheet(store: AppStore, nav: NavHostController, initialPath: String?, onDismiss: () -> Unit) {
+fun NewSessionSheet(store: AppStore, onDismiss: () -> Unit) {
     val scope = rememberCoroutineScope()
     val openSession = LocalOpenSession.current
     var name by rememberSaveable { mutableStateOf("") }
-    var selected by rememberSaveable { mutableStateOf("claude") }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
-    var agents by remember { mutableStateOf<List<Agent>>(emptyList()) }
-    LaunchedEffect(Unit) { runCatching { store.client?.agents()?.let { agents = it.filterNot { agent -> agent.terminal } } } }
 
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = Tok.Surface) {
         Column(Modifier.padding(horizontal = 16.dp).padding(bottom = 24.dp)) {
-            Text(if (initialPath == null) "新建" else "用其它 agent 打开", color = Tok.Ink, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+            Text("新建", color = Tok.Ink, fontSize = 18.sp, fontWeight = FontWeight.Bold)
             Text(
-                initialPath ?: "${store.health.collectAsState().value?.project_root ?: "/Volumes/SSD/project"}/<名称>",
+                "${store.health.collectAsState().value?.project_root ?: "/Volumes/SSD/project"}/<名称>",
                 color = Tok.Faint, fontSize = 12.sp, fontFamily = FontFamily.Monospace,
             )
-            if (initialPath == null) {
-                Spacer(Modifier.height(10.dp))
-                OutlinedTextField(
-                    name, { name = it }, label = { Text("项目名称") },
-                    placeholder = { Text("留空 = 按日期命名") },
-                    modifier = Modifier.fillMaxWidth(), singleLine = true,
-                )
-            }
-            Spacer(Modifier.height(12.dp))
-            NEW_AGENTS.chunked(2).forEach { rowAgents ->
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    rowAgents.forEach { ag ->
-                        val available = agents.isEmpty() || agents.find { it.id == ag }?.available != false
-                        val sel = selected == ag
-                        Row(
-                            Modifier.weight(1f).padding(vertical = 4.dp)
-                                .background(if (sel) Tok.Cyan.copy(alpha = 0.08f) else Color.Transparent, RoundedCornerShape(11.dp))
-                                .androidBorder(sel)
-                                .clickable { selected = ag }
-                                .padding(horizontal = 12.dp, vertical = 12.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            AgentChip(ag)
-                            Spacer(Modifier.width(8.dp))
-                            Text(Tok.agentLabel(ag), color = if (available) Tok.Ink else Tok.Faint, fontSize = 14.sp)
-                        }
-                    }
-                    if (rowAgents.size == 1) Spacer(Modifier.weight(1f))
-                }
-            }
+            Spacer(Modifier.height(10.dp))
+            OutlinedTextField(
+                name, { name = it }, label = { Text("项目名称") },
+                placeholder = { Text("留空 = 按日期命名") },
+                modifier = Modifier.fillMaxWidth(), singleLine = true,
+            )
             error?.let { Text(it, color = Tok.Red, fontSize = 13.sp, modifier = Modifier.padding(top = 6.dp)) }
             Spacer(Modifier.height(14.dp))
             Button(
@@ -347,14 +314,9 @@ fun NewSessionSheet(store: AppStore, nav: NavHostController, initialPath: String
                     scope.launch {
                         try {
                             val api = store.client ?: throw IllegalStateException("未连接 daemon")
-                            // 连 shell 也写进注册表：不写的话 daemon 那边「没有登记」
-                            // 会回落到默认的 claude，从普通终端建的文件夹一转头就
-                            // 变成 claude 项目了。改 agent 只该由人来做。
-                            val path = initialPath ?: api.createProject(
-                                name.trim().ifBlank { null },
-                                selected,
-                            ).path
-                            val sess = api.createSession(path, selected, resume = initialPath != null)
+                            // agent 显式写进注册表：daemon 对「没有登记」的目录会自己猜，不留给它猜
+                            val path = api.createProject(name.trim().ifBlank { null }, DEFAULT_AGENT).path
+                            val sess = api.createSession(path, DEFAULT_AGENT, resume = false)
                             onDismiss()
                             openSession(sess.id, "")
                         } catch (e: Exception) {
@@ -368,6 +330,3 @@ fun NewSessionSheet(store: AppStore, nav: NavHostController, initialPath: String
         }
     }
 }
-
-private fun Modifier.androidBorder(selected: Boolean): Modifier =
-    this.border(1.dp, if (selected) Tok.Cyan else Tok.Edge, RoundedCornerShape(11.dp))

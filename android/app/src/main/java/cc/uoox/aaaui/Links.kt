@@ -73,7 +73,7 @@ fun linkified(text: String, onClick: (String) -> Unit): AnnotatedString {
             if (span.start > cursor) append(text.substring(cursor, span.start))
             val link = LinkAnnotation.Url(
                 span.url,
-                TextLinkStyles(SpanStyle(color = Tok.Cyan, textDecoration = TextDecoration.Underline)),
+                TextLinkStyles(SpanStyle(color = Tok.Accent, textDecoration = TextDecoration.Underline)),
             ) { onClick(span.url) }
             withLink(link) { append(text.substring(span.start, span.end)) }
             cursor = span.end

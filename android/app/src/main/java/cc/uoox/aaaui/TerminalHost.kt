@@ -8,8 +8,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.MutableState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
@@ -25,7 +27,7 @@ import com.termux.view.TerminalViewClient
 @Composable
 internal fun TerminalHost(
     attachment: TerminalAttachment?,
-    viewRef: androidx.compose.runtime.MutableState<TerminalView?>,
+    viewRef: MutableState<TerminalView?>,
     fontSize: Int,
     viewClientFactory: (TerminalView) -> TerminalViewClient,
 ) {
@@ -39,7 +41,8 @@ internal fun TerminalHost(
     AndroidView(
         factory = { ctx ->
             TerminalView(ctx, null).apply {
-                setBackgroundColor(android.graphics.Color.parseColor("#0A0E12"))
+                // 画布底色随主题；具体值由 update 按 Tok.current 维护（换主题时它会再跑一次）
+                setBackgroundColor(Tok.TermBg.toArgb())
                 // 代码里 new 出来的 View 默认不可聚焦（termux 原本靠布局 XML 里的
                 // focusable / focusableInTouchMode）。不设这两项 requestFocus() 直接
                 // 返回 false，软键盘弹不出来，IME 输入也就永远到不了 PTY。
@@ -60,7 +63,17 @@ internal fun TerminalHost(
         },
         update = { view ->
             val px = with(density) { fontSize.sp.toPx() }.toInt()
-            if (view.tag != px) { view.tag = px; view.setTextSize(px) }
+            val palette = Tok.current // snapshot state：换主题这个 lambda 会被重新执行
+            val was = view.tag as? HostState
+            if (was?.px != px) view.setTextSize(px)
+            if (was?.theme != palette.name) {
+                // 全局配色表 AaaTheme 已经改好；这里让这个会话已存在的模拟器重读默认前景/背景，
+                // 再把画布底色换掉——模拟器只画非默认底色的格子，其余露出来的就是它。
+                applyTerminalPalette(palette, attachment.session)
+                view.setBackgroundColor(palette.termBg.toArgb())
+                view.onScreenUpdated()
+            }
+            if (was?.px != px || was?.theme != palette.name) view.tag = HostState(px, palette.name)
             if (view.currentSession !== attachment.session) view.attachSession(attachment.session)
         },
         modifier = Modifier.fillMaxSize().background(Tok.TermBg),
@@ -68,15 +81,18 @@ internal fun TerminalHost(
 }
 
 
+/** update 用来判「字号 / 主题变了没有」的标记，挂在 view.tag 上。 */
+private data class HostState(val px: Int, val theme: String)
+
 @Composable
 internal fun KeyChip(label: String, active: Boolean = false, onClick: () -> Unit) {
     Text(
         label,
-        color = if (active) Tok.Bg else Tok.Ink,
+        color = if (active) Tok.OnAccent else Tok.Ink,
         fontSize = 13.sp,
         fontFamily = FontFamily.Monospace,
         modifier = Modifier
-            .background(if (active) Tok.Cyan else Tok.Raised, RoundedCornerShape(7.dp))
+            .background(if (active) Tok.Accent else Tok.Raised, RoundedCornerShape(7.dp))
             .clickable(onClick = onClick)
             .padding(horizontal = 11.dp, vertical = 6.dp),
     )
