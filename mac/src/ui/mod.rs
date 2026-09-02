@@ -287,7 +287,14 @@ pub struct RootView {
 }
 
 impl RootView {
-    pub fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // 窗口回到前台：正在看的那个终端把尺寸夺回来（手机看过之后 PTY 是手机的行列）
+        cx.observe_window_activation(window, |this, window, cx| {
+            if window.is_window_active() {
+                this.reassert_visible_size(cx);
+            }
+        })
+        .detach();
         let config = DaemonConfig::load();
         let endpoint = config.as_ref().map(Endpoint::from_config);
         let endpoint_from_config = endpoint.is_some();
@@ -709,7 +716,19 @@ impl RootView {
         self.fetch_ports(id.clone(), cx);
         self.page = Page::Session(id.clone());
         self.pending_focus = Some(id);
+        self.reassert_visible_size(cx);
         cx.notify();
+    }
+
+    /// 正在看的终端（会话页的那个，或主页终端面板的当前标签）重新宣告尺寸。
+    fn reassert_visible_size(&mut self, cx: &mut Context<Self>) {
+        let id = match &self.page {
+            Page::Session(id) => Some(id.clone()),
+            _ => self.active_terminal.clone(),
+        };
+        if let Some(t) = id.and_then(|id| self.terminals.get(&id).cloned()) {
+            t.update(cx, |v, _| v.reassert_size());
+        }
     }
 
     /// 没有就建这个会话的终端视图（attach WS 随之建立）。返回是否新建。

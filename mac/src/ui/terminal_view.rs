@@ -329,6 +329,14 @@ impl TerminalView {
         self.focus_handle.clone()
     }
 
+    /// 把当前行列再宣告一次（会话页切到前台 / 窗口激活时）：手机那头在这期间可能把
+    /// PTY 改成了它的尺寸——谁在看谁说了算，轮到 mac 看就夺回来。
+    pub fn reassert_size(&mut self) {
+        if let Some((cols, rows)) = self.last_sent {
+            self.attach.resize(cols, rows);
+        }
+    }
+
     fn apply_view_size(&mut self, cols: u16, rows: u16, cx: &mut Context<Self>) {
         if self.last_sent == Some((cols, rows)) {
             return;

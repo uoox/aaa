@@ -66,6 +66,18 @@ class TerminalInputTest {
         )
     }
 
+    @Test fun urlAtCellUsesDisplayColumnsAndOneBasedCoordinates() {
+        val screen = "第一行\n看这里 https://example.com/a?b=1 结束\n无链接"
+        // 「看这里 」= 3 个全角 + 1 空格 = 7 列，URL 从第 8 列开始
+        assertEquals("https://example.com/a?b=1", urlAtCell(screen, 2, 8))
+        assertEquals("https://example.com/a?b=1", urlAtCell(screen, 2, 8 + "https://example.com/a?b=1".length - 1))
+        assertNull(urlAtCell(screen, 2, 7))
+        assertNull(urlAtCell(screen, 2, 8 + "https://example.com/a?b=1".length))
+        assertNull(urlAtCell(screen, 3, 1))
+        assertNull(urlAtCell(screen, 9, 1)) // 行不存在
+        assertEquals(2, displayWidth('中')); assertEquals(1, displayWidth('a'))
+    }
+
     @Test fun darkThemeKeepsXtermAnsiAndLightThemesBringTheirOwn() {
         assertArrayEquals(XTERM_ANSI, terminalAnsi(Palette.Dark))
         assertTrue(terminalAnsi(Palette.Claude).contentEquals(Palette.Claude.ansi!!.map { it.toArgb() }.toIntArray()))

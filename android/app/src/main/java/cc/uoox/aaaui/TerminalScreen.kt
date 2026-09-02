@@ -80,6 +80,7 @@ private fun TerminalPane(store: AppStore, context: Context, conn: ConnState, ses
     val ctrlStickyState = remember { mutableStateOf(false) }
     var ctrlSticky by ctrlStickyState
     val inputRef = remember { mutableStateOf<TermInputView?>(null) }
+    val selectMode = remember { mutableStateOf(false) }
     var attachment by remember(sessionId) { mutableStateOf<TerminalAttachment?>(null) }
     LaunchedEffect(conn, sessionId) { attachment = store.attachmentFor(sessionId) }
     DisposableEffect(sessionId) { onDispose { store.releaseAttachmentSoon(sessionId) } }
@@ -98,6 +99,8 @@ private fun TerminalPane(store: AppStore, context: Context, conn: ConnState, ses
                     scope.launch { store.settings.setFontSize(target) }
                     android.widget.Toast.makeText(context, "终端字号 $target（设置里可改回）", android.widget.Toast.LENGTH_SHORT).show()
                 },
+                screenText = { store.client?.screen(sessionId)?.text },
+                selectMode = selectMode,
                 inputRef = inputRef,
             )
         }
@@ -108,6 +111,7 @@ private fun TerminalPane(store: AppStore, context: Context, conn: ConnState, ses
             }
             fun lit(s: String) = { attachment?.write(s); Unit }
             KeyChip("键盘") { inputRef.value?.showKeyboard() }
+            KeyChip("选择", active = selectMode.value) { selectMode.value = !selectMode.value }
             KeyChip("Esc", onClick = key(KeyEvent.KEYCODE_ESCAPE)); KeyChip("Tab", onClick = key(KeyEvent.KEYCODE_TAB)); KeyChip("Ctrl", active = ctrlSticky) { ctrlSticky = !ctrlSticky }
             KeyChip("↑", onClick = key(KeyEvent.KEYCODE_DPAD_UP)); KeyChip("↓", onClick = key(KeyEvent.KEYCODE_DPAD_DOWN)); KeyChip("←", onClick = key(KeyEvent.KEYCODE_DPAD_LEFT)); KeyChip("→", onClick = key(KeyEvent.KEYCODE_DPAD_RIGHT))
             KeyChip("Home", onClick = key(KeyEvent.KEYCODE_MOVE_HOME)); KeyChip("End", onClick = key(KeyEvent.KEYCODE_MOVE_END)); KeyChip("⏎", onClick = key(KeyEvent.KEYCODE_ENTER)); KeyChip("-", onClick = lit("-")); KeyChip("/", onClick = lit("/")); KeyChip("|", onClick = lit("|")); KeyChip("~", onClick = lit("~")); KeyChip("粘贴") { pasteViaDaemon() }

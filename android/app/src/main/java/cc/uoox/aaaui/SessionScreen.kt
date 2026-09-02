@@ -48,6 +48,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -130,6 +131,7 @@ fun SessionScreen(
     // 终端 attach：实例归 AppStore 管（折叠/展开会重建本 composable），跟着 daemon 重连重新取一次。
     val conn by store.connState.collectAsState()
     val inputRef = remember { mutableStateOf<TermInputView?>(null) }
+    val selectMode = remember { mutableStateOf(false) }
     var attachment by remember(sessionId) { mutableStateOf<TerminalAttachment?>(null) }
     LaunchedEffect(conn, sessionId) { attachment = store.attachmentFor(sessionId) }
     DisposableEffect(sessionId) {
@@ -273,6 +275,8 @@ fun SessionScreen(
                         scope.launch { store.settings.setFontSize(target) }
                         Toast.makeText(context, "终端字号 $target（设置里可改回）", Toast.LENGTH_SHORT).show()
                     },
+                    screenText = { store.client?.screen(sessionId)?.text },
+                    selectMode = selectMode,
                     inputRef = inputRef,
                 )
             }
@@ -297,6 +301,7 @@ fun SessionScreen(
                 fun lit(ch: String) = { attachment?.write(ch); Unit }
                 KeyChip("⌨", active = true) { keysOpen = false }
                 KeyChip("键盘") { inputRef.value?.showKeyboard() }
+                KeyChip("选择", active = selectMode.value) { selectMode.value = !selectMode.value }
                 KeyChip("Esc", onClick = key(KeyEvent.KEYCODE_ESCAPE))
                 KeyChip("Tab", onClick = key(KeyEvent.KEYCODE_TAB))
                 KeyChip("Ctrl", active = ctrlSticky) { ctrlSticky = !ctrlSticky }
@@ -472,7 +477,7 @@ private fun UserBlock(m: ChatMessage) {
     Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End) {
         if (time.isNotEmpty()) BubbleCaption(time, Tok.Faint)
         UserBubble {
-            Text(rememberLinkified(m), color = Tok.Ink, fontSize = 14.5.sp, lineHeight = 21.sp)
+            SelectionContainer { Text(rememberLinkified(m), color = Tok.Ink, fontSize = 14.5.sp, lineHeight = 21.sp) }
         }
     }
 }
@@ -485,7 +490,8 @@ private fun ReplyBlock(m: ChatMessage) {
             "✻ Claude", color = Tok.Accent, fontSize = 10.5.sp, fontWeight = FontWeight.Medium,
             modifier = Modifier.padding(bottom = 4.dp),
         )
-        MarkdownBody(m.text, 15.sp, Tok.Ink, modifier = Modifier.fillMaxWidth())
+        // 长按选字复制；链接仍是点一下打开
+        SelectionContainer { MarkdownBody(m.text, 15.sp, Tok.Ink, modifier = Modifier.fillMaxWidth()) }
     }
 }
 

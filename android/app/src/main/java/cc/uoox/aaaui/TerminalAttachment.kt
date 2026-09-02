@@ -181,7 +181,8 @@ class TerminalAttachment(
         emulator.writeInput(bytes)
     }
 
-    private fun resendSize() {
+    /** 把本地行列重新宣告给 daemon：重连后、以及回到前台时（谁在看谁说了算）。 */
+    fun resendSize() {
         val d = emulator.dimensions
         if (d.columns > 0 && d.rows > 0) sendResize(d.columns, d.rows)
     }
