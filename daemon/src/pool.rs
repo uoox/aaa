@@ -14,9 +14,7 @@ use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
-use crate::config::NtfyConfig;
 use crate::events::EventHub;
-use crate::statemachine::{self, Question, Verdict};
 
 pub const SCROLLBACK_LINES: usize = 5000;
 pub const REPLAY_SCROLLBACK_TAIL: usize = 400;
@@ -33,8 +31,11 @@ pub const MAX_RESTORED_EXITED: usize = 200;
 #[serde(rename_all = "lowercase")]
 pub enum State {
     Running,
+    /// Alive and the screen has stopped changing: the agent finished its turn
+    /// and is waiting for the user. (Persisted metas from before 2026-09-02
+    /// may still say `idle`; it collapses into this.)
+    #[serde(alias = "idle")]
     Waiting,
-    Idle,
     Exited,
 }
 
@@ -47,7 +48,6 @@ pub struct Meta {
     pub project_name: String,
     pub agent: String,
     pub state: State,
-    pub question: Option<Question>,
     pub rows: u16,
     pub cols: u16,
     pub pid: Option<u32>,
@@ -67,17 +67,9 @@ pub struct Meta {
     #[serde(skip)]
     pub last_output_inst: Option<Instant>,
     #[serde(skip)]
-    pub hook_waiting: bool,
-    #[serde(skip)]
     pub needs_name: bool,
     #[serde(skip)]
     pub inbox_fed: bool,
-    #[serde(skip)]
-    pub stalled_notified: bool,
-    #[serde(skip)]
-    pub last_notified_question: Option<String>,
-    #[serde(skip)]
-    pub last_notify_at: Option<Instant>,
     /// 可见屏幕内容的哈希 + 上次内容变化时刻。「静默」按画面算而不是按
     /// 字节流：agy 这类 TUI 每几秒全清屏重绘（内容不变），按输出算它
     /// 永远是 Running、永不通知。
@@ -85,10 +77,12 @@ pub struct Meta {
     pub screen_hash: u64,
     #[serde(skip)]
     pub screen_changed_inst: Option<Instant>,
-    /// Idle 复检计数：误判 Idle 不能躺死（审查 P1），低频重分析
+    /// The agent transcript holds an AskUserQuestion with no answer yet
+    /// (claude only; structured, never guessed from the screen). Mirrored
+    /// here from the message store so `/events` can carry it.
     #[serde(skip)]
-    pub idle_recheck: u32,
-    /// 用户主动 kill：退出时不推「退出」通知（自己动的手，不用报告）
+    pub asking: bool,
+    /// 用户主动 kill：客户端据此不弹「退出」通知（自己动的手，不用报告）
     #[serde(skip)]
     pub user_killed: bool,
 }
@@ -122,7 +116,6 @@ pub struct Session {
 pub struct PoolCtx {
     pub hub: EventHub,
     pub sessions_dir: PathBuf,
-    pub ntfy: Option<NtfyConfig>,
     pub ckpt_cfg: crate::config::CheckpointConfig,
 }
 
@@ -140,7 +133,7 @@ impl Session {
         // refresh preview from the parser when we have one
         let preview = {
             let parser = self.parser.lock().unwrap();
-            parser.as_ref().map(|p| statemachine::preview(p.screen(), 4))
+            parser.as_ref().map(|p| crate::screen::preview(p.screen(), 4))
         };
         let mut meta = self.meta.lock().unwrap();
         if let Some(p) = preview {
@@ -153,7 +146,7 @@ impl Session {
             "project_name": meta.project_name,
             "agent": meta.agent,
             "state": meta.state,
-            "question": meta.question,
+            "asking": meta.asking,
             "preview": meta.preview,
             "rows": meta.rows,
             "cols": meta.cols,
@@ -399,7 +392,6 @@ impl SessionPool {
                 continue;
             };
             meta.state = State::Exited;
-            meta.hook_waiting = false;
             meta.needs_name = false;
             restored.push((id, meta));
         }
@@ -491,7 +483,6 @@ impl SessionPool {
             project_name: spec.project_name.clone(),
             agent: spec.agent.clone(),
             state: State::Running,
-            question: None,
             rows: DEFAULT_ROWS,
             cols: DEFAULT_COLS,
             pid,
@@ -503,15 +494,11 @@ impl SessionPool {
             feed_inbox: spec.feed_inbox,
             ckpt_start_ref: None,
             last_output_inst: Some(Instant::now()),
-            hook_waiting: false,
             needs_name: true,
             inbox_fed: false,
-            stalled_notified: false,
-            last_notified_question: None,
-            last_notify_at: None,
             screen_hash: 0,
             screen_changed_inst: None,
-            idle_recheck: 0,
+            asking: false,
             user_killed: false,
         };
         // Backpressure: send never blocks; a client that can't keep up drops
@@ -559,16 +546,7 @@ impl SessionPool {
                             if meta.state != State::Running {
                                 meta.state = State::Running;
                                 meta.needs_name = true;
-                                // 回到 Running = 上一个 waiting 已被应答。清掉
-                                // 去重键，下一次 waiting（哪怕又是空 key 的
-                                // composer）才能再通知——否则「agent 干完这轮
-                                // 等你」只在会话生命周期里推送一次，之后永远
-                                // 静默。5 分钟冷却（last_notify_at 不清）防抖。
-                                meta.last_notified_question = None;
                             }
-                            meta.question = None;
-                            meta.hook_waiting = false;
-                            meta.stalled_notified = false;
                         }
                         rsess.mark_dirty();
                         let _ = rsess.out_tx.send(Bytes::copy_from_slice(data));
@@ -584,7 +562,7 @@ impl SessionPool {
                 let mut meta = rsess.meta.lock().unwrap();
                 meta.state = State::Exited;
                 meta.exit_code = code;
-                meta.question = None;
+                meta.asking = false;
                 meta.needs_name = true;
             }
             *rsess.live.lock().unwrap() = None;
@@ -610,34 +588,21 @@ impl SessionPool {
             }
             rsess.persist(&rctx);
             rsess.mark_dirty();
-            let user_killed = rsess.meta.lock().unwrap().user_killed;
-            if let Some(ntfy) = rctx.ntfy.as_ref().filter(|_| !user_killed) {
-                let meta = rsess.meta.lock().unwrap();
-                crate::ntfy::push_blocking(
-                    ntfy,
-                    &format!("退出: {}", meta.title),
-                    &format!(
-                        "{} · {} exited (code {})",
-                        meta.project_name,
-                        meta.agent,
-                        code.map(|c| c.to_string()).unwrap_or_else(|| "?".into())
-                    ),
-                    crate::ntfy::PRIO_DEFAULT,
-                );
-            }
         });
 
         Ok(sess)
     }
 
-    /// 1s tick: silent running sessions -> waiting/idle by screen heuristics.
-    /// Returns sessions that just transitioned into waiting (with the parsed
-    /// question); the caller handles inbox feed + ntfy dedup.
-    pub fn tick_states(&self) -> Vec<(Arc<Session>, Option<Question>)> {
+    /// 1s tick: a running session whose *visible screen* has not changed for
+    /// `SILENCE_SECS` is done with its turn → `waiting`. No screen reading
+    /// beyond the hash: what the agent is asking, if anything, comes from
+    /// the transcript (`asking`). Returns the sessions that just flipped, so
+    /// the caller can run the inbox feed.
+    pub fn tick_states(&self) -> Vec<Arc<Session>> {
         let mut entered_waiting = Vec::new();
         for sess in self.all() {
             // 「静默」按可见内容算，不按字节流：agy 这类 TUI 每几秒全清屏
-            // 重绘一遍（画面不变），按输出算它永远 Running、永不通知。
+            // 重绘一遍（画面不变），按输出算它永远 Running、永不完成。
             let hash = {
                 let guard = sess.parser.lock().unwrap();
                 guard.as_ref().map(|p| {
@@ -651,7 +616,7 @@ impl SessionPool {
                     h.finish()
                 })
             };
-            let (candidate, silent) = {
+            let flipped = {
                 let mut meta = sess.meta.lock().unwrap();
                 if let Some(hash) = hash {
                     if meta.screen_hash != hash {
@@ -664,75 +629,19 @@ impl SessionPool {
                     .or(meta.last_output_inst)
                     .map(|t| t.elapsed().as_secs_f64() >= SILENCE_SECS)
                     .unwrap_or(false);
-                let candidate = match meta.state {
-                    State::Running => !meta.hook_waiting,
-                    // 误判过的 Idle 不能躺死（审查 P1）：每 ~30s 复检一次，
-                    // 屏幕上其实摆着问题的话还有机会升级成 Waiting
-                    State::Idle => {
-                        meta.idle_recheck = meta.idle_recheck.wrapping_add(1);
-                        meta.idle_recheck.is_multiple_of(30)
-                    }
-                    _ => false,
-                };
-                (candidate, silent)
-            };
-            if !candidate || !silent {
-                continue;
-            }
-            let verdict = {
-                let guard = sess.parser.lock().unwrap();
-                guard.as_ref().map(|p| statemachine::analyze_screen(p.screen()))
-            };
-            let Some(verdict) = verdict else { continue };
-            let mut became_waiting: Option<Option<Question>> = None;
-            let mut changed = false;
-            {
-                let mut meta = sess.meta.lock().unwrap();
-                if meta.state != State::Running && meta.state != State::Idle {
-                    continue;
+                if meta.state == State::Running && silent {
+                    meta.state = State::Waiting;
+                    true
+                } else {
+                    false
                 }
-                match verdict {
-                    Verdict::Waiting(q) => {
-                        meta.state = State::Waiting;
-                        meta.question = q.clone();
-                        became_waiting = Some(q);
-                        changed = true;
-                    }
-                    Verdict::Idle => {
-                        if meta.state != State::Idle {
-                            meta.state = State::Idle;
-                            meta.question = None;
-                            changed = true;
-                        }
-                    }
-                }
-            }
-            if changed {
+            };
+            if flipped {
                 sess.mark_dirty();
-            }
-            if let Some(q) = became_waiting {
-                entered_waiting.push((Arc::clone(&sess), q));
+                entered_waiting.push(Arc::clone(&sess));
             }
         }
         entered_waiting
-    }
-
-    /// v1.1 watchdog decision (pure, unit-testable). `waiting` never counts;
-    /// shell sessions sit at a prompt forever and are exempt.
-    pub fn watchdog_due(
-        state: State,
-        agent: &str,
-        alive: bool,
-        silence_s: u64,
-        stall_minutes: u64,
-        already_notified: bool,
-    ) -> bool {
-        stall_minutes > 0
-            && alive
-            && !already_notified
-            && agent != "shell"
-            && !matches!(state, State::Waiting | State::Exited)
-            && silence_s >= stall_minutes * 60
     }
 
     /// 250ms flush: emit throttled `session` events for dirty sessions.
@@ -766,31 +675,6 @@ mod tests {
         let p0 = text.find("line-0\r\n").unwrap();
         let p24 = text.find("line-24").unwrap();
         assert!(p0 < p24);
-    }
-
-    #[test]
-    fn watchdog_decision() {
-        let due = |state, agent: &str, silence| {
-            SessionPool::watchdog_due(state, agent, true, silence, 10, false)
-        };
-        assert!(due(State::Running, "claude", 600));
-        assert!(due(State::Idle, "claude", 600), "idle counts as stalled-capable");
-        assert!(!due(State::Waiting, "claude", 600), "waiting never stalls");
-        assert!(!due(State::Exited, "claude", 600));
-        assert!(!due(State::Running, "claude", 599), "below threshold");
-        assert!(!due(State::Running, "shell", 6000), "shell exempt");
-        assert!(
-            !SessionPool::watchdog_due(State::Running, "claude", false, 600, 10, false),
-            "dead session exempt"
-        );
-        assert!(
-            !SessionPool::watchdog_due(State::Running, "claude", true, 600, 10, true),
-            "only one event per stall episode"
-        );
-        assert!(
-            !SessionPool::watchdog_due(State::Running, "claude", true, 600, 0, false),
-            "stall_minutes=0 disables"
-        );
     }
 
     #[test]
@@ -828,7 +712,6 @@ mod tests {
         let pool = SessionPool::new(PoolCtx {
             hub: EventHub::new(),
             sessions_dir: sessions_dir.clone(),
-            ntfy: None,
             ckpt_cfg: crate::config::CheckpointConfig::default(),
         });
         pool.restore_persisted_capped(3);

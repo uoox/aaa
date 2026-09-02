@@ -28,11 +28,27 @@ class ProtocolTest {
         }
     }
 
-    @Test fun sessionQuestionJsonParses() {
-        val session = json.decodeFromString<Session>("""{"id":"s_1","title":"T","project_path":"/p","project_name":"p","agent":"claude","state":"waiting","question":{"text":"继续？","options":[{"key":"1","label":"是"}]}}""")
+    @Test fun sessionAskingParsesAndOldQuestionFieldIsIgnored() {
+        val session = json.decodeFromString<Session>("""{"id":"s_1","title":"T","project_path":"/p","project_name":"p","agent":"claude","state":"waiting","asking":true,"question":{"text":"旧字段"}}""")
         assertEquals("waiting", session.state)
-        assertEquals("1", session.question?.options?.single()?.key)
-        assertEquals("是", session.question?.options?.single()?.label)
+        assertTrue(session.asking)
+        // 旧 daemon 没有 asking：默认 false
+        assertFalse(json.decodeFromString<Session>("""{"id":"s_2","state":"idle"}""").asking)
+    }
+
+    @Test fun questionMessageCarriesTheForm() {
+        val m = json.decodeFromString<ChatMessage>(
+            """{"seq":7,"ts":"2026-09-02T10:00:00.000Z","role":"assistant","kind":"question","text":"Pick fruits",
+                "tool":{"name":"AskUserQuestion","summary":"Fruits","status":"running"},
+                "question":{"questions":[{"header":"Fruits","question":"Pick fruits","options":[{"label":"Apple","description":"Crisp"},{"label":"Cherry"}],"multi_select":true}]}}""",
+        )
+        val q = m.question!!.questions.single()
+        assertEquals("Fruits", q.header)
+        assertTrue(q.multi_select)
+        assertEquals(listOf("Apple", "Cherry"), q.options.map { it.label })
+        assertEquals("", q.options[1].description)
+        // 普通消息没有 question
+        assertNull(json.decodeFromString<ChatMessage>("""{"seq":8,"role":"user","kind":"answer","text":"Apple, Cherry"}""").question)
     }
 
     // ---------- v1.1 payloads ----------
@@ -109,8 +125,8 @@ class ProtocolTest {
         val ic = EventFrame.parse("""{"t":"inbox_changed","path":"/p/x"}""")
         assertTrue(ic is EventFrame.InboxChanged && ic.path == "/p/x")
 
-        val st = EventFrame.parse("""{"t":"session_stalled","id":"s_5","quiet_s":900}""")
-        assertTrue(st is EventFrame.SessionStalled && st.quietS == 900L)
+        // 2026-09-02 移除的帧：老 daemon 还会发，当未知帧忽略
+        assertTrue(EventFrame.parse("""{"t":"session_stalled","id":"s_5","quiet_s":900}""") is EventFrame.Unknown)
 
         assertTrue(EventFrame.parse("""{"t":"future_frame","x":1}""") is EventFrame.Unknown)
         assertTrue(EventFrame.parse("not json") is EventFrame.Unknown)

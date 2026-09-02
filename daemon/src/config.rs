@@ -6,12 +6,6 @@ use std::path::{Path, PathBuf};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct NtfyConfig {
-    pub url: String,
-    pub topic: String,
-}
-
 /// v1.1: git checkpoint settings (`[checkpoint]`, all defaulted for
 /// backward compatibility with v1.0 config files).
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -44,21 +38,6 @@ impl Default for CheckpointConfig {
     }
 }
 
-/// v1.1: watchdog settings (`[watchdog]`, defaulted).
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct WatchdogConfig {
-    #[serde(default = "default_stall")]
-    pub stall_minutes: u64,
-    #[serde(default)]
-    pub auto_kill: bool,
-}
-
-impl Default for WatchdogConfig {
-    fn default() -> Self {
-        WatchdogConfig { stall_minutes: 10, auto_kill: false }
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default = "default_port")]
@@ -73,11 +52,7 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub remote_control_name: bool,
     #[serde(default)]
-    pub ntfy: Option<NtfyConfig>,
-    #[serde(default)]
     pub checkpoint: CheckpointConfig,
-    #[serde(default)]
-    pub watchdog: WatchdogConfig,
 }
 
 fn default_port() -> u16 {
@@ -95,9 +70,6 @@ fn default_interval() -> u64 {
 fn default_auto_init_max_mb() -> u64 {
     512
 }
-fn default_stall() -> u64 {
-    10
-}
 
 pub fn generate_token() -> String {
     let bytes: [u8; 16] = rand::rng().random();
@@ -113,9 +85,7 @@ impl Config {
             project_root: default_project_root(),
             namer: true,
             remote_control_name: true,
-            ntfy: None,
             checkpoint: CheckpointConfig::default(),
-            watchdog: WatchdogConfig::default(),
         }
     }
 }
@@ -166,7 +136,8 @@ mod tests {
     fn v1_0_config_without_new_sections_still_parses() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("config.toml");
-        // exactly what a first-generation daemon wrote (no [checkpoint]/[watchdog])
+        // exactly what a first-generation daemon wrote (no [checkpoint]); the
+        // retired [ntfy] / [watchdog] sections must still be tolerated
         std::fs::write(
             &p,
             "port = 2730\ntoken = \"aaa_tk_old\"\nproject_root = \"/Volumes/SSD/project\"\nnamer = true\n\n[ntfy]\nurl = \"https://ntfy.example.com\"\ntopic = \"aaa\"\n",
@@ -177,9 +148,7 @@ mod tests {
         assert!(cfg.checkpoint.enabled);
         assert!(!cfg.checkpoint.auto_init_git, "不替用户 git init");
         assert_eq!(cfg.checkpoint.interval_minutes, 10);
-        assert_eq!(cfg.watchdog.stall_minutes, 10);
-        assert!(!cfg.watchdog.auto_kill);
-        assert_eq!(cfg.ntfy.as_ref().unwrap().topic, "aaa");
+        assert!(cfg.remote_control_name);
     }
 
     #[test]
@@ -188,14 +157,12 @@ mod tests {
         let p = dir.path().join("config.toml");
         std::fs::write(
             &p,
-            "token = \"aaa_tk_x\"\n[checkpoint]\nenabled = false\n[watchdog]\nauto_kill = true\n",
+            "token = \"aaa_tk_x\"\n[checkpoint]\nenabled = false\n[watchdog]\nauto_kill = true\nstall_minutes = 3\n",
         )
         .unwrap();
         let cfg = load_or_create(&p).unwrap();
         assert!(!cfg.checkpoint.enabled);
         assert_eq!(cfg.checkpoint.interval_minutes, 10, "missing fields default");
-        assert!(cfg.watchdog.auto_kill);
-        assert_eq!(cfg.watchdog.stall_minutes, 10);
     }
 
     #[test]

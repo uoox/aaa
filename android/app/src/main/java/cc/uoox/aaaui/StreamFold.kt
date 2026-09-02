@@ -7,7 +7,7 @@ package cc.uoox.aaaui
 /**
  * 一轮 = 用户发出的一条 text 到下一条之间的全部消息。默认只露出用户消息与这一轮
  * 最后一条 assistant text（[reply]）；中间的思考 / 工具调用 / 工具结果 / 中途文本
- * 全部折进 [process]；question 永不折叠（[questions]）。
+ * 全部折进 [process]；question / answer 永不折叠（[questions]）。
  *
  * [live]：会话仍在 running 且这是最后一轮——过程行画成「进行中」并带最近一步。
  * 最新那条 assistant text 暂当 reply，新工具调用来了它自然滚进 process。
@@ -50,6 +50,10 @@ sealed class StreamItem {
     data class Question(val msg: ChatMessage) : StreamItem() {
         override val key: String get() = "q${msg.seq}"
     }
+
+    data class Answer(val msg: ChatMessage) : StreamItem() {
+        override val key: String get() = "a${msg.seq}"
+    }
 }
 
 private fun ChatMessage.startsTurn() = role == "user" && kind == "text"
@@ -70,8 +74,8 @@ fun foldTurns(messages: List<ChatMessage>, live: Boolean): List<Turn> {
     return groups.mapIndexed { i, g ->
         val user = g.first().takeIf { it.startsTurn() }
         val body = if (user != null) g.drop(1) else g
-        val questions = body.filter { it.kind == "question" }
-        val rest = body.filter { it.kind != "question" }
+        val questions = body.filter { it.kind == "question" || it.kind == "answer" }
+        val rest = body.filter { it.kind != "question" && it.kind != "answer" }
         val reply = rest.lastOrNull { it.isAssistantText() }
         Turn(
             user = user,
@@ -104,10 +108,44 @@ fun flattenForList(turns: List<Turn>, expanded: Set<Long>): List<StreamItem> = b
             blocks += t.process.first().seq to block
         }
         t.reply?.let { blocks += it.seq to listOf(StreamItem.Reply(it)) }
-        t.questions.forEach { blocks += it.seq to listOf(StreamItem.Question(it)) }
+        t.questions.forEach {
+            val item = if (it.kind == "question") StreamItem.Question(it) else StreamItem.Answer(it)
+            blocks += it.seq to listOf(item)
+        }
         blocks.sortBy { it.first }
         blocks.forEach { addAll(it.second) }
     }
+}
+
+/**
+ * 待答的表单：会话还活着，且最新一条 question 后面没有 answer，且不早于会话进程的
+ * created_at（与 daemon 同一口径）。客户端若仍判错，提交会得到 409，卡上会显示原因。
+ */
+fun pendingQuestionSeq(messages: List<ChatMessage>, alive: Boolean, since: String? = null): Long? {
+    if (!alive) return null
+    for (m in messages.asReversed()) {
+        if (m.kind == "question") {
+            // 早于本进程 created_at 的悬置问题（resume 带进来的）不算待答；秒级前缀比较，
+            // created_at 是整秒、transcript 时间戳带毫秒
+            if (since != null && since.length >= 19 && m.ts.length >= 19 && m.ts.substring(0, 19) < since.substring(0, 19)) return null
+            return m.seq
+        }
+        if (m.kind == "answer") return null
+    }
+    return null
+}
+
+/** 已被回答的 question：每条 answer 归到它前面最近的那条 question。 */
+fun answeredQuestionSeqs(messages: List<ChatMessage>): Set<Long> {
+    val out = HashSet<Long>()
+    var lastQuestion: Long? = null
+    for (m in messages) {
+        when (m.kind) {
+            "question" -> lastQuestion = m.seq
+            "answer" -> { lastQuestion?.let { out += it }; lastQuestion = null }
+        }
+    }
+    return out
 }
 
 /** 步数 = tool_use 条数；thinking / 中途文本 / 结果都不算步。 */

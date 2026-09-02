@@ -12,21 +12,25 @@ class ProjectStateTest {
     private val p = Project(path = "/r/a", name = "a", mtime = "2026-09-01T00:00:00Z", agent = "claude", session_title = "旧对话")
     private val bare = Project(path = "/r/b", name = "b", mtime = "2026-09-01T00:00:00Z", agent = "claude", session_title = null)
 
-    private fun s(id: String, state: String, at: String, q: Question? = null, path: String = p.path, preview: String = "", title: String = "") =
-        Session(id = id, project_path = path, agent = "claude", state = state, question = q, last_output_at = at, preview = preview, title = title)
+    private fun s(id: String, state: String, at: String, asking: Boolean = false, path: String = p.path, preview: String = "", title: String = "") =
+        Session(id = id, project_path = path, agent = "claude", state = state, asking = asking, last_output_at = at, preview = preview, title = title)
 
-    @Test fun waitingWithQuestionBeatsRunningRegardlessOfRecency() {
+    @Test fun askingBeatsRunningRegardlessOfRecency() {
         val running = s("run", "running", "2026-09-02T10:00:00Z")
-        val asking = s("ask", "waiting", "2026-09-02T09:00:00Z", Question("继续吗？"))
+        val asking = s("ask", "waiting", "2026-09-02T09:00:00Z", asking = true, title = "选部署方式")
         assertSame(asking, primarySessionFor(p, listOf(running, asking)))
         assertEquals(ProjectState.NEEDS_REPLY, projectStateOf(p, asking))
-        assertEquals("继续吗？", projectSummary(p, asking, ProjectState.NEEDS_REPLY))
+        assertEquals("选部署方式", projectSummary(p, asking, ProjectState.NEEDS_REPLY))
+        // 表单刚弹出、屏幕还没静下来：asking 已 true 而 state 还是 running，一样算待回复
+        assertEquals(ProjectState.NEEDS_REPLY, projectStateOf(p, s("r", "running", "2026-09-02T10:00:00Z", asking = true)))
     }
 
     @Test fun waitingAtTheComposerIsNotAReply() {
-        val idleWaiting = s("w", "waiting", "2026-09-02T09:00:00Z", q = null)
+        val idleWaiting = s("w", "waiting", "2026-09-02T09:00:00Z")
         assertEquals(ProjectState.DONE, projectStateOf(p, idleWaiting))
         assertEquals("旧对话", projectSummary(p, idleWaiting, ProjectState.DONE))
+        // 没标题的待回复退到项目的对话名
+        assertEquals("旧对话", projectSummary(p, s("a", "waiting", "2026-09-02T09:00:00Z", asking = true), ProjectState.NEEDS_REPLY))
     }
 
     @Test fun projectAgentSessionBeatsAShellInTheSameDir() {

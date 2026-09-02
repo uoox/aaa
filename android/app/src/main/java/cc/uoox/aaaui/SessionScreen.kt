@@ -41,6 +41,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -68,10 +69,13 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
@@ -255,7 +259,22 @@ fun SessionScreen(
         // 主体
         Box(Modifier.weight(1f).fillMaxWidth()) {
             if (showMessages) {
-                MessagesView(messages.value, messagesSupported, live = s?.state == "running")
+                MessagesView(
+                    messages.value, messagesSupported, live = s?.state == "running",
+                    sessionAlive = s?.state != "exited",
+                    sessionCreatedAt = s?.created_at,
+                    onAnswer = { _, answers ->
+                        try {
+                            store.client?.answer(sessionId, answers)
+                        } catch (e: DaemonHttpException) {
+                            Toast.makeText(context, e.message ?: "作答失败", Toast.LENGTH_LONG).show()
+                            throw e
+                        } catch (e: Exception) {
+                            Toast.makeText(context, "作答失败：${e.message}", Toast.LENGTH_LONG).show()
+                            throw e
+                        }
+                    },
+                )
             } else {
                 TerminalHost(attachment, terminalViewRef, settings.fontSize,
                     viewClientFactory = { view ->
@@ -302,30 +321,6 @@ fun SessionScreen(
                             override fun logStackTrace(tag: String?, e: Exception?) {}
                         }
                     })
-            }
-        }
-
-        // waiting 时的 question 选项胶囊
-        if (s?.state == "waiting" && s.question != null) {
-            Column(Modifier.fillMaxWidth().background(Tok.Surface).padding(horizontal = 12.dp, vertical = 8.dp)) {
-                Text("? ${s.question.text}", color = Tok.Amber, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                if (s.question.options.isNotEmpty()) {
-                    Row(
-                        Modifier.horizontalScroll(rememberScrollState()).padding(top = 6.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        s.question.options.forEach { opt ->
-                            Text(
-                                "${opt.key} · ${opt.label}", color = Tok.Cyan, fontSize = 13.sp,
-                                modifier = Modifier
-                                    .background(Tok.Cyan.copy(alpha = 0.14f), RoundedCornerShape(50))
-                                    // enter 启发式：纯数字选项键由 TUI 菜单直接消费，不补回车；文本回答需要回车
-                                    .clickable { sendInput(opt.key, enter = !opt.key.all { ch -> ch.isDigit() }) }
-                                    .padding(horizontal = 12.dp, vertical = 6.dp),
-                            )
-                        }
-                    }
-                }
             }
         }
 
@@ -462,13 +457,23 @@ private fun TerminalHost(
  * 右下角浮动 ↓ 在没到底时出现，点一下滚到底。
  */
 @Composable
-fun MessagesView(messages: List<ChatMessage>, supported: Boolean?, live: Boolean) {
+fun MessagesView(
+    messages: List<ChatMessage>,
+    supported: Boolean?,
+    live: Boolean,
+    sessionAlive: Boolean = true,
+    sessionCreatedAt: String? = null,
+    onAnswer: suspend (seq: Long, answers: List<AnswerItem>) -> Unit = { _, _ -> },
+) {
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
     // 展开状态按轮 key 记；live 尾轮也默认折叠
     val expanded = remember { mutableStateMapOf<Long, Boolean>() }
     val expandedKeys = expanded.filterValues { it }.keys.toSet()
     val items = remember(messages, live, expandedKeys) { flattenForList(foldTurns(messages, live), expandedKeys) }
+    // 表单状态：只有最新那条没被回答的 question 可交互；其余按「已回答 / 已结束 / 已过期」画成只读
+    val pendingSeq = remember(messages, sessionAlive, sessionCreatedAt) { pendingQuestionSeq(messages, sessionAlive, sessionCreatedAt) }
+    val answeredSeqs = remember(messages) { answeredQuestionSeqs(messages) }
     // 空列表算在底部：没东西可滚，浮动按钮也不该出现
     val atBottom by remember { derivedStateOf { !listState.canScrollForward } }
     val latestMessages by rememberUpdatedState(messages)
@@ -507,7 +512,20 @@ fun MessagesView(messages: List<ChatMessage>, supported: Boolean?, live: Boolean
                     item is StreamItem.Step -> 3.dp
                     else -> 8.dp
                 }
-                Box(Modifier.padding(top = gap)) { StreamRow(item, expanded) }
+                Box(Modifier.padding(top = gap)) {
+                    StreamRow(
+                        item, expanded,
+                        formState = { q ->
+                            when {
+                                q.seq == pendingSeq -> FormState.PENDING
+                                q.seq in answeredSeqs -> FormState.ANSWERED
+                                !sessionAlive -> FormState.CLOSED
+                                else -> FormState.STALE
+                            }
+                        },
+                        onAnswer = onAnswer,
+                    )
+                }
             }
             item(key = "tail") { Spacer(Modifier.height(14.dp)) }
         }
@@ -518,8 +536,16 @@ fun MessagesView(messages: List<ChatMessage>, supported: Boolean?, live: Boolean
     }
 }
 
+/** 表单的四种态：待答（可交互）/ 已回答 / 会话已结束 / 被更新的问题顶掉（悬着但不可答） */
+enum class FormState { PENDING, ANSWERED, CLOSED, STALE }
+
 @Composable
-private fun StreamRow(item: StreamItem, expanded: MutableMap<Long, Boolean>) {
+private fun StreamRow(
+    item: StreamItem,
+    expanded: MutableMap<Long, Boolean>,
+    formState: (ChatMessage) -> FormState = { FormState.ANSWERED },
+    onAnswer: suspend (Long, List<AnswerItem>) -> Unit = { _, _ -> },
+) {
     when (item) {
         is StreamItem.User -> UserBlock(item.msg)
         is StreamItem.Fold -> FoldRow(item, open = expanded[item.turnKey] == true) {
@@ -530,7 +556,8 @@ private fun StreamRow(item: StreamItem, expanded: MutableMap<Long, Boolean>) {
             rememberLinkified(item.msg), color = Tok.Ink, fontSize = 15.sp, lineHeight = 21.75.sp,
             modifier = Modifier.fillMaxWidth(),
         )
-        is StreamItem.Question -> QuestionRow(item.msg)
+        is StreamItem.Question -> QuestionCard(item.msg, formState(item.msg)) { answers -> onAnswer(item.msg.seq, answers) }
+        is StreamItem.Answer -> AnswerBlock(item.msg)
     }
 }
 
@@ -665,15 +692,164 @@ private fun ToolRow(m: ChatMessage) {
     }
 }
 
+/**
+ * 原生表单：agent 的 AskUserQuestion 不再是一行「? 问题」，而是按结构化数据画出来——
+ * 单选画单选、多选画复选、末尾固定一条「其它」自填。提交交给 daemon 翻译成对话框按键。
+ * 只有 [state] == PENDING 的那张卡可交互；其它状态同布局、只读、带一个小标签。
+ */
 @Composable
-private fun QuestionRow(m: ChatMessage) {
+private fun QuestionCard(m: ChatMessage, state: FormState, onSubmit: suspend (List<AnswerItem>) -> Unit) {
+    val spec = m.question
+    val scope = rememberCoroutineScope()
+    val pending = state == FormState.PENDING
+    val n = spec?.questions?.size ?: 0
+    var selections by remember(m.seq) { mutableStateOf(List(n) { emptySet<Int>() }) }
+    var others by remember(m.seq) { mutableStateOf(List(n) { "" }) }
+    var submitting by remember(m.seq) { mutableStateOf(false) }
+    var error by remember(m.seq) { mutableStateOf<String?>(null) }
+
+    fun complete(i: Int, q: QuestionItem): Boolean {
+        val sel = selections[i]; val other = others[i].isNotBlank()
+        return if (q.multi_select) sel.isNotEmpty() || other else (sel.size == 1 && !other) || (sel.isEmpty() && other)
+    }
+    val allComplete = spec != null && spec.questions.withIndex().all { (i, q) -> complete(i, q) }
+
     Column(
         Modifier.fillMaxWidth().padding(vertical = 4.dp)
             .border(1.dp, Tok.Amber.copy(alpha = 0.55f), RoundedCornerShape(10.dp))
             .background(Tok.Amber.copy(alpha = 0.08f), RoundedCornerShape(10.dp))
-            .padding(10.dp),
+            .padding(12.dp)
+            .alpha(if (pending) 1f else 0.6f),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Text("? ${m.text}", color = Tok.Amber, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+        if (spec == null) {
+            Text("? ${m.text}", color = Tok.Amber, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            return@Column
+        }
+        spec.questions.forEachIndexed { qi, q ->
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (q.header.isNotBlank()) {
+                        Text(q.header, color = Tok.Amber, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
+                    if (q.multi_select) Text("可多选", color = Tok.Faint, fontSize = 10.sp)
+                }
+                Text(q.question, color = Tok.Ink, fontSize = 14.sp, fontWeight = FontWeight.Medium, lineHeight = 20.sp)
+                q.options.forEachIndexed { oi, opt ->
+                    val selected = oi in selections[qi]
+                    Row(
+                        Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp))
+                            .then(if (pending) Modifier.clickable {
+                                selections = selections.toMutableList().also { list ->
+                                    list[qi] = if (q.multi_select) (if (selected) list[qi] - oi else list[qi] + oi) else setOf(oi)
+                                }
+                                if (!q.multi_select) others = others.toMutableList().also { it[qi] = "" }
+                            } else Modifier)
+                            .padding(vertical = 4.dp, horizontal = 2.dp),
+                        verticalAlignment = Alignment.Top,
+                    ) {
+                        Text(
+                            if (q.multi_select) (if (selected) "☑" else "☐") else (if (selected) "●" else "○"),
+                            color = if (selected) Tok.Cyan else Tok.Dim, fontSize = 15.sp, fontFamily = FontFamily.Monospace,
+                            modifier = Modifier.padding(end = 10.dp, top = 1.dp),
+                        )
+                        Column(Modifier.weight(1f)) {
+                            Text(opt.label, color = Tok.Ink, fontSize = 14.sp)
+                            if (opt.description.isNotBlank()) Text(opt.description, color = Tok.Dim, fontSize = 12.sp, lineHeight = 16.sp)
+                        }
+                    }
+                }
+                // 其它：自填一行；单选里有字就顶掉圆点，多选里算多勾一项
+                val other = others[qi]
+                Row(Modifier.fillMaxWidth().padding(vertical = 2.dp, horizontal = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    val otherOn = other.isNotBlank()
+                    Text(
+                        if (q.multi_select) (if (otherOn) "☑" else "☐") else (if (otherOn) "●" else "○"),
+                        color = if (otherOn) Tok.Cyan else Tok.Dim, fontSize = 15.sp, fontFamily = FontFamily.Monospace,
+                        modifier = Modifier.padding(end = 10.dp),
+                    )
+                    BasicTextField(
+                        value = other,
+                        onValueChange = { v ->
+                            val one = v.replace('\n', ' ')
+                            others = others.toMutableList().also { it[qi] = one }
+                            if (!q.multi_select && one.isNotBlank()) selections = selections.toMutableList().also { it[qi] = emptySet() }
+                        },
+                        enabled = pending,
+                        singleLine = true,
+                        textStyle = TextStyle(color = Tok.Ink, fontSize = 14.sp),
+                        cursorBrush = SolidColor(Tok.Cyan),
+                        modifier = Modifier.weight(1f).background(Tok.TermBg, RoundedCornerShape(6.dp)).padding(horizontal = 10.dp, vertical = 7.dp),
+                        decorationBox = { inner ->
+                            if (other.isEmpty()) Text("其它…", color = Tok.Faint, fontSize = 14.sp)
+                            inner()
+                        },
+                    )
+                }
+            }
+        }
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            when (state) {
+                FormState.PENDING -> {}
+                FormState.ANSWERED -> Tag("已回答")
+                FormState.CLOSED -> Tag("已结束")
+                FormState.STALE -> Tag("已过期")
+            }
+            error?.let { Text(it, color = Tok.Red, fontSize = 11.sp, modifier = Modifier.weight(1f).padding(end = 8.dp)) }
+                ?: Spacer(Modifier.weight(1f))
+            if (pending) {
+                val enabled = allComplete && !submitting
+                Text(
+                    if (submitting) "提交中…" else "提交",
+                    color = if (enabled) Tok.Bg else Tok.Faint, fontSize = 13.sp, fontWeight = FontWeight.Bold,
+                    modifier = Modifier
+                        .background(if (enabled) Tok.Cyan else Tok.Edge2, RoundedCornerShape(8.dp))
+                        .then(if (enabled) Modifier.clickable {
+                            val answers = spec.questions.indices.map { i ->
+                                AnswerItem(selected = selections[i].sorted(), other = others[i].trim().ifBlank { null })
+                            }
+                            scope.launch {
+                                submitting = true
+                                try { onSubmit(answers); error = null }
+                                catch (e: Exception) { error = (e.message ?: "作答失败") + " · 请到终端处理" }
+                                finally { submitting = false }
+                            }
+                        } else Modifier)
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun Tag(label: String) {
+    Text(
+        label, color = Tok.Dim, fontSize = 10.sp,
+        modifier = Modifier.border(1.dp, Tok.Edge2, RoundedCornerShape(50)).padding(horizontal = 8.dp, vertical = 2.dp),
+    )
+}
+
+/** 用户对表单的回答：画在用户一侧，与 UserBlock 同款，多一行「回答」小字。 */
+@Composable
+private fun AnswerBlock(m: ChatMessage) {
+    val time = remember(m.ts) { clockTime(m.ts) }
+    val err = m.tool?.status == "err"
+    Column(Modifier.fillMaxWidth()) {
+        Text(
+            listOf(time, if (err) "回答 · 出错" else "回答").filter { it.isNotEmpty() }.joinToString(" · "),
+            color = if (err) Tok.Red else Tok.Faint, fontSize = 10.sp, modifier = Modifier.padding(bottom = 3.dp),
+        )
+        Row(
+            Modifier.fillMaxWidth().height(IntrinsicSize.Min)
+                .clip(RoundedCornerShape(8.dp)).background(Tok.Surface),
+        ) {
+            Spacer(Modifier.width(3.dp).fillMaxHeight().background(if (err) Tok.Red else Tok.Cyan))
+            Text(
+                m.text, color = Tok.Ink, fontSize = 14.sp, lineHeight = 20.sp,
+                modifier = Modifier.weight(1f).padding(horizontal = 12.dp, vertical = 10.dp),
+            )
+        }
     }
 }
 

@@ -38,10 +38,10 @@ token = "aaa_tk_<32hex>"     # 首次运行生成
 project_root = "/Volumes/SSD/project"
 namer = true                  # haiku 会话命名开关（对应 AAA_NAMER）
 remote_control_name = true    # claude 会话给 Remote Control 起项目名（手机官方 App 的会话列表更可读；仅 claude 认此旗标）
-[ntfy]                        # 可选，离线推送兜底
-url = "https://ntfy.example.com"
-topic = "aaa"
+[checkpoint]                  # 见「git checkpoint」
 ```
+
+历史上的 `[ntfy]` / `[watchdog]` 段已废弃（2026-09-02），旧文件里留着也能解析，只是被忽略。
 
 ## Agent 表（与 aaa CLI 完全一致）
 
@@ -71,11 +71,8 @@ daemon 在启动时用 `zsh -lic` 问一次「终端里应有的 PATH」（带�
   "project_path": "/Volumes/SSD/project/aaa-ui",
   "project_name": "aaa-ui",
   "agent": "claude",             // agent id 或 "shell"
-  "state": "waiting",            // running | waiting | idle | exited
-  "question": {                   // 仅 waiting 且解析成功时非 null
-    "text": "原型是否需要包含 iPad 布局？",
-    "options": [{"key":"1","label":"需要"},{"key":"2","label":"不需要"}]
-  },
+  "state": "waiting",            // running | waiting | exited
+  "asking": false,                // claude：transcript 里有一条 AskUserQuestion 还没被回答（结构化事实，不是猜的）
   "preview": "…最近 4 行纯文本…",
   "rows": 40, "cols": 120,
   "pid": 12345, "exit_code": null,
@@ -84,8 +81,10 @@ daemon 在启动时用 `zsh -lic` 问一次「终端里应有的 PATH」（带�
 }
 ```
 
-状态机：有输出 → `running`；进程存活 + 静默 ≥ 6s + 屏幕末行匹配提示模式（`? `、`❯`、`(y/n)`、`[Y/n]`、编号选项、输入框 `│ >` 等）→ `waiting`（尽力解析出 question/options）；静默且无提示 → `idle`；进程退出 → `exited`（保留屏幕 + 回滚缓冲，daemon 重启后仍可查看回放）。
-Claude 的 hook 事件（见下）可精确覆盖启发式。
+状态机（2026-09-02 简化）：屏幕内容在变 → `running`；进程存活 + **可见屏幕 6s 没变** → `waiting`（这轮干完了，轮到你）；进程退出 → `exited`（保留屏幕 + 回滚缓冲，daemon 重启后仍可查看回放）。
+daemon **不再读屏猜「它在问什么」**：没有 `idle`，没有 `question`，没有提示模式匹配。agent 在等一个具体回答这件事只认一个来源——claude transcript 里的 `AskUserQuestion` 工具调用（结构化，见「消息流」），`asking` 就是它的镜像；其它 agent 没有这种结构化信号，`asking` 恒为 false。
+
+三态口径（客户端分组，三端一致）：**待回复** = `asking`；**执行中** = `running`；**已完成** = 其余（`waiting`、`exited`）。
 
 ## REST（前缀 `/api/v1`）
 
@@ -99,7 +98,8 @@ Claude 的 hook 事件（见下）可精确覆盖启发式。
 | POST | `/projects/agent` | `{path, agent}` 写注册表 |
 | GET | `/sessions` | 全部会话（含 exited） |
 | POST | `/sessions` | `{project_path, agent, resume}`；resume=true 时按 aaa 逻辑找最近会话套 resume 模板；目录不存在则创建（但见 SSD 守卫） |
-| POST | `/sessions/:id/input` | `{text, enter}`：写入 PTY（enter 补 `\r`）。composer / 快捷作答用 |
+| POST | `/sessions/:id/input` | `{text, enter}`：写入 PTY（enter 补 `\r`）。composer 用 |
+| POST | `/sessions/:id/answer` | `{answers:[{selected:[0,2], other:"自填文本"|null}, …]}`：回答当前待答的 AskUserQuestion 表单，一项对应一个问题（顺序同 `question.questions`），`selected` 是 0 起的选项下标，`other` 是「其它」自填。daemon 负责把选择翻译成 Claude Code 对话框的按键并确认对话框已关闭（见「回答表单」）。无待答问题 / 非 claude 会话 / 对话框没吃下 → 409；答案形状不对 → 400 |
 | POST | `/sessions/:id/kill` | TERM，2s 后 KILL；记录保留为 exited |
 | DELETE | `/sessions/:id` | 删除记录与回放（活着先 kill） |
 | POST | `/sessions/:id/rename` | `{title}` |
@@ -109,7 +109,6 @@ Claude 的 hook 事件（见下）可精确覆盖启发式。
 | GET | `/pair` | `{payload}`，二维码内容（见「配对」） |
 | GET | `/config` | `{port, token, project_root}`（以磁盘 config.toml 为准） |
 | PUT | `/config` | `{port?, token?, project_root?, migrate?}`。**写盘 + daemon 自我重启**（`exec` 自身，PID 不变，launchd 托管不受影响）；有非 exited 会话 → 409。`project_root` 变更且 `migrate=true`：先把各项目对话 id 采进注册表，再整根 `rename`（同卷限定，跨卷报错让人手动拷），最后重写注册表路径前缀；`migrate=false` 时要求新目录已存在，只改指向 |
-| POST | `/hooks/claude` | **仅接受 localhost 来源，免 token**；Claude Code hook 转发 |
 
 ## WS
 
@@ -132,7 +131,7 @@ server → client JSON 文本帧：
 {"t":"health","ssd_mounted":true}
 ```
 
-通知策略（客户端行为）：`waiting`（带 question 优先）与 `running→exited` 触发系统通知；daemon 侧在配置了 ntfy 时同步推送一份（手机 App 进程不在时的兜底）。
+通知策略（客户端行为，2026-09-02 用户拍板）：**只有一种通知——「完成」**。`running→waiting` 与 `running→exited`（非本机用户手动 kill）各弹一条，标题带项目名，正文是会话标题。不识别「里面要回什么」、不按问题去重、没有高低优先级、没有空转告警；daemon 侧不推送（ntfy 已移除）。按项目静音仍是客户端本地配置。用户正盯着的会话（窗口前台且当前页就是它）不弹。
 
 ## macOS 权限（一键授权）
 
@@ -175,7 +174,7 @@ Mac 客户端把 payload 渲染成二维码；Android 扫码解析后逐个 host
 
 ## Claude Code hook（可选精确信号）
 
-`aaa-daemon install-claude-hooks` 子命令（**仅显式执行，daemon 不自动改用户配置**）向 `~/.claude/settings.json` 合并 Notification / Stop hook，向 `http://127.0.0.1:2730/api/v1/hooks/claude` POST hook 原始 JSON。daemon 按 `cwd` 匹配会话：Notification → `waiting`，Stop → 静默计时重置。写入需原子、幂等、保留原有配置。
+（Claude hooks 通道已于 2026-09-02 移除：`install-claude-hooks` 与 `/hooks/claude` 不再存在，状态只看屏幕是否在变、问题只看 transcript。）
 
 ## SSD 守卫（硬性约束）
 
@@ -192,7 +191,9 @@ Mac 客户端把 payload 渲染成二维码；Android 扫码解析后逐个 host
 ### 消息流（手机主视图，终端保留可切换）
 
 - `GET /sessions/:id/messages?after=<seq>&limit=<n=200>` → `{"supported":bool,"source":"claude|codex|pi|none","last_seq":N,"messages":[…]}`
-- 消息结构：`{"seq":N,"ts":"…","role":"user|assistant|tool|system","kind":"text|thinking|tool_use|tool_result|question","text":"…","tool":{"name":"Bash","summary":"cargo build","status":"ok|err|running"}|null}`
+- 消息结构：`{"seq":N,"ts":"…","role":"user|assistant|tool|system","kind":"text|thinking|tool_use|tool_result|question|answer","text":"…","tool":{"name":"Bash","summary":"cargo build","status":"ok|err|running"}|null,"question":{…}?}`
+- **表单（claude）**：`AskUserQuestion` 工具调用不当普通 tool_use 显示，而是 `kind:"question"`（role assistant）：`text` = 第一题题面，`tool.summary` = 各题 header 用 ` · ` 连接，并附 `"question":{"questions":[{"header":"Color","question":"Pick a color","options":[{"label":"Red","description":"A warm color"}],"multi_select":false}]}`（原样来自工具入参，`multiSelect` 已转 snake_case）。它的 tool_result 变成 `kind:"answer"`（role **user**）：`text` 为用户的回答（单题就是答案本身；多题每行 `题面 → 答案`），`tool.status` 沿用 ok/err。**待答** = 最新一条 question 后面没有 answer，且它不早于本进程 `created_at`（resume 进来的旧 transcript 里悬着的问题，新进程不会再弹框，不算）。这就是会话 `asking` 的定义。
+- 客户端渲染约定：`question` 一律**原生对话框**——单选画单选、`multi_select` 画复选、末尾固定一条「其它…」自填；已有 answer 的表单折成已答态；待答且会话存活时才可交互，提交走 `POST /sessions/:id/answer`。不折叠进过程；`answer` 画在用户一侧。
 - daemon 在会话 spawn/resume 后定位该会话的 agent 存储文件（resume 已知文件；新会话按 cwd 匹配 + mtime ≥ 启动时刻轮询发现）并增量 tail 解析。**claude 必须支持**（jsonl：user/assistant/tool_use/tool_result/thinking，过滤 isSidechain 与注入块），codex/pi/reasonix 尽力而为（reasonix：chat-jsonl，raw_content 为用户原文，tool_execution.state=failed → err），agy/shell 返回 `supported:false`（agy 存储为 SQLite，客户端回落终端视图）。resume 场景：旧 id 的 transcript 只是延迟兜底（~30s），发现会话自己写的新文件后自动升级；同目录并发会话不共享同一存储文件（已被认领的候选跳过）。
 - `/events` 新帧：`{"t":"messages_changed","id":"s_…","last_seq":N}`（≥500ms 节流）。客户端收到后增量拉取。
 - `/events` 心跳：服务端每 20s 发一个 WS Ping；客户端应以「45s 无任何帧」为读超时并重连（overlay 网络半开连接检测）。
@@ -204,25 +205,23 @@ Mac 客户端把 payload 渲染成二维码；Android 扫码解析后逐个 host
 - `GET /sessions/:id/diff` → `{"supported":bool,"base":"<ref>","files":[{"path","status":"added|modified|deleted","additions":N,"deletions":N,"patch":"…≤64KB","truncated":bool}]}`：start 检查点树 vs 当前工作区（含未跟踪文件，同样经临时 index）。
 - `POST /sessions/:id/rollback` body `{"confirm":true,"force":false}`：恢复工作区到 start 检查点（checkout 树 + 删除 start 后新增文件；`.git` 与忽略文件不动）。会话仍存活时必须 `force:true`（daemon 先 kill）。客户端必须二次确认。
 
+### 回答表单（daemon 驾驭 Claude Code 对话框）
+
+按键协议实测于 Claude Code 2.1.258（2026-09-02，pyte 采屏）：表单**有 Review/Submit 页** iff 多于一题或任一题多选；单题单选按下即提交。单选：按选项数字键（自动跳下一页/提交）；单选自填：按「Type something」的数字（= 选项数 + 1）、输入文本、回车。多选：逐个数字键切换（高亮停在第 1 行），自填要 **↓×选项数** 落到「Type something」行再输入（自动打勾；此时**回车会把勾取消**，绝不能按），随后 Tab（文本态下 Tab 移到 Submit/Next 行，再回车前进；非文本态 Tab 直接翻页）。最后 daemon 看屏：出现 `Ready to submit your answers?` 就回车确认；`Enter to select` 提示行消失才算成功，3s 内没消失返回 409，让用户去终端收尾。按键之间留 70–160ms 节拍（Ink 一次 read 当一个事件）。
+
 ### 任务收件箱
 
 - `GET /inbox?path=<proj>` → `[{"id","text","created_at"}]`；`POST /inbox` `{path,text}`；`DELETE /inbox/:id`。
-- 自动喂入：项目会话**首次进入 waiting** 且收件箱非空时，daemon 把条目拼成一条消息（`任务清单：\n1. …\n2. …` + `\r`）写入 PTY 并删除条目。`POST /sessions` 可带 `"feed_inbox":false` 禁用。喂入只发生在接受自由文本的 waiting（输入框/无选项问题），带选项的对话框不喂。
+- 自动喂入：项目会话**进入 waiting**（每会话最多一次）且收件箱非空时，daemon 把条目拼成一条消息（`任务清单：\n1. …\n2. …` + `\r`）写入 PTY 并删除条目。`POST /sessions` 可带 `"feed_inbox":false` 禁用。**不喂的两种情形（都是结构化判断，不读屏）**：claude 会话 `asking`（对话框开着，自由文本会替用户按下高亮项）；claude 会话的目录在 `~/.claude.json` 里尚无 `hasTrustDialogAccepted`（新项目第一屏是信任对话框）。这两种情形条目留在箱里，下一次 waiting 再试。daemon 只读 `~/.claude.json`，永不写它（claude 自己频繁改写，读改写会撞）。
 - `POST /sessions` **幂等**：同项目 + 同 agent 已有存活会话时直接返回该会话（不孵第二个进程）；显式并行开第二个用 `"fresh":true`。事件 `{"t":"inbox_changed","path"}`。
 
 ### 手机→项目文件通道
 
 - `POST /projects/upload?path=<proj>&name=<fname>`，body = 原始字节（`application/octet-stream`，≤50MB）→ `{"saved_path":"<proj>/_inbox/<ts>-<name>"}`。文件名 slugify、防覆盖。客户端上传后自行把路径发进 composer 告知 agent。
 
-### Watchdog
+### 已移除（2026-09-02）
 
-- config：`[watchdog] stall_minutes=10, auto_kill=false`。`running` 且静默 ≥ stall_minutes（waiting 不算）→ 事件 `{"t":"session_stalled","id","quiet_s":N}` + ntfy（high）；auto_kill=true 则随后 kill。
-
-### 通知细化
-
-- ntfy 消息带 priority：waiting / stalled = high，exited = default。
-- waiting 推送去重：同会话同 question 只推一次，且同会话冷却 5 分钟（避免 Claude 每回合结束常驻输入框导致刷屏）。
-- 客户端侧：通知渠道分级（等待输入=high、完成=default）、按项目静音列表、快捷短语 chips、**默认 UI 设置（消息流 / 终端）**——均为客户端本地配置，不进 daemon。
+Watchdog（`session_stalled` 事件 + 空转告警）、ntfy 推送、waiting 推送去重与冷却、通知渠道分级、快捷短语 chips、Claude hooks——这一整层「监测 + 推送」都拆掉了。理由：读屏猜问题误报不断，去重/冷却掩盖不了根因；用户真正要的只是「跑完了告诉我一声」，而问题本身由消息流按结构化数据原生呈现。
 
 ## aaa CLI（第三个客户端）
 
@@ -231,7 +230,7 @@ CLI 开的会话在 Mac App 和手机上同样可见、可接管。旧的 zsh �
 不可用时的兜底（它把 agent 直接跑在当前终端里，不常驻）。
 
 `aaa` 现在是 `cli/aaa` bash 脚本，依赖 bash ≥3.2、curl、python3，无需构建。CLI 动词保持不变；
-`ls` 与交互菜单按「执行中 / 待回复 / 已完成」顺序分组会话；`perms` 会在每个权限的状态旁打印 `hint` 提示文本。
+`ls` 与交互菜单按「执行中 / 待回复 / 已完成」顺序分组会话（待回复 = `asking`）；`wait` 只列 `asking` 的会话；`perms` 会在每个权限的状态旁打印 `hint` 提示文本。
 
 - 连接：默认读 `~/.config/aaa-daemon/config.toml` 取 port + token 连本机；`AAA_HOST=主机:2730`
   + `AAA_TOKEN=…` 指向另一台机器的 daemon。本机连不上时尝试 `launchctl kickstart` 唤醒一次。

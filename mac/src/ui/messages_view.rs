@@ -1,23 +1,134 @@
 //! 消息流视图：daemon `/sessions/:id/messages` 的气泡列表，与 Android 同源同构。
-//! 终端仍是权威视图；消息流只读展示（输入走终端或问题栏），⌘E 切换。
+//! 终端仍是权威视图；消息流里能直接对 agent 说话（底部 composer → POST /input），
+//! claude 的 AskUserQuestion 表单在这里**原生**画出来（单选 / 复选 / 「其它」自填），
+//! 提交走 POST /sessions/:id/answer，由 daemon 翻译成对话框按键。⌘E 切换。
 //!
 //! 拉取模型：打开时全量补齐（seq 游标循环直到追平 last_seq），此后靠
 //! /events 的 messages_changed 帧增量拉。`supported:false`（shell、
 //! reasonix 等）或 404（v1 daemon）→ 上层自动回落终端并隐藏切换入口。
 
+use std::collections::{HashMap, HashSet};
+
 use gpui::{
-    Context, Entity, KeyDownEvent, ScrollHandle, SharedString, Window, div, prelude::*, px,
-    relative,
+    Context, ElementId, Entity, KeyDownEvent, ScrollHandle, SharedString, Window, div, prelude::*,
+    px, relative,
 };
 
 use super::kit::{c, ca};
 use super::mini_input::MiniInput;
-use crate::model::ChatMessage;
+use crate::model::{AnswerItem, ChatMessage, QuestionItem, QuestionSpec};
 use crate::net::Net;
 use crate::theme;
 
 /// 内存里最多留这么多条：够回看，不至于无限膨胀
 const KEEP: usize = 2000;
+
+/// 一道题的草稿：勾选的选项下标 + 「其它」自填（镜像自该题的 MiniInput）
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Draft {
+    pub selected: Vec<usize>,
+    pub other: String,
+}
+
+impl Draft {
+    fn has_other(&self) -> bool {
+        !self.other.trim().is_empty()
+    }
+
+    /// 与 daemon `answer::validate` 同口径：单选恰好一个选择（选项或自填），
+    /// 多选至少一个
+    pub fn complete(&self, multi: bool) -> bool {
+        let n = self.selected.len() + usize::from(self.has_other());
+        if multi { n >= 1 } else { n == 1 }
+    }
+
+    fn to_answer(&self) -> AnswerItem {
+        let mut selected = self.selected.clone();
+        selected.sort_unstable();
+        AnswerItem {
+            selected,
+            other: if self.has_other() {
+                Some(self.other.trim().to_string())
+            } else {
+                None
+            },
+        }
+    }
+}
+
+/// 整张表单是否可提交：每题都齐
+pub fn form_complete(spec: &QuestionSpec, drafts: &[Draft]) -> bool {
+    drafts.len() == spec.questions.len()
+        && spec
+            .questions
+            .iter()
+            .zip(drafts)
+            .all(|(q, d)| d.complete(q.multi_select))
+}
+
+/// 待答表单：从尾部找最近一条 question / answer——question 在后 = 还没人答。
+/// 会话已退出就没有可答的了（对话框随进程一起没了）。`since` 是会话进程的
+/// created_at：resume 进来的旧 transcript 里可能悬着上个进程没答完的问题，
+/// 新进程不会再弹框，比 created_at 早的问题不算待答（与 daemon 同一口径）。
+pub fn pending_question_seq(msgs: &[ChatMessage], alive: bool, since: Option<&str>) -> Option<u64> {
+    if !alive {
+        return None;
+    }
+    for m in msgs.iter().rev() {
+        match m.kind.as_str() {
+            "question" => {
+                if let Some(since) = since {
+                    // 秒级前缀比较：created_at 是整秒、transcript 时间戳带毫秒
+                    let older = m.ts.len() >= 19 && since.len() >= 19 && m.ts[..19] < since[..19];
+                    if older {
+                        return None;
+                    }
+                }
+                return Some(m.seq);
+            }
+            "answer" => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// 某条 question 之后紧跟的是不是 answer（已答态标签用）
+fn answered_after(msgs: &[ChatMessage], seq: u64) -> bool {
+    msgs.iter()
+        .filter(|m| m.seq > seq)
+        .find(|m| m.kind == "question" || m.kind == "answer")
+        .is_some_and(|m| m.kind == "answer")
+}
+
+/// 选项行的元素 id：gpui 没有四元组 From，拼成名字
+fn opt_id(seq: u64, qi: usize, oi: usize) -> ElementId {
+    ElementId::Name(format!("opt-{seq}-{qi}-{oi}").into())
+}
+
+/// 提交失败文案：409 = daemon 没法替你按（没有待答问题 / 对话框没吃下）→ 去终端收尾
+fn describe_submit_error(e: &anyhow::Error) -> String {
+    let msg = match e.downcast_ref::<crate::net::ApiFailure>() {
+        Some(f) if !f.message.is_empty() => f.message.clone(),
+        _ => e.to_string(),
+    };
+    if crate::net::http_status(e) == Some(409) {
+        format!("{msg} · 去终端处理")
+    } else {
+        msg
+    }
+}
+
+/// 表单卡片此刻的交互态
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FormMode {
+    /// 已答 / 已过期 / 会话已退出：只读、压暗
+    ReadOnly,
+    /// 待答且会话活着：可勾选、可填、可提交
+    Editing,
+    /// 提交在路上：保留内容但不响应点击
+    Submitting,
+}
 
 pub struct MessagesView {
     sid: String,
@@ -28,13 +139,27 @@ pub struct MessagesView {
     pub supported: Option<bool>,
     loading: bool,
     /// 已展开的 thinking / tool 消息 seq（点击切换）
-    expanded: std::collections::HashSet<u64>,
+    expanded: HashSet<u64>,
     scroll: ScrollHandle,
     /// 底部输入框：消息流里直接对 agent 说话（POST /input，text+回车）
     input: Entity<MiniInput>,
     /// 下一帧渲染时把焦点放到输入框（切进消息流视图时置位）
     wants_focus: bool,
     sending: bool,
+    /// 会话进程是否还活着（上层按 session 事件同步）；退出后表单一律只读
+    alive: bool,
+    /// 会话进程的 created_at（ISO 秒级）；早于它的悬置问题不算待答
+    since: Option<String>,
+    /// 表单草稿：question 消息 seq → 每题一份
+    drafts: HashMap<u64, Vec<Draft>>,
+    /// 每题的「其它」自填框，(question seq, 题号) 按需创建，表单不再待答时回收
+    other_inputs: HashMap<(u64, usize), Entity<MiniInput>>,
+    /// 正在提交的表单
+    submitting: HashSet<u64>,
+    /// 提交失败的表单 → 展示文案（草稿保留，可改可重试）
+    errors: HashMap<u64, String>,
+    /// 本端已提交成功、answer 消息还没到的表单：先按已答态画，免得空表单闪一下
+    answered: HashSet<u64>,
 }
 
 impl MessagesView {
@@ -47,11 +172,18 @@ impl MessagesView {
             last_seq: 0,
             supported: None,
             loading: false,
-            expanded: std::collections::HashSet::new(),
+            expanded: HashSet::new(),
             scroll: ScrollHandle::new(),
             input,
             wants_focus: true,
             sending: false,
+            alive: true,
+            since: None,
+            drafts: HashMap::new(),
+            other_inputs: HashMap::new(),
+            submitting: HashSet::new(),
+            errors: HashMap::new(),
+            answered: HashSet::new(),
         };
         v.fetch(cx);
         v
@@ -60,6 +192,19 @@ impl MessagesView {
     /// 切进消息流视图时调用：下一帧把焦点交给输入框
     pub fn request_focus(&mut self, cx: &mut Context<Self>) {
         self.wants_focus = true;
+        cx.notify();
+    }
+
+    /// 上层在 session / snapshot 事件里同步：进程退了，表单就不能再交互；
+    /// created_at 用来判掉 resume 带进来的旧问题
+    pub fn set_session(&mut self, alive: bool, created_at: Option<&str>, cx: &mut Context<Self>) {
+        let since = created_at.filter(|s| !s.is_empty()).map(str::to_string);
+        if self.alive == alive && self.since == since {
+            return;
+        }
+        self.alive = alive;
+        self.since = since;
+        self.ensure_form_state(cx);
         cx.notify();
     }
 
@@ -89,9 +234,27 @@ impl MessagesView {
         .detach();
     }
 
-    fn on_key_down(&mut self, ev: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        // MiniInput 不消费回车；IME 组字中的回车是「确认候选词」，不能抢
-        if ev.keystroke.key == "enter" && !self.input.read(cx).composing() {
+    fn on_key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if ev.keystroke.key != "enter" {
+            return;
+        }
+        // 焦点在某题的「其它」框里：回车 = 提交这张表单（没填齐就什么都不做）。
+        // IME 组字中的回车是「确认候选词」，不能抢。
+        let in_form = self
+            .other_inputs
+            .iter()
+            .find(|(_, i)| i.read(cx).focus_handle.is_focused(window))
+            .map(|((seq, _), i)| (*seq, i.read(cx).composing()));
+        if let Some((seq, composing)) = in_form {
+            if !composing {
+                self.submit(seq, cx);
+                cx.stop_propagation();
+            }
+            return;
+        }
+        // MiniInput 不消费回车；composer 有焦点且不在组字才算「发送」
+        let composer = self.input.read(cx);
+        if composer.focus_handle.is_focused(window) && !composer.composing() {
             self.send(cx);
             cx.stop_propagation();
         }
@@ -121,6 +284,7 @@ impl MessagesView {
                             }
                             v.last_seq = v.msgs.last().map(|m| m.seq).unwrap_or(0);
                             v.scroll.scroll_to_bottom();
+                            v.ensure_form_state(cx);
                         }
                         if r.supported && v.last_seq < r.last_seq {
                             v.fetch(cx);
@@ -128,7 +292,8 @@ impl MessagesView {
                     }
                     Err(e) => {
                         // v1 daemon 无此端点 → 永久回落终端；其余错误留待下次事件重试
-                        if e.to_string().contains("404") {
+                        if crate::net::http_status(&e) == Some(404) || e.to_string().contains("404")
+                        {
                             v.supported = Some(false);
                         }
                     }
@@ -153,7 +318,161 @@ impl MessagesView {
         cx.notify();
     }
 
-    fn row(&self, m: &ChatMessage, cx: &mut Context<Self>) -> gpui::AnyElement {
+    // ── 表单状态 ───────────────────────────────────────────────────────
+
+    /// 让草稿 / 输入框 / 错误只围着「当前待答的那张表单」存在：
+    /// 表单被答掉（无论从哪端）或会话退出，相关状态一并回收。
+    fn ensure_form_state(&mut self, cx: &mut Context<Self>) {
+        let pending = pending_question_seq(&self.msgs, self.alive, self.since.as_deref());
+        self.drafts.retain(|k, _| Some(*k) == pending);
+        self.other_inputs.retain(|(k, _), _| Some(*k) == pending);
+        self.errors.retain(|k, _| Some(*k) == pending);
+        self.submitting.retain(|k| Some(*k) == pending);
+        self.answered.retain(|k| Some(*k) == pending);
+        let Some(seq) = pending else {
+            return;
+        };
+        let spec = self
+            .msgs
+            .iter()
+            .find(|m| m.seq == seq)
+            .and_then(|m| m.question.clone());
+        let Some(spec) = spec else {
+            return;
+        };
+        let n = spec.questions.len();
+        let drafts = self.drafts.entry(seq).or_default();
+        if drafts.len() != n {
+            drafts.resize(n, Draft::default());
+        }
+        for (qi, q) in spec.questions.iter().enumerate() {
+            if self.other_inputs.contains_key(&(seq, qi)) {
+                continue;
+            }
+            let input = cx.new(|cx| MiniInput::new(cx, "其它…"));
+            let multi = q.multi_select;
+            // MiniInput 改文本时自己 notify；这里镜像进草稿，并执行「单选自填即弃选」
+            cx.observe(&input, move |v: &mut Self, input, cx| {
+                let text = input.read(cx).text.clone();
+                v.on_other_changed(seq, qi, multi, text, cx);
+            })
+            .detach();
+            self.other_inputs.insert((seq, qi), input);
+        }
+    }
+
+    fn on_other_changed(
+        &mut self,
+        seq: u64,
+        qi: usize,
+        multi: bool,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(d) = self.drafts.get_mut(&seq).and_then(|v| v.get_mut(qi)) else {
+            return;
+        };
+        if d.other == text {
+            return;
+        }
+        d.other = text;
+        if !multi && d.has_other() {
+            // 单选只能有一个答案：开始自填就把勾过的选项放掉
+            d.selected.clear();
+        }
+        self.errors.remove(&seq);
+        cx.notify();
+    }
+
+    fn toggle_option(
+        &mut self,
+        seq: u64,
+        qi: usize,
+        oi: usize,
+        multi: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.submitting.contains(&seq) {
+            return;
+        }
+        let Some(d) = self.drafts.get_mut(&seq).and_then(|v| v.get_mut(qi)) else {
+            return;
+        };
+        if multi {
+            match d.selected.iter().position(|&x| x == oi) {
+                Some(p) => {
+                    d.selected.remove(p);
+                }
+                None => d.selected.push(oi),
+            }
+        } else {
+            d.selected = vec![oi];
+            // 单选点了选项就把自填清掉（反向规则在 on_other_changed）
+            if !d.other.is_empty() {
+                d.other.clear();
+                if let Some(input) = self.other_inputs.get(&(seq, qi)).cloned() {
+                    input.update(cx, |i, cx| i.set_text("", cx));
+                }
+            }
+        }
+        self.errors.remove(&seq);
+        cx.notify();
+    }
+
+    fn submit(&mut self, seq: u64, cx: &mut Context<Self>) {
+        if self.submitting.contains(&seq) {
+            return;
+        }
+        let spec = self
+            .msgs
+            .iter()
+            .find(|m| m.seq == seq)
+            .and_then(|m| m.question.as_ref());
+        let Some(spec) = spec else {
+            return;
+        };
+        let Some(drafts) = self.drafts.get(&seq) else {
+            return;
+        };
+        if !form_complete(spec, drafts) {
+            return;
+        }
+        let answers: Vec<AnswerItem> = drafts.iter().map(Draft::to_answer).collect();
+        self.submitting.insert(seq);
+        self.errors.remove(&seq);
+        let fut = self.net.session_answer(&self.sid, answers);
+        cx.spawn(async move |this, cx| {
+            let res = fut.await;
+            let _ = this.update(cx, |v: &mut MessagesView, cx| {
+                v.submitting.remove(&seq);
+                match res {
+                    Ok(_) => {
+                        // daemon 已确认对话框关闭；answer 消息随 messages_changed 到达。
+                        // 先按已答态画，并顺手拉一次缩短空窗。
+                        v.drafts.remove(&seq);
+                        v.answered.insert(seq);
+                        v.fetch(cx);
+                    }
+                    Err(e) => {
+                        // 草稿保留：改一改还能再交
+                        log::warn!("回答表单失败: {e}");
+                        v.errors.insert(seq, describe_submit_error(&e));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    // ── 渲染 ───────────────────────────────────────────────────────────
+
+    fn row(
+        &self,
+        m: &ChatMessage,
+        pending: Option<u64>,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let text: SharedString = m.text.clone().into();
         match () {
             _ if m.kind == "thinking" => {
@@ -269,21 +588,41 @@ impl MessagesView {
                     })
                     .into_any_element()
             }
+            // claude 的 AskUserQuestion：结构化表单原生画；没带 question（不该发生）
+            // 就退回普通 assistant 气泡，至少把题面露出来
+            _ if m.kind == "question" => match &m.question {
+                Some(spec) => self.question_card(m, spec, pending, cx),
+                None => assistant_bubble(text),
+            },
+            // 表单的回答画在用户一侧，加一行「回答」小字与普通输入区分
+            _ if m.kind == "answer" => {
+                let err = m.tool.as_ref().is_some_and(|t| t.status == "err");
+                let (caption, color) = if err {
+                    ("回答 · 出错", theme::RED)
+                } else {
+                    ("回答", theme::FAINT)
+                };
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .items_end()
+                    .gap(px(2.))
+                    .child(
+                        div()
+                            .text_size(px(10.5))
+                            .font_family("Menlo")
+                            .text_color(c(color))
+                            .child(caption),
+                    )
+                    .child(user_bubble(text))
+                    .into_any_element()
+            }
             _ if m.role == "user" => div()
                 .w_full()
                 .flex()
                 .justify_end()
-                .child(
-                    div()
-                        .max_w(relative(0.78))
-                        .px(px(12.))
-                        .py(px(7.))
-                        .rounded(px(12.))
-                        .bg(ca(theme::CYAN, 0.16))
-                        .text_size(px(12.5))
-                        .text_color(c(theme::INK))
-                        .child(text),
-                )
+                .child(user_bubble(text))
                 .into_any_element(),
             _ if m.role == "system" => div()
                 .w_full()
@@ -291,23 +630,273 @@ impl MessagesView {
                 .text_color(c(theme::FAINT))
                 .child(text)
                 .into_any_element(),
-            _ => div()
-                .w_full()
-                .flex()
-                .child(
-                    div()
-                        .max_w(relative(0.86))
-                        .px(px(12.))
-                        .py(px(7.))
-                        .rounded(px(12.))
-                        .bg(c(theme::SURFACE))
-                        .text_size(px(12.5))
-                        .text_color(c(theme::INK))
-                        .child(text),
-                )
-                .into_any_element(),
+            _ => assistant_bubble(text),
         }
     }
+
+    /// 表单卡片：琥珀描边，逐题画选项，待答时底部有「提交」
+    fn question_card(
+        &self,
+        m: &ChatMessage,
+        spec: &QuestionSpec,
+        pending: Option<u64>,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let seq = m.seq;
+        let interactive = pending == Some(seq) && !self.answered.contains(&seq);
+        let submitting = self.submitting.contains(&seq);
+        let mode = match (interactive, submitting) {
+            (false, _) => FormMode::ReadOnly,
+            (true, false) => FormMode::Editing,
+            (true, true) => FormMode::Submitting,
+        };
+        let drafts = self.drafts.get(&seq).cloned().unwrap_or_default();
+        let tag: Option<&'static str> = if interactive {
+            None
+        } else if self.answered.contains(&seq) || answered_after(&self.msgs, seq) {
+            Some("已回答")
+        } else if !self.alive {
+            Some("已结束")
+        } else {
+            // 活着、没答、后面却又来了新问题：上一张被 agent 自己跳过了
+            Some("已过期")
+        };
+
+        let mut card = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .p(px(10.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(ca(theme::AMBER, 0.55))
+            .bg(ca(theme::AMBER, 0.08))
+            .when(!interactive, |el| el.opacity(0.6));
+
+        // 顶行：表单标识 + 已答态标签
+        card = card.child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(px(10.5))
+                        .font_family("Menlo")
+                        .text_color(c(theme::AMBER))
+                        .child(if interactive {
+                            "? 等你选择"
+                        } else {
+                            "? 表单"
+                        }),
+                )
+                .when_some(tag, |el, t| {
+                    el.child(
+                        div()
+                            .px(px(6.))
+                            .py(px(1.))
+                            .rounded(px(4.))
+                            .text_size(px(10.))
+                            .font_family("Menlo")
+                            .text_color(c(theme::DIM))
+                            .bg(ca(theme::INK, 0.06))
+                            .child(t),
+                    )
+                }),
+        );
+
+        for (qi, q) in spec.questions.iter().enumerate() {
+            let d = drafts.get(qi).cloned().unwrap_or_default();
+            card = card.child(self.question_block(seq, qi, q, &d, mode, cx));
+        }
+
+        if interactive {
+            let complete = form_complete(spec, &drafts);
+            let label = if submitting { "…" } else { "提交" };
+            let mut btn = div()
+                .id(("q-submit", seq))
+                .px(px(12.))
+                .py(px(4.))
+                .rounded(px(6.))
+                .bg(c(theme::CYAN))
+                .text_size(px(12.))
+                .font_weight(gpui::FontWeight::BOLD)
+                .text_color(c(0x0b2830))
+                .child(label);
+            if complete && !submitting {
+                btn = btn
+                    .cursor_pointer()
+                    .hover(|s| s.opacity(0.85))
+                    .on_click(cx.listener(move |v: &mut Self, _, _, cx| v.submit(seq, cx)));
+            } else {
+                btn = btn.opacity(0.4);
+            }
+            card = card.child(div().flex().justify_end().child(btn));
+        }
+
+        let mut outer = div().w_full().flex().flex_col().gap(px(4.)).child(card);
+        if let Some(err) = self.errors.get(&seq) {
+            outer = outer.child(
+                div()
+                    .px(px(4.))
+                    .text_size(px(11.))
+                    .text_color(c(theme::RED))
+                    .child(SharedString::from(err.clone())),
+            );
+        }
+        outer.into_any_element()
+    }
+
+    /// 一道题：header / 题面 / 选项行 / 末尾固定一条「其它」自填
+    fn question_block(
+        &self,
+        seq: u64,
+        qi: usize,
+        q: &QuestionItem,
+        d: &Draft,
+        mode: FormMode,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let multi = q.multi_select;
+        let clickable = mode == FormMode::Editing;
+        let glyph_el = |on: bool| {
+            let glyph = match (multi, on) {
+                (false, false) => "○",
+                (false, true) => "●",
+                (true, false) => "☐",
+                (true, true) => "☑",
+            };
+            div()
+                .flex_none()
+                .w(px(16.))
+                .text_size(px(12.))
+                .font_family("Menlo")
+                .text_color(c(if on { theme::CYAN } else { theme::DIM }))
+                .child(glyph)
+        };
+
+        let mut block = div().flex().flex_col().gap(px(3.));
+        if !q.header.is_empty() {
+            block = block.child(
+                div()
+                    .text_size(px(10.5))
+                    .font_family("Menlo")
+                    .text_color(c(theme::FAINT))
+                    .child(SharedString::from(q.header.clone())),
+            );
+        }
+        block = block.child(
+            div()
+                .text_size(px(13.))
+                .font_weight(gpui::FontWeight::BOLD)
+                .text_color(c(theme::INK))
+                .child(SharedString::from(q.question.clone())),
+        );
+
+        for (oi, opt) in q.options.iter().enumerate() {
+            let on = d.selected.contains(&oi);
+            let mut row = div()
+                .id(opt_id(seq, qi, oi))
+                .flex()
+                .items_start()
+                .gap(px(8.))
+                .px(px(6.))
+                .py(px(3.))
+                .rounded(px(6.))
+                .child(glyph_el(on))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .text_size(px(12.5))
+                                .text_color(c(theme::INK))
+                                .child(SharedString::from(opt.label.clone())),
+                        )
+                        .when(!opt.description.is_empty(), |el| {
+                            el.child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(c(theme::DIM))
+                                    .child(SharedString::from(opt.description.clone())),
+                            )
+                        }),
+                );
+            if clickable {
+                row = row
+                    .cursor_pointer()
+                    .hover(|s| s.bg(ca(theme::AMBER, 0.12)))
+                    .on_click(cx.listener(move |v: &mut Self, _, _, cx| {
+                        v.toggle_option(seq, qi, oi, multi, cx)
+                    }));
+            }
+            block = block.child(row);
+        }
+
+        // 「其它」：待答时是输入框（提交中保留内容），否则只是一条占位
+        let other_row = div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .px(px(6.))
+            .py(px(3.))
+            .child(glyph_el(d.has_other()));
+        let other_row = match self.other_inputs.get(&(seq, qi)) {
+            Some(input) if mode != FormMode::ReadOnly => other_row
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(px(12.5))
+                        .text_color(c(theme::INK))
+                        .child("其它"),
+                )
+                .child(div().flex_1().min_w(px(0.)).child(input.clone())),
+            _ => other_row.child(
+                div()
+                    .text_size(px(12.5))
+                    .text_color(c(theme::DIM))
+                    .child("其它…"),
+            ),
+        };
+        block.child(other_row).into_any_element()
+    }
+}
+
+/// assistant 文本气泡（左侧）
+fn assistant_bubble(text: SharedString) -> gpui::AnyElement {
+    div()
+        .w_full()
+        .flex()
+        .child(
+            div()
+                .max_w(relative(0.86))
+                .px(px(12.))
+                .py(px(7.))
+                .rounded(px(12.))
+                .bg(c(theme::SURFACE))
+                .text_size(px(12.5))
+                .text_color(c(theme::INK))
+                .child(text),
+        )
+        .into_any_element()
+}
+
+/// 用户一侧的青色气泡（调用方负责靠右）
+fn user_bubble(text: SharedString) -> gpui::Div {
+    div()
+        .max_w(relative(0.78))
+        .px(px(12.))
+        .py(px(7.))
+        .rounded(px(12.))
+        .bg(ca(theme::CYAN, 0.16))
+        .text_size(px(12.5))
+        .text_color(c(theme::INK))
+        .child(text)
 }
 
 impl Render for MessagesView {
@@ -335,8 +924,13 @@ impl Render for MessagesView {
             };
             placeholder(msg).into_any_element()
         } else {
-            let rows: Vec<gpui::AnyElement> =
-                self.msgs.clone().iter().map(|m| self.row(m, cx)).collect();
+            let pending = pending_question_seq(&self.msgs, self.alive, self.since.as_deref());
+            let rows: Vec<gpui::AnyElement> = self
+                .msgs
+                .clone()
+                .iter()
+                .map(|m| self.row(m, pending, cx))
+                .collect();
             div()
                 .id("msgs-scroll")
                 .flex_1()
@@ -391,5 +985,124 @@ impl Render for MessagesView {
             );
         }
         root
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::QOption;
+
+    fn msg(seq: u64, kind: &str) -> ChatMessage {
+        ChatMessage {
+            seq,
+            ts: String::new(),
+            role: String::new(),
+            kind: kind.into(),
+            text: String::new(),
+            tool: None,
+            question: None,
+        }
+    }
+
+    fn spec(multi: &[bool]) -> QuestionSpec {
+        QuestionSpec {
+            questions: multi
+                .iter()
+                .map(|&m| QuestionItem {
+                    header: String::new(),
+                    question: "q".into(),
+                    options: vec![QOption::default(), QOption::default(), QOption::default()],
+                    multi_select: m,
+                })
+                .collect(),
+        }
+    }
+
+    fn draft(selected: &[usize], other: &str) -> Draft {
+        Draft {
+            selected: selected.to_vec(),
+            other: other.into(),
+        }
+    }
+
+    #[test]
+    fn pending_is_latest_unanswered_question() {
+        let msgs = vec![msg(1, "text"), msg(2, "question"), msg(3, "tool_use")];
+        assert_eq!(pending_question_seq(&msgs, true, None), Some(2));
+        // 答过了就没有待答
+        let msgs = vec![msg(2, "question"), msg(3, "answer"), msg(4, "text")];
+        assert_eq!(pending_question_seq(&msgs, true, None), None);
+        // 新问题盖过旧问题：只有最新那条待答
+        let msgs = vec![msg(2, "question"), msg(3, "answer"), msg(5, "question")];
+        assert_eq!(pending_question_seq(&msgs, true, None), Some(5));
+        let msgs = vec![msg(2, "question"), msg(5, "question")];
+        assert_eq!(pending_question_seq(&msgs, true, None), Some(5));
+        // 没有问题 / 空列表
+        assert_eq!(pending_question_seq(&[msg(1, "text")], true, None), None);
+        assert_eq!(pending_question_seq(&[], true, None), None);
+        // 会话退出：对话框随进程没了，什么都不待答
+        assert_eq!(pending_question_seq(&[msg(2, "question")], false, None), None);
+        // resume 带进来的旧问题：早于会话 created_at 的不算待答（秒级前缀比较）
+        let mut old = msg(2, "question");
+        old.ts = "2026-09-02T09:59:59.900Z".into();
+        assert_eq!(pending_question_seq(&[old.clone()], true, Some("2026-09-02T10:00:00Z")), None);
+        old.ts = "2026-09-02T10:00:00.500Z".into();
+        assert_eq!(pending_question_seq(&[old], true, Some("2026-09-02T10:00:00Z")), Some(2));
+    }
+
+    #[test]
+    fn answered_after_looks_at_next_form_event() {
+        let msgs = vec![msg(2, "question"), msg(3, "tool_use"), msg(4, "answer")];
+        assert!(answered_after(&msgs, 2));
+        // 中间又来一题：旧的那张没答
+        let msgs = vec![msg(2, "question"), msg(5, "question"), msg(6, "answer")];
+        assert!(!answered_after(&msgs, 2));
+        assert!(answered_after(&msgs, 5));
+        assert!(!answered_after(&[msg(2, "question")], 2));
+    }
+
+    #[test]
+    fn draft_completeness_matches_daemon_validate() {
+        // 单选：恰好一个（选项或自填），不多不少
+        assert!(!draft(&[], "").complete(false));
+        assert!(draft(&[1], "").complete(false));
+        assert!(draft(&[], "Zed").complete(false));
+        assert!(!draft(&[1], "Zed").complete(false));
+        assert!(!draft(&[0, 1], "").complete(false));
+        assert!(!draft(&[], "   ").complete(false), "空白自填不算");
+        // 多选：至少一个
+        assert!(!draft(&[], "").complete(true));
+        assert!(draft(&[0, 2], "").complete(true));
+        assert!(draft(&[], "x").complete(true));
+        assert!(draft(&[1], "x").complete(true));
+    }
+
+    #[test]
+    fn form_complete_needs_every_question() {
+        let s = spec(&[false, true]);
+        assert!(form_complete(&s, &[draft(&[0], ""), draft(&[1, 2], "")]));
+        assert!(!form_complete(&s, &[draft(&[0], ""), draft(&[], "")]));
+        // 题数不齐（草稿还没建全）
+        assert!(!form_complete(&s, &[draft(&[0], "")]));
+        assert!(!form_complete(&s, &[]));
+    }
+
+    #[test]
+    fn draft_to_answer_shape() {
+        // 下标排好序；自填去首尾空白；空自填不发
+        let a = draft(&[2, 0], "  Zed ").to_answer();
+        assert_eq!(a.selected, vec![0, 2]);
+        assert_eq!(a.other.as_deref(), Some("Zed"));
+        let a = draft(&[1], "  ").to_answer();
+        assert_eq!(a.selected, vec![1]);
+        assert_eq!(a.other, None);
+    }
+
+    #[test]
+    fn option_ids_are_distinct() {
+        assert_ne!(opt_id(7, 0, 1), opt_id(7, 1, 0));
+        assert_ne!(opt_id(7, 0, 1), opt_id(8, 0, 1));
+        assert_eq!(opt_id(7, 0, 1), opt_id(7, 0, 1));
     }
 }

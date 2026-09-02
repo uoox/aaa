@@ -19,6 +19,7 @@ class TurnFoldTest {
     private fun use(seq: Long, name: String, summary: String = "") = msg(seq, "tool", "tool_use", tool = ToolInfo(name, summary, "ok"))
     private fun result(seq: Long) = msg(seq, "tool", "tool_result", "out", ToolInfo("", "", "ok"))
     private fun question(seq: Long) = msg(seq, "assistant", "question", "which?")
+    private fun answer(seq: Long) = msg(seq, "user", "answer", "that one", ToolInfo("AskUserQuestion", "", "ok"))
 
     // 1. 两轮基本切分
     @Test fun splitsIntoTurnsOnUserText() {
@@ -53,6 +54,35 @@ class TurnFoldTest {
         val t2 = foldTurns(listOf(user(1), say(2), question(3)), live = false).single()
         assertEquals(2L, t2.reply?.seq)
         assertEquals(listOf("u1", "r2", "q3"), flattenForList(listOf(t2), emptySet()).map { it.key })
+    }
+
+    // 3b. answer 与 question 一样独立成项、不折叠、不占 reply 位；键前缀 a
+    @Test fun answersAreStandaloneItemsToo() {
+        val t = foldTurns(listOf(user(1), question(2), answer(3), use(4, "Edit"), say(5)), live = false).single()
+        assertEquals(listOf(2L, 3L), t.questions.map { it.seq })
+        assertEquals(listOf(4L), t.process.map { it.seq })
+        assertEquals(5L, t.reply?.seq)
+        assertEquals(listOf("u1", "q2", "a3", "f1", "r5"), flattenForList(listOf(t), emptySet()).map { it.key })
+    }
+
+    // 3c. 待答 = 会话活着且最新 question 后没有 answer
+    @Test fun pendingQuestionIsTheNewestUnanswered() {
+        val asked = listOf(user(1), question(2))
+        assertEquals(2L, pendingQuestionSeq(asked, alive = true))
+        assertNull(pendingQuestionSeq(asked, alive = false))
+        assertNull(pendingQuestionSeq(asked + answer(3), alive = true))
+        // 新问题顶掉旧问题：只有最新的待答
+        assertEquals(4L, pendingQuestionSeq(asked + answer(3) + question(4), alive = true))
+        assertEquals(4L, pendingQuestionSeq(asked + question(4), alive = true))
+        assertNull(pendingQuestionSeq(listOf(user(1), say(2)), alive = true))
+        // resume 带进来的旧问题：早于本进程 created_at 的不算待答
+        val old = msg(2, "assistant", "question", "old?").copy(ts = "2026-09-02T09:59:59.900Z")
+        assertNull(pendingQuestionSeq(listOf(user(1), old), alive = true, since = "2026-09-02T10:00:00Z"))
+        val fresh = old.copy(ts = "2026-09-02T10:00:00.500Z")
+        assertEquals(2L, pendingQuestionSeq(listOf(user(1), fresh), alive = true, since = "2026-09-02T10:00:00Z"))
+        // 已回答集合：answer 归到前面最近的 question
+        assertEquals(setOf(2L), answeredQuestionSeqs(asked + answer(3) + question(4)))
+        assertEquals(emptySet<Long>(), answeredQuestionSeqs(asked))
     }
 
     // 4. 首条非 user 的消息归入 user==null 首轮

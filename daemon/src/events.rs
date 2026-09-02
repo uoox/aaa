@@ -57,10 +57,6 @@ impl EventHub {
     pub fn inbox_changed(&self, path: &str) {
         self.send(&serde_json::json!({"t": "inbox_changed", "path": path}));
     }
-
-    pub fn session_stalled(&self, id: &str, quiet_s: u64) {
-        self.send(&serde_json::json!({"t": "session_stalled", "id": id, "quiet_s": quiet_s}));
-    }
 }
 
 #[cfg(test)]

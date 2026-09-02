@@ -126,6 +126,18 @@ class DaemonClient(
     suspend fun messages(id: String, after: Long = 0, limit: Int = 200): MessagesResponse =
         json.decodeFromString(get("/sessions/$id/messages?after=$after&limit=$limit"))
 
+    suspend fun answer(sessionId: String, answers: List<AnswerItem>) {
+        val body = buildJsonObject {
+            put("answers", kotlinx.serialization.json.JsonArray(answers.map { a ->
+                buildJsonObject {
+                    put("selected", kotlinx.serialization.json.JsonArray(a.selected.map { kotlinx.serialization.json.JsonPrimitive(it) }))
+                    put("other", a.other?.let { kotlinx.serialization.json.JsonPrimitive(it) } ?: kotlinx.serialization.json.JsonNull)
+                }
+            }))
+        }
+        post("/sessions/$sessionId/answer", body.toString())
+    }
+
     suspend fun diff(id: String): DiffResponse = json.decodeFromString(get("/sessions/$id/diff"))
 
     suspend fun rollback(id: String, force: Boolean) {

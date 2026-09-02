@@ -24,7 +24,6 @@ use crate::namer::Namer;
 use crate::paths::Paths;
 use crate::pool::{SessionPool, SpawnSpec, State as SState};
 use crate::registry::Registry;
-use crate::statemachine::Question;
 use crate::stores;
 
 pub struct App {
@@ -91,6 +90,9 @@ impl ApiError {
     pub fn conflict(msg: impl Into<String>) -> Self {
         Self { status: StatusCode::CONFLICT, code: "conflict", message: msg.into() }
     }
+    pub fn bad_request(msg: impl Into<String>) -> Self {
+        Self { status: StatusCode::BAD_REQUEST, code: "bad_request", message: msg.into() }
+    }
     pub fn agent_unknown(agent: &str) -> Self {
         Self { status: StatusCode::BAD_REQUEST, code: "agent_unknown", message: format!("unknown agent: {agent}") }
     }
@@ -147,14 +149,7 @@ async fn auth_mw(
     req: Request,
     next: Next,
 ) -> Response {
-    let path = req.uri().path();
-    if path == "/api/v1/hooks/claude" {
-        // localhost-only, token-free (Claude Code hook curl)
-        if addr.ip().is_loopback() {
-            return next.run(req).await;
-        }
-        return ApiError::unauthorized().into_response();
-    }
+    let _ = addr; // kept for future per-peer policy; every route needs the token now
     let header = req
         .headers()
         .get(header::AUTHORIZATION)
@@ -660,6 +655,46 @@ async fn session_input(
     Ok(Json(json!({"ok": true})))
 }
 
+#[derive(Deserialize)]
+struct AnswerBody {
+    answers: Vec<crate::answer::Answer>,
+}
+
+/// Answer the AskUserQuestion form the session is waiting on. The client
+/// sends choices (option indexes / free text per question); the daemon
+/// turns them into the dialog's keystrokes and confirms the dialog closed.
+async fn session_answer(
+    State(app): State<SharedApp>,
+    UrlPath(id): UrlPath<String>,
+    Json(body): Json<AnswerBody>,
+) -> ApiResult<Json<Value>> {
+    let sess = get_session(&app, &id)?;
+    if sess.state() == SState::Exited {
+        return Err(ApiError::conflict("session already exited"));
+    }
+    let (agent, since) = {
+        let meta = sess.meta.lock().unwrap();
+        (
+            meta.agent.clone(),
+            meta.created_at.to_rfc3339_opts(SecondsFormat::Millis, true),
+        )
+    };
+    if agent != "claude" {
+        return Err(ApiError::conflict("only claude sessions carry structured questions"));
+    }
+    let spec = {
+        let store = sess.msgs.lock().unwrap();
+        store
+            .pending_question(Some(&since))
+            .and_then(|m| m.question.clone())
+            .ok_or_else(|| ApiError::conflict("no question is waiting for an answer"))?
+    };
+    crate::answer::validate(&spec, &body.answers).map_err(ApiError::bad_request)?;
+    let steps = crate::answer::plan(&spec, &body.answers);
+    crate::answer::drive(&sess, steps).await.map_err(ApiError::conflict)?;
+    Ok(Json(json!({"ok": true})))
+}
+
 async fn session_kill(
     State(app): State<SharedApp>,
     UrlPath(id): UrlPath<String>,
@@ -926,67 +961,6 @@ async fn config_put(
         "port": cfg.port,
         "note": "daemon 将在 1 秒内自动重启，客户端会自动重连"
     })))
-}
-
-async fn hooks_claude(
-    State(app): State<SharedApp>,
-    Json(body): Json<Value>,
-) -> Json<Value> {
-    let event = body
-        .get("hook_event_name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let cwd = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
-    let message = body.get("message").and_then(|v| v.as_str()).unwrap_or("");
-    if cwd.is_empty() {
-        return Json(json!({"ok": false}));
-    }
-    let cwd_canon = stores::realpath(cwd);
-    let mut matched = 0;
-    for sess in app.pool.all() {
-        let is_match = {
-            let meta = sess.meta.lock().unwrap();
-            meta.agent == "claude"
-                && meta.state != SState::Exited
-                && (meta.project_path == cwd || meta.project_path == cwd_canon)
-        };
-        if !is_match {
-            continue;
-        }
-        matched += 1;
-        match event {
-            "Notification" => {
-                let question = (!message.is_empty()).then(|| Question {
-                    text: message.to_string(),
-                    options: vec![],
-                });
-                {
-                    let mut meta = sess.meta.lock().unwrap();
-                    meta.state = SState::Waiting;
-                    meta.hook_waiting = true;
-                    meta.question = question.clone();
-                    meta.needs_name = true;
-                }
-                sess.mark_dirty();
-                // inbox auto-feed + deduplicated waiting push (v1.1)
-                crate::waiting::on_waiting(&app, Arc::clone(&sess), question).await;
-            }
-            "Stop" | "SubagentStop" => {
-                let mut meta = sess.meta.lock().unwrap();
-                // reset the silence timer; heuristics take over from here
-                meta.last_output_at = Utc::now();
-                meta.last_output_inst = Some(Instant::now());
-                meta.state = SState::Running;
-                meta.hook_waiting = false;
-                meta.question = None;
-                meta.needs_name = true;
-                drop(meta);
-                sess.mark_dirty();
-            }
-            _ => {}
-        }
-    }
-    Json(json!({"ok": true, "matched": matched}))
 }
 
 // ---------- v1.1: messages / checkpoint / inbox / upload ----------
@@ -1348,6 +1322,7 @@ pub fn router(app: SharedApp) -> Router {
         .route("/api/v1/sessions", get(sessions_list).post(sessions_create))
         .route("/api/v1/sessions/{id}", delete(session_delete))
         .route("/api/v1/sessions/{id}/input", post(session_input))
+        .route("/api/v1/sessions/{id}/answer", post(session_answer))
         .route("/api/v1/sessions/{id}/kill", post(session_kill))
         .route("/api/v1/sessions/{id}/rename", post(session_rename))
         .route("/api/v1/sessions/{id}/ports", get(session_ports))
@@ -1367,7 +1342,6 @@ pub fn router(app: SharedApp) -> Router {
         .route("/api/v1/mac/permissions/request", post(mac_permissions_request))
         .route("/api/v1/pair", get(pair_handler))
         .route("/api/v1/config", get(config_get).put(config_put))
-        .route("/api/v1/hooks/claude", post(hooks_claude))
         .layer(middleware::from_fn_with_state(Arc::clone(&app), auth_mw))
         .with_state(app)
 }

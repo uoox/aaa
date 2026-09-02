@@ -95,9 +95,7 @@ fun SettingsScreen(store: AppStore, nav: NavHostController) {
         // ---------- 通知 ----------
         GroupTitle("通知")
         Group {
-            ToggleRow("agent 等待输入时推送", settings.notifyWaiting) { scope.launch { store.settings.setNotifyWaiting(it) } }
-            ToggleRow("任务完成时推送", settings.notifyExited) { scope.launch { store.settings.setNotifyExited(it) } }
-            ToggleRow("会话疑似空转时推送", settings.notifyStalled) { scope.launch { store.settings.setNotifyStalled(it) } }
+            ToggleRow("任务完成时通知", settings.notifyDone) { scope.launch { store.settings.setNotifyDone(it) } }
             ToggleRow("后台常驻（前台服务维持连接）", settings.serviceEnabled) { on ->
                 scope.launch { store.settings.setServiceEnabled(on) }
                 if (on) NotificationService.start(context) else NotificationService.stop(context)

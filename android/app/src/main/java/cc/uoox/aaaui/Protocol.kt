@@ -13,9 +13,6 @@ import java.net.URLDecoder
 
 // ---------- models (PROTOCOL.md v1 + v1.1) ----------
 
-@Serializable data class Question(val text: String, val options: List<Option> = emptyList())
-@Serializable data class Option(val key: String, val label: String)
-
 @Serializable data class Session(
     val id: String,
     val title: String = "",
@@ -23,7 +20,7 @@ import java.net.URLDecoder
     val project_name: String = "",
     val agent: String = "",
     val state: String = "",
-    val question: Question? = null,
+    val asking: Boolean = false,
     val preview: String = "",
     val rows: Int = 24,
     val cols: Int = 80,
@@ -51,6 +48,14 @@ import java.net.URLDecoder
 
 // v1.1 messages
 @Serializable data class ToolInfo(val name: String = "", val summary: String = "", val status: String = "")
+@Serializable data class QOption(val label: String, val description: String = "")
+@Serializable data class QuestionItem(
+    val header: String = "",
+    val question: String,
+    val options: List<QOption> = emptyList(),
+    val multi_select: Boolean = false,
+)
+@Serializable data class QuestionSpec(val questions: List<QuestionItem> = emptyList())
 @Serializable data class ChatMessage(
     val seq: Long,
     val ts: String = "",
@@ -58,7 +63,9 @@ import java.net.URLDecoder
     val kind: String = "",
     val text: String = "",
     val tool: ToolInfo? = null,
+    val question: QuestionSpec? = null,
 )
+@Serializable data class AnswerItem(val selected: List<Int> = emptyList(), val other: String? = null)
 @Serializable data class MessagesResponse(
     val supported: Boolean = false,
     val source: String = "none",
@@ -123,7 +130,6 @@ sealed class EventFrame {
     data class HealthUpdate(val ssdMounted: Boolean) : EventFrame()
     data class MessagesChanged(val id: String, val lastSeq: Long) : EventFrame()
     data class InboxChanged(val path: String) : EventFrame()
-    data class SessionStalled(val id: String, val quietS: Long) : EventFrame()
     data class Unknown(val type: String) : EventFrame()
 
     companion object {
@@ -139,7 +145,6 @@ sealed class EventFrame {
                     "health" -> HealthUpdate(obj["ssd_mounted"]?.jsonPrimitive?.booleanOrNull ?: true)
                     "messages_changed" -> MessagesChanged(obj["id"]!!.jsonPrimitive.content, obj["last_seq"]?.jsonPrimitive?.longOrNull ?: 0)
                     "inbox_changed" -> InboxChanged(obj["path"]?.jsonPrimitive?.contentOrNull ?: "")
-                    "session_stalled" -> SessionStalled(obj["id"]!!.jsonPrimitive.content, obj["quiet_s"]?.jsonPrimitive?.longOrNull ?: 0)
                     else -> Unknown(t)
                 }
             } catch (_: Exception) { Unknown(t) }
@@ -149,51 +154,14 @@ sealed class EventFrame {
 
 // ---------- notification filtering (client-side, PROTOCOL v1.1 通知细化) ----------
 
-enum class NotifyKind { WAITING, EXITED, STALLED }
-
 data class NotifySettings(
-    val waitingEnabled: Boolean = true,
-    val exitedEnabled: Boolean = true,
-    val stalledEnabled: Boolean = true,
+    val doneEnabled: Boolean = true,
     val mutedProjects: Set<String> = emptySet(),
 )
 
 object NotifyFilter {
-    fun shouldNotify(kind: NotifyKind, projectPath: String, settings: NotifySettings): Boolean {
+    fun shouldNotify(projectPath: String, settings: NotifySettings): Boolean {
         if (projectPath in settings.mutedProjects) return false
-        return when (kind) {
-            NotifyKind.WAITING -> settings.waitingEnabled
-            NotifyKind.EXITED -> settings.exitedEnabled
-            NotifyKind.STALLED -> settings.stalledEnabled
-        }
-    }
-}
-
-/**
- * Waiting-notification dedup: same session + same question notifies once, and a session
- * cools down for [cooldownMs] between waiting notifications (mirrors daemon-side ntfy dedup).
- */
-class WaitingDeduper(private val cooldownMs: Long = 5 * 60 * 1000) {
-    private data class Entry(val questionKey: String, val at: Long)
-    private val last = HashMap<String, Entry>()
-
-    fun offer(sessionId: String, questionText: String?, now: Long = System.currentTimeMillis()): Boolean {
-        val key = questionText.orEmpty()
-        val prev = last[sessionId]
-        if (prev != null) {
-            if (prev.questionKey == key) return false
-            if (now - prev.at < cooldownMs) return false
-        }
-        last[sessionId] = Entry(key, now)
-        return true
-    }
-
-    fun clear(sessionId: String) { last.remove(sessionId) }
-
-    /** 会话回到 running = 上一个 waiting 已被应答：清掉 question 键（下一轮
-     *  waiting——哪怕又是空 key 的 composer——重新可通知），保留时间戳走冷却。 */
-    fun answered(sessionId: String) {
-        val prev = last[sessionId] ?: return
-        last[sessionId] = Entry(" answered", prev.at)
+        return settings.doneEnabled
     }
 }

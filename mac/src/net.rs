@@ -220,6 +220,19 @@ impl Net {
             serde_json::json!({"text": text, "enter": enter}),
         )
     }
+    /// 回答当前待答的 AskUserQuestion 表单：一项对应一题，顺序同 `question.questions`。
+    /// daemon 负责翻译成对话框按键并确认对话框关闭。409（`ApiFailure::status`）=
+    /// 没有待答问题 / 非 claude 会话 / 对话框没吃下——调用方提示用户去终端收尾。
+    pub fn session_answer(
+        &self,
+        id: &str,
+        answers: Vec<AnswerItem>,
+    ) -> impl Future<Output = Result<serde_json::Value>> + use<> {
+        self.post_json(
+            &format!("/sessions/{id}/answer"),
+            serde_json::json!({ "answers": answers }),
+        )
+    }
     pub fn kill_session(&self, id: &str) -> impl Future<Output = Result<serde_json::Value>> + use<> {
         self.post_json(&format!("/sessions/{id}/kill"), serde_json::json!({}))
     }
@@ -408,6 +421,34 @@ impl Net {
     }
 }
 
+/// REST 非 2xx。Display 仍是 `code: message`（toast 文案不变），但把 HTTP 状态码
+/// 一并带着：回答表单要区分 409（没有待答问题 / 对话框没吃下 → 让用户去终端收尾）
+/// 与其它失败，在字符串里找 "409" 不可靠。`anyhow::Error::downcast_ref` 取回。
+#[derive(Debug, Clone)]
+pub struct ApiFailure {
+    pub status: u16,
+    pub code: String,
+    pub message: String,
+}
+
+impl std::fmt::Display for ApiFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match (self.code.is_empty(), self.message.is_empty()) {
+            (true, true) => write!(f, "HTTP {}", self.status),
+            (true, false) => f.write_str(&self.message),
+            (false, true) => write!(f, "{} (HTTP {})", self.code, self.status),
+            (false, false) => write!(f, "{}: {}", self.code, self.message),
+        }
+    }
+}
+
+impl std::error::Error for ApiFailure {}
+
+/// 从请求错误里取 HTTP 状态码；不是 REST 层失败（没连上、超时、解析错）就 None
+pub fn http_status(e: &anyhow::Error) -> Option<u16> {
+    e.downcast_ref::<ApiFailure>().map(|f| f.status)
+}
+
 async fn do_request(
     http: reqwest::Client,
     ep: Option<Endpoint>,
@@ -428,10 +469,16 @@ async fn do_request(
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        if let Ok(e) = serde_json::from_str::<ApiError>(&text) {
-            return Err(anyhow!("{}: {}", e.error.code, e.error.message));
+        // daemon 的 `{"error":{code,message}}`；非 JSON 体（代理、v1 daemon 404）就只剩状态码
+        let (code, message) = serde_json::from_str::<ApiError>(&text)
+            .map(|e| (e.error.code, e.error.message))
+            .unwrap_or_default();
+        return Err(ApiFailure {
+            status: status.as_u16(),
+            code,
+            message,
         }
-        return Err(anyhow!("HTTP {}", status.as_u16()));
+        .into());
     }
     if text.trim().is_empty() {
         return Ok(serde_json::Value::Null);
@@ -530,6 +577,7 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("ssd_unmounted"), "错误未带 code: {msg}");
         assert!(msg.contains("SSD 未挂载"), "错误未带 message: {msg}");
+        assert_eq!(http_status(&err), Some(503), "状态码要随错误一起回来");
         let req = req_rx.recv().unwrap();
         assert!(req.starts_with("POST /api/v1/sessions HTTP/1.1"));
         let body_start = req.find("\r\n\r\n").unwrap() + 4;
@@ -541,7 +589,7 @@ mod tests {
 
     #[test]
     fn rest_input_options_key() {
-        // waiting 会话快捷作答：POST input {"text":"1","enter":true}
+        // composer 发送：POST input {"text":"1","enter":true}
         let (port, req_rx) = one_shot_server("HTTP/1.1 200 OK", "{}");
         let net = test_net(port);
         futures::executor::block_on(net.session_input("s_1", "1".into(), true)).unwrap();
@@ -551,6 +599,55 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&req[body_start..]).unwrap();
         assert_eq!(v["text"], "1");
         assert_eq!(v["enter"], true);
+    }
+
+    #[test]
+    fn rest_answer_body_and_409_status() {
+        // 对话框没吃下 → daemon 409；message 与状态码都要能到调用方手里
+        let (port, req_rx) = one_shot_server(
+            "HTTP/1.1 409 Conflict",
+            r#"{"error":{"code":"conflict","message":"the dialog did not take the answer; finish it in the terminal"}}"#,
+        );
+        let net = test_net(port);
+        let err = futures::executor::block_on(net.session_answer(
+            "s_1",
+            vec![
+                AnswerItem {
+                    selected: vec![0, 2],
+                    other: None,
+                },
+                AnswerItem {
+                    selected: vec![],
+                    other: Some("Zed".into()),
+                },
+            ],
+        ))
+        .unwrap_err();
+        assert_eq!(http_status(&err), Some(409), "{err}");
+        assert!(err.to_string().contains("finish it in the terminal"), "{err}");
+        let f = err.downcast_ref::<ApiFailure>().unwrap();
+        assert_eq!(f.code, "conflict");
+        let req = req_rx.recv().unwrap();
+        assert!(
+            req.starts_with("POST /api/v1/sessions/s_1/answer HTTP/1.1"),
+            "req: {req}"
+        );
+        let body_start = req.find("\r\n\r\n").unwrap() + 4;
+        let v: serde_json::Value = serde_json::from_str(&req[body_start..]).unwrap();
+        assert_eq!(v["answers"][0]["selected"], serde_json::json!([0, 2]));
+        assert!(v["answers"][0].get("other").is_none(), "other 为空时不发字段");
+        assert_eq!(v["answers"][1]["selected"], serde_json::json!([]));
+        assert_eq!(v["answers"][1]["other"], "Zed");
+    }
+
+    #[test]
+    fn plain_http_error_has_status_only() {
+        // 非 JSON 错误体（v1 daemon 的 404）：Display 退回 "HTTP 404"，状态码照样可取
+        let (port, _rx) = one_shot_server("HTTP/1.1 404 Not Found", "not found");
+        let net = test_net(port);
+        let err = futures::executor::block_on(net.health()).unwrap_err();
+        assert_eq!(err.to_string(), "HTTP 404");
+        assert_eq!(http_status(&err), Some(404));
     }
 
     #[test]

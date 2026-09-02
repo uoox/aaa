@@ -21,7 +21,7 @@ Mac 上会话常驻不掉线，手机上两步答一句，终端里 `aaa` 依然
 
 | 目录 | 内容 |
 |---|---|
-| `daemon/` | Rust 常驻服务：PTY 池 + 服务端 VT + 全套 API + aaa 逻辑移植 + TCC 权限 + checkpoint/消息流/收件箱/watchdog |
+| `daemon/` | Rust 常驻服务：PTY 池 + 服务端 VT + 全套 API + aaa 逻辑移植 + TCC 权限 + checkpoint/消息流/收件箱/表单作答 |
 | `cli/` | `aaa` 终端客户端：一个可移植 bash 脚本（bash ≥ 3.2 + curl + python3 标准库），`curl` 下来即用，不用编译 |
 | `mac/` | gpui 原生客户端（tty7 路线，alacritty_terminal + 自绘渲染） |
 | `android/` | Kotlin/Compose 原生客户端（vendor Termux 终端引擎，无 WebView） |
@@ -50,14 +50,10 @@ open "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
 # 4. 一键申请全部 macOS 权限（弹窗在 Mac 上逐个允许；授权归到 daemon，所有 agent 子进程共享，
 #    此后手机远程操作不再被权限弹窗卡死）。也可以在 `aaa` 菜单里的「macOS 权限」进
 aaa perms all                     # 或 aaa perms 只看状态
-
-# 5.（可选）Claude 精确「等待输入」信号：原子/幂等合并 Notification/Stop hooks
-aaa-daemon install-claude-hooks
 ```
 
 config.toml 要点：`port=2730`（=0xAAA）、`project_root=/Volumes/SSD/project`、`namer`（haiku 会话命名）、
-`[checkpoint] enabled/auto_init_git/interval_minutes/auto_init_max_mb`、`[watchdog] stall_minutes/auto_kill`、
-`[ntfy] url/topic`（离线推送兜底）。
+`[checkpoint] enabled/auto_init_git/interval_minutes/auto_init_max_mb`。旧的 `[watchdog]`/`[ntfy]` 段已废弃（留着无害）。
 
 > **`auto_init_git` 默认 false**：项目常常只是一个任务目录（笔记、抓取、一堆 yml），
 > 替你 `git init` 不是 daemon 该做的事。已经是 git 仓库的项目照常有检查点/diff/回滚；
@@ -110,7 +106,7 @@ aaa open <目标> [--fresh]  进入项目（有活会话就接回，否则 resum
 aaa attach <目标>         接入会话（Ctrl-] 脱离，会话继续跑）
 aaa say <目标> <文本…>     写一句进会话并回车（回答提问用）
 aaa kill / rm / rename <目标>
-aaa wait [--json]        只列等待输入且带提问的会话（脚本/通知用）
+aaa wait [--json]        只列有表单等你回答的会话（asking）
 aaa status [--json]      daemon 状态       aaa perms [all|<id…>]  macOS 权限
 ```
 
@@ -136,8 +132,8 @@ packaging/bundle.sh install    # → /Applications，之后 Spotlight 直接启�
 > 签名是 ad-hoc（本机无开发者证书），**TCC 授权绑定签名、每次重新构建即失效**——这正是权限由 daemon
 > 而非客户端持有的原因。
 
-左侧会话栏（状态点：绿=运行 黄=等待输入 灰=空闲 红=退出，行内 × 关闭，栏宽可拖）、
-终端（选区/选中复制/右键直接粘贴/Ctrl-V·Cmd-V/链接点击/CJK）、waiting 选项胶囊直接点、项目表格、系统通知、设置页出配对二维码。
+左侧会话栏（执行中 / 待回复 / 已完成 三组，行内 × 关闭，栏宽可拖）、
+终端（选区/选中复制/右键直接粘贴/Ctrl-V·Cmd-V/链接点击/CJK）、消息流里原生表单作答（单选/复选/其它自填）、项目表格、「完成」系统通知、设置页出配对二维码。
 
 ## Android 客户端
 
@@ -151,13 +147,14 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 配对：扫 Mac 设置页二维码，或手输 `host:2730` + token（多 host 依次试连，tailscale 优先）。
 主视图为**消息流**（claude 完整解析；不支持的 agent 自动回落终端），右上可切终端，设置里改默认 UI。
-通知：等待输入 = 高优先级 + **通知栏内联回复** + 选项按钮；完成/空转分级；按项目静音。
-其余：diff 卡片 + 一键回滚、任务收件箱、系统分享 → 上传进项目 `_inbox/`、快捷短语 chips、前台服务保活、
+通知只有一种：agent 这轮跑完（或退出）时「完成」一条，点开直达会话；按项目静音。
+agent 的提问在消息流里是**原生表单**：单选、复选、「其它」自填，提交由 daemon 翻译成对话框按键。
+其余：diff 卡片 + 一键回滚、任务收件箱、系统分享 → 上传进项目 `_inbox/`、前台服务保活、
 折叠屏/大屏展开后底栏收成左侧导航 rail（内容仍单栏）。
 
 ## 日常动线
 
-1. **手机答一句**：推送到达 → 通知栏直接点选项/内联回复（零步进 App）。
+1. **手机答一句**：「完成」通知到达 → 点开会话 → 表单原生点选提交，或 composer 说下一步。
 2. **无缝接力**：终端 `aaa` 开的会话 = Mac App 里的同一个 = 手机上的同一个 PTY。
 3. **开新活**：`aaa new 任务名` 或菜单里 New \<agent\>；只建目录 + 开会话，不碰 git。
 4. **项目治理**：换 agent / 批量删除（purge 语义与旧 CLI 的 d 键一致）。
@@ -166,7 +163,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 - 活会话不跨 daemon 重启（exited 回放会恢复）；重启 daemon 前先收尾要紧会话。
 - codex/pi 消息流解析基于 2026-08 存储格式样本，上游变更需跟进；reasonix/agy 回落终端。
-- Android 深度 Doze 下 events WS 可能被限流，离线兜底走 ntfy。
+- Android 深度 Doze 下 events WS 可能被限流，「完成」通知可能迟到（没有服务端推送兜底）。
 - `refs/aaa-ckpt` 只增不减，尚无 GC。
 
 ## 开发

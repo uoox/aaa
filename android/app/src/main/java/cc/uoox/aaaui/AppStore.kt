@@ -29,11 +29,7 @@ sealed class ConnState {
 }
 
 sealed class NotifyEvent {
-    data class Waiting(val session: Session) : NotifyEvent()
-    data class Exited(val session: Session) : NotifyEvent()
-    /** waiting → running：上一问已被应答，通知去重键要复位 */
-    data class Answered(val id: String) : NotifyEvent()
-    data class Stalled(val session: Session?, val id: String, val quietS: Long) : NotifyEvent()
+    data class Done(val session: Session, val exited: Boolean) : NotifyEvent()
 }
 
 /** Process-wide repository: settings, connection loop, /events WS → StateFlows. */
@@ -60,7 +56,7 @@ class AppStore private constructor(context: Context) {
     private val _health = MutableStateFlow<Health?>(null)
     val health: StateFlow<Health?> = _health.asStateFlow()
 
-    /** Session-state transition notifications (waiting / exited / stalled). */
+    /** Session-state transition notifications (running → waiting / exited). */
     private val _notifyEvents = MutableSharedFlow<NotifyEvent>(extraBufferCapacity = 32)
     val notifyEvents = _notifyEvents.asSharedFlow()
     /** Raw v1.1 frames screens care about (messages_changed / inbox_changed). */
@@ -185,11 +181,10 @@ class AppStore private constructor(context: Context) {
                 val s = frame.session
                 val prev = synchronized(prevStates) { val p = prevStates[s.id]; prevStates[s.id] = s.state; p }
                 _sessions.value = _sessions.value.filter { it.id != s.id } + s
-                if (s.state == "waiting" && prev != "waiting") _notifyEvents.tryEmit(NotifyEvent.Waiting(s))
-                if (s.state == "running" && prev != "running") _notifyEvents.tryEmit(NotifyEvent.Answered(s.id))
+                if (s.state == "waiting" && prev == "running") _notifyEvents.tryEmit(NotifyEvent.Done(s, exited = false))
                 // 本机手动终止的会话不弹「会话结束」——自己动的手不用报告
                 if (s.state == "exited" && prev == "running" && !userKilled.remove(s.id)) {
-                    _notifyEvents.tryEmit(NotifyEvent.Exited(s))
+                    _notifyEvents.tryEmit(NotifyEvent.Done(s, exited = true))
                 }
             }
             is EventFrame.SessionRemoved -> {
@@ -200,10 +195,6 @@ class AppStore private constructor(context: Context) {
             is EventFrame.ProjectsChanged -> scope.launch { refreshProjects() }
             is EventFrame.HealthUpdate -> {
                 _health.value = (_health.value ?: Health()).copy(ssd_mounted = frame.ssdMounted)
-            }
-            is EventFrame.SessionStalled -> {
-                val session = _sessions.value.find { it.id == frame.id }
-                _notifyEvents.tryEmit(NotifyEvent.Stalled(session, frame.id, frame.quietS))
             }
             is EventFrame.MessagesChanged, is EventFrame.InboxChanged -> _frames.tryEmit(frame)
             is EventFrame.Unknown -> { }

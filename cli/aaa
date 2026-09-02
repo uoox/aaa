@@ -9,7 +9,7 @@
 # WebSocket attach 客户端放在下面同一个文件里的 python 源码里（$PY_SRC），
 # 每条命令只起一次 python。
 
-VERSION="1.1.0"
+VERSION="1.2.0"
 
 HELP="aaa — AAA daemon 的命令行前端
 
@@ -23,7 +23,7 @@ HELP="aaa — AAA daemon 的命令行前端
   aaa kill <目标>           结束会话
   aaa rm <目标>             删除会话记录
   aaa rename <目标> <标题>   重命名会话
-  aaa wait [--json]         只列等待输入的会话（脚本/通知用）
+  aaa wait [--json]         只列有表单等你回答的会话 (asking)
   aaa status [--json]       daemon 状态
   aaa perms [--json]        macOS 权限状态
   aaa perms all | <id…>     申请权限（弹窗出现在 Mac 上）
@@ -217,12 +217,9 @@ def S(o, k, d=""):
     return d if v is None else v
 
 def is_live(s): return S(s, "state") != "exited"
-def has_question(s): return isinstance(s.get("question"), dict)
+def is_asking(s): return bool(s.get("asking"))
 
 def headline(s):
-    q = s.get("question")
-    if isinstance(q, dict) and q.get("text"):
-        return q["text"]
     return S(s, "title")
 
 GROUP_NAMES = ["执行中", "待回复", "已完成"]
@@ -230,8 +227,8 @@ GROUP_COLORS = [GREEN, YELLOW, GREY]
 
 def group_of(s):
     st = S(s, "state")
+    if is_asking(s): return 1
     if st == "running": return 0
-    if st == "waiting" and has_question(s): return 1
     return 2
 
 def sort_for_listing(sessions):
@@ -245,8 +242,7 @@ def state_color(state):
 def state_label(s):
     st = S(s, "state")
     if st == "running": return "运行中"
-    if st == "waiting": return "等待输入"
-    if st == "idle": return "空闲"
+    if st == "waiting": return "待回复" if is_asking(s) else "等你"
     if st == "exited":
         code = s.get("exit_code")
         return "已退出" if code in (None, 0) else "退出 %s" % code
@@ -335,29 +331,21 @@ def cmd_ps(args):
         out("%s%2d%s %s" % (DIM, i + 1, RESET, project_row(p, max(cols - 4, 0))))
 
 def waiting_only(sessions):
-    return [s for s in sort_for_listing(sessions) if S(s, "state") == "waiting" and has_question(s)]
+    return [s for s in sort_for_listing(sessions) if is_asking(s)]
 
 def cmd_wait(args):
     sessions = waiting_only(load())
     if "--json" in args:
         v = []
         for s in sessions:
-            q = s.get("question") or {}
             v.append({"id": S(s, "id"), "project": S(s, "project_name"), "path": S(s, "project_path"),
-                      "agent": S(s, "agent"), "question": S(q, "text"),
-                      "options": [{"key": S(o, "key"), "label": S(o, "label")}
-                                  for o in (q.get("options") or []) if isinstance(o, dict)]})
+                      "agent": S(s, "agent"), "title": S(s, "title")})
         out(pretty(v)); return
     if not sessions:
-        out(DIM + "没有会话在等你" + RESET); return
+        out(DIM + "没有会话在等你回答" + RESET); return
     for s in sessions:
         out("%s●%s %s%s%s  %s%s%s" % (YELLOW, RESET, BOLD, S(s, "project_name"), RESET, DIM, S(s, "id"), RESET))
-        q = s.get("question") or {}
-        if S(q, "text"):
-            out("   " + S(q, "text"))
-        for o in q.get("options") or []:
-            if isinstance(o, dict):
-                out("   %s%s%s %s" % (CYAN, display_key(S(o, "key")), RESET, S(o, "label")))
+        out("   " + S(s, "title"))
 
 def cmd_status(args):
     host, port = args[0], args[1]
@@ -377,7 +365,7 @@ def cmd_status(args):
     out("%saaa-daemon%s v%s  %s%s:%s%s" % (BOLD, RESET, S(h, "version"), DIM, host, port, RESET))
     out("  项目根   %s %s" % (S(h, "project_root"), note))
     out("  运行时长 %s" % uptime(int(S(h, "uptime_s", 0) or 0)))
-    out("  会话     %d 活跃 · %d 等待输入 · %d 总计" % (live, waiting, len(sessions)))
+    out("  会话     %d 活跃 · %d 待回复 · %d 总计" % (live, waiting, len(sessions)))
     if rs == "denied":
         out("\n%s项目根读不了%s：launchd 起的 daemon 没有可移动卷访问权。\n  "
             "系统设置 → 隐私与安全性 → 完全磁盘访问权限，加入 %s~/.local/bin/aaa-daemon%s，\n  "

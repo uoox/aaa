@@ -53,6 +53,5 @@
             android:name=".NotificationService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
-        <receiver android:name=".ReplyReceiver" android:exported="false" />
     </application>
 </manifest>

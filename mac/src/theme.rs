@@ -28,22 +28,22 @@ pub fn agent_color(agent: &str) -> u32 {
     }
 }
 
-/// 会话状态点颜色：绿=运行中、黄=等待输入、灰=空闲、红=已退出
+/// 会话状态点颜色：绿=运行中、黄=这轮干完了（waiting）、红=已退出
 pub fn state_color(state: &str) -> u32 {
     match state {
         "running" => GREEN,
         "waiting" => AMBER,
-        "idle" => FAINT,
         "exited" => RED,
         _ => FAINT,
     }
 }
 
+/// 状态字，按三态口径：waiting 就是「已完成」（这轮说完了，轮到你）；
+/// 「待回复」不是状态而是 `asking`，由调用方优先盖上去
 pub fn state_label(state: &str) -> &'static str {
     match state {
         "running" => "运行中",
-        "waiting" => "等待输入",
-        "idle" => "空闲",
+        "waiting" => "已完成",
         "exited" => "已退出",
         _ => "未知",
     }
@@ -122,8 +122,8 @@ mod tests {
     fn state_colors() {
         assert_eq!(state_color("running"), GREEN);
         assert_eq!(state_color("waiting"), AMBER);
-        assert_eq!(state_color("idle"), FAINT);
         assert_eq!(state_color("exited"), RED);
+        assert_eq!(state_color("idle"), FAINT, "未知状态一律灰");
     }
 
     #[test]

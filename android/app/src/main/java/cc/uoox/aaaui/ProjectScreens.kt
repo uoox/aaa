@@ -87,8 +87,8 @@ data class ProjectRow(
     val timeIso: String get() = sortKey
 }
 
-/** 用户拍板口径：待回复 = waiting 且弹出了问题/选项；停在输入框的 waiting 不算。 */
-fun Session.needsReply(): Boolean = state == "waiting" && question != null
+/** 用户拍板口径：待回复 = asking，与 state 无关。 */
+fun Session.needsReply(): Boolean = asking
 
 /**
  * 主会话：优先活着的（非 exited），待回复 < 执行中 < 其它，同级按最近输出；
@@ -128,7 +128,9 @@ fun projectStateOf(project: Project, primary: Session?): ProjectState = when {
  * 提示符，没有字母/数字/汉字的行跳过，否则摘要永远是一串横线。
  */
 fun projectSummary(project: Project, primary: Session?, state: ProjectState): String = when (state) {
-    ProjectState.NEEDS_REPLY -> primary?.question?.text?.trim().orEmpty().ifBlank { "等待回复" }
+    ProjectState.NEEDS_REPLY -> primary?.title?.takeIf { it.isNotBlank() }
+        ?: project.session_title?.takeIf { it.isNotBlank() }
+        ?: "等你回答"
     // 不用 preview：它是屏幕末 4 行，TUI 型 agent 那里永远是输入框和底栏（"bypass permissions on…"），
     // 当摘要只会是垃圾。色点 + 分组标题已经说明「执行中」，这行给标题。
     ProjectState.RUNNING -> primary?.title?.takeIf { it.isNotBlank() }

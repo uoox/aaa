@@ -20,7 +20,6 @@ commands:
   service install           写 launchd plist 并 launchctl load
   service uninstall         launchctl unload 并删除 plist
   service status            查看服务状态
-  install-claude-hooks      向 ~/.claude/settings.json 合并 Notification/Stop hook
   perms status              macOS 权限体检 (只读)
   perms request-all         逐项触发授权弹窗 (弹窗出现在 Mac 屏幕上)
 ";
@@ -49,22 +48,6 @@ pub fn main_entry() {
             if let Err(e) = crate::service::status(&paths) {
                 eprintln!("service status failed: {e}");
                 std::process::exit(1);
-            }
-        }
-        ("install-claude-hooks", _) => {
-            let paths = Paths::from_env();
-            match crate::config::load_or_create(&paths.config_path()) {
-                Ok(cfg) => match crate::claude_hooks::install(&paths, cfg.port) {
-                    Ok(msg) => println!("{msg}"),
-                    Err(e) => {
-                        eprintln!("install-claude-hooks failed: {e}");
-                        std::process::exit(1);
-                    }
-                },
-                Err(e) => {
-                    eprintln!("config error: {e}");
-                    std::process::exit(1);
-                }
             }
         }
         ("perms", Some("status")) => crate::perms::cli_status(),
@@ -125,7 +108,6 @@ fn run() {
     let pool = SessionPool::new(PoolCtx {
         hub: hub.clone(),
         sessions_dir: paths.sessions_dir(),
-        ntfy: cfg.ntfy.clone(),
         ckpt_cfg: cfg.checkpoint.clone(),
     });
     pool.restore_persisted();
@@ -149,16 +131,20 @@ fn run() {
         .build()
         .expect("tokio runtime");
     rt.block_on(async move {
-        // state machine tick (1s); waiting transitions feed inbox / dedup-ntfy
+        // state machine tick (1s); a session that just finished its turn
+        // gets the queued inbox (if the structured gate allows)
         {
             let app = Arc::clone(&app);
             tokio::spawn(async move {
                 let mut iv = tokio::time::interval(Duration::from_secs(1));
                 loop {
                     iv.tick().await;
-                    let entered = app.pool.tick_states();
-                    for (sess, question) in entered {
-                        crate::waiting::on_waiting(&app, sess, question).await;
+                    for sess in app.pool.tick_states() {
+                        let app2 = Arc::clone(&app);
+                        let _ = tokio::task::spawn_blocking(move || {
+                            crate::feed::on_waiting(&app2, sess);
+                        })
+                        .await;
                     }
                 }
             });
@@ -186,6 +172,27 @@ fn run() {
                                 crate::messages::poll_session(&app2.paths, sess, &claimed)
                             {
                                 app2.hub.messages_changed(&sess.id, last_seq);
+                            }
+                            // mirror「有问题在等回答」to the session object
+                            // (structured: transcript AskUserQuestion without
+                            // an answer, from this process's lifetime)
+                            let asking = {
+                                let meta = sess.meta.lock().unwrap();
+                                if meta.state == State::Exited {
+                                    false
+                                } else {
+                                    let since = meta
+                                        .created_at
+                                        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+                                    drop(meta);
+                                    sess.msgs.lock().unwrap().pending_question(Some(&since)).is_some()
+                                }
+                            };
+                            let mut meta = sess.meta.lock().unwrap();
+                            if meta.asking != asking {
+                                meta.asking = asking;
+                                drop(meta);
+                                sess.mark_dirty();
                             }
                         }
                     })
@@ -236,59 +243,6 @@ fn run() {
                             );
                         })
                         .await;
-                    }
-                }
-            });
-        }
-        // v1.1 watchdog (30s)
-        {
-            let app = Arc::clone(&app);
-            tokio::spawn(async move {
-                let mut iv = tokio::time::interval(Duration::from_secs(30));
-                loop {
-                    iv.tick().await;
-                    let cfg = &app.cfg.watchdog;
-                    for sess in app.pool.all() {
-                        let (state, agent, silence_s, already, title) = {
-                            let meta = sess.meta.lock().unwrap();
-                            (
-                                meta.state,
-                                meta.agent.clone(),
-                                meta.last_output_inst
-                                    .map(|t| t.elapsed().as_secs())
-                                    .unwrap_or(0),
-                                meta.stalled_notified,
-                                meta.title.clone(),
-                            )
-                        };
-                        let alive = sess.live.lock().unwrap().is_some();
-                        if !SessionPool::watchdog_due(
-                            state,
-                            &agent,
-                            alive,
-                            silence_s,
-                            cfg.stall_minutes,
-                            already,
-                        ) {
-                            continue;
-                        }
-                        sess.meta.lock().unwrap().stalled_notified = true;
-                        app.hub.session_stalled(&sess.id, silence_s);
-                        if let Some(ntfy) = app.cfg.ntfy.clone() {
-                            let body = format!("{} 分钟无输出", silence_s / 60);
-                            let title = format!("疑似卡死: {title}");
-                            tokio::task::spawn_blocking(move || {
-                                crate::ntfy::push_blocking(
-                                    &ntfy,
-                                    &title,
-                                    &body,
-                                    crate::ntfy::PRIO_HIGH,
-                                );
-                            });
-                        }
-                        if cfg.auto_kill {
-                            sess.kill().await;
-                        }
                     }
                 }
             });

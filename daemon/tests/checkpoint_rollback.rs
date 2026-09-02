@@ -207,23 +207,20 @@ fn rollback_restores_worktree_and_nothing_else() {
 const TOKEN: &str = "aaa_tk_router_test";
 
 fn build_app(root: &Path, home: &Path) -> aaa_daemon::api::SharedApp {
-    use aaa_daemon::config::{CheckpointConfig, Config, WatchdogConfig};
+    use aaa_daemon::config::{CheckpointConfig, Config};
     let cfg = Config {
         port: 0,
         token: TOKEN.to_string(),
         project_root: root.to_path_buf(),
         namer: false,
         remote_control_name: true,
-        ntfy: None,
         checkpoint: CheckpointConfig::default(),
-        watchdog: WatchdogConfig::default(),
     };
     let paths = aaa_daemon::paths::Paths::new(home);
     let hub = aaa_daemon::events::EventHub::new();
     let pool = aaa_daemon::pool::SessionPool::new(aaa_daemon::pool::PoolCtx {
         hub: hub.clone(),
         sessions_dir: paths.sessions_dir(),
-        ntfy: None,
         ckpt_cfg: cfg.checkpoint.clone(),
     });
     let inbox = aaa_daemon::inbox::Inbox::load(&paths.state_dir());
@@ -252,7 +249,6 @@ fn synthetic_session(app: &aaa_daemon::api::SharedApp, proj: &Path, start_ref: O
         project_name: "proj".into(),
         agent: "claude".into(),
         state: State::Exited,
-        question: None,
         rows: 40,
         cols: 120,
         pid: None,
@@ -264,15 +260,11 @@ fn synthetic_session(app: &aaa_daemon::api::SharedApp, proj: &Path, start_ref: O
         feed_inbox: true,
         ckpt_start_ref: start_ref.clone(),
         last_output_inst: None,
-        hook_waiting: false,
         needs_name: false,
         inbox_fed: false,
-        stalled_notified: false,
-        last_notified_question: None,
-        last_notify_at: None,
         screen_hash: 0,
         screen_changed_inst: None,
-        idle_recheck: 0,
+        asking: false,
         user_killed: false,
     };
     let (tx, _) = tokio::sync::broadcast::channel(8);

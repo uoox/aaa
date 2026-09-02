@@ -42,6 +42,35 @@ fn page_after_close(current: &Page, closed: &str, open_order: &[String]) -> Page
         .unwrap_or(Page::Home)
 }
 
+/// 侧栏三态口径（PROTOCOL「会话模型」，三端一致）：待回复 = asking；
+/// 执行中 = running 且不在问；已完成 = 其余（waiting、exited）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Bucket {
+    Asking,
+    Running,
+    Done,
+}
+
+fn bucket_of(s: &Session) -> Bucket {
+    if s.asking {
+        Bucket::Asking
+    } else if s.state == SessionState::Running {
+        Bucket::Running
+    } else {
+        Bucket::Done
+    }
+}
+
+/// 列表排序键：在问的排最前，其次按状态（running < waiting < exited），
+/// 同态里最近有输出的在前。
+fn sort_key(s: &Session) -> (bool, u8, std::cmp::Reverse<&str>) {
+    (
+        !s.asking,
+        s.state.sort_weight(),
+        std::cmp::Reverse(s.last_output_at.as_str()),
+    )
+}
+
 /// Ctrl-Tab：在存活会话里循环。`alive` 按侧栏顺序；当前不在列表里（主页 /
 /// 设置 / 已退出）就回到第一个。
 fn next_session_id(alive: &[String], current: Option<&str>) -> Option<String> {
@@ -109,14 +138,8 @@ pub struct RootView {
     msg_views: HashMap<String, Entity<MessagesView>>,
     msg_mode: HashSet<String>,
 
-    // v1.1 watchdog：id → quiet_s
-    pub stalled: HashMap<String, u64>,
     // 会话监听端口缓存（Web 预览）
     pub ports_cache: HashMap<String, Vec<PortEntry>>,
-    // 通知去重：同会话同 question 不重复；回到 Running 时清键（下一轮
-    // waiting 重新可通知），5 分钟冷却兜底防 TUI 闪烁刷屏
-    last_notified_question: HashMap<String, String>,
-    last_notify_at: HashMap<String, std::time::Instant>,
     /// 本机手动终止的会话：exited 不弹「已退出」（自己动的手）
     pub user_killed: HashSet<String>,
 
@@ -183,10 +206,7 @@ impl RootView {
             pending_focus: None,
             msg_views: HashMap::new(),
             msg_mode: HashSet::new(),
-            stalled: HashMap::new(),
             ports_cache: HashMap::new(),
-            last_notified_question: HashMap::new(),
-            last_notify_at: HashMap::new(),
             user_killed: HashSet::new(),
             sidebar_w: UiState::load().sidebar_w,
             sidebar_drag: None,
@@ -249,17 +269,10 @@ impl RootView {
             DaemonEvent::Snapshot { sessions } => {
                 self.sessions = sessions;
                 self.sort_sessions();
-                // 快照不带 stalled 状态：仅保留仍在 running 的标记
-                self.stalled.retain(|id, _| {
-                    self.sessions
-                        .iter()
-                        .any(|s| &s.id == id && s.state == SessionState::Running)
-                });
+                self.sync_msg_alive_all(cx);
                 cx.notify();
             }
             DaemonEvent::Session { session } => {
-                // 任何会话帧（状态/preview/title 变化）都视为有活动，解除空转标记
-                self.stalled.remove(&session.id);
                 self.maybe_notify(&session, cx);
                 self.upsert_session(session, cx);
             }
@@ -269,25 +282,14 @@ impl RootView {
                 self.msg_views.remove(&id);
                 self.msg_mode.remove(&id);
                 self.open_order.retain(|x| x != &id);
-                self.stalled.remove(&id);
                 self.ports_cache.remove(&id);
-                self.last_notified_question.remove(&id);
+                self.user_killed.remove(&id);
                 self.page = page_after_close(&self.page, &id, &self.open_order);
                 cx.notify();
             }
             DaemonEvent::ProjectsChanged {} => self.fetch_projects(cx),
             DaemonEvent::Health { ssd_mounted } => {
                 self.ssd_mounted = ssd_mounted;
-                cx.notify();
-            }
-            DaemonEvent::SessionStalled { id, quiet_s } => {
-                if let Some(s) = self.sessions.iter().find(|s| s.id == id) {
-                    crate::notify::send(
-                        &s.display_title(),
-                        &format!("可能空转：已静默 {} 分钟", (quiet_s / 60).max(1)),
-                    );
-                }
-                self.stalled.insert(id, quiet_s);
                 cx.notify();
             }
             DaemonEvent::MessagesChanged { id, last_seq } => {
@@ -311,10 +313,17 @@ impl RootView {
         } else {
             let net = self.net.clone();
             let sid = id.clone();
+            // 新建的视图默认当会话活着；这里立刻用真实状态校准，已退出的会话
+            // 里悬着的表单不能是可交互的
+            let (alive, created) = self
+                .session(&id)
+                .map(|s| (s.state != SessionState::Exited, s.created_at.clone()))
+                .unwrap_or((false, String::new()));
             self.msg_views
                 .entry(id.clone())
                 .or_insert_with(|| cx.new(|cx| MessagesView::new(sid, net, cx)))
                 .update(cx, |v, cx| {
+                    v.set_session(alive, Some(&created), cx);
                     v.fetch(cx);
                     v.request_focus(cx);
                 });
@@ -332,75 +341,75 @@ impl RootView {
                 .is_some_and(|v| v.read(cx).supported != Some(false))
     }
 
-    /// 系统通知：进入 waiting（带 question，去重）与 running→exited
+    /// 系统通知：只有一种——「完成」（2026-09-02 用户拍板，PROTOCOL「WS」通知策略）。
+    /// running→waiting（这轮干完了）与 running→exited（非本机手动 kill）各弹一条。
+    /// 不识别里面在问什么、不按问题去重、没有冷却、没有空转告警；问题本身由
+    /// 消息流按结构化数据原生呈现。
     fn maybe_notify(&mut self, new: &Session, cx: &Context<Self>) {
         let old_state = self
             .sessions
             .iter()
             .find(|s| s.id == new.id)
             .map(|s| s.state);
+        if old_state != Some(SessionState::Running) {
+            return;
+        }
         // 用户正盯着这个会话（窗口前台 + 当前页就是它）就别弹通知——
-        // 刚从 app 里开的项目立刻弹「等待输入」只是噪音
+        // 眼皮底下跑完的东西再弹一条只是噪音
         let watching =
             self.page == Page::Session(new.id.clone()) && cx.active_window().is_some();
         match new.state {
-            SessionState::Running => {
-                // 上一个 waiting 已被应答：清键，下一轮 waiting 重新可通知
-                self.last_notified_question.remove(&new.id);
-            }
             SessionState::Waiting => {
-                let key = new
-                    .question
-                    .as_ref()
-                    .map(|q| q.text.clone())
-                    .unwrap_or_default();
-                let cooled = self
-                    .last_notify_at
-                    .get(&new.id)
-                    .is_none_or(|t| t.elapsed().as_secs() >= 300);
-                if self.last_notified_question.get(&new.id) != Some(&key) && cooled {
-                    if !watching {
-                        // 无具体问题 = 这轮跑完了（用户口径里的「已完成」）
-                        let body = if key.is_empty() { "已完成 · 等你下一步" } else { &key };
-                        crate::notify::send(&new.display_title(), body);
-                        self.last_notify_at
-                            .insert(new.id.clone(), std::time::Instant::now());
-                    }
-                    // 看着时也记 key：切走后同一问题不该再补一刀
-                    self.last_notified_question.insert(new.id.clone(), key);
+                if !watching {
+                    crate::notify::send(&new.display_title(), "完成 · 等你下一步");
                 }
             }
-            SessionState::Exited
-                if old_state == Some(SessionState::Running)
-                    && !watching
-                    && !self.user_killed.remove(&new.id) =>
-            {
-                let body = match new.exit_code {
-                    Some(code) => format!("已退出 (exit {code})"),
-                    None => "已退出".to_string(),
-                };
-                crate::notify::send(&new.display_title(), &body);
+            SessionState::Exited => {
+                // 自己在 app 里 kill 的不弹；标记无论如何都要消耗掉
+                let killed_here = self.user_killed.remove(&new.id);
+                if !watching && !killed_here {
+                    let body = match new.exit_code {
+                        Some(code) => format!("已退出 (exit {code})"),
+                        None => "已退出".to_string(),
+                    };
+                    crate::notify::send(&new.display_title(), &body);
+                }
             }
-            _ => {}
+            SessionState::Running => {}
         }
     }
 
     fn upsert_session(&mut self, session: Session, cx: &mut Context<Self>) {
+        let id = session.id.clone();
+        let alive = session.state != SessionState::Exited;
+        let created = session.created_at.clone();
         match self.sessions.iter_mut().find(|s| s.id == session.id) {
             Some(slot) => *slot = session,
             None => self.sessions.push(session),
         }
         self.sort_sessions();
+        if let Some(v) = self.msg_views.get(&id) {
+            v.update(cx, |v, cx| v.set_session(alive, Some(&created), cx));
+        }
         cx.notify();
     }
 
+    /// 全量会话列表（快照 / 重连拉取）到达后，把存活状态同步给每个已开的消息流视图；
+    /// 列表里没有的会话按已死处理（对话框随进程一起没了）
+    fn sync_msg_alive_all(&self, cx: &mut Context<Self>) {
+        for (id, view) in &self.msg_views {
+            let (alive, created) = self
+                .sessions
+                .iter()
+                .find(|s| &s.id == id)
+                .map(|s| (s.state != SessionState::Exited, s.created_at.clone()))
+                .unwrap_or((false, String::new()));
+            view.update(cx, |v, cx| v.set_session(alive, Some(&created), cx));
+        }
+    }
+
     fn sort_sessions(&mut self) {
-        self.sessions.sort_by(|a, b| {
-            a.state
-                .sort_weight()
-                .cmp(&b.state.sort_weight())
-                .then(b.last_output_at.cmp(&a.last_output_at))
-        });
+        self.sessions.sort_by(|a, b| sort_key(a).cmp(&sort_key(b)));
     }
 
     // ── 数据拉取 ────────────────────────────────────────────────────────
@@ -460,6 +469,7 @@ impl RootView {
             |r, s: Vec<Session>, cx| {
                 r.sessions = s;
                 r.sort_sessions();
+                r.sync_msg_alive_all(cx);
                 cx.notify();
             },
             false,
@@ -551,12 +561,6 @@ impl RootView {
         );
     }
 
-    /// waiting 选项胶囊点击
-    pub fn answer_question(&mut self, id: &str, key: String, cx: &mut Context<Self>) {
-        let fut = self.net.session_input(id, key, true);
-        self.spawn_fetch(fut, |_, _: serde_json::Value, _| {}, true, cx);
-    }
-
     fn session(&self, id: &str) -> Option<&Session> {
         self.sessions.iter().find(|s| s.id == id)
     }
@@ -640,10 +644,12 @@ impl RootView {
                 .cursor_pointer()
         };
 
-        // ── 上分区：会话按三态分组（用户拍板的口径，2026-09-02）────────
-        //   执行中 = running（任务没跑完）
-        //   待回复 = waiting 且弹出了问题/选项（对话在等一个具体回答）
-        //   已完成 = 其余：停在输入框的 waiting（这轮说完了）、idle、exited
+        // ── 上分区：会话按三态分组（用户拍板的口径，2026-09-02，三端一致）──
+        //   待回复 = asking（claude transcript 里有一条 AskUserQuestion 没答——
+        //            结构化事实，不是读屏猜的）
+        //   执行中 = running 且不在问（屏幕还在变）
+        //   已完成 = 其余：waiting（这轮干完了，轮到你）、exited
+        //   问题本身不在侧栏画：进消息流，表单原生呈现、原地作答
         let alive_paths: Vec<&str> = self
             .sessions
             .iter()
@@ -656,7 +662,12 @@ impl RootView {
             let id_close = s.id.clone();
             let exited = s.state == SessionState::Exited;
             let active = self.page == Page::Session(id.clone());
-            let is_stalled = s.state == SessionState::Running && self.stalled.contains_key(&s.id);
+            // 在问的会话点亮黄点，哪怕屏幕还在变
+            let dot_color = if s.asking {
+                theme::AMBER
+            } else {
+                theme::state_color(s.state.as_str())
+            };
             let agent_label: SharedString = if s.agent == "shell" {
                 "term".into()
             } else {
@@ -669,7 +680,7 @@ impl RootView {
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.open_session(id.clone(), cx);
                 }))
-                .child(dot(theme::state_color(s.state.as_str())))
+                .child(dot(dot_color))
                 .child(
                     div()
                         .flex_1()
@@ -680,15 +691,6 @@ impl RootView {
                         .text_color(c(if exited { theme::DIM } else { theme::INK }))
                         .child(SharedString::from(s.display_title())),
                 )
-                .when(is_stalled, |el| {
-                    el.child(
-                        div()
-                            .text_size(px(9.5))
-                            .font_family("Menlo")
-                            .text_color(c(theme::AMBER))
-                            .child("空转?"),
-                    )
-                })
                 .child(
                     div()
                         .text_size(px(10.))
@@ -747,27 +749,13 @@ impl RootView {
                 )
         };
 
-        let needs_reply =
-            |s: &&Session| s.state == SessionState::Waiting && s.question.is_some();
+        let by = |b: Bucket| -> Vec<&Session> {
+            self.sessions.iter().filter(|s| bucket_of(s) == b).collect()
+        };
         let buckets: [(&'static str, u32, Vec<&Session>); 3] = [
-            (
-                "执行中",
-                theme::GREEN,
-                self.sessions.iter().filter(|s| s.state == SessionState::Running).collect(),
-            ),
-            (
-                "待回复",
-                theme::AMBER,
-                self.sessions.iter().filter(needs_reply).collect(),
-            ),
-            (
-                "已完成",
-                theme::FAINT,
-                self.sessions
-                    .iter()
-                    .filter(|s| s.state != SessionState::Running && !needs_reply(s))
-                    .collect(),
-            ),
+            ("执行中", theme::GREEN, by(Bucket::Running)),
+            ("待回复", theme::AMBER, by(Bucket::Asking)),
+            ("已完成", theme::FAINT, by(Bucket::Done)),
         ];
         let mut active_col = div().flex().flex_col().gap(px(1.));
         let mut ix = 0usize;
@@ -993,54 +981,6 @@ impl RootView {
         }
     }
 
-    fn render_question_bar(&self, s: &Session, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
-        if s.state != SessionState::Waiting {
-            return None;
-        }
-        let q = s.question.clone()?;
-        let sid = s.id.clone();
-        let mut row = div()
-            .flex()
-            .items_center()
-            .flex_wrap()
-            .gap(px(8.))
-            .px(px(12.))
-            .py(px(8.))
-            .flex_none()
-            .bg(ca(theme::AMBER, 0.08))
-            .border_t_1()
-            .border_color(ca(theme::AMBER, 0.35))
-            .child(
-                div()
-                    .text_size(px(12.))
-                    .text_color(c(theme::AMBER))
-                    .child(SharedString::from(format!("? {}", q.text))),
-            );
-        for (ix, opt) in q.options.iter().enumerate() {
-            let key = opt.key.clone();
-            let sid2 = sid.clone();
-            row = row.child(
-                div()
-                    .id(("qopt", ix))
-                    .px(px(10.))
-                    .py(px(3.))
-                    .rounded_full()
-                    .border_1()
-                    .border_color(c(theme::AMBER))
-                    .bg(ca(theme::AMBER, 0.12))
-                    .text_size(px(12.))
-                    .text_color(c(theme::INK))
-                    .cursor_pointer()
-                    .hover(|st| st.bg(ca(theme::AMBER, 0.28)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.answer_question(&sid2.clone(), key.clone(), cx);
-                    }))
-                    .child(SharedString::from(format!("{}. {}", opt.key, opt.label))),
-            );
-        }
-        Some(row)
-    }
-
     fn render_statusbar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let bar = div()
             .flex()
@@ -1067,9 +1007,6 @@ impl RootView {
                     let state_color = theme::state_color(s.state.as_str());
                     let sid = s.id.clone();
                     let exited = s.state == SessionState::Exited;
-                    let stalled_min = (s.state == SessionState::Running)
-                        .then(|| self.stalled.get(&s.id).map(|q| (q / 60).max(1)))
-                        .flatten();
                     let host = self
                         .net
                         .endpoint()
@@ -1182,35 +1119,27 @@ impl RootView {
                         },
                     )));
 
-                    if let Some(min) = stalled_min {
-                        bar = bar.child(
-                            div()
-                                .text_color(c(theme::AMBER))
-                                .child(SharedString::from(format!("可能空转 {min} 分"))),
-                        );
-                    }
+                    // 「待回复」盖过状态字：asking 是结构化事实，比 running/waiting 更要紧
+                    let (label, color) = if s.asking {
+                        ("待回复", theme::AMBER)
+                    } else {
+                        (theme::state_label(s.state.as_str()), state_color)
+                    };
                     bar.child(
                         div()
-                            .text_color(c(state_color))
-                            .child(SharedString::from(format!(
-                                "● {}",
-                                theme::state_label(s.state.as_str())
-                            ))),
+                            .text_color(c(color))
+                            .child(SharedString::from(format!("● {label}"))),
                     )
                 } else {
                     bar.child("会话不存在")
                 }
             }
             _ => {
-                let waiting = self
-                    .sessions
-                    .iter()
-                    .filter(|s| s.state == SessionState::Waiting)
-                    .count();
+                let asking = self.sessions.iter().filter(|s| s.asking).count();
                 bar.child(SharedString::from(format!(
-                    "{} 个会话 · {} 个等待输入",
+                    "{} 个会话 · {} 个待回复",
                     self.sessions.len(),
-                    waiting
+                    asking
                 )))
             }
         }
@@ -1261,7 +1190,7 @@ impl Render for RootView {
                         .then(|| self.msg_views.get(&id).cloned())
                         .flatten();
                     let term = self.terminals.get(&id).cloned();
-                    let el = match (msg_view, term) {
+                    match (msg_view, term) {
                         (Some(mv), _) => el.child(div().flex_1().min_h(px(0.)).child(mv)),
                         (None, Some(t)) => el.child(div().flex_1().min_h(px(0.)).child(t)),
                         (None, None) => el.child(
@@ -1273,13 +1202,6 @@ impl Render for RootView {
                                 .text_color(c(theme::FAINT))
                                 .child("会话未打开"),
                         ),
-                    };
-                    if let Some(s) = self.session(&id).cloned()
-                        && let Some(qbar) = self.render_question_bar(&s, cx)
-                    {
-                        el.child(qbar)
-                    } else {
-                        el
                     }
                 }
                 Page::Home => el.child(
@@ -1383,6 +1305,41 @@ mod tests {
         assert_eq!(next_session_id(&alive, None).as_deref(), Some("a"));
         assert_eq!(next_session_id(&alive, Some("gone")).as_deref(), Some("a"));
         assert_eq!(next_session_id(&[], Some("a")), None, "没有存活会话就不动");
+    }
+
+    fn sess(id: &str, state: SessionState, asking: bool, last: &str) -> Session {
+        Session {
+            id: id.into(),
+            state,
+            asking,
+            last_output_at: last.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn three_buckets_follow_asking_then_state() {
+        // 待回复 = asking，不管屏幕是不是还在变
+        assert_eq!(bucket_of(&sess("a", SessionState::Running, true, "")), Bucket::Asking);
+        assert_eq!(bucket_of(&sess("a", SessionState::Waiting, true, "")), Bucket::Asking);
+        assert_eq!(bucket_of(&sess("a", SessionState::Running, false, "")), Bucket::Running);
+        // waiting 与 exited 都是「已完成」
+        assert_eq!(bucket_of(&sess("a", SessionState::Waiting, false, "")), Bucket::Done);
+        assert_eq!(bucket_of(&sess("a", SessionState::Exited, false, "")), Bucket::Done);
+    }
+
+    #[test]
+    fn asking_sorts_first_then_state_then_recency() {
+        let mut v = [
+            sess("exited", SessionState::Exited, false, "2026-09-02T10:00:00Z"),
+            sess("wait-old", SessionState::Waiting, false, "2026-09-02T09:00:00Z"),
+            sess("run", SessionState::Running, false, "2026-09-02T08:00:00Z"),
+            sess("ask", SessionState::Waiting, true, "2026-09-02T07:00:00Z"),
+            sess("wait-new", SessionState::Waiting, false, "2026-09-02T11:00:00Z"),
+        ];
+        v.sort_by(|a, b| sort_key(a).cmp(&sort_key(b)));
+        let ids: Vec<&str> = v.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["ask", "run", "wait-new", "wait-old", "exited"]);
     }
 
     #[test]

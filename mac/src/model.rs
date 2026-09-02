@@ -5,13 +5,16 @@ use serde::{Deserialize, Serialize};
 
 // ── 会话 ────────────────────────────────────────────────────────────────────
 
+/// 三态（2026-09-02 简化）：屏幕在变 = running；进程活着但可见屏幕 6s 没变 =
+/// waiting（这轮干完了，轮到你）；进程退出 = exited。没有 idle 了——旧 daemon
+/// 发来的 `idle` 按 waiting 解析，升级顺序错开也不会把客户端弄崩。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum SessionState {
     Running,
-    Waiting,
     #[default]
-    Idle,
+    #[serde(alias = "idle")]
+    Waiting,
     Exited,
 }
 
@@ -20,35 +23,18 @@ impl SessionState {
         match self {
             SessionState::Running => "running",
             SessionState::Waiting => "waiting",
-            SessionState::Idle => "idle",
             SessionState::Exited => "exited",
         }
     }
-    /// 排序权重：waiting 一等状态置顶
+    /// 排序权重：还在跑的在前，跑完的其次，退出的最后
+    /// （在问的会话另由 `Session::asking` 提到最前，见 ui::sort_key）
     pub fn sort_weight(&self) -> u8 {
         match self {
-            SessionState::Waiting => 0,
-            SessionState::Running => 1,
-            SessionState::Idle => 2,
-            SessionState::Exited => 3,
+            SessionState::Running => 0,
+            SessionState::Waiting => 1,
+            SessionState::Exited => 2,
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
-pub struct QuestionOption {
-    #[serde(default)]
-    pub key: String,
-    #[serde(default)]
-    pub label: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
-pub struct Question {
-    #[serde(default)]
-    pub text: String,
-    #[serde(default)]
-    pub options: Vec<QuestionOption>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -64,8 +50,10 @@ pub struct Session {
     pub agent: String,
     #[serde(default)]
     pub state: SessionState,
+    /// claude：transcript 里有一条 AskUserQuestion 还没被回答（结构化事实，不是
+    /// 读屏猜的）。其它 agent 没有这种信号，恒为 false。三态口径里的「待回复」。
     #[serde(default)]
-    pub question: Option<Question>,
+    pub asking: bool,
     #[serde(default)]
     pub preview: String,
     #[serde(default)]
@@ -220,17 +208,61 @@ pub struct ToolInfo {
     pub status: String, // ok|err|running
 }
 
+/// AskUserQuestion 的一个选项（原样来自工具入参）
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+pub struct QOption {
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub description: String,
+}
+
+/// AskUserQuestion 的一道题；`multi_select` 决定画单选还是复选
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+pub struct QuestionItem {
+    #[serde(default)]
+    pub header: String,
+    #[serde(default)]
+    pub question: String,
+    #[serde(default)]
+    pub options: Vec<QOption>,
+    #[serde(default)]
+    pub multi_select: bool,
+}
+
+/// `kind:"question"` 消息携带的整张表单（一次工具调用可以问好几题）
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+pub struct QuestionSpec {
+    #[serde(default)]
+    pub questions: Vec<QuestionItem>,
+}
+
+/// `POST /sessions/:id/answer` 里的一项：对应一题，顺序同 `QuestionSpec::questions`。
+/// `selected` 是 0 起的选项下标；`other` 是「其它」自填，空就不发字段。
+#[derive(Debug, Clone, Serialize, Default, PartialEq)]
+pub struct AnswerItem {
+    pub selected: Vec<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub other: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ChatMessage {
     pub seq: u64,
+    /// ISO 时间（transcript 里带毫秒）；待答判定拿它与会话 created_at 比
+    #[serde(default)]
+    pub ts: String,
     #[serde(default)]
     pub role: String, // user|assistant|tool|system
     #[serde(default)]
-    pub kind: String, // text|thinking|tool_use|tool_result|question
+    pub kind: String, // text|thinking|tool_use|tool_result|question|answer
     #[serde(default)]
     pub text: String,
     #[serde(default)]
     pub tool: Option<ToolInfo>,
+    /// 仅 `kind:"question"`：结构化表单，客户端原生画对话框
+    #[serde(default)]
+    pub question: Option<QuestionSpec>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -272,19 +304,13 @@ pub enum DaemonEvent {
     Health {
         ssd_mounted: bool,
     },
-    /// v1.1 watchdog：running 且静默 ≥ stall_minutes
-    SessionStalled {
-        id: String,
-        #[serde(default)]
-        quiet_s: u64,
-    },
     /// v1.1 消息流：该会话的 agent 存储有新消息（≥500ms 节流）
     MessagesChanged {
         id: String,
         #[serde(default)]
         last_seq: u64,
     },
-    /// 未知帧向前兼容（inbox_changed 等本期忽略）
+    /// 未知帧向前兼容（inbox_changed 本期忽略；已移除的 session_stalled 也落到这里）
     #[serde(other)]
     Unknown,
 }
@@ -434,10 +460,7 @@ mod tests {
           "project_name": "aaa-ui",
           "agent": "claude",
           "state": "waiting",
-          "question": {
-            "text": "原型是否需要包含 iPad 布局？",
-            "options": [{"key":"1","label":"需要"},{"key":"2","label":"不需要"}]
-          },
+          "asking": true,
           "preview": "…最近 4 行纯文本…",
           "rows": 40, "cols": 120,
           "pid": 12345, "exit_code": null,
@@ -446,9 +469,7 @@ mod tests {
         }"#;
         let s: Session = serde_json::from_str(j).unwrap();
         assert_eq!(s.state, SessionState::Waiting);
-        let q = s.question.as_ref().unwrap();
-        assert_eq!(q.options.len(), 2);
-        assert_eq!(q.options[0].key, "1");
+        assert!(s.asking);
         assert_eq!(s.rows, 40);
         assert_eq!(s.pid, Some(12345));
         assert_eq!(s.exit_code, None);
@@ -457,10 +478,65 @@ mod tests {
 
     #[test]
     fn session_minimal() {
-        // daemon 早期实现可能字段不全，必须能解析
+        // daemon 早期实现可能字段不全，必须能解析；asking 缺省 false
         let s: Session = serde_json::from_str(r#"{"id":"s_1","agent":"shell"}"#).unwrap();
-        assert_eq!(s.state, SessionState::Idle);
+        assert_eq!(s.state, SessionState::Waiting);
+        assert!(!s.asking);
         assert_eq!(s.display_title(), "zsh");
+    }
+
+    #[test]
+    fn idle_from_old_daemon_parses_as_waiting() {
+        // 2026-09-02 之前的 daemon 还会发 idle：别名兜住，不能让升级顺序把 UI 弄崩
+        let s: Session = serde_json::from_str(r#"{"id":"s_1","state":"idle"}"#).unwrap();
+        assert_eq!(s.state, SessionState::Waiting);
+        // 序列化只认新词
+        assert_eq!(serde_json::to_string(&SessionState::Waiting).unwrap(), "\"waiting\"");
+        assert!(serde_json::from_str::<SessionState>("\"bogus\"").is_err());
+    }
+
+    #[test]
+    fn chat_message_question_parses() {
+        let j = r#"{"seq":7,"ts":"…","role":"assistant","kind":"question",
+          "text":"Pick a color",
+          "tool":{"name":"AskUserQuestion","summary":"Color · Tools","status":"running"},
+          "question":{"questions":[
+            {"header":"Color","question":"Pick a color",
+             "options":[{"label":"Red","description":"A warm color"},{"label":"Blue"}],
+             "multi_select":false},
+            {"question":"Which tools?","options":[{"label":"Bash"},{"label":"Read"},{"label":"Edit"}],
+             "multi_select":true}
+          ]}}"#;
+        let m: ChatMessage = serde_json::from_str(j).unwrap();
+        assert_eq!(m.kind, "question");
+        let q = m.question.as_ref().expect("question 字段");
+        assert_eq!(q.questions.len(), 2);
+        assert_eq!(q.questions[0].header, "Color");
+        assert_eq!(q.questions[0].options[0].description, "A warm color");
+        assert_eq!(q.questions[0].options[1].description, "", "description 可缺省");
+        assert!(!q.questions[0].multi_select);
+        assert_eq!(q.questions[1].header, "", "header 可缺省");
+        assert!(q.questions[1].multi_select);
+        assert_eq!(q.questions[1].options.len(), 3);
+        // 普通消息没有 question 字段
+        let m: ChatMessage =
+            serde_json::from_str(r#"{"seq":8,"role":"user","kind":"answer","text":"Red"}"#).unwrap();
+        assert_eq!(m.kind, "answer");
+        assert!(m.question.is_none());
+    }
+
+    #[test]
+    fn answer_item_shape() {
+        // 与 PROTOCOL 一致：selected 下标数组；other 为空时整个字段不发
+        let v = serde_json::to_value(vec![
+            AnswerItem { selected: vec![0, 2], other: None },
+            AnswerItem { selected: vec![], other: Some("Zed".into()) },
+        ])
+        .unwrap();
+        assert_eq!(v[0]["selected"], serde_json::json!([0, 2]));
+        assert!(v[0].get("other").is_none());
+        assert_eq!(v[1]["selected"], serde_json::json!([]));
+        assert_eq!(v[1]["other"], "Zed");
     }
 
     #[test]
@@ -486,10 +562,10 @@ mod tests {
         assert!(matches!(e, DaemonEvent::ProjectsChanged {}));
         let e: DaemonEvent = serde_json::from_str(r#"{"t":"health","ssd_mounted":false}"#).unwrap();
         assert!(matches!(e, DaemonEvent::Health { ssd_mounted: false }));
-        // v1.1 watchdog 帧
+        // watchdog 已移除（2026-09-02）：旧 daemon 若还发 session_stalled，当未知帧忽略
         let e: DaemonEvent =
             serde_json::from_str(r#"{"t":"session_stalled","id":"s_4","quiet_s":612}"#).unwrap();
-        assert!(matches!(e, DaemonEvent::SessionStalled { ref id, quiet_s: 612 } if id == "s_4"));
+        assert!(matches!(e, DaemonEvent::Unknown));
         // 向前兼容：未知帧不报错（inbox_changed 等）
         let e: DaemonEvent = serde_json::from_str(r#"{"t":"future_frame","x":1}"#).unwrap();
         assert!(matches!(e, DaemonEvent::Unknown));
@@ -580,9 +656,9 @@ mod tests {
     }
 
     #[test]
-    fn waiting_sorts_first() {
-        assert!(SessionState::Waiting.sort_weight() < SessionState::Running.sort_weight());
-        assert!(SessionState::Running.sort_weight() < SessionState::Idle.sort_weight());
-        assert!(SessionState::Idle.sort_weight() < SessionState::Exited.sort_weight());
+    fn state_sort_order() {
+        // running < waiting < exited；「在问」不是状态，由 ui::sort_key 另行提前
+        assert!(SessionState::Running.sort_weight() < SessionState::Waiting.sort_weight());
+        assert!(SessionState::Waiting.sort_weight() < SessionState::Exited.sort_weight());
     }
 }

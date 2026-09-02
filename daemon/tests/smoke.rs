@@ -143,17 +143,6 @@ async fn full_session_lifecycle() {
     let (code, _) = http("GET", port, "/api/v1/health", Some("wrong"), None);
     assert_eq!(code, 401);
 
-    // hooks endpoint: localhost, no token required
-    let (code, hook) = http(
-        "POST",
-        port,
-        "/api/v1/hooks/claude",
-        None,
-        Some(serde_json::json!({"hook_event_name":"Notification","cwd":"/nowhere","message":"?"})),
-    );
-    assert_eq!(code, 200);
-    assert_eq!(hook["matched"], 0);
-
     // ---- agents table ----
     let (code, agents) = http("GET", port, "/api/v1/agents", Some(TOKEN), None);
     assert_eq!(code, 200);
@@ -220,10 +209,10 @@ async fn full_session_lifecycle() {
     assert_eq!(sess["rows"], 40);
     assert_eq!(sess["cols"], 120);
     assert!(sess["pid"].as_u64().is_some());
-    // full session object: resume_id / exit_code / question present (null here)
+    // full session object: resume_id / exit_code null here; asking is a bool
     assert!(sess["resume_id"].is_null());
     assert!(sess["exit_code"].is_null());
-    assert!(sess["question"].is_null());
+    assert_eq!(sess["asking"], false);
     assert_eq!(sess["project_path"].as_str().unwrap(), {
         let c = std::fs::canonicalize(&proj_path).unwrap();
         c.to_string_lossy().into_owned()
@@ -526,11 +515,10 @@ async fn inbox_auto_feed_on_first_waiting() {
     let sid_feed = spawn_sess(&p_feed, true);
     let sid_off = spawn_sess(&p_off, false);
 
-    // attach and park both shells on a free-text question (read waits for a
-    // key, the screen ends with `?` and goes silent -> waiting with an
-    // options-less question). NOT a y/n prompt: option dialogs discard free
-    // text, so the feeder now deliberately skips them (P0 fix) —— feeding
-    // only happens where typed text is actually accepted.
+    // attach and park both shells on a blocking read: the screen goes quiet
+    // -> waiting. A shell has no structured "dialog is up" signal (that gate
+    // exists for claude only: `asking` / untrusted folder), so its first
+    // waiting gets the queued entries typed in.
     let attach = |sid: String| async move {
         let url = format!("ws://127.0.0.1:{port}/api/v1/sessions/{sid}/attach?token={TOKEN}");
         let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
