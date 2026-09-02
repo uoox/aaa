@@ -28,7 +28,7 @@ class ProjectStateTest {
     @Test fun waitingAtTheComposerIsNotAReply() {
         val idleWaiting = s("w", "waiting", "2026-09-02T09:00:00Z")
         assertEquals(ProjectState.DONE, projectStateOf(p, idleWaiting))
-        assertEquals("点击继续", projectSummary(p, idleWaiting, ProjectState.DONE))
+        assertEquals("", projectSummary(p, idleWaiting, ProjectState.DONE))
         // 没标题的待回复退到项目的对话名
         assertEquals("等你回答", projectSummary(p, s("a", "waiting", "2026-09-02T09:00:00Z", asking = true), ProjectState.NEEDS_REPLY))
     }
@@ -66,9 +66,9 @@ class ProjectStateTest {
 
     @Test fun noSessionButAStoredConversationIsDoneNotNever() {
         assertEquals(ProjectState.DONE, projectStateOf(p, null))
-        assertEquals("点击继续", projectSummary(p, null, ProjectState.DONE))
+        assertEquals("", projectSummary(p, null, ProjectState.DONE))
         assertEquals(ProjectState.NEVER, projectStateOf(bare, null))
-        assertEquals("未开始 · 点击启动", projectSummary(bare, null, ProjectState.NEVER))
+        assertEquals("未开始", projectSummary(bare, null, ProjectState.NEVER))
     }
 
     @Test fun runningSummaryIgnoresScreenPreview() {
@@ -127,9 +127,9 @@ class ProjectStateTest {
         assertEquals("执行中", liveRow.subtitle)
         val idleRow = projectRows(listOf(p), emptyList()).single()
         assertEquals("旧对话", idleRow.title)
-        assertEquals("点击继续", idleRow.subtitle)
+        assertEquals("", idleRow.subtitle)
         val neverRow = projectRows(listOf(bare), emptyList()).single()
         assertEquals("b", neverRow.title)
-        assertEquals("未开始 · 点击启动", neverRow.subtitle)
+        assertEquals("未开始", neverRow.subtitle)
     }
 }

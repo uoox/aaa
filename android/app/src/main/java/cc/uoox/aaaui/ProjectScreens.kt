@@ -29,6 +29,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -158,8 +160,9 @@ fun projectStateOf(project: Project, primary: Session?): ProjectState = when {
 fun projectSummary(project: Project, primary: Session?, state: ProjectState): String = when (state) {
     ProjectState.NEEDS_REPLY -> "等你回答"
     ProjectState.RUNNING -> "执行中"
-    ProjectState.DONE -> "点击继续"
-    ProjectState.NEVER -> "未开始 · 点击启动"
+    // 未激活的项目没什么可说的：点一行就是 resume，不必每行都写「点击继续」
+    ProjectState.DONE -> ""
+    ProjectState.NEVER -> "未开始"
 }
 
 fun projectRows(projects: List<Project>, sessions: List<Session>): List<ProjectRow> = projects.map { p ->
@@ -418,7 +421,7 @@ private fun ProjectRowItem(row: ProjectRow, busy: Boolean, onClick: () -> Unit, 
             Spacer(Modifier.width(8.dp))
             Text(relativeTime(row.timeIso), color = Tok.Faint, fontSize = 11.sp)
         }
-        Text(
+        if (row.subtitle.isNotEmpty()) Text(
             row.subtitle, color = row.state.summaryColor(), fontSize = 13.sp,
             maxLines = 1, overflow = TextOverflow.Ellipsis,
             modifier = Modifier.padding(start = 20.dp, top = 3.dp),
@@ -473,9 +476,21 @@ fun ProjectActionsSheet(
     val sessions by store.sessions.collectAsState()
     val primary = primarySessionFor(p, sessions)
     var deleteConfirm by remember { mutableStateOf(false) }
+    var killConfirm by remember { mutableStateOf(false) }
 
     fun toast(msg: String) = Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
     val muted = p.path in settings.mutedProjects
+    val alive = primary != null && primary.state != "exited"
+    /** 结束会话 = 项目回到未激活栏。用户自己动的手，随后的 exited 不弹通知。 */
+    fun killPrimary() {
+        val id = primary?.id ?: return
+        scope.launch {
+            store.markUserKilled(id)
+            runCatching { store.client?.kill(id) }.onFailure { toast("失败：${it.message}") }
+            store.refreshSessions()
+        }
+        onDismiss()
+    }
 
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = Tok.Surface) {
         Column(Modifier.padding(bottom = 20.dp)) {
@@ -486,7 +501,13 @@ fun ProjectActionsSheet(
                     color = Tok.Faint, fontSize = 11.sp, fontFamily = FontFamily.Monospace,
                 )
             }
-            SheetItem("▶", "继续会话", "resume") {
+            if (alive) {
+                // 与 mac 侧栏的 × 同一规则：只有执行中的才确认（被顺手点掉最伤），等你的直接结束
+                SheetItem("■", "结束会话", "项目回到未激活栏", danger = true) {
+                    if (primary?.state == "running") killConfirm = true else killPrimary()
+                }
+            }
+            if (!alive) SheetItem("▶", "继续会话", "resume") {
                 val agent = p.agent ?: DEFAULT_AGENT
                 scope.launch {
                     try {
@@ -521,6 +542,16 @@ fun ProjectActionsSheet(
             SheetItem("🗑", "删除项目…", "目录 + 全部会话", danger = true) { deleteConfirm = true }
             TextButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) { Text("取消", color = Tok.Dim) }
         }
+    }
+
+    if (killConfirm) {
+        ConfirmDialog(
+            "结束正在执行的会话？",
+            "agent 正在跑，结束后这一轮的工作会中断；对话记录保留，之后可以 resume。",
+            "结束",
+            onConfirm = { killConfirm = false; killPrimary() },
+            onCancel = { killConfirm = false },
+        )
     }
 
     if (deleteConfirm) {
@@ -579,7 +610,38 @@ fun InboxScreen(store: AppStore, nav: NavHostController, projectPath: String) {
         )
         error?.let { Text(it, color = Tok.Red, fontSize = 13.sp, modifier = Modifier.padding(16.dp)) }
 
-        LazyColumn(Modifier.weight(1f).fillMaxWidth().padding(top = 6.dp)) {
+        // 添加框放在列表上方（跟首页的新建框一个位置），不钉在屏幕底部
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                Modifier.weight(1f).background(Tok.Raised, RoundedCornerShape(10.dp)).padding(horizontal = 12.dp, vertical = 8.dp),
+                contentAlignment = Alignment.CenterStart,
+            ) {
+                if (input.isEmpty()) Text("添加任务…", color = Tok.Faint, fontSize = 14.sp)
+                BasicTextField(
+                    input, { input = it },
+                    modifier = Modifier.fillMaxWidth(), maxLines = 3,
+                    textStyle = androidx.compose.ui.text.TextStyle(color = Tok.Ink, fontSize = 14.sp),
+                    cursorBrush = SolidColor(Tok.Accent),
+                )
+            }
+            Spacer(Modifier.width(6.dp))
+            TextButton(
+                enabled = input.isNotBlank(),
+                onClick = {
+                    val text = input.trim(); input = ""
+                    scope.launch {
+                        runCatching { store.client?.inboxAdd(projectPath, text) }
+                            .onFailure { Toast.makeText(context, "添加失败：${it.message}", Toast.LENGTH_SHORT).show() }
+                        reload()
+                    }
+                },
+            ) { Text("添加", color = if (input.isNotBlank()) Tok.Accent else Tok.Faint) }
+        }
+
+        LazyColumn(Modifier.weight(1f).fillMaxWidth()) {
             items(items, key = { it.id }) { item ->
                 Card(
                     colors = CardDefaults.cardColors(containerColor = Tok.Surface),
@@ -608,27 +670,5 @@ fun InboxScreen(store: AppStore, nav: NavHostController, projectPath: String) {
             }
         }
 
-        Row(
-            Modifier.fillMaxWidth().background(Tok.Surface).padding(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            OutlinedTextField(
-                input, { input = it },
-                placeholder = { Text("添加任务…", color = Tok.Faint, fontSize = 13.sp) },
-                modifier = Modifier.weight(1f), maxLines = 3,
-            )
-            Spacer(Modifier.width(8.dp))
-            Button(
-                enabled = input.isNotBlank(),
-                onClick = {
-                    val text = input.trim(); input = ""
-                    scope.launch {
-                        runCatching { store.client?.inboxAdd(projectPath, text) }
-                            .onFailure { Toast.makeText(context, "添加失败：${it.message}", Toast.LENGTH_SHORT).show() }
-                        reload()
-                    }
-                },
-            ) { Text("添加") }
-        }
     }
 }
