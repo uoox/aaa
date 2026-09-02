@@ -163,10 +163,6 @@ fn next_session_id(alive: &[String], current: Option<&str>) -> Option<String> {
 
 pub enum Modal {
     None,
-    /// 新建项目：只填名字，agent 固定 claude（2026-09-03 起只支持 Claude Code）
-    NewProject {
-        busy: bool,
-    },
     DeleteConfirm {
         paths: Vec<String>,
         report: Option<DeleteResponse>,
@@ -237,6 +233,10 @@ pub struct RootView {
     pub theme: ThemeKind,
 
     // 输入框
+    /// 侧栏顶部的新建项目输入框：内容即文件夹名，回车 / ＋ 创建
+    pub new_input: Entity<MiniInput>,
+    /// 正在 POST /projects + /sessions：挡住第二次回车
+    pub creating: bool,
     pub name_input: Entity<MiniInput>,
     pub host_input: Entity<MiniInput>,
     pub port_input: Entity<MiniInput>,
@@ -272,7 +272,8 @@ impl RootView {
         let theme_kind = ThemeKind::from_str(&ui_state.theme);
         theme::set_current(theme_kind);
 
-        let name_input = cx.new(|cx| MiniInput::new(cx, "留空 = 时间戳目录名"));
+        let new_input = cx.new(|cx| MiniInput::new(cx, "新建项目：文件夹名，回车"));
+        let name_input = cx.new(|cx| MiniInput::new(cx, "新名字"));
         let host_input = cx.new(|cx| MiniInput::new(cx, "127.0.0.1"));
         let port_input = cx.new(|cx| MiniInput::new(cx, "2730"));
         let token_input = cx.new(|cx| MiniInput::new(cx, "aaa_tk_…"));
@@ -307,6 +308,8 @@ impl RootView {
             sidebar_w: ui_state.sidebar_w,
             sidebar_drag: None,
             theme: theme_kind,
+            new_input,
+            creating: false,
             name_input,
             host_input,
             port_input,
@@ -710,7 +713,7 @@ impl RootView {
         }
     }
 
-    /// App 级快捷键：⌘N/Ctrl-N 新建项目，Ctrl-Tab 切换激活会话，⌘E 消息流⇄终端，
+    /// App 级快捷键：⌘N/Ctrl-N 光标进新建项目输入框，Ctrl-Tab 切换激活会话，⌘E 消息流⇄终端，
     /// ⌘W 关闭当前会话 / 终端标签。
     /// 挂在根节点上吃冒泡：终端把 Ctrl-Tab 放行、⌘ 组合本来就不吞。
     fn on_root_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -718,7 +721,7 @@ impl RootView {
         let m = ks.modifiers;
         if ks.key == "n" && (m.platform || m.control) {
             if matches!(self.modal, Modal::None) {
-                self.open_new_project_modal(window, cx);
+                self.focus_new_project(window, cx);
             }
             cx.stop_propagation();
             return;
@@ -766,21 +769,24 @@ impl RootView {
             cx.stop_propagation();
             return;
         }
-        // 新建项目弹窗里回车 = 「创建并进入」。MiniInput 不消费 enter，
+        // 新建项目输入框里回车 = 「创建并进入」。MiniInput 不消费 enter，
         // 这里在根上接住（IME 组字中的确认回车走 input handler，到不了这）。
-        if ks.key == "enter" && matches!(self.modal, Modal::NewProject { .. }) {
+        if ks.key == "enter"
+            && matches!(self.modal, Modal::None)
+            && self.new_input.read(cx).focus_handle.is_focused(window)
+        {
             // IME 组字中的回车是「确认候选词」，不是「创建」——不能抢
-            if self.name_input.read(cx).composing() {
+            if self.new_input.read(cx).composing() {
                 return;
             }
-            self.confirm_create_project(cx);
+            self.create_project(cx);
             cx.stop_propagation();
         }
     }
 
     // ── 侧栏 ───────────────────────────────────────────────────────────
     //
-    // 结构（自上而下）：新建按钮 → 激活的会话（TUI/Shell 开着的） → 分隔线 →
+    // 结构（自上而下）：新建项目输入框 → 激活的会话（TUI/Shell 开着的） → 分隔线 →
     // 未激活的项目（双击开启会话）。没有大标题、没有总览页——侧栏本身就是
     // 全部导航。
 
@@ -971,24 +977,37 @@ impl RootView {
             .flex_col()
             .overflow_hidden() // 拖窄时标题按 ellipsis 收，不许挤出侧栏
             .bg(c(theme::surface()))
+            // 新建项目就是一个输入框：字即文件夹名，回车或 ＋ 创建；⌘N 把光标放进来
             .child(
-                row_base("sb-new".into())
+                div()
                     .mt(px(10.))
                     .mb(px(4.))
-                    .border_1()
-                    .border_color(c(theme::edge_light()))
-                    .hover(|st| st.bg(c(theme::surface_raised())).border_color(c(theme::accent())))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.open_new_project_modal(window, cx);
-                    }))
-                    .child(div().text_size(px(13.)).text_color(c(theme::accent())).child("＋"))
-                    .child(div().flex_1().text_size(px(12.5)).child("新建项目"))
+                    .mx(px(8.))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(div().flex_1().min_w(px(0.)).child(self.new_input.clone()))
                     .child(
                         div()
-                            .text_size(px(10.))
-                            .font_family("Menlo")
-                            .text_color(c(theme::faint()))
-                            .child("⌘N"),
+                            .id("sb-new")
+                            .flex_none()
+                            .h(px(28.))
+                            .w(px(28.))
+                            .rounded(px(6.))
+                            .border_1()
+                            .border_color(c(theme::edge_light()))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .hover(|st| st.bg(c(theme::surface_raised())).border_color(c(theme::accent())))
+                            .on_click(cx.listener(|this, _, _, cx| this.create_project(cx)))
+                            .child(
+                                div()
+                                    .text_size(px(14.))
+                                    .text_color(c(if self.creating { theme::faint() } else { theme::accent() }))
+                                    .child(if self.creating { "…" } else { "＋" }),
+                            ),
                     ),
             )
             .child(
@@ -1111,6 +1130,7 @@ impl RootView {
             v.update(cx, |_, cx| cx.notify());
         }
         for i in [
+            &self.new_input,
             &self.name_input,
             &self.host_input,
             &self.port_input,

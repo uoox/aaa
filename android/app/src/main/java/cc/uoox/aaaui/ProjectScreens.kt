@@ -30,6 +30,10 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -94,6 +98,16 @@ data class ProjectRow(
     /** 第二行那一句话。 */
     val summary: String,
 ) {
+    /**
+     * 第一行标题，与 mac 侧栏同一口径：会话的命名（活着的会话 title，退出后 daemon 从
+     * agent 存储读出的 session_title），没有才退到文件夹名。文件夹名不是标题——它是地址。
+     */
+    val title: String get() =
+        primary?.title?.takeIf { it.isNotBlank() }
+            ?: project.session_title?.takeIf { it.isNotBlank() }
+            ?: project.name
+    /** 第二行：标题是会话名时给文件夹名（地址），标题已经是文件夹名时才给状态摘要。 */
+    val subtitle: String get() = if (title != project.name) project.name else summary
     /** 激活 = 主会话活着。exited 的会话只是历史，项目回到未激活栏，点一行即 resume。 */
     val group: ProjectGroup get() = if (primary != null && primary.state != "exited") ProjectGroup.ACTIVE else ProjectGroup.INACTIVE
     /** 行尾的相对时间：有会话按最近输出，没有按目录 mtime；都是 daemon 给的 ISO 时间串。 */
@@ -198,7 +212,7 @@ private fun ProjectState.summaryColor(): Color = when (this) {
 /**
  * 首页：项目列表本身。点一行进该项目的消息流——会话活着直接进，退出了/没有就
  * `POST /sessions`（daemon 幂等，且 resume 找不到旧对话会自动开新会话）再进。
- * 长按出项目操作单。新建按钮与设置入口由外层 HomeScreen 摆。
+ * 长按出项目操作单。顶部输入框既过滤列表也新建项目（与 mac 侧栏一致）；设置入口在顶栏。
  */
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
@@ -216,6 +230,9 @@ fun ProjectsHome(store: AppStore, nav: NavHostController) {
     var busy by remember { mutableStateOf(setOf<String>()) }
     var actionsFor by remember { mutableStateOf<Project?>(null) }
     var purgeReport by remember { mutableStateOf<List<ProjectDeleteResult>?>(null) }
+    // 正在 POST /projects + /sessions：挡住第二次回车
+    var creating by remember { mutableStateOf(false) }
+    val focusManager = LocalFocusManager.current
 
     LaunchedEffect(Unit) { store.refreshProjects() }
 
@@ -229,6 +246,26 @@ fun ProjectsHome(store: AppStore, nav: NavHostController) {
     }
 
     fun toast(msg: String) = Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+
+    /** 顶部输入框回车 / ＋：框里的字就是文件夹名，留空 = 按日期命名；建完清空并进入。 */
+    fun create() {
+        if (creating) return
+        creating = true
+        val name = query.trim().ifBlank { null }
+        scope.launch {
+            try {
+                val api = store.client ?: throw IllegalStateException("未连接 daemon")
+                // agent 显式写进注册表：daemon 对「没有登记」的目录会自己猜，不留给它猜
+                val path = api.createProject(name, DEFAULT_AGENT).path
+                val sess = api.createSession(path, DEFAULT_AGENT, resume = false)
+                query = ""
+                focusManager.clearFocus()
+                openSession(sess.id, "")
+            } catch (e: Exception) {
+                toast(if (e is DaemonHttpException && e.errorCode == "conflict") "项目已存在" else "新建失败：${e.message}")
+            } finally { creating = false }
+        }
+    }
 
     fun open(row: ProjectRow) {
         val p = row.project
@@ -285,11 +322,21 @@ fun ProjectsHome(store: AppStore, nav: NavHostController) {
                 Text("⚙", color = Tok.Dim, fontSize = 20.sp)
             }
         }
+        // 与 mac 侧栏同一件东西：边输入边过滤列表，回车或右边 ＋ 就按这个名字新建项目
         OutlinedTextField(
             query, { query = it },
-            placeholder = { Text("搜索项目 / 会话命名…", color = Tok.Faint, fontSize = 13.sp) },
+            placeholder = { Text("新建项目：文件夹名，回车", color = Tok.Faint, fontSize = 13.sp) },
             modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp), singleLine = true,
             textStyle = androidx.compose.ui.text.TextStyle(color = Tok.Ink, fontSize = 14.sp),
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
+            keyboardActions = KeyboardActions(onGo = { create() }),
+            trailingIcon = {
+                if (creating) {
+                    CircularProgressIndicator(Modifier.width(18.dp).height(18.dp), strokeWidth = 2.dp, color = Tok.Accent)
+                } else {
+                    IconButton(onClick = { create() }) { Text("＋", color = Tok.Accent, fontSize = 22.sp) }
+                }
+            },
         )
 
         PullToRefreshBox(
@@ -304,7 +351,7 @@ fun ProjectsHome(store: AppStore, nav: NavHostController) {
                 Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
                     if (projects.isEmpty()) {
                         Text("暂无项目", color = Tok.Faint)
-                        Text("点右下 ＋ 新建", color = Tok.Faint, fontSize = 12.sp)
+                        Text("在上方输入文件夹名，回车新建", color = Tok.Faint, fontSize = 12.sp)
                     } else {
                         Text("没有匹配的项目", color = Tok.Faint)
                     }
@@ -369,14 +416,16 @@ private fun ProjectRowItem(row: ProjectRow, busy: Boolean, onClick: () -> Unit, 
             }
             Spacer(Modifier.width(8.dp))
             Text(
-                p.name, color = Tok.Ink, fontSize = 15.sp, fontWeight = FontWeight.Bold,
+                row.title, color = Tok.Ink, fontSize = 15.sp, fontWeight = FontWeight.Bold,
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
             )
             Spacer(Modifier.width(8.dp))
             Text(relativeTime(row.timeIso), color = Tok.Faint, fontSize = 11.sp)
         }
+        val isPath = row.subtitle == p.name && row.title != p.name
         Text(
-            row.summary, color = row.state.summaryColor(), fontSize = 13.sp,
+            row.subtitle, color = if (isPath) Tok.Faint else row.state.summaryColor(), fontSize = 13.sp,
+            fontFamily = if (isPath) FontFamily.Monospace else FontFamily.Default,
             maxLines = 1, overflow = TextOverflow.Ellipsis,
             modifier = Modifier.padding(start = 20.dp, top = 3.dp),
         )

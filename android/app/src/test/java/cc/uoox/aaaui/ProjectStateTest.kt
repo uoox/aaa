@@ -113,4 +113,19 @@ class ProjectStateTest {
         val rows = projectRows(listOf(p2, p), emptyList())
         assertEquals(listOf("a", "c"), groupProjectRows(rows).single().second.map { it.project.name })
     }
+
+    @Test fun rowTitleIsTheSessionNameNotTheFolder() {
+        // 与 mac 侧栏同口径：活着的会话用它的 title，退出后用 daemon 读出的 session_title，
+        // 都没有才是文件夹名；文件夹名退到第二行当地址
+        val live = s("l", "running", "2026-09-02T10:00:00Z", title = "改登录页")
+        val liveRow = projectRows(listOf(p), listOf(live)).single()
+        assertEquals("改登录页", liveRow.title)
+        assertEquals("a", liveRow.subtitle)
+        val idleRow = projectRows(listOf(p), emptyList()).single()
+        assertEquals("旧对话", idleRow.title)
+        assertEquals("a", idleRow.subtitle)
+        val neverRow = projectRows(listOf(bare), emptyList()).single()
+        assertEquals("b", neverRow.title)
+        assertEquals("未开始 · 点击启动", neverRow.subtitle)
+    }
 }

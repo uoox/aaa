@@ -18,12 +18,10 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -250,83 +248,17 @@ fun PairScreen(store: AppStore, onConnected: () -> Unit) {
 // ---------- home：项目列表就是首页 ----------
 
 /**
- * 首页只有一屏：项目列表（含每个项目的会话三态），右上角齿轮进设置，右下角 ＋ 新建。
- * 原来的「会话 / 项目 / 设置」三 tab 收掉了——一个项目一个 agent，项目即会话，
- * 两张列表说的是同一件事。宽屏也不摆 rail：没有 tab 就没有导航可放。
+ * 首页只有一屏：项目列表（含每个项目的会话三态），右上角齿轮进设置，顶部输入框
+ * 既过滤列表也新建项目（输入文件夹名回车，与 mac 侧栏一致）。原来的「会话 / 项目 /
+ * 设置」三 tab 和右下角 ＋ 都收掉了——一个项目一个 agent，项目即会话。
  */
 @Composable
 fun HomeScreen(store: AppStore, nav: NavHostController) {
-    var showNewSheet by remember { mutableStateOf(false) }
-
     // POST_NOTIFICATIONS runtime permission (Android 13+)
     val permLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
     LaunchedEffect(Unit) {
         if (Build.VERSION.SDK_INT >= 33) permLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
-
-    Box(Modifier.fillMaxSize().background(Tok.Bg)) {
-        ProjectsHome(store, nav)
-        // safeDrawingPadding：手势条 / 展开态横屏的系统栏不吃掉 FAB
-        Box(
-            Modifier.align(Alignment.BottomEnd)
-                .safeDrawingPadding()
-                .padding(20.dp),
-        ) {
-            FloatingActionButton(onClick = { showNewSheet = true }, containerColor = Tok.Accent) {
-                Text("＋", color = Tok.OnAccent, fontSize = 24.sp)
-            }
-        }
-    }
-    if (showNewSheet) NewSessionSheet(store) { showNewSheet = false }
+    Box(Modifier.fillMaxSize().background(Tok.Bg)) { ProjectsHome(store, nav) }
 }
 
-// ---------- A5 新建 ----------
-
-/** 新建项目：只问名字。agent 固定 claude——这个 app 只跑 Claude Code，终端是另外那个面板。 */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun NewSessionSheet(store: AppStore, onDismiss: () -> Unit) {
-    val scope = rememberCoroutineScope()
-    val openSession = LocalOpenSession.current
-    var name by rememberSaveable { mutableStateOf("") }
-    var busy by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf<String?>(null) }
-
-    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = Tok.Surface) {
-        Column(Modifier.padding(horizontal = 16.dp).padding(bottom = 24.dp)) {
-            Text("新建", color = Tok.Ink, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-            Text(
-                "${store.health.collectAsState().value?.project_root ?: "/Volumes/SSD/project"}/<名称>",
-                color = Tok.Faint, fontSize = 12.sp, fontFamily = FontFamily.Monospace,
-            )
-            Spacer(Modifier.height(10.dp))
-            OutlinedTextField(
-                name, { name = it }, label = { Text("项目名称") },
-                placeholder = { Text("留空 = 按日期命名") },
-                modifier = Modifier.fillMaxWidth(), singleLine = true,
-            )
-            error?.let { Text(it, color = Tok.Red, fontSize = 13.sp, modifier = Modifier.padding(top = 6.dp)) }
-            Spacer(Modifier.height(14.dp))
-            Button(
-                enabled = !busy,
-                onClick = {
-                    busy = true; error = null
-                    scope.launch {
-                        try {
-                            val api = store.client ?: throw IllegalStateException("未连接 daemon")
-                            // agent 显式写进注册表：daemon 对「没有登记」的目录会自己猜，不留给它猜
-                            val path = api.createProject(name.trim().ifBlank { null }, DEFAULT_AGENT).path
-                            val sess = api.createSession(path, DEFAULT_AGENT, resume = false)
-                            onDismiss()
-                            openSession(sess.id, "")
-                        } catch (e: Exception) {
-                            error = if (e is DaemonHttpException && e.errorCode == "conflict") "项目已存在" else e.message
-                        } finally { busy = false }
-                    }
-                },
-                modifier = Modifier.fillMaxWidth(),
-            ) { if (busy) CircularProgressIndicator(Modifier.height(18.dp).width(18.dp), strokeWidth = 2.dp) else Text("创建并进入 →") }
-            TextButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) { Text("取消", color = Tok.Dim) }
-        }
-    }
-}

@@ -1,4 +1,4 @@
-//! 模态框：新建项目（只填名字，agent 固定 claude）/ 删除确认（purge 报告）/
+//! 模态框：删除确认（purge 报告）/
 //! 会话终止、删除、重命名 / 配置变更确认。
 
 use anyhow::anyhow;
@@ -9,26 +9,23 @@ use super::{Modal, RootView};
 use crate::theme;
 
 impl RootView {
-    pub(super) fn open_new_project_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.modal = Modal::NewProject { busy: false };
-        self.name_input.update(cx, |i, cx| i.set_text("", cx));
-        let handle = self.name_input.read(cx).focus_handle.clone();
+    /// ⌘N / 点侧栏输入框：光标进「新建项目」输入框
+    pub(super) fn focus_new_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let handle = self.new_input.read(cx).focus_handle.clone();
         handle.focus(window, cx);
         cx.notify();
     }
 
-    pub(super) fn confirm_create_project(&mut self, cx: &mut Context<Self>) {
-        if let Modal::NewProject { busy, .. } = &mut self.modal {
-            if *busy {
-                return;
-            }
-            *busy = true;
-        } else {
+    /// 侧栏输入框回车 / ＋：输入框里的字就是文件夹名，留空 = 时间戳目录名。
+    /// 建完清空输入框并进入新会话。
+    pub(super) fn create_project(&mut self, cx: &mut Context<Self>) {
+        if self.creating {
             return;
         }
+        self.creating = true;
         cx.notify();
         let name = {
-            let t = self.name_input.read(cx).text.trim().to_string();
+            let t = self.new_input.read(cx).text.trim().to_string();
             if t.is_empty() { None } else { Some(t) }
         };
         // 唯一的 agent；显式写进注册表（名册以注册表为准），不靠 daemon 端兜底
@@ -60,20 +57,16 @@ impl RootView {
             }
             .await;
             let _ = this.update(cx, |r, cx| {
+                r.creating = false;
                 match res {
                     Ok(s) => {
-                        r.modal = Modal::None;
+                        r.new_input.update(cx, |i, cx| i.set_text("", cx));
                         let id = s.id.clone();
                         r.upsert_session(s, cx);
                         r.open_session(id, cx);
                         r.fetch_projects(cx);
                     }
-                    Err(e) => {
-                        r.set_error(e.to_string(), cx);
-                        if let Modal::NewProject { busy, .. } = &mut r.modal {
-                            *busy = false;
-                        }
-                    }
+                    Err(e) => r.set_error(e.to_string(), cx),
                 }
                 cx.notify();
             });
@@ -197,7 +190,6 @@ impl RootView {
     pub(super) fn render_modal(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let content = match &self.modal {
             Modal::None => return None,
-            Modal::NewProject { busy } => self.render_new_project(*busy, cx),
             Modal::DeleteConfirm {
                 paths,
                 report,
@@ -241,75 +233,6 @@ impl RootView {
             .shadow_lg()
             .flex()
             .flex_col()
-    }
-
-    fn render_new_project(&self, busy: bool, cx: &mut Context<Self>) -> gpui::Div {
-        let ts_hint = chrono::Local::now().format("%Y-%m-%d-%H%M").to_string();
-        // daemon 的 PATH 里找不到 claude：照样让人建目录，但先说一声，免得会话起不来还纳闷
-        let claude_missing = self
-            .agents
-            .iter()
-            .any(|a| a.id == "claude" && !a.available);
-        self.modal_box()
-            .child(
-                div()
-                    .font_weight(gpui::FontWeight::BOLD)
-                    .text_size(px(15.))
-                    .pb(px(12.))
-                    .child("新项目"),
-            )
-            .child(
-                div()
-                    .font_family("Menlo")
-                    .text_size(px(10.))
-                    .text_color(c(theme::faint()))
-                    .pb(px(4.))
-                    .child(SharedString::from(format!(
-                        "名称 · {}/<名称>",
-                        self.health
-                            .as_ref()
-                            .map(|h| h.project_root.clone())
-                            .unwrap_or_else(|| "/Volumes/SSD/project".into())
-                    ))),
-            )
-            .child(self.name_input.clone())
-            .child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(c(theme::faint()))
-                    .pt(px(4.))
-                    .pb(px(12.))
-                    .child(SharedString::from(format!("留空 = {ts_hint}"))),
-            )
-            .when(claude_missing, |el| {
-                el.child(
-                    div()
-                        .text_size(px(11.))
-                        .text_color(c(theme::amber()))
-                        .pb(px(8.))
-                        .child("daemon 找不到 claude 命令（检查安装与 PATH）——目录会建，会话起不来"),
-                )
-            })
-            .child(
-                div()
-                    .flex()
-                    .justify_end()
-                    .gap(px(8.))
-                    .pt(px(14.))
-                    .child(
-                        btn_secondary("np-cancel", "取消").on_click(cx.listener(|this, _, _, cx| {
-                            this.modal = Modal::None;
-                            cx.notify();
-                        })),
-                    )
-                    .child(
-                        btn_primary("np-ok", if busy { "创建中…" } else { "创建并进入" }).on_click(
-                            cx.listener(|this, _, _, cx| {
-                                this.confirm_create_project(cx);
-                            }),
-                        ),
-                    ),
-            )
     }
 
     fn render_delete_confirm(
