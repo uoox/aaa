@@ -12,9 +12,11 @@ use std::collections::{HashMap, HashSet};
 
 use futures::StreamExt;
 use gpui::{
-    AppContext as _, Context, Entity, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, SharedString, Task, Window, div, prelude::*, px,
+    Animation, AnimationExt as _, AppContext as _, Context, Entity, KeyDownEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, SharedString, Task, Window, div,
+    ease_out_quint, prelude::*, px,
 };
+use std::time::{Duration, Instant};
 
 use crate::model::*;
 use crate::net::{ConnState, Net, UiEvent};
@@ -140,6 +142,31 @@ fn resolve_active_terminal(active: Option<&str>, tabs: &[String]) -> Option<Stri
     }
 }
 
+/// 侧栏两栏之间搬家动画的时长。
+const MOVE_ANIM: Duration = Duration::from_millis(260);
+
+/// 下栏顺序：最近有过动静的项目在前——刚关掉的会话所属项目排第一。「动静」取该项目
+/// 最新一条会话（含已退出）的 created_at，没有会话的用目录 mtime；同刻按名字稳住。
+/// 两者都是 ISO 时间串，字典序即时间序。
+fn idle_projects_recent_first<'a>(projects: &'a [Project], sessions: &[Session]) -> Vec<&'a Project> {
+    let alive = alive_paths(sessions);
+    let mut idle: Vec<(&'a Project, String)> = projects
+        .iter()
+        .filter(|p| !alive.contains(&p.path.as_str()))
+        .map(|p| {
+            let last = sessions
+                .iter()
+                .filter(|s| s.project_path == p.path)
+                .map(|s| s.created_at.as_str())
+                .max()
+                .unwrap_or(p.mtime.as_str());
+            (p, last.to_owned())
+        })
+        .collect();
+    idle.sort_by(|(a, ta), (b, tb)| tb.cmp(ta).then_with(|| a.name.cmp(&b.name)));
+    idle.into_iter().map(|(p, _)| p).collect()
+}
+
 /// 列表排序键：按开启时间（`created_at` 升序，末尾最新）再按 id 稳住。
 /// 状态、最近输出都**不**参与排序——多个会话同时在跑时，按状态/活跃度排会
 /// 让行在侧栏里跳来跳去，点都点不准；状态交给行首色点表达。
@@ -213,6 +240,12 @@ pub struct RootView {
     /// 会话页的打开顺序（关当前页时回落用）；终端标签不进这里
     open_order: Vec<String>,
     pending_focus: Option<String>,
+
+    /// 侧栏两栏之间的搬家动画：项目路径 → (何时搬的, 是否上移)。渲染时不到
+    /// [`MOVE_ANIM`] 的行做一段淡入 + 位移；过期即删。
+    moves: HashMap<String, (Instant, bool)>,
+    /// 上一帧的激活集合（项目路径），用来发现谁搬了家；None = 首帧还没基线
+    prev_active: Option<HashSet<String>>,
 
     // 终端面板
     /// 当前标签；None / 指向已死会话时回落到最新存活的
@@ -303,6 +336,8 @@ impl RootView {
             terminals: HashMap::new(),
             open_order: Vec::new(),
             pending_focus: None,
+            moves: HashMap::new(),
+            prev_active: None,
             active_terminal: None,
             deleted_terminals: HashSet::new(),
             msg_views: HashMap::new(),
@@ -526,6 +561,43 @@ impl RootView {
 
     fn sort_sessions(&mut self) {
         self.sessions.sort_by(|a, b| sort_key(a).cmp(&sort_key(b)));
+    }
+
+    /// 每帧比对激活集合：新激活的项目上移进上栏、会话关掉的项目下移进下栏，
+    /// 各记一个时间戳给行动画用。首帧只建基线不记动画（冷启动别满屏乱飞）。
+    fn track_moves(&mut self) {
+        let now = Instant::now();
+        let cur: HashSet<String> = alive_paths(&self.sessions).into_iter().map(str::to_owned).collect();
+        if let Some(prev) = &self.prev_active {
+            for path in cur.difference(prev) {
+                self.moves.insert(path.clone(), (now, true));
+            }
+            for path in prev.difference(&cur) {
+                self.moves.insert(path.clone(), (now, false));
+            }
+        }
+        self.prev_active = Some(cur);
+        self.moves.retain(|_, (at, _)| now.duration_since(*at) < MOVE_ANIM);
+    }
+
+    /// 某项目若刚搬过家，给它的行套上淡入 + 从来处滑入的动画；否则原样返回。
+    fn animate_move(&self, path: &str, key: &str, row: gpui::Stateful<gpui::Div>) -> gpui::AnyElement {
+        match self.moves.get(path) {
+            Some((_, up)) => {
+                let up = *up;
+                row.with_animation(
+                    SharedString::from(format!("sb-move-{key}")),
+                    Animation::new(MOVE_ANIM).with_easing(ease_out_quint()),
+                    move |el, t| {
+                        // 上移的从下面滑上来，下移的从上面滑下来
+                        let shift = (1.0 - t) * 14.0 * if up { 1.0 } else { -1.0 };
+                        el.opacity(t.max(0.15)).mt(px(shift))
+                    },
+                )
+                .into_any_element()
+            }
+            None => row.into_any_element(),
+        }
     }
 
     // ── 数据拉取 ────────────────────────────────────────────────────────
@@ -813,8 +885,6 @@ impl RootView {
         //   AskUserQuestion 没答——结构化事实，不是读屏猜的）/ waiting（轮到你），
         //   绿 = running。问题本身不在侧栏画：进消息流，表单原生呈现、原地作答。
         //   exited 不在这里（项目回下栏）；终端（shell）也不在（归终端面板）。
-        let alive_paths = alive_paths(&self.sessions);
-
         let session_row = |s: &Session, ix: usize| {
             let id = s.id.clone();
             let id_close = s.id.clone();
@@ -886,22 +956,21 @@ impl RootView {
                 )
         };
 
-        // self.sessions 已按 created_at 排好（sort_sessions），这里只过滤不再排
+        // self.sessions 已按 created_at 排好（sort_sessions），这里只过滤不再排：
+        // 刚激活（新开 / resume）的会话 created_at 最新，自然落在上栏底部
         let active: Vec<&Session> = self.sessions.iter().filter(|s| is_active(s)).collect();
         let mut active_col = div().flex().flex_col().gap(px(1.));
         if !active.is_empty() {
             active_col = active_col.child(group_header("激活", theme::green(), active.len()));
             for (ix, s) in active.iter().enumerate() {
-                active_col = active_col.child(session_row(s, ix));
+                let row = session_row(s, ix);
+                active_col = active_col.child(self.animate_move(&s.project_path, &s.id, row));
             }
         }
 
         // ── 下栏：未激活的项目（双击开启会话并移入上栏） ─────────────
-        let idle: Vec<&Project> = self
-            .projects
-            .iter()
-            .filter(|p| !alive_paths.contains(&p.path.as_str()))
-            .collect();
+        //   最近活动过的在最前：刚关掉的会话所属项目排第一，从没跑过的按目录 mtime 靠后
+        let idle: Vec<&Project> = idle_projects_recent_first(&self.projects, &self.sessions);
         let mut idle_col = div().flex().flex_col().gap(px(1.));
         if !idle.is_empty() {
             idle_col = idle_col.child(group_header("未激活", theme::faint(), idle.len()));
@@ -914,7 +983,8 @@ impl RootView {
                 .clone()
                 .filter(|t| !t.is_empty())
                 .unwrap_or_else(|| p.name.clone());
-            idle_col = idle_col.child(
+            let idle_path = p.path.clone();
+            idle_col = idle_col.child(self.animate_move(&idle_path, &idle_path, 
                 row_base(("sb-proj", ix).into())
                     .group("sb-idle")
                     .hover(|st| st.bg(c(theme::surface_raised())))
@@ -955,7 +1025,7 @@ impl RootView {
                             }))
                             .child("删"),
                     ),
-            );
+            ));
         }
 
         let (conn_color, conn_text) = match self.conn {
@@ -1342,6 +1412,8 @@ impl RootView {
 
 impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 侧栏搬家动画的基线要在渲染前更新
+        self.track_moves();
         // 挂起的焦点请求（异步流程里无 window，延到这里）
         if let Some(id) = self.pending_focus.take()
             && let Some(t) = self.terminals.get(&id)

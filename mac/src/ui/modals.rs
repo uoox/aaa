@@ -91,7 +91,11 @@ impl RootView {
             let _ = this.update(cx, |r, cx| {
                 match res {
                     Ok(resp) => {
-                        if let Modal::DeleteConfirm { report, busy, .. } = &mut r.modal {
+                        // 全部成功就直接收起：列表少了那几行就是结果，不必再弹一层
+                        // 「删除完成」让人点关闭。有失败的才留下清单看哪条没删掉。
+                        if resp.results.iter().all(|x| x.ok) {
+                            r.modal = Modal::None;
+                        } else if let Modal::DeleteConfirm { report, busy, .. } = &mut r.modal {
                             *report = Some(resp);
                             *busy = false;
                         }

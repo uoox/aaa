@@ -106,8 +106,8 @@ data class ProjectRow(
         primary?.title?.takeIf { it.isNotBlank() }
             ?: project.session_title?.takeIf { it.isNotBlank() }
             ?: project.name
-    /** 第二行：标题是会话名时给文件夹名（地址），标题已经是文件夹名时才给状态摘要。 */
-    val subtitle: String get() = if (title != project.name) project.name else summary
+    /** 第二行：状态摘要。文件夹名不再单独占一行——没开过对话时它就是标题（2026-09-03 用户拍板）。 */
+    val subtitle: String get() = summary
     /** 激活 = 主会话活着。exited 的会话只是历史，项目回到未激活栏，点一行即 resume。 */
     val group: ProjectGroup get() = if (primary != null && primary.state != "exited") ProjectGroup.ACTIVE else ProjectGroup.INACTIVE
     /** 行尾的相对时间：有会话按最近输出，没有按目录 mtime；都是 daemon 给的 ISO 时间串。 */
@@ -151,21 +151,14 @@ fun projectStateOf(project: Project, primary: Session?): ProjectState = when {
 }
 
 /**
- * 一句话摘要。running 取 preview 最后一行「有字」的——TUI 底部常是一整行边框或
- * 提示符，没有字母/数字/汉字的行跳过，否则摘要永远是一串横线。
+ * 第二行的一句话：只说状态。标题行已经是会话名，这里再放标题就是重复；也不用 preview——
+ * 它是屏幕末 4 行，TUI 型 agent 那里永远是输入框和底栏，当摘要只会是垃圾。
  */
+@Suppress("UNUSED_PARAMETER")
 fun projectSummary(project: Project, primary: Session?, state: ProjectState): String = when (state) {
-    ProjectState.NEEDS_REPLY -> primary?.title?.takeIf { it.isNotBlank() }
-        ?: project.session_title?.takeIf { it.isNotBlank() }
-        ?: "等你回答"
-    // 不用 preview：它是屏幕末 4 行，TUI 型 agent 那里永远是输入框和底栏（"bypass permissions on…"），
-    // 当摘要只会是垃圾。色点 + 分组标题已经说明「执行中」，这行给标题。
-    ProjectState.RUNNING -> primary?.title?.takeIf { it.isNotBlank() }
-        ?: project.session_title?.takeIf { it.isNotBlank() }
-        ?: "运行中"
-    ProjectState.DONE -> project.session_title?.takeIf { it.isNotBlank() }
-        ?: primary?.title?.takeIf { it.isNotBlank() }
-        ?: "点击继续"
+    ProjectState.NEEDS_REPLY -> "等你回答"
+    ProjectState.RUNNING -> "执行中"
+    ProjectState.DONE -> "点击继续"
     ProjectState.NEVER -> "未开始 · 点击启动"
 }
 
@@ -177,8 +170,9 @@ fun projectRows(projects: List<Project>, sessions: List<Session>): List<ProjectR
 
 /**
  * 两栏分组，空栏不出现。**顺序不随状态或输出变**：激活栏按会话开启时间
- * （created_at 升序，末尾最新）再按路径稳住，几个会话同时在跑也不跳行；
- * 未激活栏按项目名，一眼找得到。状态交给色点。
+ * （created_at 升序，末尾最新）再按路径稳住，几个会话同时在跑也不跳行——刚激活的
+ * 落在上栏底部；未激活栏最近有动静的在前——刚关掉的会话所属项目排第一，从没跑过的
+ * 按目录 mtime 靠后（与 mac 侧栏同一口径，2026-09-03）。状态交给色点。
  */
 fun groupProjectRows(rows: List<ProjectRow>): List<Pair<ProjectGroup, List<ProjectRow>>> =
     ProjectGroup.entries
@@ -186,7 +180,7 @@ fun groupProjectRows(rows: List<ProjectRow>): List<Pair<ProjectGroup, List<Proje
             val inGroup = rows.filter { it.group == g }
             g to when (g) {
                 ProjectGroup.ACTIVE -> inGroup.sortedWith(compareBy({ it.primary?.created_at.orEmpty() }, { it.project.path }))
-                ProjectGroup.INACTIVE -> inGroup.sortedWith(compareBy({ it.project.name.lowercase() }, { it.project.path }))
+                ProjectGroup.INACTIVE -> inGroup.sortedWith(compareByDescending<ProjectRow> { it.timeIso }.thenBy { it.project.path })
             }
         }
         .filter { it.second.isNotEmpty() }
@@ -373,8 +367,10 @@ fun ProjectsHome(store: AppStore, nav: NavHostController) {
                         }
                     }
                     items(rows, key = { it.project.path }) { row ->
+                        // 同一个 LazyColumn 里跨栏搬家：Compose 按 key 做位移过渡，上移/下移都有动画
                         ProjectRowItem(
                             row,
+                            modifier = Modifier.animateItem(),
                             busy = row.project.path in busy,
                             onClick = { open(row) },
                             onLongClick = { actionsFor = row.project },
@@ -402,8 +398,8 @@ fun ProjectsHome(store: AppStore, nav: NavHostController) {
 /** 一行：色点 + 项目名 + 时间；第二行一句摘要。目录大小等细节在长按单里。 */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ProjectRowItem(row: ProjectRow, busy: Boolean, onClick: () -> Unit, onLongClick: () -> Unit) {
-    val p = row.project
+private fun ProjectRowItem(row: ProjectRow, busy: Boolean, onClick: () -> Unit, onLongClick: () -> Unit, modifier: Modifier = Modifier) {
+    Column(modifier) {
     Column(
         Modifier.fillMaxWidth()
             .combinedClickable(onClick = onClick, onLongClick = onLongClick)
@@ -422,15 +418,14 @@ private fun ProjectRowItem(row: ProjectRow, busy: Boolean, onClick: () -> Unit, 
             Spacer(Modifier.width(8.dp))
             Text(relativeTime(row.timeIso), color = Tok.Faint, fontSize = 11.sp)
         }
-        val isPath = row.subtitle == p.name && row.title != p.name
         Text(
-            row.subtitle, color = if (isPath) Tok.Faint else row.state.summaryColor(), fontSize = 13.sp,
-            fontFamily = if (isPath) FontFamily.Monospace else FontFamily.Default,
+            row.subtitle, color = row.state.summaryColor(), fontSize = 13.sp,
             maxLines = 1, overflow = TextOverflow.Ellipsis,
             modifier = Modifier.padding(start = 20.dp, top = 3.dp),
         )
     }
     HorizontalDivider(color = Tok.Edge, thickness = 1.dp, modifier = Modifier.padding(start = 36.dp))
+    }
 }
 
 /** A8 删除结果（purge 报告渲染） */

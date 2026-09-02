@@ -20,7 +20,7 @@ class ProjectStateTest {
         val asking = s("ask", "waiting", "2026-09-02T09:00:00Z", asking = true, title = "选部署方式")
         assertSame(asking, primarySessionFor(p, listOf(running, asking)))
         assertEquals(ProjectState.NEEDS_REPLY, projectStateOf(p, asking))
-        assertEquals("选部署方式", projectSummary(p, asking, ProjectState.NEEDS_REPLY))
+        assertEquals("等你回答", projectSummary(p, asking, ProjectState.NEEDS_REPLY))
         // 表单刚弹出、屏幕还没静下来：asking 已 true 而 state 还是 running，一样算待回复
         assertEquals(ProjectState.NEEDS_REPLY, projectStateOf(p, s("r", "running", "2026-09-02T10:00:00Z", asking = true)))
     }
@@ -28,9 +28,9 @@ class ProjectStateTest {
     @Test fun waitingAtTheComposerIsNotAReply() {
         val idleWaiting = s("w", "waiting", "2026-09-02T09:00:00Z")
         assertEquals(ProjectState.DONE, projectStateOf(p, idleWaiting))
-        assertEquals("旧对话", projectSummary(p, idleWaiting, ProjectState.DONE))
+        assertEquals("点击继续", projectSummary(p, idleWaiting, ProjectState.DONE))
         // 没标题的待回复退到项目的对话名
-        assertEquals("旧对话", projectSummary(p, s("a", "waiting", "2026-09-02T09:00:00Z", asking = true), ProjectState.NEEDS_REPLY))
+        assertEquals("等你回答", projectSummary(p, s("a", "waiting", "2026-09-02T09:00:00Z", asking = true), ProjectState.NEEDS_REPLY))
     }
 
     @Test fun projectAgentSessionBeatsAShellInTheSameDir() {
@@ -66,7 +66,7 @@ class ProjectStateTest {
 
     @Test fun noSessionButAStoredConversationIsDoneNotNever() {
         assertEquals(ProjectState.DONE, projectStateOf(p, null))
-        assertEquals("旧对话", projectSummary(p, null, ProjectState.DONE))
+        assertEquals("点击继续", projectSummary(p, null, ProjectState.DONE))
         assertEquals(ProjectState.NEVER, projectStateOf(bare, null))
         assertEquals("未开始 · 点击启动", projectSummary(bare, null, ProjectState.NEVER))
     }
@@ -74,9 +74,9 @@ class ProjectStateTest {
     @Test fun runningSummaryIgnoresScreenPreview() {
         // preview 是 TUI 的输入框/底栏，不能当摘要；执行中一律给标题
         val running = s("r", "running", "2026-09-02T10:00:00Z", preview = "⏵⏵ bypass permissions on (shift+tab to cycle)\n│ > │\n", title = "标题")
-        assertEquals("标题", projectSummary(p, running, ProjectState.RUNNING))
+        assertEquals("执行中", projectSummary(p, running, ProjectState.RUNNING))
         val untitled = s("r2", "running", "2026-09-02T10:00:00Z", preview = "Reading foo.kt\n")
-        assertEquals(p.session_title, projectSummary(p, untitled, ProjectState.RUNNING))
+        assertEquals("执行中", projectSummary(p, untitled, ProjectState.RUNNING))
     }
 
     @Test fun twoGroupsAliveVersusRest() {
@@ -108,22 +108,26 @@ class ProjectStateTest {
         assertEquals(listOf("c", "a", "d"), groupProjectRows(projectRows(listOf(p, p2, p3), flipped)).single().second.map { it.project.name })
     }
 
-    @Test fun inactiveOrderIsByName() {
+    @Test fun inactiveOrderIsMostRecentFirst() {
+        // 从没跑过的按目录 mtime：c 更新，排前面
+        val pa = p.copy(mtime = "2026-09-01T00:00:00Z")
         val p2 = p.copy(path = "/r/c", name = "c", mtime = "2026-09-02T00:00:00Z")
-        val rows = projectRows(listOf(p2, p), emptyList())
-        assertEquals(listOf("a", "c"), groupProjectRows(rows).single().second.map { it.project.name })
+        assertEquals(listOf("c", "a"), groupProjectRows(projectRows(listOf(pa, p2), emptyList())).single().second.map { it.project.name })
+        // 刚关掉会话的项目排第一：a 的会话 09-03 退出，比 c 的 mtime 新
+        val exited = s("x", "exited", "2026-09-03T08:00:00Z")
+        assertEquals(listOf("a", "c"), groupProjectRows(projectRows(listOf(p2, pa), listOf(exited))).single().second.map { it.project.name })
     }
 
     @Test fun rowTitleIsTheSessionNameNotTheFolder() {
         // 与 mac 侧栏同口径：活着的会话用它的 title，退出后用 daemon 读出的 session_title，
-        // 都没有才是文件夹名；文件夹名退到第二行当地址
+        // 都没有才是文件夹名；第二行只说状态，文件夹名不再出现
         val live = s("l", "running", "2026-09-02T10:00:00Z", title = "改登录页")
         val liveRow = projectRows(listOf(p), listOf(live)).single()
         assertEquals("改登录页", liveRow.title)
-        assertEquals("a", liveRow.subtitle)
+        assertEquals("执行中", liveRow.subtitle)
         val idleRow = projectRows(listOf(p), emptyList()).single()
         assertEquals("旧对话", idleRow.title)
-        assertEquals("a", idleRow.subtitle)
+        assertEquals("点击继续", idleRow.subtitle)
         val neverRow = projectRows(listOf(bare), emptyList()).single()
         assertEquals("b", neverRow.title)
         assertEquals("未开始 · 点击启动", neverRow.subtitle)
