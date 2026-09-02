@@ -842,6 +842,24 @@ async fn session_rename(
     Ok(Json(sess.to_json()))
 }
 
+/// 屏幕文本（见 pool::screen_text）。没起 parser 的会话（刚建 / 已退出未回放）给空。
+async fn session_screen(
+    State(app): State<SharedApp>,
+    UrlPath(id): UrlPath<String>,
+) -> ApiResult<Json<Value>> {
+    let sess = get_session(&app, &id)?;
+    let mut guard = sess.parser.lock().unwrap();
+    let Some(parser) = guard.as_mut() else {
+        return Ok(Json(json!({"text": "", "alternate_screen": false})));
+    };
+    let text = crate::pool::screen_text(parser, SCREEN_TEXT_SCROLLBACK);
+    let alt = parser.screen().alternate_screen();
+    Ok(Json(json!({"text": text, "alternate_screen": alt})))
+}
+
+/// `/screen` 带多少行回滚：手机复制/抓链接够用，又不至于一次抠出几万行。
+const SCREEN_TEXT_SCROLLBACK: usize = 500;
+
 async fn session_ports(
     State(app): State<SharedApp>,
     UrlPath(id): UrlPath<String>,
@@ -1425,6 +1443,7 @@ pub fn router(app: SharedApp) -> Router {
         .route("/api/v1/sessions/{id}/kill", post(session_kill))
         .route("/api/v1/sessions/{id}/rename", post(session_rename))
         .route("/api/v1/sessions/{id}/ports", get(session_ports))
+        .route("/api/v1/sessions/{id}/screen", get(session_screen))
         .route("/api/v1/sessions/{id}/messages", get(session_messages))
         .route("/api/v1/sessions/{id}/diff", get(session_diff))
         .route("/api/v1/sessions/{id}/rollback", post(session_rollback))

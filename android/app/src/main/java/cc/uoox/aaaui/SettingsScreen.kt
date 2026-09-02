@@ -181,22 +181,6 @@ fun SettingsScreen(store: AppStore, nav: NavHostController) {
                     ) { Text("终端", fontSize = 12.sp) }
                 }
             }
-            Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("终端引擎", color = Tok.Ink, fontSize = 14.sp, modifier = Modifier.weight(1f))
-                SingleChoiceSegmentedButtonRow {
-                    TerminalEngine.entries.forEachIndexed { i, e ->
-                        SegmentedButton(
-                            selected = settings.terminalEngine == e.key,
-                            onClick = { scope.launch { store.settings.setTerminalEngine(e.key) } },
-                            shape = SegmentedButtonDefaults.itemShape(i, TerminalEngine.entries.size),
-                        ) { Text(e.label, fontSize = 12.sp) }
-                    }
-                }
-            }
-            Text(
-                "Termlib 是新接的 libvterm + Compose 终端，与 Termux 并存对比中；会话页顶栏的视图按钮也能临时切。",
-                color = Tok.Faint, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 14.dp).padding(bottom = 6.dp),
-            )
             SettingRow("终端字号") {
                 TextButton(onClick = { scope.launch { store.settings.setFontSize(settings.fontSize - 1) } }) { Text("−", fontSize = 18.sp) }
                 Text("${settings.fontSize}", color = Tok.Ink, fontFamily = FontFamily.Monospace)

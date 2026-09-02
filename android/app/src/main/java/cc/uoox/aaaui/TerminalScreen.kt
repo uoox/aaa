@@ -2,8 +2,6 @@ package cc.uoox.aaaui
 
 import android.content.Context
 import android.view.KeyEvent
-import android.view.MotionEvent
-import android.view.inputmethod.InputMethodManager
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -35,10 +33,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavHostController
-import com.termux.terminal.TerminalSession
-import com.termux.terminal.TerminalSessionClient
-import com.termux.view.TerminalView
-import com.termux.view.TerminalViewClient
 import kotlinx.coroutines.launch
 
 fun terminalTabLabel(index: Int, s: Session, root: String): String =
@@ -76,38 +70,18 @@ fun TerminalScreen(store: AppStore, nav: NavHostController, focusId: String) {
         }
         if (effectiveId.isEmpty()) Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) { Text("还没有终端", color = Tok.Faint); Button(onClick = { createTerminal() }, modifier = Modifier.padding(top = 12.dp)) { Text("开一个") } }
-        } else TerminalPane(store, context, conn, effectiveId, settings.fontSize, TerminalEngine.forName(settings.terminalEngine), Modifier.weight(1f))
+        } else TerminalPane(store, context, conn, effectiveId, settings.fontSize, Modifier.weight(1f))
     }
 }
 
 @Composable
-private fun TerminalPane(store: AppStore, context: Context, conn: ConnState, sessionId: String, fontSize: Int, engine: TerminalEngine, modifier: Modifier) {
+private fun TerminalPane(store: AppStore, context: Context, conn: ConnState, sessionId: String, fontSize: Int, modifier: Modifier) {
     val scope = rememberCoroutineScope()
-    val viewRef = remember { mutableStateOf<TerminalView?>(null) }
     val ctrlStickyState = remember { mutableStateOf(false) }
     var ctrlSticky by ctrlStickyState
-    val terminalClient = remember(sessionId) { object : TerminalSessionClient {
-        override fun onTextChanged(changedSession: TerminalSession) { viewRef.value?.onScreenUpdated() }
-        override fun onTitleChanged(changedSession: TerminalSession) {}
-        override fun onSessionFinished(finishedSession: TerminalSession) {}
-        override fun onCopyTextToClipboard(session: TerminalSession, text: String) { copyToClipboard(context, text) }
-        override fun onPasteTextFromClipboard(session: TerminalSession?) { pasteIntoPty(context, session) }
-        override fun onBell(session: TerminalSession) {}
-        override fun onColorsChanged(session: TerminalSession) {}
-        override fun onTerminalCursorStateChange(state: Boolean) {}
-        override fun setTerminalShellPid(session: TerminalSession, pid: Int) {}
-        override fun getTerminalCursorStyle(): Int? = null
-        override fun logError(tag: String?, message: String?) {}
-        override fun logWarn(tag: String?, message: String?) {}
-        override fun logInfo(tag: String?, message: String?) {}
-        override fun logDebug(tag: String?, message: String?) {}
-        override fun logVerbose(tag: String?, message: String?) {}
-        override fun logStackTraceWithMessage(tag: String?, message: String?, e: Exception?) {}
-        override fun logStackTrace(tag: String?, e: Exception?) {}
-    } }
+    val inputRef = remember { mutableStateOf<TermInputView?>(null) }
     var attachment by remember(sessionId) { mutableStateOf<TerminalAttachment?>(null) }
-    LaunchedEffect(conn, sessionId) { attachment = store.attachmentFor(sessionId, terminalClient) }
-    LaunchedEffect(attachment, engine) { attachment?.switchEngine(engine) }
+    LaunchedEffect(conn, sessionId) { attachment = store.attachmentFor(sessionId) }
     DisposableEffect(sessionId) { onDispose { store.releaseAttachmentSoon(sessionId) } }
     fun pasteViaDaemon() {
         val clip = (context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager).primaryClip
@@ -115,44 +89,28 @@ private fun TerminalPane(store: AppStore, context: Context, conn: ConnState, ses
         if (!text.isNullOrEmpty()) scope.launch { runCatching { store.client?.input(sessionId, text, false) } }
     }
     Column(modifier) {
-        if (engine == TerminalEngine.Termlib) Box(Modifier.weight(1f).fillMaxWidth()) {
-            TermlibHost(attachment, fontSize, ctrlStickyState, onHyperlinkClick = { openUrl(context, it) }, onPasteRequest = { pasteViaDaemon() })
-        } else Box(Modifier.weight(1f).fillMaxWidth()) { TerminalHost(attachment, viewRef, fontSize) { view -> object : TerminalViewClient {
-            override fun onScale(scale: Float) = scale
-            override fun onSingleTapUp(e: MotionEvent?) { view.requestFocus(); (context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager).showSoftInput(view, InputMethodManager.SHOW_IMPLICIT) }
-            override fun shouldBackButtonBeMappedToEscape() = false
-            override fun shouldEnforceCharBasedInput() = true
-            override fun shouldUseCtrlSpaceWorkaround() = false
-            override fun isTerminalViewSelected() = true
-            override fun copyModeChanged(copyMode: Boolean) {}
-            override fun onKeyDown(keyCode: Int, e: KeyEvent?, session: TerminalSession?) = false
-            override fun onKeyUp(keyCode: Int, e: KeyEvent?) = false
-            override fun onLongPress(event: MotionEvent?) = false
-            override fun readControlKey() = ctrlSticky
-            override fun readAltKey() = false
-            override fun readShiftKey() = false
-            override fun readFnKey() = false
-            override fun onCodePoint(codePoint: Int, ctrlDown: Boolean, session: TerminalSession?): Boolean { if (ctrlSticky) view.post { ctrlSticky = false }; return false }
-            override fun onEmulatorSet() {}
-            override fun logError(tag: String?, message: String?) {}
-            override fun logWarn(tag: String?, message: String?) {}
-            override fun logInfo(tag: String?, message: String?) {}
-            override fun logDebug(tag: String?, message: String?) {}
-            override fun logVerbose(tag: String?, message: String?) {}
-            override fun logStackTraceWithMessage(tag: String?, message: String?, e: Exception?) {}
-            override fun logStackTrace(tag: String?, e: Exception?) {}
-        } } }
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+            TerminalHost(
+                attachment, fontSize, ctrlStickyState,
+                onHyperlinkClick = { openUrl(context, it) },
+                onPasteRequest = { pasteViaDaemon() },
+                onFontSize = { target ->
+                    scope.launch { store.settings.setFontSize(target) }
+                    android.widget.Toast.makeText(context, "终端字号 $target（设置里可改回）", android.widget.Toast.LENGTH_SHORT).show()
+                },
+                inputRef = inputRef,
+            )
+        }
         Row(Modifier.fillMaxWidth().background(Tok.Surface).horizontalScroll(rememberScrollState()).padding(8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             fun key(code: Int) = {
-                if (engine == TerminalEngine.Termlib) {
-                    vtermKeyFor(code)?.let { k -> attachment?.termlib?.dispatchKey(if (ctrlSticky) VTERM_MOD_CTRL else 0, k); ctrlSticky = false }
-                } else viewRef.value?.handleKeyCode(code, 0)
+                vtermKeyFor(code)?.let { k -> attachment?.emulator?.dispatchKey(if (ctrlSticky) VTERM_MOD_CTRL else 0, k); ctrlSticky = false }
                 Unit
             }
             fun lit(s: String) = { attachment?.write(s); Unit }
+            KeyChip("键盘") { inputRef.value?.showKeyboard() }
             KeyChip("Esc", onClick = key(KeyEvent.KEYCODE_ESCAPE)); KeyChip("Tab", onClick = key(KeyEvent.KEYCODE_TAB)); KeyChip("Ctrl", active = ctrlSticky) { ctrlSticky = !ctrlSticky }
             KeyChip("↑", onClick = key(KeyEvent.KEYCODE_DPAD_UP)); KeyChip("↓", onClick = key(KeyEvent.KEYCODE_DPAD_DOWN)); KeyChip("←", onClick = key(KeyEvent.KEYCODE_DPAD_LEFT)); KeyChip("→", onClick = key(KeyEvent.KEYCODE_DPAD_RIGHT))
-            KeyChip("Home", onClick = key(KeyEvent.KEYCODE_MOVE_HOME)); KeyChip("End", onClick = key(KeyEvent.KEYCODE_MOVE_END)); KeyChip("⏎", onClick = key(KeyEvent.KEYCODE_ENTER)); KeyChip("-", onClick = lit("-")); KeyChip("/", onClick = lit("/")); KeyChip("|", onClick = lit("|")); KeyChip("~", onClick = lit("~")); KeyChip("粘贴") { if (engine == TerminalEngine.Termlib) pasteViaDaemon() else pasteIntoPty(context, attachment?.session) }
+            KeyChip("Home", onClick = key(KeyEvent.KEYCODE_MOVE_HOME)); KeyChip("End", onClick = key(KeyEvent.KEYCODE_MOVE_END)); KeyChip("⏎", onClick = key(KeyEvent.KEYCODE_ENTER)); KeyChip("-", onClick = lit("-")); KeyChip("/", onClick = lit("/")); KeyChip("|", onClick = lit("|")); KeyChip("~", onClick = lit("~")); KeyChip("粘贴") { pasteViaDaemon() }
         }
     }
 }

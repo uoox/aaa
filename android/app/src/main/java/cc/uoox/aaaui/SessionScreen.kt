@@ -86,10 +86,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.navigation.NavHostController
-import com.termux.terminal.TerminalSession
-import com.termux.terminal.TerminalSessionClient
-import com.termux.view.TerminalView
-import com.termux.view.TerminalViewClient
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
@@ -123,12 +119,6 @@ fun SessionScreen(
         else -> settings.defaultUi
     }
     val showMessages = effectiveMode == "messages" && messagesSupported != false
-    // 终端用哪套模拟器：顶栏临时切的优先，否则跟设置
-    val engine = when (effectiveMode) {
-        "termux" -> TerminalEngine.Termux
-        "termlib" -> TerminalEngine.Termlib
-        else -> TerminalEngine.forName(settings.terminalEngine)
-    }
 
     var composer by rememberSaveable { mutableStateOf(prefill) }
     var showMenu by remember { mutableStateOf(false) }
@@ -137,35 +127,11 @@ fun SessionScreen(
     // 终端视图的键位条 + 输入框：默认收起，右下角 ⌨ 放出来；不持久化，每次进来都是收起的
     var keysOpen by rememberSaveable { mutableStateOf(false) }
 
-    // 终端 attach：实例归 AppStore 管（折叠/展开会重建本 composable），这里只负责
-    // 把当前这份 TerminalView / Context 绑上去，并跟着 daemon 重连重新取一次。
-    val terminalViewRef = remember { mutableStateOf<TerminalView?>(null) }
+    // 终端 attach：实例归 AppStore 管（折叠/展开会重建本 composable），跟着 daemon 重连重新取一次。
     val conn by store.connState.collectAsState()
-    val terminalClient = remember(sessionId) {
-        object : TerminalSessionClient {
-                override fun onTextChanged(changedSession: TerminalSession) { terminalViewRef.value?.onScreenUpdated() }
-                override fun onTitleChanged(changedSession: TerminalSession) {}
-                override fun onSessionFinished(finishedSession: TerminalSession) {}
-                override fun onCopyTextToClipboard(session: TerminalSession, text: String) { copyToClipboard(context, text) }
-                override fun onPasteTextFromClipboard(session: TerminalSession?) { pasteIntoPty(context, session) }
-                override fun onBell(session: TerminalSession) {}
-                override fun onColorsChanged(session: TerminalSession) {}
-                override fun onTerminalCursorStateChange(state: Boolean) {}
-                override fun setTerminalShellPid(session: TerminalSession, pid: Int) {}
-                override fun getTerminalCursorStyle(): Int? = null
-                override fun logError(tag: String?, message: String?) {}
-                override fun logWarn(tag: String?, message: String?) {}
-                override fun logInfo(tag: String?, message: String?) {}
-                override fun logDebug(tag: String?, message: String?) {}
-                override fun logVerbose(tag: String?, message: String?) {}
-                override fun logStackTraceWithMessage(tag: String?, message: String?, e: Exception?) {}
-                override fun logStackTrace(tag: String?, e: Exception?) {}
-            }
-    }
+    val inputRef = remember { mutableStateOf<TermInputView?>(null) }
     var attachment by remember(sessionId) { mutableStateOf<TerminalAttachment?>(null) }
-    LaunchedEffect(conn, sessionId) { attachment = store.attachmentFor(sessionId, terminalClient) }
-    // 模拟器切换：attach 断开重连，daemon replay 整屏进新的那套
-    LaunchedEffect(attachment, engine) { attachment?.switchEngine(engine) }
+    LaunchedEffect(conn, sessionId) { attachment = store.attachmentFor(sessionId) }
     DisposableEffect(sessionId) {
         // 只是预约关闭：折叠屏重建在宽限期内会把它取消掉，见 AppStore
         onDispose { store.releaseAttachmentSoon(sessionId) }
@@ -215,8 +181,8 @@ fun SessionScreen(
         }
     }
     /**
-     * termlib 视图下的粘贴：libvterm 这边没有 paste()，剪贴板文本走 daemon 的 /input——
-     * 它在 TUI 开了 DECSET 2004 时会补 bracketed-paste 包裹，效果与 termux 的 emulator.paste 一致。
+     * 粘贴：剪贴板文本走 daemon 的 /input——它在 TUI 开了 DECSET 2004 时会补 bracketed-paste
+     * 包裹，Claude Code 靠它区分「粘进来的多行」和「一行行敲的回车」。
      */
     fun pasteViaDaemon() {
         val clip = (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).primaryClip
@@ -259,16 +225,18 @@ fun SessionScreen(
                     color = Tok.Faint, fontSize = 10.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )
             }
-            // 视图切换：显示当前视图名，点一下轮到下一种（消息流 → Termux → Termlib）
-            Text(
-                if (showMessages) "消息流" else engine.label,
-                color = Tok.Accent, fontSize = 12.sp, fontFamily = FontFamily.Monospace,
-                modifier = Modifier
-                    .clickable { uiMode = nextUiMode(if (showMessages) "messages" else engine.key, messagesSupported != false) }
-                    .border(1.dp, Tok.Edge2, RoundedCornerShape(8.dp))
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
-            )
-            Spacer(Modifier.width(8.dp))
+            // 视图切换：显示当前视图名，点一下换另一种
+            if (messagesSupported != false) {
+                Text(
+                    if (showMessages) "消息流" else "终端",
+                    color = Tok.Accent, fontSize = 12.sp, fontFamily = FontFamily.Monospace,
+                    modifier = Modifier
+                        .clickable { uiMode = if (showMessages) "terminal" else "messages" }
+                        .border(1.dp, Tok.Edge2, RoundedCornerShape(8.dp))
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                )
+                Spacer(Modifier.width(8.dp))
+            }
             StateDot(Tok.stateColor(s?.state ?: ""))
             Text("⋮", color = Tok.Dim, fontSize = 22.sp, modifier = Modifier.clickable { showMenu = true }.padding(horizontal = 10.dp))
         }
@@ -295,63 +263,18 @@ fun SessionScreen(
                         }
                     },
                 )
-            } else if (engine == TerminalEngine.Termlib) {
-                TermlibHost(
+            } else {
+                TerminalHost(
                     attachment, settings.fontSize, ctrlStickyState,
                     onHyperlinkClick = { openUrl(context, it) },
                     onPasteRequest = { pasteViaDaemon() },
+                    onFontSize = { target ->
+                        // 双指捏合改的是全局字号并且会记住，所以报出来；要精确就去设置里调
+                        scope.launch { store.settings.setFontSize(target) }
+                        Toast.makeText(context, "终端字号 $target（设置里可改回）", Toast.LENGTH_SHORT).show()
+                    },
+                    inputRef = inputRef,
                 )
-            } else {
-                TerminalHost(attachment, terminalViewRef, settings.fontSize,
-                    viewClientFactory = { view ->
-                        object : TerminalViewClient {
-                            override fun onScale(scale: Float): Float {
-                                // 双指缩放改的是全局字号并且会记住——一次误捏就让所有终端变大。
-                                // 所以每一步都报出来（toast），并把上限收到 22。要精确就去设置里调。
-                                if (scale < 0.9f || scale > 1.1f) {
-                                    val target = (settings.fontSize * scale).toInt().coerceIn(10, 22)
-                                    if (target != settings.fontSize) {
-                                        scope.launch { store.settings.setFontSize(target) }
-                                        Toast.makeText(context, "终端字号 $target（设置里可改回）", Toast.LENGTH_SHORT).show()
-                                    }
-                                    return 1.0f
-                                }
-                                return scale
-                            }
-                            override fun onSingleTapUp(e: MotionEvent?) {
-                                // 点在链接上就打开它，不弹键盘。命中测试借 vendored
-                                // 的 getWordAtLocation：它已经处理了换行折叠的长行。
-                                if (e != null && openTappedUrl(context, view, e)) return
-                                view.requestFocus()
-                                (context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
-                                    .showSoftInput(view, InputMethodManager.SHOW_IMPLICIT)
-                            }
-                            override fun shouldBackButtonBeMappedToEscape() = false
-                            override fun shouldEnforceCharBasedInput() = true
-                            override fun shouldUseCtrlSpaceWorkaround() = false
-                            override fun isTerminalViewSelected() = true
-                            override fun copyModeChanged(copyMode: Boolean) {}
-                            override fun onKeyDown(keyCode: Int, e: KeyEvent?, session: TerminalSession?) = false
-                            override fun onKeyUp(keyCode: Int, e: KeyEvent?) = false
-                            override fun onLongPress(event: MotionEvent?) = false
-                            override fun readControlKey() = ctrlSticky
-                            override fun readAltKey() = false
-                            override fun readShiftKey() = false
-                            override fun readFnKey() = false
-                            override fun onCodePoint(codePoint: Int, ctrlDown: Boolean, session: TerminalSession?): Boolean {
-                                if (ctrlSticky) view.post { ctrlSticky = false }
-                                return false
-                            }
-                            override fun onEmulatorSet() {}
-                            override fun logError(tag: String?, message: String?) {}
-                            override fun logWarn(tag: String?, message: String?) {}
-                            override fun logInfo(tag: String?, message: String?) {}
-                            override fun logDebug(tag: String?, message: String?) {}
-                            override fun logVerbose(tag: String?, message: String?) {}
-                            override fun logStackTraceWithMessage(tag: String?, message: String?, e: Exception?) {}
-                            override fun logStackTrace(tag: String?, e: Exception?) {}
-                        }
-                    })
             }
         }
 
@@ -362,19 +285,18 @@ fun SessionScreen(
                     .padding(horizontal = 8.dp, vertical = 5.dp),
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                // 键码交给模拟器（termux 的 KeyHandler / libvterm 的 dispatchKey），它们会按当前
-                // keypad / cursor 模式给出正确的转义序列；字面符号直接写进 PTY。
+                // 键码交给 libvterm 的 dispatchKey，它按当前 keypad / cursor 模式给出正确的
+                // 转义序列；字面符号直接写进 PTY。粘性 Ctrl 用一次就松开。
                 fun key(code: Int) = {
-                    if (engine == TerminalEngine.Termlib) {
-                        vtermKeyFor(code)?.let { k ->
-                            attachment?.termlib?.dispatchKey(if (ctrlSticky) VTERM_MOD_CTRL else 0, k)
-                            ctrlSticky = false
-                        }
-                    } else terminalViewRef.value?.handleKeyCode(code, 0)
+                    vtermKeyFor(code)?.let { k ->
+                        attachment?.emulator?.dispatchKey(if (ctrlSticky) VTERM_MOD_CTRL else 0, k)
+                        ctrlSticky = false
+                    }
                     Unit
                 }
                 fun lit(ch: String) = { attachment?.write(ch); Unit }
                 KeyChip("⌨", active = true) { keysOpen = false }
+                KeyChip("键盘") { inputRef.value?.showKeyboard() }
                 KeyChip("Esc", onClick = key(KeyEvent.KEYCODE_ESCAPE))
                 KeyChip("Tab", onClick = key(KeyEvent.KEYCODE_TAB))
                 KeyChip("Ctrl", active = ctrlSticky) { ctrlSticky = !ctrlSticky }
@@ -394,7 +316,7 @@ fun SessionScreen(
                 KeyChip("|", onClick = lit("|"))
                 KeyChip("~", onClick = lit("~"))
                 // 长按选区工具条里也有粘贴，但那要先长按选中；这里给一个直达入口
-                KeyChip("粘贴") { if (engine == TerminalEngine.Termlib) pasteViaDaemon() else pasteIntoPty(context, attachment?.session) }
+                KeyChip("粘贴") { pasteViaDaemon() }
             }
         }
 
@@ -428,7 +350,7 @@ fun SessionScreen(
     }
 
     if (showMenu && s != null) {
-        SessionMenuSheet(store, nav, s, attachment, showMessagesMode = showMessages, engine = engine, onDismiss = { showMenu = false })
+        SessionMenuSheet(store, nav, s, attachment, showMessagesMode = showMessages, onDismiss = { showMenu = false })
     }
 }
 
@@ -875,7 +797,6 @@ fun SessionMenuSheet(
     s: Session,
     attachment: TerminalAttachment?,
     showMessagesMode: Boolean,
-    engine: TerminalEngine = TerminalEngine.Termux,
     onDismiss: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
@@ -915,19 +836,24 @@ fun SessionMenuSheet(
                 }
             }
             SheetItem("✏️", "重命名会话", if (s.resume_id != null) "当前为 AI 命名" else null) { renameDialog = true }
-            // termlib 0.1.0 没把整屏文本暴露出来（有自带的长按选区），先只给 termux 这套
-            if (!showMessagesMode && engine == TerminalEngine.Termux) SheetItem("📋", "复制屏幕内容", null) {
-                val text = attachment?.session?.emulator?.screen?.transcriptText?.trim()
-                if (text.isNullOrBlank()) toast("屏幕为空") else { copyToClipboard(context, text); toast("已复制") }
-                onDismiss()
+            // 屏幕文本问 daemon：它的 vt100 有整屏和回滚（备用屏里 TUI 自己的历史除外），
+            // termlib 0.1.0 没把快照暴露出来，而且两端看到的本来就该是同一份
+            if (!showMessagesMode) SheetItem("📋", "复制屏幕内容", null) {
+                scope.launch {
+                    val text = runCatching { store.client?.screen(s.id)?.text }.getOrNull()?.trim()
+                    if (text.isNullOrBlank()) toast("屏幕为空") else { copyToClipboard(context, text); toast("已复制") }
+                    onDismiss()
+                }
             }
             // 直接点链接要点得准；回放里翻出来的地址（编译报错、dev server URL）
             // 常常已经滚上去了，给一个列表入口
             if (!showMessagesMode) SheetItem("🔗", "打开链接…", null) {
-                val urls = if (engine == TerminalEngine.Termlib) {
-                    attachment?.termlib?.getUrls(org.connectbot.terminal.UrlScanScope.ScreenAndScrollback)?.map { it.url }?.distinct().orEmpty()
-                } else urlsOnScreen(attachment?.session)
-                if (urls.isEmpty()) toast("回放里没有链接") else urlsDialog = urls
+                scope.launch {
+                    val fromDaemon = runCatching { store.client?.screen(s.id)?.text }.getOrNull()?.let { findUrls(it).map { u -> u.url } }.orEmpty()
+                    val fromScreen = attachment?.emulator?.getUrls(org.connectbot.terminal.UrlScanScope.ScreenAndScrollback)?.map { it.url }.orEmpty()
+                    val urls = (fromDaemon + fromScreen).distinct()
+                    if (urls.isEmpty()) toast("回放里没有链接") else urlsDialog = urls
+                }
             }
             SheetItem("±", "本次改动", "diff · 回滚") { onDismiss(); nav.navigate("diff/${s.id}") }
             SheetItem("📥", "任务收件箱", s.project_name) { onDismiss(); nav.navigate("inbox/${Uri.encode(s.project_path)}") }
@@ -1203,45 +1129,6 @@ private fun PatchView(patch: String, truncated: Boolean) {
 fun copyToClipboard(context: Context, text: String) {
     (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
         .setPrimaryClip(ClipData.newPlainText("aaa-ui", text))
-}
-
-/**
- * 剪贴板 → 远端 PTY。走 emulator.paste 而不是 session.write：前者会剥掉 ESC 与
- * C1、把 CRLF 归一成 CR，并在 DECSET 2004 打开时补上 bracketed-paste 包裹——
- * Claude Code 这类 TUI 正是靠它区分「粘进来的多行」和「一行行敲的回车」，
- * 直接 write 会被当成连着按了好几次提交。
- */
-fun pasteIntoPty(context: Context, session: TerminalSession?) {
-    if (session == null) return
-    val clip = (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).primaryClip
-    val text = clip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(context)?.toString()
-    if (text.isNullOrEmpty()) return
-    val emulator = session.emulator
-    if (emulator != null) emulator.paste(text) else session.write(text)
-}
-
-/**
- * 终端里点到的那个词若是链接就打开，返回是否命中。getWordAtLocation 按列算
- * 偏移，所以同一行里链接前面有全角字符时可能偏几列——URL 本身是 ASCII，
- * 真点偏了顶多是没反应，退回弹键盘，不会打开错的地址。
- *
- * 注意：TUI 打开鼠标追踪（DECSET 1000/1002）时，vendored 视图在 onUp 里就把
- * 单指点击变成鼠标事件发给远端了，根本走不到这里——和原本「点一下弹键盘」
- * 是同一个限制。那种情况下走会话菜单的「打开链接…」。
- */
-private fun openTappedUrl(context: Context, view: TerminalView, e: MotionEvent): Boolean {
-    val screen = view.currentSession?.emulator?.screen ?: return false
-    val (col, row) = view.getColumnAndRow(e, true).let { it[0] to it[1] }
-    val word = runCatching { screen.getWordAtLocation(col, row) }.getOrNull().orEmpty()
-    val url = urlInWord(word) ?: return false
-    openUrl(context, url)
-    return true
-}
-
-/** 整屏回放里出现过的链接，去重后按出现顺序返回（会话菜单的「打开链接」用）。 */
-fun urlsOnScreen(session: TerminalSession?): List<String> {
-    val text = session?.emulator?.screen?.transcriptText ?: return emptyList()
-    return findUrls(text).map { it.url }.distinct()
 }
 
 private fun openPort(context: Context, store: AppStore, port: Int) {

@@ -26,9 +26,8 @@ dependencies {
     implementation(libs.commonmark)
     implementation(libs.commonmark.gfm.tables)
     implementation(libs.commonmark.gfm.strikethrough)
-    implementation(project(":terminal-view"))
-    // 第二套终端：ConnectBot 的 termlib（libvterm 走 JNI 解析，Compose Canvas 渲染）。
-    // 与 termux 那套并存，设置里可切，看过效果再决定去留。
+    // 终端：ConnectBot 的 termlib（libvterm 走 JNI 解析，Compose Canvas 渲染）。Maven 上的 AAR
+    // 自带四个 ABI 的 .so，不需要 NDK。键盘与鼠标手势是我们自己的，见 TermInput.kt / TerminalHost.kt。
     implementation(libs.termlib)
     testImplementation(libs.junit)
     testImplementation(libs.coroutines.android)

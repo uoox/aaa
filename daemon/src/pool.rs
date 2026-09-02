@@ -310,6 +310,23 @@ fn extract_scrollback(parser: &mut vt100::Parser, limit: usize) -> Vec<String> {
     out
 }
 
+/// 屏幕纯文本：非备用屏时前面带最近 `scrollback_limit` 行回滚，然后是可见画面；
+/// 尾部空行剥掉。给客户端「复制屏幕内容 / 抓链接」用，两端看到同一份。
+pub fn screen_text(parser: &mut vt100::Parser, scrollback_limit: usize) -> String {
+    let mut lines: Vec<String> = if parser.screen().alternate_screen() {
+        Vec::new()
+    } else {
+        extract_scrollback(parser, scrollback_limit)
+    };
+    let (_, cols) = parser.screen().size();
+    lines.extend(parser.screen().rows(0, cols));
+    let mut out: Vec<&str> = lines.iter().map(|l| l.trim_end()).collect();
+    while out.last().is_some_and(|l| l.is_empty()) {
+        out.pop();
+    }
+    out.join("\n")
+}
+
 pub fn build_replay_from_parser(parser: &mut vt100::Parser) -> Vec<u8> {
     let sb = extract_scrollback(parser, REPLAY_SCROLLBACK_TAIL);
     let mut out = Vec::new();
@@ -673,6 +690,19 @@ impl SessionPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn screen_text_joins_scrollback_and_screen_on_main_screen_only() {
+        let mut parser = vt100::Parser::new(3, 20, 100);
+        parser.process(b"one\r\ntwo\r\nthree\r\nfour\r\n");
+        // 3 行屏 + 1 行回滚（"one"）；尾部空行剥掉
+        assert_eq!(screen_text(&mut parser, 500), "one\ntwo\nthree\nfour");
+        assert_eq!(screen_text(&mut parser, 0), "three\nfour"); // 只看可见 3 行（第 3 行空）
+        // 备用屏：只有可见画面，回滚不算
+        parser.process(b"\x1b[?1049h\x1b[2J\x1b[Halt");
+        assert!(parser.screen().alternate_screen());
+        assert_eq!(screen_text(&mut parser, 500), "alt");
+    }
 
     #[test]
     fn replay_contains_scrollback_tail_and_screen() {

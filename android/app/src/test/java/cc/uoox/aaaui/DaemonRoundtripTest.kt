@@ -92,23 +92,21 @@ class DaemonRoundtripTest {
                 val frames = LinkedBlockingQueue<ByteArray>()
                 val opened = CountDownLatch(1)
                 var wsRef: WebSocket? = null
-                val session = RemoteTerminalSession(
-                    sendBytes = { b -> wsRef?.send(b.toByteString()) },
-                    sendControl = { t -> wsRef?.send(t) },
-                )
                 wsRef = api.attachSocket(sess.id, object : WebSocketListener() {
                     override fun onOpen(webSocket: WebSocket, response: Response) { opened.countDown() }
                     override fun onMessage(webSocket: WebSocket, bytes: ByteString) { frames.add(bytes.toByteArray()) }
                 })
                 assertTrue("attach WS did not open", opened.await(10, TimeUnit.SECONDS))
-                session.updateSize(120, 30, 10, 20) // hello 后宣告网格 → {"t":"resize"} 文本帧
+                wsRef.send("""{"t":"resize","cols":120,"rows":30}""") // hello 后宣告网格 → {"t":"resize"} 文本帧
 
-                // 单线程泵：WS 二进制帧 → 模拟器（保证模拟器只在本线程被触碰）
-                fun transcript(): String = session.emulator?.screen?.transcriptText ?: ""
+                // 单线程泵：WS 二进制帧攒成原始字节流。终端模拟器（libvterm）是 JNI，JVM 单测里
+                // 不能起，所以这里只看字节里有没有期望的文本——shell 的输出是明文行。
+                val raw = StringBuilder()
+                fun transcript(): String = raw.toString()
                 fun pump(timeoutMs: Long, until: () -> Boolean): Boolean {
                     val deadline = System.currentTimeMillis() + timeoutMs
                     while (System.currentTimeMillis() < deadline) {
-                        frames.poll(200, TimeUnit.MILLISECONDS)?.let { session.pushBytes(it) }
+                        frames.poll(200, TimeUnit.MILLISECONDS)?.let { raw.append(it.toString(Charsets.UTF_8)) }
                         if (until()) return true
                     }
                     return until()
@@ -116,8 +114,8 @@ class DaemonRoundtripTest {
 
                 assertTrue("no replay/prompt output arrived; log:\n${log.readTextSafe()}", pump(15_000) { transcript().isNotBlank() })
 
-                // 用户输入路径：session.write → 二进制 WS 帧 → PTY
-                session.write("echo aaa-roundtrip-\$((6*7))\r")
+                // 用户输入路径：二进制 WS 帧 → PTY
+                wsRef.send("echo aaa-roundtrip-\$((6*7))\r".toByteArray().toByteString())
                 assertTrue(
                     "echo output missing; screen:\n${transcript()}\nlog:\n${log.readTextSafe()}",
                     pump(20_000) { transcript().contains("aaa-roundtrip-42") },

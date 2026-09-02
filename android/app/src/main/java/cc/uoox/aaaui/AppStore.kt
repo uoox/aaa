@@ -2,7 +2,6 @@ package cc.uoox.aaaui
 
 import android.annotation.SuppressLint
 import android.content.Context
-import com.termux.terminal.TerminalSessionClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -218,20 +217,18 @@ class AppStore private constructor(context: Context) {
      * session/{id}，宽屏时两栏并排），attach 若跟着 composable 生死，
      * 每折一次屏就断线重连一次——PTY 在 daemon 上不会丢，但整屏 replay 肉眼可见。
      *
-     * [sessionClient] 每次都重新绑：回调对象里存着当前那份 TerminalView 与 Context。
      */
-    fun attachmentFor(sessionId: String, sessionClient: TerminalSessionClient): TerminalAttachment? {
+    fun attachmentFor(sessionId: String): TerminalAttachment? {
         val api = client ?: return null
         return synchronized(attachments) {
             pendingRelease.remove(sessionId)?.cancel()
             val cur = attachments[sessionId]
             // daemon 重连后换了 DaemonClient，旧 socket 指向的 base 可能已经不对了
             if (cur != null && cur.api === api) {
-                cur.rebind(sessionClient)
                 cur
             } else {
                 cur?.stop()
-                TerminalAttachment(api, sessionId, sessionClient).also { attachments[sessionId] = it; it.start() }
+                TerminalAttachment(api, sessionId).also { attachments[sessionId] = it; it.start() }
             }
         }
     }

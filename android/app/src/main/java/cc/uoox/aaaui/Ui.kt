@@ -36,9 +36,6 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
-import com.termux.terminal.TerminalColors
-import com.termux.terminal.TerminalSession
-import com.termux.terminal.TextStyle
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -80,7 +77,7 @@ data class Palette(
     val termBg: Color,
     val termFg: Color,
     /**
-     * 终端 ANSI 16 色。null = 沿用 termux 默认（xterm 一路，为黑底设计）；亮底主题必须
+     * 终端 ANSI 16 色。null = 沿用 xterm 默认表（为黑底设计）；亮底主题必须
      * 自带一套——xterm 的亮黄 #FFFF54、亮青 #54FFFF 落在白纸上根本看不见，而 Claude Code
      * 的警告 / 提示恰恰爱用这几个。规则同 mac：浅底上 8–15 比 0–7 更沉而不是更亮。
      */
@@ -217,32 +214,20 @@ fun Palette.materialScheme(): ColorScheme {
     )
 }
 
-/** termux 出厂的 ANSI 16 色，第一次改表之前抄一份，切回黑暗主题时用它还原。 */
-internal val termuxDefaultAnsi: IntArray by lazy { TerminalColors.COLOR_SCHEME.mDefaultColors.copyOf(16) }
+/** 暗色主题的 ANSI 16 色：xterm 默认表（termux 出厂同一套），为黑底设计。 */
+internal val XTERM_ANSI: IntArray = intArrayOf(
+    0xFF000000.toInt(), 0xFFCD0000.toInt(), 0xFF00CD00.toInt(), 0xFFCDCD00.toInt(),
+    0xFF0000EE.toInt(), 0xFFCD00CD.toInt(), 0xFF00CDCD.toInt(), 0xFFE5E5E5.toInt(),
+    0xFF7F7F7F.toInt(), 0xFFFF0000.toInt(), 0xFF00FF00.toInt(), 0xFFFFFF00.toInt(),
+    0xFF5C5CFF.toInt(), 0xFFFF00FF.toInt(), 0xFF00FFFF.toInt(), 0xFFFFFFFF.toInt(),
+)
 
-/**
- * 把主题的终端前景/背景和 ANSI 16 色写进 termux 的全局配色表（新建的模拟器从这里拷贝
- * 默认色），并让 [session] 已有的模拟器重读一遍。光标色按背景明暗自动挑黑/白。
- * 256 色立方 / 灰阶不动——它们两种底色上都还过得去，真彩更与主题无关。
- */
-fun applyTerminalPalette(p: Palette, session: TerminalSession? = null) {
-    val scheme = TerminalColors.COLOR_SCHEME
-    val defaults = termuxDefaultAnsi // 先触发快照，再往表里写
-    val ansi = p.ansi
-    for (i in 0 until 16) {
-        scheme.mDefaultColors[i] = ansi?.get(i)?.toArgb() ?: defaults[i]
-    }
-    scheme.mDefaultColors[TextStyle.COLOR_INDEX_FOREGROUND] = p.termFg.toArgb()
-    scheme.mDefaultColors[TextStyle.COLOR_INDEX_BACKGROUND] = p.termBg.toArgb()
-    scheme.setCursorColorForBackground()
-    session?.emulator?.mColors?.reset()
-}
+/** 主题里 libvterm 实际会用的 16 色：主题没自带 ANSI 表的用 xterm 默认。 */
+fun terminalAnsi(p: Palette): IntArray = IntArray(16) { i -> p.ansi?.get(i)?.toArgb() ?: XTERM_ANSI[i] }
 
-/** 同一套配色喂给 termlib（libvterm）：16 色 + 默认前景/背景，暗色主题同样沿用 termux 的 xterm 默认 16 色。 */
-fun applyTermlibPalette(p: Palette, emulator: org.connectbot.terminal.TerminalEmulator) {
-    val defaults = termuxDefaultAnsi
-    val ansi = IntArray(16) { i -> p.ansi?.get(i)?.toArgb() ?: defaults[i] }
-    emulator.applyColorScheme(ansi, p.termFg.toArgb(), p.termBg.toArgb())
+/** 配色喂给 libvterm：16 色 + 默认前景/背景。 */
+fun applyTerminalPalette(p: Palette, emulator: org.connectbot.terminal.TerminalEmulator) {
+    emulator.applyColorScheme(terminalAnsi(p), p.termFg.toArgb(), p.termBg.toArgb())
 }
 
 /** 读设置里的主题，交给 [AaaTheme]。两个 Activity（主界面、分享目标）都走这里。 */
@@ -260,7 +245,6 @@ fun AaaTheme(theme: String?, content: @Composable () -> Unit) {
         // 写在 SideEffect 里而不是组合期：Tok.current 是被追踪的 state，组合期改它
         // 会被判成反向写入。这一帧 MaterialTheme 已经用新 palette 画，Tok 读者下一帧跟上。
         if (Tok.current != palette) Tok.current = palette
-        applyTerminalPalette(palette)
         // 系统栏：亮主题黑图标，暗主题白图标。API 35 起 setStatusBarColor 是空操作
         // （强制 edge-to-edge，底色由下面那个 Box 透上去），老系统上仍要它把栏染成 Bg。
         val window = view.context.findActivity()?.window

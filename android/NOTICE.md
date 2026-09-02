@@ -1,15 +1,15 @@
-# Vendor notice
+# Third-party notice
 
-Source: https://github.com/termux/termux-app.git
-Commit: `3b66f8799635a4dba4a206563048ff0e6792c487`
+## termlib (ConnectBot Terminal)
 
-The `terminal-emulator` and `terminal-view` modules are copied from the Termux App repository and remain under the Apache License 2.0. Original license headers are retained in copied source files. aaa-ui removes the native JNI/NDK PTY implementation and provides a remote byte transport instead; local UI behavior and terminal emulation code are otherwise retained. Any aaa-ui changes are marked with `// aaa-ui patch`.
+`org.connectbot:termlib` — Apache License 2.0, consumed as a prebuilt AAR from Maven Central
+(https://github.com/connectbot/termlib). It bundles **libvterm** by Paul Evans (MIT License) as
+`libjni_cb_term.so`. aaa-ui does not modify termlib; the software keyboard bridge
+(`TermInput.kt`) and the mouse-reporting touch layer (`TerminalHost.kt`) are aaa-ui code that
+sits beside the library's `Terminal()` composable.
 
-Deviation detail: `terminal-emulator/src/main/java/com/termux/terminal/TerminalSession.java` is a
-transport-neutral reimplementation of the upstream class (the upstream file is inseparable from
-JNI.createSubprocess + reader/writer/waiter threads). It preserves the upstream-observable surface —
-TerminalOutput callbacks (title/bell/clipboard/colors), main-thread emulator dispatch, writeCodePoint
-UTF-8 encoding, updateSize / running / exit-status semantics — and replaces the process plumbing with
-`receive(byte[])` (remote PTY output in) and an overridable `write(byte[],int,int)` (user input out).
-Behavior is locked in by `app/src/test/java/cc/uoox/aaaui/RemoteTerminalSessionTest.kt` plus the 145
-upstream emulator tests, which are vendored unchanged and kept green.
+## History
+
+Until 2026-09-03 the Android client vendored Termux's `terminal-emulator` / `terminal-view`
+modules (Apache-2.0). They were removed in favour of termlib; see git history for the vendored
+sources and the transport-neutral `TerminalSession` reimplementation.

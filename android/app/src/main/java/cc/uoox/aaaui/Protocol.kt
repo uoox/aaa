@@ -47,6 +47,7 @@ import java.net.URLDecoder
     val session_title: String? = null,
 )
 @Serializable data class PortInfo(val port: Int, val cmd: String = "")
+@Serializable data class ScreenText(val text: String = "", val alternate_screen: Boolean = false)
 @Serializable data class PurgedAgent(val agent_label: String, val count: Int)
 @Serializable data class ProjectDeleteResult(val path: String, val ok: Boolean, val purged: List<PurgedAgent> = emptyList())
 

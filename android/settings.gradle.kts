@@ -6,4 +6,4 @@ dependencyResolutionManagement {
     repositories { google(); mavenCentral() }
 }
 rootProject.name = "aaa-ui"
-include(":app", ":terminal-emulator", ":terminal-view")
+include(":app")

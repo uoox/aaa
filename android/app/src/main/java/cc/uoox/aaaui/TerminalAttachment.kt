@@ -2,9 +2,6 @@ package cc.uoox.aaaui
 
 import android.os.Handler
 import android.os.Looper
-import com.termux.terminal.TerminalSessionClient
-import org.connectbot.terminal.TerminalEmulator
-import org.connectbot.terminal.TerminalEmulatorFactory
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -15,73 +12,134 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import okio.ByteString
 import okio.ByteString.Companion.toByteString
+import org.connectbot.terminal.TerminalEmulator
+import org.connectbot.terminal.TerminalEmulatorFactory
 import java.io.ByteArrayOutputStream
 
-/** 手机端终端用哪套模拟器画。设置里可切，也可以在会话页临时切。 */
-enum class TerminalEngine(val key: String, val label: String) {
-    /** vendored termux：Java 解析 + 自绘 View，久经考验但和 Compose 隔着一层。 */
-    Termux("termux", "Termux"),
-    /** ConnectBot termlib：libvterm 走 JNI 解析，Compose Canvas 渲染，选区/缩放/链接都是原生 Compose。 */
-    Termlib("termlib", "Termlib");
+/**
+ * 远端 TUI 声明的终端模式，从输出字节流里盯 DECSET/DECRST 得来——termlib 0.1.0 不把
+ * libvterm 的 termprop 往外报，而这几项决定触摸手势的含义。daemon 在 attach 的 replay 里
+ * 会用 state_formatted 把当前模式重发一遍，所以晚接入也能拿到。
+ */
+data class TermModes(
+    /** 鼠标上报：0 关；1000 点击；1002 拖动；1003 任意移动。Claude Code 开的是 1003。 */
+    val mouse: Int = 0,
+    /** DECSET 1006：SGR 坐标编码（不限 223 列）。 */
+    val sgrMouse: Boolean = false,
+    /** DECSET 1049 / 47 / 1047：备用屏。备用屏没有回滚，滑动要变成滚轮事件发给 TUI。 */
+    val altScreen: Boolean = false,
+) {
+    val mouseOn: Boolean get() = mouse != 0
+}
+
+/** 增量扫描输出字节里的私有模式开关；跨帧被截断的 `ESC [ ?…` 前缀留到下一帧接着解析。 */
+class ModeTracker {
+    private val _modes = MutableStateFlow(TermModes())
+    val modes: StateFlow<TermModes> = _modes.asStateFlow()
+    private var carry = ByteArray(0)
+
+    fun feed(bytes: ByteArray) {
+        val buf = if (carry.isEmpty()) bytes else carry + bytes
+        val (next, rest) = scan(_modes.value, buf)
+        carry = rest
+        if (next != _modes.value) _modes.value = next
+    }
+
+    /** 重连前清零：replay 会把模式重发一遍。 */
+    fun reset() {
+        carry = ByteArray(0)
+        _modes.value = TermModes()
+    }
 
     companion object {
-        fun forName(name: String?): TerminalEngine = entries.firstOrNull { it.key == name } ?: Termux
+        private const val ESC = 0x1b.toByte()
+        private const val MAX_PARAMS = 64
+
+        /** 纯函数：叠加 [buf] 里所有完整的 `CSI ? Pm h/l`，返回新模式与末尾未完结的序列前缀。 */
+        fun scan(start: TermModes, buf: ByteArray): Pair<TermModes, ByteArray> {
+            var m = start
+            var i = 0
+            while (i < buf.size) {
+                if (buf[i] != ESC) { i++; continue }
+                var j = i + 1
+                if (j >= buf.size) return m to buf.copyOfRange(i, buf.size)
+                if (buf[j] != '['.code.toByte()) { i++; continue }
+                j++
+                if (j >= buf.size) return m to buf.copyOfRange(i, buf.size)
+                if (buf[j] != '?'.code.toByte()) { i++; continue }
+                j++
+                val params = StringBuilder()
+                while (j < buf.size && params.length <= MAX_PARAMS) {
+                    val c = buf[j].toInt().toChar()
+                    if (c.isDigit() || c == ';') { params.append(c); j++ } else break
+                }
+                if (j >= buf.size) return m to buf.copyOfRange(i, buf.size) // 截断，等下一帧
+                val final = buf[j].toInt().toChar()
+                if (final == 'h' || final == 'l') {
+                    val on = final == 'h'
+                    for (p in params.split(';')) when (val n = p.toIntOrNull()) {
+                        1000, 1002, 1003 -> m = m.copy(mouse = if (on) n else 0)
+                        1006 -> m = m.copy(sgrMouse = on)
+                        1049, 47, 1047 -> m = m.copy(altScreen = on)
+                    }
+                }
+                i = j + 1
+            }
+            return m to ByteArray(0)
+        }
     }
 }
 
+/** xterm 鼠标上报编码。[col]/[row] 1-based；滚轮按键 64（上）/ 65（下）只有按下没有松开。 */
+object Mouse {
+    const val LEFT = 0
+    const val WHEEL_UP = 64
+    const val WHEEL_DOWN = 65
+
+    fun report(button: Int, col: Int, row: Int, press: Boolean, sgr: Boolean): ByteArray =
+        if (sgr) {
+            "\u001b[<$button;$col;$row${if (press) 'M' else 'm'}".toByteArray()
+        } else {
+            // X10 编码：松开一律是按钮 3；坐标 +32 后必须是单字节
+            val b = if (press) button else 3
+            byteArrayOf(
+                0x1b, '['.code.toByte(), 'M'.code.toByte(),
+                (32 + b).toByte(), (32 + col.coerceIn(1, 223)).toByte(), (32 + row.coerceIn(1, 223)).toByte(),
+            )
+        }
+}
+
 /**
- * Owns the attach WebSocket for one session and glues it to a [RemoteTerminalSession]:
- * hello text frame → session metadata; binary frames → emulator; user input bytes →
- * binary frames; resize → `{"t":"resize"}` text frames. Reconnects with exponential
- * backoff — the daemon replays the full screen on re-attach.
+ * Owns the attach WebSocket for one session and glues it to the termlib emulator:
+ * hello text frame → session metadata; binary frames → emulator（同时过一遍 [ModeTracker]）;
+ * emulator 编好的键盘字节 → binary frames; Compose 侧算出的格子数 → `{"t":"resize"}` text frames。
+ * Reconnects with exponential backoff — the daemon replays the full screen on re-attach.
  *
  * Lifetime is owned by [AppStore], not by the composable that shows it — see
- * `AppStore.attachmentFor`.
+ * `AppStore.attachmentFor`. 模拟器随之常驻，所以回滚历史跨 composable 重建保留。
  */
 class TerminalAttachment(
     val api: DaemonClient,
     private val sessionId: String,
-    client: TerminalSessionClient,
 ) {
-    val session = RemoteTerminalSession(::sendBytes, ::sendControl, client)
-
-    /**
-     * 当前把远端字节喂给哪套模拟器。两套都建着太费（每个字节解析两遍），所以只喂一套；
-     * 切换时断开重连，daemon 在 hello 后整屏 replay，新的那套就有完整画面。
-     */
-    @Volatile var engine: TerminalEngine = TerminalEngine.Termux
-        private set
+    private val tracker = ModeTracker()
+    val modes: StateFlow<TermModes> get() = tracker.modes
 
     /** OSC 52（程序往剪贴板写）到达时的去处，由持有 Context 的 UI 挂上。 */
     @Volatile var onClipboardCopy: ((String) -> Unit)? = null
 
     /**
-     * 第二套模拟器（termlib / libvterm）。按需建，和 attach 同生共死，所以滚回历史
-     * 跨 composable 重建保留。键盘输入经 [onKeyboardInput] 原样进 WS；尺寸由 Compose
-     * 侧的 Terminal() 按可用像素算出来后回调，再走同一条 resize 控制帧。
+     * libvterm 模拟器（termlib）。键盘输入经 onKeyboardInput 原样进 WS；尺寸由 Compose 侧的
+     * Terminal() 按可用像素算出来后回调，再走 resize 控制帧。在主线程建（attachmentFor 在组合期调）。
      */
-    val termlib: TerminalEmulator by lazy {
-        TerminalEmulatorFactory.create(
-            defaultForeground = Tok.TermFg,
-            defaultBackground = Tok.TermBg,
-            onKeyboardInput = ::sendBytes,
-            onResize = { d -> sendResize(d.columns, d.rows) },
-            onClipboardCopy = { text -> onClipboardCopy?.invoke(text) },
-            autoDetectUrls = true,
-        ).also { applyTermlibPalette(Tok.current, it) }
-    }
-
-    /** 切换模拟器：清掉目标那套的旧画面，断开重连拿 replay。同一套则什么都不做。 */
-    fun switchEngine(target: TerminalEngine) {
-        if (engine == target) return
-        engine = target
-        // 还没连上（首连在路上 / 重连已排队）就不用动：feed() 是按当下的 engine 分发的，
-        // 即将到来的 replay 自然进新的那套。已经连着才需要断开换一份 replay。
-        if (open && !stopped) reconnectNow()
-    }
-
-    /** 直接写字面文本进 PTY（键位条上的 - / | ~ 与「换行」）。 */
-    fun write(text: String) = sendBytes(text.toByteArray())
+    val emulator: TerminalEmulator = TerminalEmulatorFactory.create(
+        defaultForeground = Tok.TermFg,
+        defaultBackground = Tok.TermBg,
+        onKeyboardInput = ::sendBytes,
+        onResize = { d -> sendResize(d.columns, d.rows) },
+        onClipboardCopy = { text -> onClipboardCopy?.invoke(text) },
+        autoDetectUrls = true,
+    ).also { applyTerminalPalette(Tok.current, it) }
 
     /**
      * 连接状态与 hello 帧带回的会话元数据做成 StateFlow，而不是构造期传进来的
@@ -100,8 +158,6 @@ class TerminalAttachment(
     @Volatile private var everConnected = false
     private var attempt = 0
     private val pendingInput = ByteArrayOutputStream()
-    /** 每次 connect 加一；旧 socket 被主动 cancel 后的 onFailure 不许再排重连，否则会连出两条。 */
-    @Volatile private var generation = 0
 
     fun start() = connect()
 
@@ -114,56 +170,38 @@ class TerminalAttachment(
         _connected.value = false
     }
 
-    /** 换宿主 UI 时把回调对象接过去（emulator 也要跟着换，见 vendored 实现）。 */
-    fun rebind(client: TerminalSessionClient) = session.updateTerminalSessionClient(client)
+    /** 直接写字面文本进 PTY（键位条上的 - / | ~ 与「换行」，输入法提交的整段文本）。 */
+    fun write(text: String) = sendBytes(text.toByteArray())
 
-    /** 主动断开并立刻重连（切模拟器用）。旧 socket 的收尾回调按代数丢弃。 */
-    private fun reconnectNow() {
-        handler.removeCallbacksAndMessages(null)
-        ws?.cancel()
-        ws = null
-        open = false
-        _connected.value = false
-        attempt = 0
-        connect()
-    }
+    /** 原样字节（鼠标上报序列）。 */
+    fun sendRaw(bytes: ByteArray) = sendBytes(bytes)
 
     private fun feed(bytes: ByteArray) {
-        when (engine) {
-            TerminalEngine.Termux -> session.pushBytes(bytes)
-            TerminalEngine.Termlib -> termlib.writeInput(bytes)
-        }
+        tracker.feed(bytes)
+        emulator.writeInput(bytes)
     }
 
     private fun resendSize() {
-        when (engine) {
-            TerminalEngine.Termux -> session.resendSize()
-            TerminalEngine.Termlib -> {
-                val d = termlib.dimensions
-                if (d.columns > 0 && d.rows > 0) sendResize(d.columns, d.rows)
-            }
-        }
+        val d = emulator.dimensions
+        if (d.columns > 0 && d.rows > 0) sendResize(d.columns, d.rows)
     }
 
     private fun sendResize(cols: Int, rows: Int) = sendControl("""{"t":"resize","cols":$cols,"rows":$rows}""")
 
     private fun connect() {
         if (stopped) return
-        val gen = ++generation
         ws = api.attachSocket(sessionId, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                if (gen != generation) return
                 val isReconnect = everConnected
                 everConnected = true
                 open = true
                 attempt = 0
                 _connected.value = true
-                if (isReconnect) {
-                    // hello 后 daemon 必发整屏 replay（含数百行历史）：重连前本地
-                    // 清掉回滚缓冲，否则每次断线重连都叠一份重复历史（审查 P1）。
-                    // 3J = 清 transcript（termux 与 libvterm 都认），2J+H = 清屏归位。
-                    feed("\u001b[3J\u001b[2J\u001b[H".toByteArray())
-                }
+                // hello 后 daemon 必发整屏 replay（含数百行历史 + 当前终端模式）：
+                // 模式从零开始跟，重连还要先清掉本地回滚，否则每次断线重连都叠一份重复历史。
+                // 3J = 清回滚（libvterm 认），2J+H = 清屏归位。
+                tracker.reset()
+                if (isReconnect) feed("\u001b[3J\u001b[2J\u001b[H".toByteArray())
                 resendSize()
                 val queued = synchronized(pendingInput) {
                     val b = pendingInput.toByteArray(); pendingInput.reset(); b
@@ -188,14 +226,12 @@ class TerminalAttachment(
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                if (gen != generation) return
                 open = false
                 _connected.value = false
                 scheduleReconnect()
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                if (gen != generation) return
                 open = false
                 _connected.value = false
                 scheduleReconnect()

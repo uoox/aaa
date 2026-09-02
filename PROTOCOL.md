@@ -118,6 +118,7 @@ CLI 的 `ls` / 交互菜单仍按「执行中 / 待回复 / 已完成」三组�
 | DELETE | `/sessions/:id` | 删除记录与回放（活着先 kill） |
 | POST | `/sessions/:id/rename` | `{title}` |
 | GET | `/sessions/:id/ports` | 进程树监听端口 `[{port,cmd}]`（Web 预览入口用） |
+| GET | `/sessions/:id/screen` | daemon 侧 vt100 的屏幕文本 `{text, alternate_screen}`。非备用屏时 text 前带最近 500 行回滚；备用屏（Claude Code）只有可见画面。客户端「复制屏幕内容」「打开链接」用它。 |
 | GET | `/mac/permissions` | 见「macOS 权限」 |
 | POST | `/mac/permissions/request` | 见「macOS 权限」 |
 | GET | `/pair` | `{payload}`，二维码内容（见「配对」） |

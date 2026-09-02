@@ -123,6 +123,8 @@ class DaemonClient(
     suspend fun deleteSession(id: String) { delete("/sessions/$id") }
     suspend fun rename(id: String, title: String) { post("/sessions/$id/rename", buildJsonObject { put("title", title) }.toString()) }
     suspend fun ports(id: String): List<PortInfo> = json.decodeFromString(ListSerializer(PortInfo.serializer()), get("/sessions/$id/ports"))
+    /** daemon 侧 vt100 的整屏文本（非备用屏时带回滚尾巴）：复制屏幕、抓链接用。 */
+    suspend fun screen(id: String): ScreenText = json.decodeFromString(ScreenText.serializer(), get("/sessions/$id/screen"))
 
     // ---------- v1.1 ----------
 
