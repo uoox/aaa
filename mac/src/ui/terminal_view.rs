@@ -2,7 +2,8 @@
 //! 等宽 Menlo，前景/背景/粗体/斜体/下划线/光标块/回滚缓冲；
 //! IME 走 EntityInputHandler（中文组字预览显示在光标处）；
 //! 视图尺寸变化 → 行列重算 → WS resize 控制帧；
-//! 鼠标：拖选 + 松手即复制、右键菜单（复制/粘贴）、链接悬停下划线并点击打开。
+//! 鼠标：拖选 + 松手即复制、右键菜单（复制/粘贴）、链接悬停下划线并点击打开；
+//! TUI 开了鼠标上报（claude code）时左键点击/拖动按鼠标协议转发给应用。
 //! （独立实现，不含任何 Zed GPL terminal_view 代码。）
 
 use alacritty_terminal::index::{Column, Line, Point as TermPoint, Side};
@@ -19,7 +20,10 @@ use gpui::{
 
 use super::kit::{c, ca};
 use crate::net::{AttachHandle, Net};
-use crate::term::{KeyInput, TermModel, encode_key, encode_paste, find_urls};
+use crate::term::{
+    KeyInput, TermModel, encode_key, encode_mouse_button, encode_mouse_motion, encode_paste,
+    find_urls,
+};
 use crate::theme;
 
 const FONT_SIZE: f32 = 12.5;
@@ -52,6 +56,11 @@ pub struct TerminalView {
     links: Vec<LinkSpan>,
     /// 悬停中的链接（存跨度本身而非下标：重算后下标会错位）
     hover_link: Option<LinkSpan>,
+    /// 左键按下已按鼠标协议转发给了应用（值 = 按钮号）：拖动/松开跟着走同一条路，
+    /// 不碰本地选区。None = 这次手势是本地的（选区 / 链接）。
+    mouse_reporting_press: Option<u8>,
+    /// 上一次转发的移动事件落在哪一格（同格不重发——像素级事件会把 PTY 灌满）
+    last_motion_cell: Option<(u16, u16)>,
 }
 
 /// 一段可点链接：viewport 行 + 列区间 [start, end) + 目标地址
@@ -110,6 +119,18 @@ fn resolve_mouse_up(has_selection: bool, over_link: bool) -> MouseUpAction {
         (false, true) => MouseUpAction::OpenLink,
         (false, false) => MouseUpAction::Nothing,
     }
+}
+
+/// 左键按下归谁：TUI 开了鼠标上报（1000/1002/1003 任一）就是应用的——点选项、
+/// 点焦点在真终端里都能用，靠的就是这个。Shift+点击按 xterm 惯例绕过应用，
+/// 仍走本地选区，给用户留一条在 TUI 里复制文字的路。
+fn click_goes_to_app(mode: TermMode, shift: bool) -> bool {
+    mode.intersects(TermMode::MOUSE_MODE) && !shift
+}
+
+/// gpui 修饰键 → 鼠标协议要的 (shift, alt, ctrl)。cmd 不参与（xterm 没这一位）。
+fn mouse_mods(m: &gpui::Modifiers) -> (bool, bool, bool) {
+    (m.shift, m.alt, m.control)
 }
 
 /// 一行的链接：OSC 8（终端自己声明的）优先，正则扫出来的只补它没盖到的段落。
@@ -253,6 +274,8 @@ impl TerminalView {
             last_drag_pos: None,
             links: Vec::new(),
             hover_link: None,
+            mouse_reporting_press: None,
+            last_motion_cell: None,
         }
     }
 
@@ -368,6 +391,26 @@ impl TerminalView {
             .cloned()
     }
 
+    /// 窗口坐标 → 鼠标上报用的 (row, col)。落在 padding 里的点夹到贴边那一格
+    /// （真终端也这么报：菜单第一列左边差两个像素照样算点中），
+    /// 只有度量还没算出来时才 None。
+    fn report_cell(&self, pos: gpui::Point<Pixels>) -> Option<(u16, u16)> {
+        if let Some(cell) = self.viewport_cell(pos) {
+            return Some(cell);
+        }
+        let (cell_w, line_h) = self.cell?;
+        let origin = self.last_origin?;
+        let x = f32::from(pos.x) - f32::from(origin.x) - PAD;
+        let y = f32::from(pos.y) - f32::from(origin.y) - PAD;
+        let col = (x / f32::from(cell_w))
+            .floor()
+            .clamp(0., (self.model.cols - 1) as f32) as u16;
+        let row = (y / f32::from(line_h))
+            .floor()
+            .clamp(0., (self.model.rows - 1) as f32) as u16;
+        Some((row, col))
+    }
+
     fn paste_from_clipboard(&mut self, cx: &mut Context<Self>) {
         if let Some(item) = cx.read_from_clipboard()
             && let Some(text) = item.text()
@@ -381,6 +424,24 @@ impl TerminalView {
     fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.focus_handle.focus(window, cx);
         if self.sb_mouse_down(ev.position, cx) {
+            return;
+        }
+        let mode = self.model.mode();
+        if click_goes_to_app(mode, ev.modifiers.shift) {
+            // TUI 开了鼠标上报（claude code：1000+1006）：这一下是应用的，
+            // 不开选区；已有的选区也清掉——屏幕接下来归应用重绘。
+            // 直发 PTY：不走 send_input（那会重置视口）。
+            self.model.term.selection = None;
+            self.selecting = false;
+            if let Some((row, col)) = self.report_cell(ev.position)
+                && let Some(bytes) =
+                    encode_mouse_button(mode, 0, true, col, row, mouse_mods(&ev.modifiers))
+            {
+                self.attach.input(bytes);
+                self.mouse_reporting_press = Some(0);
+                self.last_motion_cell = Some((row, col));
+            }
+            cx.notify();
             return;
         }
         if let Some((p, side)) = self.grid_point(ev.position) {
@@ -406,6 +467,32 @@ impl TerminalView {
             if let Some(origin) = self.last_origin {
                 let y = f32::from(ev.position.y) - f32::from(origin.y);
                 self.sb_drag_to(y, cx);
+            }
+            return;
+        }
+        if let Some(btn) = self.mouse_reporting_press {
+            // 按下已经交给了应用：拖动也归它（1002/1003 才报，encode 自己判），
+            // 不碰选区、不管链接悬停。
+            let mode = self.model.mode();
+            let mods = mouse_mods(&ev.modifiers);
+            let Some((row, col)) = self.report_cell(ev.position) else {
+                return;
+            };
+            if ev.pressed_button != Some(MouseButton::Left) {
+                // 松开发生在视图外（gpui 只把 mouse_up 派给悬停中的元素）：
+                // 在这儿补一个 release，别让应用一直以为键还按着
+                self.mouse_reporting_press = None;
+                self.last_motion_cell = None;
+                if let Some(bytes) = encode_mouse_button(mode, btn, false, col, row, mods) {
+                    self.attach.input(bytes);
+                }
+                return;
+            }
+            if self.last_motion_cell != Some((row, col)) {
+                self.last_motion_cell = Some((row, col));
+                if let Some(bytes) = encode_mouse_motion(mode, btn, col, row, mods) {
+                    self.attach.input(bytes);
+                }
             }
             return;
         }
@@ -486,6 +573,20 @@ impl TerminalView {
 
     fn on_mouse_up(&mut self, ev: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
         if self.sb_drag.take().is_some() {
+            cx.notify();
+            return;
+        }
+        if let Some(btn) = self.mouse_reporting_press.take() {
+            // 这次手势是应用的：只补 release，不复制、不开链接（本来就没选区）。
+            // 应用可能在按下和松开之间关了鼠标上报，encode 返回 None 就算了。
+            self.last_motion_cell = None;
+            let mode = self.model.mode();
+            if let Some((row, col)) = self.report_cell(ev.position)
+                && let Some(bytes) =
+                    encode_mouse_button(mode, btn, false, col, row, mouse_mods(&ev.modifiers))
+            {
+                self.attach.input(bytes);
+            }
             cx.notify();
             return;
         }
@@ -1403,6 +1504,44 @@ mod tests {
         }
         // 无历史 → 无滚动条（备用屏）
         assert!(scrollbar_thumb(600., 24, 0, 0).is_none());
+    }
+
+    #[test]
+    fn clicks_go_to_the_app_only_when_it_asked_for_the_mouse() {
+        // 没开鼠标上报：点击是本地选区
+        assert!(!click_goes_to_app(TermMode::empty(), false));
+        // claude code 组合：1049 + 1000 + 1006
+        let cc = TermMode::ALT_SCREEN | TermMode::MOUSE_REPORT_CLICK | TermMode::SGR_MOUSE;
+        assert!(click_goes_to_app(cc, false));
+        assert!(
+            !click_goes_to_app(cc, true),
+            "Shift+点击绕过应用（xterm 惯例）"
+        );
+        // 1002 / 1003 单独开也算
+        assert!(click_goes_to_app(TermMode::MOUSE_DRAG, false));
+        assert!(click_goes_to_app(TermMode::MOUSE_MOTION, false));
+        // 只有编码位没有上报位不算开；less/man 那种备用屏不抢点击
+        assert!(!click_goes_to_app(TermMode::SGR_MOUSE, false));
+        assert!(!click_goes_to_app(
+            TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL,
+            false
+        ));
+    }
+
+    #[test]
+    fn mouse_mods_follow_xterm_order_and_ignore_cmd() {
+        let m = gpui::Modifiers {
+            shift: true,
+            control: true,
+            ..Default::default()
+        };
+        assert_eq!(mouse_mods(&m), (true, false, true));
+        let m = gpui::Modifiers {
+            alt: true,
+            platform: true,
+            ..Default::default()
+        };
+        assert_eq!(mouse_mods(&m), (false, true, false), "cmd 不进鼠标协议");
     }
 
     #[test]

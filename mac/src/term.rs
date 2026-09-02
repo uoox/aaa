@@ -137,19 +137,80 @@ pub fn encode_wheel(mode: TermMode, up: bool, col: u16, row: u16) -> Option<Vec<
         return None;
     }
     let btn: u16 = if up { 64 } else { 65 };
+    Some(mouse_report(mode, btn, false, col, row))
+}
+
+/// 鼠标事件的 Cb 字段：按钮号 + 修饰键位（shift 4 / alt 8 / ctrl 16），
+/// 移动事件再加 32。xterm 约定，SGR 与 X10 两种编码共用。
+fn mouse_cb(button: u8, motion: bool, (shift, alt, ctrl): (bool, bool, bool)) -> u16 {
+    button as u16
+        + if shift { 4 } else { 0 }
+        + if alt { 8 } else { 0 }
+        + if ctrl { 16 } else { 0 }
+        + if motion { 32 } else { 0 }
+}
+
+/// 把一条鼠标事件按当前模式编码。SGR（1006）：`ESC [ < Cb ; Cx ; Cy M`，
+/// 松开用小写 `m`、按钮号保留；坐标 1 起、不限长。
+/// 传统 X10：`ESC [ M` + 三个字节（32 + 值），松开不分哪个键统一按钮 3
+/// （低两位），修饰键位保留；坐标上限 223（单字节放不下更大的）。
+fn mouse_report(mode: TermMode, cb: u16, release: bool, col: u16, row: u16) -> Vec<u8> {
     if mode.contains(TermMode::SGR_MOUSE) {
-        Some(format!("\x1b[<{};{};{}M", btn, col + 1, row + 1).into_bytes())
+        let fin = if release { 'm' } else { 'M' };
+        format!("\x1b[<{};{};{}{}", cb, col + 1, row + 1, fin).into_bytes()
     } else {
-        // 传统 X10 编码：字节 = 32 + 值，坐标上限 223
-        Some(vec![
+        let cb = if release { (cb & !0b11) | 3 } else { cb };
+        vec![
             0x1b,
             b'[',
             b'M',
-            (32 + btn) as u8,
+            (32 + cb) as u8,
             32 + (col + 1).min(223) as u8,
             32 + (row + 1).min(223) as u8,
-        ])
+        ]
     }
+}
+
+/// 鼠标按下/松开 → 上报序列。`button`：0 左 / 1 中 / 2 右；`modifiers`
+/// 按 (shift, alt, ctrl) 给。TUI（claude code）开了鼠标上报后点选项、点焦点
+/// 全靠这个——真终端里点击能用就是因为它把点击转成了这串字节。
+/// 返回 None = 应用没开鼠标上报（调用方按本地选区处理点击）。
+pub fn encode_mouse_button(
+    mode: TermMode,
+    button: u8,
+    pressed: bool,
+    col: u16,
+    row: u16,
+    modifiers: (bool, bool, bool),
+) -> Option<Vec<u8>> {
+    if !mode.intersects(TermMode::MOUSE_MODE) {
+        return None;
+    }
+    let cb = mouse_cb(button, false, modifiers);
+    Some(mouse_report(mode, cb, !pressed, col, row))
+}
+
+/// 鼠标移动 → 上报序列。`button` 是按住的键（0/1/2），3 = 没按键。
+/// 1002（按键拖动）只在按住时上报；1003（任意移动）没按键也报（按钮号 3）。
+/// 只开 1000 不报移动。调用方自行按格点去重，别每个像素都发一条。
+pub fn encode_mouse_motion(
+    mode: TermMode,
+    button: u8,
+    col: u16,
+    row: u16,
+    modifiers: (bool, bool, bool),
+) -> Option<Vec<u8>> {
+    if !mode.intersects(TermMode::MOUSE_MODE) {
+        return None;
+    }
+    let held = button < 3;
+    let wanted =
+        mode.contains(TermMode::MOUSE_MOTION) || (mode.contains(TermMode::MOUSE_DRAG) && held);
+    if !wanted {
+        return None;
+    }
+    let cb = mouse_cb(button, true, modifiers);
+    Some(mouse_report(mode, cb, false, col, row))
 }
 
 // ── 键盘编码 ────────────────────────────────────────────────────────────────
@@ -657,6 +718,93 @@ mod tests {
         assert_eq!(
             encode_wheel(tm.mode(), true, 0, 0).unwrap(),
             vec![0x1b, b'[', b'M', 96, 33, 33]
+        );
+    }
+
+    #[test]
+    fn click_reporting_follows_claude_code_modes() {
+        let none = (false, false, false);
+        let mut tm = TermModel::new(10, 4);
+        // 未开鼠标上报：点击归本地选区，不产生序列
+        assert!(encode_mouse_button(tm.mode(), 0, true, 0, 0, none).is_none());
+        assert!(encode_mouse_motion(tm.mode(), 0, 0, 0, none).is_none());
+        // claude code 实测开的组合：1049 + 1000 + 1006（SGR）
+        tm.advance(b"\x1b[?1049h\x1b[?1000h\x1b[?1006h");
+        assert_eq!(
+            encode_mouse_button(tm.mode(), 0, true, 4, 2, none).unwrap(),
+            b"\x1b[<0;5;3M".to_vec(),
+            "SGR 左键按下，坐标 1 起"
+        );
+        assert_eq!(
+            encode_mouse_button(tm.mode(), 0, false, 4, 2, none).unwrap(),
+            b"\x1b[<0;5;3m".to_vec(),
+            "SGR 松开用小写 m，按钮号保留"
+        );
+        assert_eq!(
+            encode_mouse_button(tm.mode(), 2, true, 0, 0, none).unwrap(),
+            b"\x1b[<2;1;1M".to_vec()
+        );
+        // 修饰键位：shift 4 / alt 8 / ctrl 16
+        assert_eq!(
+            encode_mouse_button(tm.mode(), 0, true, 0, 0, (true, false, true)).unwrap(),
+            b"\x1b[<20;1;1M".to_vec()
+        );
+        assert_eq!(
+            encode_mouse_button(tm.mode(), 1, true, 0, 0, (false, true, false)).unwrap(),
+            b"\x1b[<9;1;1M".to_vec()
+        );
+        // 只开 1000：拖动不上报
+        assert!(encode_mouse_motion(tm.mode(), 0, 4, 2, none).is_none());
+        // 对话框里再开 1002：按住拖动上报（按钮 +32），没按键的移动仍不报
+        tm.advance(b"\x1b[?1002h");
+        assert_eq!(
+            encode_mouse_motion(tm.mode(), 0, 4, 2, none).unwrap(),
+            b"\x1b[<32;5;3M".to_vec()
+        );
+        assert!(
+            encode_mouse_motion(tm.mode(), 3, 4, 2, none).is_none(),
+            "1002 只报按住时的移动"
+        );
+        // 1003：任何移动都报，没按键时按钮号 3
+        tm.advance(b"\x1b[?1003h");
+        assert_eq!(
+            encode_mouse_motion(tm.mode(), 3, 0, 0, none).unwrap(),
+            b"\x1b[<35;1;1M".to_vec()
+        );
+        // 应用关掉鼠标上报后立刻恢复 None（松开时模式可能已经变了）
+        tm.advance(b"\x1b[?1000l\x1b[?1002l\x1b[?1003l");
+        assert!(encode_mouse_button(tm.mode(), 0, false, 0, 0, none).is_none());
+    }
+
+    #[test]
+    fn click_reporting_x10_encoding() {
+        let none = (false, false, false);
+        let mut tm = TermModel::new(10, 4);
+        tm.advance(b"\x1b[?1000h");
+        // 按下：32+按钮, 32+col+1, 32+row+1
+        assert_eq!(
+            encode_mouse_button(tm.mode(), 0, true, 0, 0, none).unwrap(),
+            vec![0x1b, b'[', b'M', 32, 33, 33]
+        );
+        // 松开不分哪个键，统一按钮 3；修饰键位保留
+        assert_eq!(
+            encode_mouse_button(tm.mode(), 0, false, 0, 0, none).unwrap(),
+            vec![0x1b, b'[', b'M', 35, 33, 33]
+        );
+        assert_eq!(
+            encode_mouse_button(tm.mode(), 2, false, 0, 0, (false, false, true)).unwrap(),
+            vec![0x1b, b'[', b'M', 32 + 3 + 16, 33, 33]
+        );
+        // 坐标上限 223（单字节编码放不下更大的）
+        assert_eq!(
+            &encode_mouse_button(tm.mode(), 0, true, 500, 300, none).unwrap()[3..],
+            &[32u8, 255, 255]
+        );
+        // 1002 拖动：32 + 0 + 32
+        tm.advance(b"\x1b[?1002h");
+        assert_eq!(
+            encode_mouse_motion(tm.mode(), 0, 1, 1, none).unwrap(),
+            vec![0x1b, b'[', b'M', 64, 34, 34]
         );
     }
 
