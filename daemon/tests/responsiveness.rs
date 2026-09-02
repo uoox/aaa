@@ -19,6 +19,7 @@ fn build_app(root: &Path, home: &Path) -> aaa_daemon::api::SharedApp {
         token: TOKEN.to_string(),
         project_root: root.to_path_buf(),
         namer: true, // naming enabled, as in production
+        remote_control_name: true,
         ntfy: None,
         checkpoint: CheckpointConfig::default(),
         watchdog: WatchdogConfig::default(),

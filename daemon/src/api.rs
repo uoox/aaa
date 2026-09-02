@@ -565,6 +565,12 @@ async fn sessions_create(
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| canon_str.clone());
+    // Remote Control 会话按项目命名（仅 claude 认此旗标；配置可关）。
+    let cmd = if app.cfg.remote_control_name {
+        agents::with_remote_control_name(cmd, agent, &project_name)
+    } else {
+        cmd
+    };
     let spec = SpawnSpec {
         project_path: canon_str.clone(),
         project_name: project_name.clone(),

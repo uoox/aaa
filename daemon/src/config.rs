@@ -68,6 +68,10 @@ pub struct Config {
     pub project_root: PathBuf,
     #[serde(default = "default_true")]
     pub namer: bool,
+    /// Name each claude session's Remote Control session after its project
+    /// (phone session list reads as project names). See agents::with_remote_control_name.
+    #[serde(default = "default_true")]
+    pub remote_control_name: bool,
     #[serde(default)]
     pub ntfy: Option<NtfyConfig>,
     #[serde(default)]
@@ -108,6 +112,7 @@ impl Config {
             token: generate_token(),
             project_root: default_project_root(),
             namer: true,
+            remote_control_name: true,
             ntfy: None,
             checkpoint: CheckpointConfig::default(),
             watchdog: WatchdogConfig::default(),

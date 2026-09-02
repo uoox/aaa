@@ -76,6 +76,19 @@ pub fn shell_quote(s: &str) -> String {
     out
 }
 
+/// Name the Remote Control session after its project. Only `claude` understands
+/// the `--remote-control <name>` flag; with `remoteControlAtStartup` already on
+/// in the user's settings, this only *names* the auto-created RC session, so the
+/// phone's session list reads as project names instead of "hostname-random".
+/// Other agents (and a blank name) are returned unchanged.
+pub fn with_remote_control_name(cmd: String, agent: &AgentDef, name: &str) -> String {
+    if agent.id == "claude" && !name.is_empty() {
+        format!("{cmd} --remote-control {}", shell_quote(name))
+    } else {
+        cmd
+    }
+}
+
 /// Build the resume command from the template, or None if the agent has no
 /// resume entry.
 pub fn build_resume_cmd(agent: &AgentDef, sid: &str) -> Option<String> {
@@ -240,6 +253,29 @@ mod tests {
         );
         assert_eq!(build_resume_cmd(get("pi").unwrap(), "x").unwrap(), "pi --continue");
         assert!(build_resume_cmd(get("shell").unwrap(), "x").is_none());
+    }
+
+    #[test]
+    fn remote_control_name_only_for_claude() {
+        let c = with_remote_control_name(
+            "claude --dangerously-skip-permissions".into(),
+            get("claude").unwrap(),
+            "aaa-ui",
+        );
+        assert_eq!(c, "claude --dangerously-skip-permissions --remote-control aaa-ui");
+        // a name with a space is shell-quoted
+        let q = with_remote_control_name("claude x".into(), get("claude").unwrap(), "my proj");
+        assert_eq!(q, "claude x --remote-control 'my proj'");
+        // other agents untouched
+        assert_eq!(
+            with_remote_control_name("codex y".into(), get("codex").unwrap(), "aaa-ui"),
+            "codex y"
+        );
+        // blank name untouched
+        assert_eq!(
+            with_remote_control_name("claude z".into(), get("claude").unwrap(), ""),
+            "claude z"
+        );
     }
 
     #[test]

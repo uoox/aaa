@@ -37,6 +37,7 @@ port = 2730
 token = "aaa_tk_<32hex>"     # 首次运行生成
 project_root = "/Volumes/SSD/project"
 namer = true                  # haiku 会话命名开关（对应 AAA_NAMER）
+remote_control_name = true    # claude 会话给 Remote Control 起项目名（手机官方 App 的会话列表更可读；仅 claude 认此旗标）
 [ntfy]                        # 可选，离线推送兜底
 url = "https://ntfy.example.com"
 topic = "aaa"
