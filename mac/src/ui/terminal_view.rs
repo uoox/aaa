@@ -815,7 +815,7 @@ impl TerminalView {
                     if let Some(rgb) = colors[*i as usize] {
                         ((rgb.r as u32) << 16) | ((rgb.g as u32) << 8) | rgb.b as u32
                     } else {
-                        theme::indexed_color(*i)
+                        theme::palette().indexed_color(*i)
                     }
                 }
                 AnsiColor::Named(n) => {
@@ -824,10 +824,10 @@ impl TerminalView {
                         return ((rgb.r as u32) << 16) | ((rgb.g as u32) << 8) | rgb.b as u32;
                     }
                     match n {
-                        NamedColor::Foreground | NamedColor::BrightForeground => theme::TERM_FG,
-                        NamedColor::Background => theme::TERM_BG,
-                        NamedColor::Cursor => theme::CYAN,
-                        _ if idx < 16 => theme::ANSI[idx],
+                        NamedColor::Foreground | NamedColor::BrightForeground => theme::term_fg(),
+                        NamedColor::Background => theme::term_bg(),
+                        NamedColor::Cursor => theme::accent(),
+                        _ if idx < 16 => theme::palette().ansi[idx],
                         _ => default,
                     }
                 }
@@ -874,8 +874,8 @@ impl TerminalView {
                     _ => runs.push((col, end, h.uri().to_string())),
                 }
             }
-            let mut fg = resolve(&cell.fg, theme::TERM_FG);
-            let mut bg = resolve(&cell.bg, theme::TERM_BG);
+            let mut fg = resolve(&cell.fg, theme::term_fg());
+            let mut bg = resolve(&cell.bg, theme::term_bg());
             if flags.contains(CellFlags::INVERSE) {
                 std::mem::swap(&mut fg, &mut bg);
             }
@@ -886,10 +886,10 @@ impl TerminalView {
                 && (n as usize) < 8
                 && !flags.contains(CellFlags::INVERSE)
             {
-                fg = theme::ANSI[n as usize + 8];
+                fg = theme::palette().ansi[n as usize + 8];
             }
             // 背景 span
-            if bg != theme::TERM_BG {
+            if bg != theme::term_bg() {
                 let end = col + if wide { 2 } else { 1 };
                 match line.bgs.last_mut() {
                     Some((_, e, color)) if *e == col && *color == bg => *e = end,
@@ -1089,7 +1089,7 @@ impl Render for TerminalView {
         div()
             .id("terminal")
             .size_full()
-            .bg(c(theme::TERM_BG))
+            .bg(c(theme::term_bg()))
             .track_focus(&self.focus_handle)
             .when(hover.is_some(), |el| el.cursor_pointer())
             .on_key_down(cx.listener(Self::on_key_down))
@@ -1150,7 +1150,7 @@ impl Render for TerminalView {
                                         point(ox + cell_w * (*s as f32), y),
                                         size(cell_w * ((*e - *s) as f32), line_h),
                                     ),
-                                    ca(theme::CYAN, 0.24),
+                                    ca(theme::accent(), 0.24),
                                 ));
                             }
                         }
@@ -1161,22 +1161,22 @@ impl Render for TerminalView {
                             let (b, color) = match shape {
                                 CursorShape::Block => (
                                     Bounds::new(point(x, y), size(cell_w, line_h)),
-                                    ca(theme::CYAN, if focused { 0.9 } else { 0.35 }),
+                                    ca(theme::accent(), if focused { 0.9 } else { 0.35 }),
                                 ),
                                 CursorShape::Beam => (
                                     Bounds::new(point(x, y), size(px(2.), line_h)),
-                                    ca(theme::CYAN, 0.9),
+                                    ca(theme::accent(), 0.9),
                                 ),
                                 CursorShape::Underline => (
                                     Bounds::new(
                                         point(x, y + line_h - px(2.)),
                                         size(cell_w, px(2.)),
                                     ),
-                                    ca(theme::CYAN, 0.9),
+                                    ca(theme::accent(), 0.9),
                                 ),
                                 _ => (
                                     Bounds::new(point(x, y), size(cell_w, line_h)),
-                                    ca(theme::CYAN, 0.35),
+                                    ca(theme::accent(), 0.35),
                                 ),
                             };
                             window.paint_quad(fill(b, color));
@@ -1194,7 +1194,7 @@ impl Render for TerminalView {
                                 color.a = seg.style.alpha;
                                 if cursor_here && focused && seg.chars == 1 {
                                     // 单字符 seg 且光标在其上：反色
-                                    color = c(theme::TERM_BG).into();
+                                    color = c(theme::term_bg()).into();
                                 }
                                 let run = gpui::TextRun {
                                     len: seg.text.len(),
@@ -1243,7 +1243,7 @@ impl Render for TerminalView {
                                     ),
                                     size(cell_w * ((e - s) as f32), px(1.)),
                                 ),
-                                c(theme::CYAN),
+                                c(theme::accent()),
                             ));
                         }
                         // IME 组字预览
@@ -1255,11 +1255,11 @@ impl Render for TerminalView {
                             let run = gpui::TextRun {
                                 len: m.len(),
                                 font: mono(false, false),
-                                color: c(theme::INK).into(),
-                                background_color: Some(c(theme::SURFACE_RAISED).into()),
+                                color: c(theme::ink()).into(),
+                                background_color: Some(c(theme::surface_raised()).into()),
                                 underline: Some(gpui::UnderlineStyle {
                                     thickness: px(1.5),
-                                    color: Some(c(theme::CYAN).into()),
+                                    color: Some(c(theme::accent()).into()),
                                     wavy: false,
                                 }),
                                 strikethrough: None,
@@ -1272,7 +1272,7 @@ impl Render for TerminalView {
                             );
                             window.paint_quad(fill(
                                 Bounds::new(point(x, y), size(shaped.width, line_h)),
-                                c(theme::SURFACE_RAISED),
+                                c(theme::surface_raised()),
                             ));
                             let _ = shaped.paint(
                                 point(x, y),
@@ -1297,14 +1297,14 @@ impl Render for TerminalView {
                                     point(track_x, bounds.origin.y),
                                     size(px(14.), bounds.size.height),
                                 ),
-                                ca(theme::EDGE_LIGHT, 0.35),
+                                ca(theme::edge_light(), 0.35),
                             ));
                             window.paint_quad(fill(
                                 Bounds::new(
                                     point(track_x + px(2.), bounds.origin.y + px(top)),
                                     size(px(10.), px(h)),
                                 ),
-                                ca(theme::DIM, if sb_dragging { 0.85 } else { 0.45 }),
+                                ca(theme::dim(), if sb_dragging { 0.85 } else { 0.45 }),
                             ));
                         }
                         // 回看指示
@@ -1317,7 +1317,7 @@ impl Render for TerminalView {
                             let run = gpui::TextRun {
                                 len: label.len(),
                                 font: mono(false, false),
-                                color: c(theme::AMBER).into(),
+                                color: c(theme::amber()).into(),
                                 background_color: None,
                                 underline: None,
                                 strikethrough: None,
@@ -1334,7 +1334,7 @@ impl Render for TerminalView {
                                     point(x - px(8.), bounds.origin.y + px(4.)),
                                     size(shaped.width + px(16.), px(20.)),
                                 ),
-                                ca(theme::SURFACE_RAISED, 0.92),
+                                ca(theme::surface_raised(), 0.92),
                             ));
                             let _ = shaped.paint(
                                 point(x, bounds.origin.y + px(7.)),
@@ -1358,11 +1358,11 @@ impl Render for TerminalView {
                         .px(px(10.))
                         .py(px(3.))
                         .rounded(px(6.))
-                        .bg(ca(theme::RED, 0.15))
+                        .bg(ca(theme::red(), 0.15))
                         .border_1()
-                        .border_color(c(theme::RED))
+                        .border_color(c(theme::red()))
                         .text_size(px(11.))
-                        .text_color(c(theme::RED))
+                        .text_color(c(theme::red()))
                         .child("连接已断开 · 自动重连中…"),
                 )
             })

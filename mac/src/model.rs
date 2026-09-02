@@ -147,7 +147,8 @@ fn default_true() -> bool {
     true
 }
 
-/// agent 表兜底（daemon /agents 不可达时新建对话框仍可用），与 PROTOCOL.md 表一致
+/// agent 表兜底（daemon /agents 不可达时也得知道有 claude），与 PROTOCOL.md
+/// 「Agent 表」一致：2026-09-03 起只剩 Claude Code，外加不是 agent 的 shell。
 pub fn builtin_agents() -> Vec<AgentInfo> {
     let mk = |id: &str, label: &str, cmd: &str| AgentInfo {
         id: id.into(),
@@ -159,16 +160,13 @@ pub fn builtin_agents() -> Vec<AgentInfo> {
     };
     vec![
         mk("claude", "Claude", "claude --dangerously-skip-permissions"),
-        mk("codex", "Codex", "codex --dangerously-bypass-approvals-and-sandbox"),
-        mk("pi", "Pi", "pi"),
-        mk("reasonix", "Reasonix", "reasonix --permission-mode bypassPermissions"),
-        mk("agy", "Antigravity", "agy --dangerously-skip-permissions"),
         mk("shell", "终端", "exec zsh -l"),
     ]
 }
 
-/// 新建项目 / 换 agent 可选的 agent：剔掉终端（`terminal:true`，旧 daemon 靠 id）。
-/// 终端是常驻工具，从侧栏底部的面板开，不是项目的 agent 选择。
+/// 真正的 agent（剔掉终端：`terminal:true`，旧 daemon 靠 id）。只支持 Claude 之后
+/// 这里只会剩 claude 一项——新建项目不再选 agent，留着它是为了读 `available`
+/// （daemon 的 PATH 里找不到 claude 时提示一句）。
 pub fn pickable_agents(agents: Vec<AgentInfo>) -> Vec<AgentInfo> {
     agents
         .into_iter()
@@ -399,18 +397,29 @@ fn default_sidebar_w() -> f32 {
     SIDEBAR_W_DEFAULT
 }
 
-/// daemon 的 config.toml 是双方的契约，UI 不往里写；窗口布局这类只属于本机的
-/// 偏好另起一个文件。读写失败一律回落默认值——配置坏了也必须能开窗。
+/// 主题默认黑暗（原始设计令牌）；值的解释见 theme::ThemeKind::from_str
+pub const THEME_DEFAULT: &str = "dark";
+
+fn default_theme() -> String {
+    THEME_DEFAULT.to_string()
+}
+
+/// daemon 的 config.toml 是双方的契约，UI 不往里写；窗口布局、主题这类只属于
+/// 本机的偏好另起一个文件。读写失败一律回落默认值——配置坏了也必须能开窗。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UiState {
     #[serde(default = "default_sidebar_w")]
     pub sidebar_w: f32,
+    /// "dark" | "light" | "claude"（认不出的按 dark）
+    #[serde(default = "default_theme")]
+    pub theme: String,
 }
 
 impl Default for UiState {
     fn default() -> Self {
         UiState {
             sidebar_w: SIDEBAR_W_DEFAULT,
+            theme: default_theme(),
         }
     }
 }
@@ -513,7 +522,9 @@ mod tests {
         // 内置兜底表：shell 带 terminal 标记，挑选后不见
         assert!(builtin_agents().iter().any(|a| a.id == "shell" && a.terminal));
         assert!(pickable_agents(builtin_agents()).iter().all(|a| a.id != "shell"));
-        assert_eq!(pickable_agents(builtin_agents()).len(), 5);
+        // 只支持 Claude：兜底表挑完只剩 claude 一项
+        assert_eq!(pickable_agents(builtin_agents()).len(), 1);
+        assert_eq!(pickable_agents(builtin_agents())[0].id, "claude");
         // 会话侧：agent=shell 就是终端
         let s: Session = serde_json::from_str(r#"{"id":"s_1","agent":"shell"}"#).unwrap();
         assert!(s.is_terminal());
@@ -691,13 +702,22 @@ mod tests {
 
     #[test]
     fn ui_state_roundtrip_and_tolerance() {
-        let s = UiState { sidebar_w: 320.0 };
+        let s = UiState {
+            sidebar_w: 320.0,
+            theme: "claude".into(),
+        };
         let text = toml::to_string(&s).unwrap();
         let back: UiState = toml::from_str(&text).unwrap();
         assert_eq!(back.sidebar_w, 320.0);
+        assert_eq!(back.theme, "claude");
         // 缺字段（旧版本写的文件）用默认值补齐，不报错
         let empty: UiState = toml::from_str("").unwrap();
         assert_eq!(empty.sidebar_w, SIDEBAR_W_DEFAULT);
+        assert_eq!(empty.theme, THEME_DEFAULT);
+        // 只有旧字段的文件：主题回落默认，不报错
+        let old: UiState = toml::from_str("sidebar_w = 250.0\n").unwrap();
+        assert_eq!(old.theme, "dark");
+        assert_eq!(old.sidebar_w, 250.0);
     }
 
     #[test]

@@ -264,11 +264,11 @@ impl Render for MiniInput {
             .rounded(px(6.))
             .border_1()
             .border_color(if focused {
-                c(theme::CYAN)
+                c(theme::accent())
             } else {
-                c(theme::EDGE_LIGHT)
+                c(theme::edge_light())
             })
-            .bg(c(theme::TERM_BG))
+            .bg(c(theme::inset()))
             .cursor_text()
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::on_key_down))
@@ -288,7 +288,7 @@ impl Render for MiniInput {
                         } else {
                             text.clone().into()
                         };
-                        let color = if empty { theme::FAINT } else { theme::INK };
+                        let color = if empty { theme::faint() } else { theme::ink() };
                         let runs = [gpui::TextRun {
                             len: display.len(),
                             font: gpui::font("Menlo"),
@@ -296,7 +296,7 @@ impl Render for MiniInput {
                             background_color: None,
                             underline: marked.as_ref().map(|_| gpui::UnderlineStyle {
                                 thickness: px(1.),
-                                color: Some(c(theme::CYAN).into()),
+                                color: Some(c(theme::accent()).into()),
                                 wavy: false,
                             }),
                             strikethrough: None,
@@ -339,7 +339,7 @@ impl Render for MiniInput {
                                         ),
                                         size(px(1.5), bounds.size.height - px(10.)),
                                     ),
-                                    c(theme::CYAN),
+                                    c(theme::accent()),
                                 ));
                             }
                         });

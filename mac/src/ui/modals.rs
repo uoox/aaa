@@ -1,5 +1,5 @@
-//! 模态框：新建项目（含 agent 选择；终端不是 agent，不在里面）/ 删除确认
-//! （purge 报告）/ 会话终止、删除、重命名 / 配置变更确认。
+//! 模态框：新建项目（只填名字，agent 固定 claude）/ 删除确认（purge 报告）/
+//! 会话终止、删除、重命名 / 配置变更确认。
 
 use anyhow::anyhow;
 use gpui::{Context, SharedString, Window, div, prelude::*, px};
@@ -10,17 +10,14 @@ use crate::theme;
 
 impl RootView {
     pub(super) fn open_new_project_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.modal = Modal::NewProject {
-            agent_idx: 0,
-            busy: false,
-        };
+        self.modal = Modal::NewProject { busy: false };
         self.name_input.update(cx, |i, cx| i.set_text("", cx));
         let handle = self.name_input.read(cx).focus_handle.clone();
         handle.focus(window, cx);
         cx.notify();
     }
 
-    pub(super) fn confirm_create_project(&mut self, agent_idx: usize, cx: &mut Context<Self>) {
+    pub(super) fn confirm_create_project(&mut self, cx: &mut Context<Self>) {
         if let Modal::NewProject { busy, .. } = &mut self.modal {
             if *busy {
                 return;
@@ -34,13 +31,8 @@ impl RootView {
             let t = self.name_input.read(cx).text.trim().to_string();
             if t.is_empty() { None } else { Some(t) }
         };
-        let agent = self
-            .agents
-            .get(agent_idx)
-            .map(|a| a.id.clone())
-            .unwrap_or_else(|| "claude".into());
-        // 选的 agent 一并写注册表：名册以注册表为准，不写的话 daemon 端
-        // 「没登记」会回落成 claude（self.agents 已剔掉终端，这里不会是 shell）
+        // 唯一的 agent；显式写进注册表（名册以注册表为准），不靠 daemon 端兜底
+        let agent = "claude".to_string();
         let project_agent = Some(agent.clone());
         let fallback_path = name.as_ref().and_then(|n| {
             self.health
@@ -194,9 +186,7 @@ impl RootView {
     pub(super) fn render_modal(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let content = match &self.modal {
             Modal::None => return None,
-            Modal::NewProject { agent_idx, busy } => {
-                self.render_new_project(*agent_idx, *busy, cx)
-            }
+            Modal::NewProject { busy } => self.render_new_project(*busy, cx),
             Modal::DeleteConfirm {
                 paths,
                 report,
@@ -234,95 +224,21 @@ impl RootView {
             .max_h(px(600.))
             .p(px(18.))
             .rounded(px(12.))
-            .bg(c(theme::SURFACE_RAISED))
+            .bg(c(theme::surface_raised()))
             .border_1()
-            .border_color(c(theme::EDGE_LIGHT))
+            .border_color(c(theme::edge_light()))
             .shadow_lg()
             .flex()
             .flex_col()
     }
 
-    fn agent_rows(
-        &self,
-        selected: Option<usize>,
-        on_pick_id: &'static str,
-        cx: &mut Context<Self>,
-    ) -> gpui::Div {
-        let mut list = div().flex().flex_col().gap(px(4.));
-        // self.agents 进表前已经剔掉终端（pickable_agents），这里都是真 agent
-        for (ix, a) in self.agents.iter().enumerate() {
-            let is_sel = selected == Some(ix);
-            let chip_label: SharedString = a.id.clone().into();
-            let label: SharedString = a.label.clone().into();
-            let cmd: SharedString = a.cmd.clone().unwrap_or_default().into();
-            list = list.child(
-                div()
-                    .id((on_pick_id, ix))
-                    .flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .px(px(10.))
-                    .py(px(7.))
-                    .rounded(px(8.))
-                    .border_1()
-                    .border_color(if is_sel {
-                        c(theme::CYAN)
-                    } else {
-                        c(theme::EDGE_LIGHT)
-                    })
-                    .when(is_sel, |el| el.bg(ca(theme::CYAN, 0.07)))
-                    .cursor_pointer()
-                    .hover(|st| st.border_color(c(theme::CYAN)))
-                    .when(!a.available, |el| el.opacity(0.5))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.on_agent_row_click(ix, cx);
-                    }))
-                    .child(agent_chip(&a.id, chip_label))
-                    .child(div().text_size(px(12.5)).child(label))
-                    .when(!a.available, |el| {
-                        el.child(
-                            div()
-                                .text_size(px(10.))
-                                .text_color(c(theme::RED))
-                                .child("未安装"),
-                        )
-                    })
-                    .child(
-                        div()
-                            .ml_auto()
-                            .max_w(px(220.))
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .whitespace_nowrap()
-                            .font_family("Menlo")
-                            .text_size(px(10.))
-                            .text_color(c(theme::FAINT))
-                            .child(cmd),
-                    ),
-            );
-        }
-        list
-    }
-
-    /// agent 行点击：目前只有新建项目模态用得到（换 agent 入口已随项目页移除）
-    fn on_agent_row_click(&mut self, ix: usize, cx: &mut Context<Self>) {
-        if let Modal::NewProject { busy, .. } = &self.modal {
-            let b = *busy;
-            self.modal = Modal::NewProject {
-                agent_idx: ix,
-                busy: b,
-            };
-            cx.notify();
-        }
-    }
-
-    fn render_new_project(
-        &self,
-        agent_idx: usize,
-        busy: bool,
-        cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    fn render_new_project(&self, busy: bool, cx: &mut Context<Self>) -> gpui::Div {
         let ts_hint = chrono::Local::now().format("%Y-%m-%d-%H%M").to_string();
+        // daemon 的 PATH 里找不到 claude：照样让人建目录，但先说一声，免得会话起不来还纳闷
+        let claude_missing = self
+            .agents
+            .iter()
+            .any(|a| a.id == "claude" && !a.available);
         self.modal_box()
             .child(
                 div()
@@ -335,7 +251,7 @@ impl RootView {
                 div()
                     .font_family("Menlo")
                     .text_size(px(10.))
-                    .text_color(c(theme::FAINT))
+                    .text_color(c(theme::faint()))
                     .pb(px(4.))
                     .child(SharedString::from(format!(
                         "名称 · {}/<名称>",
@@ -349,19 +265,20 @@ impl RootView {
             .child(
                 div()
                     .text_size(px(11.))
-                    .text_color(c(theme::FAINT))
+                    .text_color(c(theme::faint()))
                     .pt(px(4.))
                     .pb(px(12.))
                     .child(SharedString::from(format!("留空 = {ts_hint}"))),
             )
-            .child(
-                div()
-                    .id("np-agents-scroll")
-                    .flex_1()
-                    .min_h(px(0.))
-                    .overflow_y_scroll()
-                    .child(self.agent_rows(Some(agent_idx), "np-agent", cx)),
-            )
+            .when(claude_missing, |el| {
+                el.child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(c(theme::amber()))
+                        .pb(px(8.))
+                        .child("daemon 找不到 claude 命令（检查安装与 PATH）——目录会建，会话起不来"),
+                )
+            })
             .child(
                 div()
                     .flex()
@@ -376,8 +293,8 @@ impl RootView {
                     )
                     .child(
                         btn_primary("np-ok", if busy { "创建中…" } else { "创建并进入" }).on_click(
-                            cx.listener(move |this, _, _, cx| {
-                                this.confirm_create_project(agent_idx, cx);
+                            cx.listener(|this, _, _, cx| {
+                                this.confirm_create_project(cx);
                             }),
                         ),
                     ),
@@ -417,7 +334,7 @@ impl RootView {
                     body = body.child(
                         div()
                             .text_size(px(12.5))
-                            .text_color(c(theme::DIM))
+                            .text_color(c(theme::dim()))
                             .child(SharedString::from(line)),
                     );
                 }
@@ -426,14 +343,14 @@ impl RootView {
                         div()
                             .pt(px(8.))
                             .text_size(px(12.5))
-                            .text_color(c(theme::DIM))
-                            .child("将同时清除各 agent 会话存储（含历史遗留）。"),
+                            .text_color(c(theme::dim()))
+                            .child("将同时清除 Claude Code 在这些目录下的会话存储。"),
                     )
                     .child(
                         div()
                             .pt(px(8.))
                             .text_size(px(11.))
-                            .text_color(c(theme::FAINT))
+                            .text_color(c(theme::faint()))
                             .child("purge 语义与 aaa CLI 完全一致，不可恢复。"),
                     )
                     .child(
@@ -472,13 +389,13 @@ impl RootView {
                         div()
                             .py(px(4.))
                             .border_b_1()
-                            .border_color(ca(theme::EDGE, 0.5))
+                            .border_color(ca(theme::edge(), 0.5))
                             .child(
                                 div()
                                     .flex()
                                     .items_center()
                                     .gap(px(8.))
-                                    .child(dot(if r.ok { theme::GREEN } else { theme::RED }))
+                                    .child(dot(if r.ok { theme::green() } else { theme::red() }))
                                     .child(
                                         div()
                                             .text_size(px(12.5))
@@ -490,7 +407,7 @@ impl RootView {
                                     .pl(px(15.))
                                     .font_family("Menlo")
                                     .text_size(px(11.))
-                                    .text_color(c(theme::INK))
+                                    .text_color(c(theme::ink()))
                                     .child(SharedString::from(purged)),
                             ),
                     );
@@ -578,7 +495,7 @@ impl RootView {
             .child(
                 div()
                     .text_size(px(12.5))
-                    .text_color(c(theme::DIM))
+                    .text_color(c(theme::dim()))
                     .child(SharedString::from(self.kill_warning(&id))),
             )
             .child(
@@ -619,7 +536,7 @@ impl RootView {
             .child(
                 div()
                     .text_size(px(12.5))
-                    .text_color(c(theme::DIM))
+                    .text_color(c(theme::dim()))
                     .child("删除记录与回放（存活会话会先被终止），不可恢复。"),
             )
             .child(
@@ -727,28 +644,28 @@ impl RootView {
                 div()
                     .font_family("Menlo")
                     .text_size(px(11.5))
-                    .text_color(c(theme::DIM))
+                    .text_color(c(theme::dim()))
                     .child(SharedString::from(old_root)),
             )
             .child(
                 div()
                     .font_family("Menlo")
                     .text_size(px(11.5))
-                    .text_color(c(theme::INK))
+                    .text_color(c(theme::ink()))
                     .pb(px(10.))
                     .child(SharedString::from(format!("→ {new_root}"))),
             )
             .child(
                 div()
                     .text_size(px(12.5))
-                    .text_color(c(theme::DIM))
+                    .text_color(c(theme::dim()))
                     .pb(px(4.))
                     .child("「迁移」会整体移动目录并重写注册表（含各项目对话 id，之后 resume 不会乱）。"),
             )
             .child(
                 div()
                     .text_size(px(12.5))
-                    .text_color(c(theme::DIM))
+                    .text_color(c(theme::dim()))
                     .pb(px(10.))
                     .child("「仅指向」不动旧文件，只把 daemon 指到新目录（须已存在）。两者都要求没有存活会话，daemon 会自动重启。"),
             )

@@ -184,7 +184,7 @@ impl RootView {
     pub(super) fn render_terminal_entry(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let n = self.live_terminal_tabs().len();
         let active = self.page == Page::Terminal;
-        let accent = c(if active { theme::CYAN } else { theme::DIM });
+        let accent = c(if active { theme::accent() } else { theme::dim() });
         div()
             .id("sb-terminal")
             .flex()
@@ -193,10 +193,10 @@ impl RootView {
             .px(px(16.))
             .py(px(7.))
             .border_t_1()
-            .border_color(c(theme::EDGE))
+            .border_color(c(theme::edge()))
             .cursor_pointer()
-            .when(active, |el| el.bg(c(theme::SURFACE_RAISED)))
-            .hover(|st| st.bg(c(theme::SURFACE_RAISED)))
+            .when(active, |el| el.bg(c(theme::surface_raised())))
+            .hover(|st| st.bg(c(theme::surface_raised())))
             .on_click(cx.listener(|this, _, _, cx| this.open_terminal_panel(cx)))
             .child(
                 div()
@@ -209,7 +209,7 @@ impl RootView {
                 div()
                     .flex_1()
                     .text_size(px(12.5))
-                    .text_color(c(if active { theme::CYAN } else { theme::INK }))
+                    .text_color(c(if active { theme::accent() } else { theme::ink() }))
                     .child("终端"),
             )
             .when(n > 0, |el| {
@@ -217,7 +217,7 @@ impl RootView {
                     div()
                         .font_family("Menlo")
                         .text_size(px(10.))
-                        .text_color(c(theme::FAINT))
+                        .text_color(c(theme::faint()))
                         .child(SharedString::from(n.to_string())),
                 )
             })
@@ -228,8 +228,8 @@ impl RootView {
                     .px(px(4.))
                     .rounded(px(4.))
                     .text_size(px(13.))
-                    .text_color(c(theme::DIM))
-                    .hover(|st| st.text_color(c(theme::CYAN)).bg(c(theme::EDGE_LIGHT)))
+                    .text_color(c(theme::dim()))
+                    .hover(|st| st.text_color(c(theme::accent())).bg(c(theme::edge_light())))
                     .on_click(cx.listener(|this, _, _, cx| {
                         cx.stop_propagation();
                         this.new_terminal(cx);
@@ -249,9 +249,9 @@ impl RootView {
             .items_center()
             .h(px(30.))
             .overflow_hidden()
-            .bg(c(theme::SURFACE))
+            .bg(c(theme::surface()))
             .border_b_1()
-            .border_color(c(theme::EDGE));
+            .border_color(c(theme::edge()));
         for (ix, (id, label)) in tabs.iter().enumerate() {
             let is_active = active.as_deref() == Some(id.as_str());
             let id_click = id.clone();
@@ -266,15 +266,15 @@ impl RootView {
                     .h_full()
                     .px(px(12.))
                     .border_r_1()
-                    .border_color(c(theme::EDGE))
+                    .border_color(c(theme::edge()))
                     .cursor_pointer()
                     .text_size(px(12.))
                     .when(is_active, |el| {
-                        el.bg(c(theme::SURFACE_RAISED)).text_color(c(theme::INK))
+                        el.bg(c(theme::surface_raised())).text_color(c(theme::ink()))
                     })
                     .when(!is_active, |el| {
-                        el.text_color(c(theme::DIM))
-                            .hover(|st| st.bg(c(theme::SURFACE_RAISED)))
+                        el.text_color(c(theme::dim()))
+                            .hover(|st| st.bg(c(theme::surface_raised())))
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.focus_terminal(id_click.clone(), cx);
@@ -288,8 +288,8 @@ impl RootView {
                             .px(px(3.))
                             .rounded(px(4.))
                             .text_size(px(10.))
-                            .text_color(c(theme::FAINT))
-                            .hover(|st| st.text_color(c(theme::RED)).bg(c(theme::EDGE_LIGHT)))
+                            .text_color(c(theme::faint()))
+                            .hover(|st| st.text_color(c(theme::red())).bg(c(theme::edge_light())))
                             .when(!is_active, |el| {
                                 el.invisible().group_hover("term-tab", |st| st.visible())
                             })
@@ -311,8 +311,8 @@ impl RootView {
                 .px(px(12.))
                 .cursor_pointer()
                 .text_size(px(14.))
-                .text_color(c(theme::DIM))
-                .hover(|st| st.text_color(c(theme::CYAN)).bg(c(theme::SURFACE_RAISED)))
+                .text_color(c(theme::dim()))
+                .hover(|st| st.text_color(c(theme::accent())).bg(c(theme::surface_raised())))
                 .on_click(cx.listener(|this, _, _, cx| this.new_terminal(cx)))
                 .child("＋"),
         );
@@ -330,7 +330,7 @@ impl RootView {
                 .items_center()
                 .justify_center()
                 .gap(px(10.))
-                .text_color(c(theme::FAINT))
+                .text_color(c(theme::faint()))
                 .child(div().text_size(px(13.)).child("还没有终端 · 点 + 开一个"))
                 .child(
                     tbtn("term-empty-new", "＋ 新终端")
@@ -373,7 +373,7 @@ impl RootView {
         .child(
             div()
                 .ml_auto()
-                .text_color(c(theme::FAINT))
+                .text_color(c(theme::faint()))
                 .child(SharedString::from(hint)),
         )
     }

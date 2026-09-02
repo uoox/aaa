@@ -1,6 +1,6 @@
-//! 设置页（精简版）：① 配对二维码 + 连接信息 ② 可编辑配置
-//! （host/port/token/项目目录；保存写入 daemon 并触发它自我重启，
-//! 项目目录变更先弹迁移确认）。
+//! 设置页（精简版）：① 配对二维码 + 连接信息 ② 外观（三套主题，即时切换、
+//! 本机落盘）③ 可编辑配置（host/port/token/项目目录；保存写入 daemon 并触发
+//! 它自我重启，项目目录变更先弹迁移确认）。
 
 use gpui::{
     Bounds, ClipboardItem, Context, SharedString, Window, canvas, div, fill, point, prelude::*, px,
@@ -10,7 +10,7 @@ use gpui::{
 use super::kit::*;
 use super::{Modal, RootView};
 use crate::net::ConnState;
-use crate::theme;
+use crate::theme::{self, Palette, ThemeKind};
 
 /// 配对 payload → 二维码模块位图（fetch 时调用一次；渲染帧不重复编码）
 pub(super) fn qr_encode(payload: &str) -> Option<(usize, Vec<bool>)> {
@@ -70,15 +70,15 @@ impl RootView {
                 .w_full()
                 .p(px(14.))
                 .rounded(px(10.))
-                .bg(c(theme::SURFACE))
+                .bg(c(theme::surface()))
                 .border_1()
-                .border_color(c(theme::EDGE))
+                .border_color(c(theme::edge()))
         };
         let sect_title = |text: &'static str| {
             div()
                 .font_family("Menlo")
                 .text_size(px(10.))
-                .text_color(c(theme::FAINT))
+                .text_color(c(theme::faint()))
                 .pb(px(8.))
                 .child(text)
         };
@@ -95,7 +95,7 @@ impl RootView {
                         .flex_none()
                         .font_family("Menlo")
                         .text_size(px(10.))
-                        .text_color(c(theme::FAINT))
+                        .text_color(c(theme::faint()))
                         .child(k),
                 )
                 .child(
@@ -105,7 +105,7 @@ impl RootView {
                         .text_ellipsis()
                         .whitespace_nowrap()
                         .text_size(px(12.))
-                        .text_color(c(color.unwrap_or(theme::INK)))
+                        .text_color(c(color.unwrap_or(theme::ink())))
                         .child(SharedString::from(v)),
                 )
         };
@@ -113,9 +113,9 @@ impl RootView {
         // ── ① 配对 + 连接信息 ───────────────────────────────────────────
         let ep = self.net.endpoint();
         let (conn_color, conn_label) = match self.conn {
-            ConnState::Connected => (theme::GREEN, "已连接"),
-            ConnState::Connecting => (theme::AMBER, "连接中…"),
-            ConnState::Disconnected => (theme::RED, "未连接"),
+            ConnState::Connected => (theme::green(), "已连接"),
+            ConnState::Connecting => (theme::amber(), "连接中…"),
+            ConnState::Disconnected => (theme::red(), "未连接"),
         };
         let qr_box = match self.qr_modules.clone() {
             Some((w, modules)) => div()
@@ -157,12 +157,12 @@ impl RootView {
                 .flex_none()
                 .rounded(px(6.))
                 .border_1()
-                .border_color(c(theme::EDGE))
+                .border_color(c(theme::edge()))
                 .flex()
                 .items_center()
                 .justify_center()
                 .text_size(px(11.))
-                .text_color(c(theme::FAINT))
+                .text_color(c(theme::faint()))
                 .child("连接后生成"),
         };
         let mut info = div()
@@ -187,7 +187,7 @@ impl RootView {
                         el.child(
                             div()
                                 .text_size(px(11.))
-                                .text_color(c(theme::AMBER))
+                                .text_color(c(theme::amber()))
                                 .child("（未读到本机 config.toml）"),
                         )
                     }),
@@ -204,7 +204,7 @@ impl RootView {
                     } else {
                         "未挂载 ✕（创建/删除被禁用）".into()
                     },
-                    Some(if h.ssd_mounted { theme::GREEN } else { theme::RED }),
+                    Some(if h.ssd_mounted { theme::green() } else { theme::red() }),
                 ));
         }
         if let Some(ep) = &ep {
@@ -214,7 +214,54 @@ impl RootView {
             .child(sect_title("配对 · Android 扫码自动填入地址与 TOKEN"))
             .child(div().flex().gap(px(16.)).child(qr_box).child(info));
 
-        // ── ② 可编辑配置 ────────────────────────────────────────────────
+        // ── ② 外观：三套主题，点了立刻整窗换色并落盘 ───────────────────
+        let current = self.theme;
+        let mut chips = div().flex().flex_wrap().gap(px(8.));
+        for kind in ThemeKind::ALL {
+            let sel = kind == current;
+            let p = Palette::for_kind(kind);
+            // 芯片上带一小条色样（页面底 / 卡片 / 主色），不用切过去就知道长什么样
+            let swatch = div()
+                .flex()
+                .flex_none()
+                .rounded(px(3.))
+                .overflow_hidden()
+                .border_1()
+                .border_color(c(theme::edge_light()))
+                .child(div().w(px(10.)).h(px(14.)).bg(c(p.bg)))
+                .child(div().w(px(10.)).h(px(14.)).bg(c(p.surface)))
+                .child(div().w(px(10.)).h(px(14.)).bg(c(p.accent)));
+            chips = chips.child(
+                div()
+                    .id(("theme-chip", kind as usize))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .px(px(12.))
+                    .py(px(6.))
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(c(if sel { theme::accent() } else { theme::edge_light() }))
+                    .bg(if sel {
+                        ca(theme::accent(), 0.12)
+                    } else {
+                        c(theme::surface_raised())
+                    })
+                    .text_size(px(12.5))
+                    .text_color(c(if sel { theme::accent() } else { theme::ink() }))
+                    .when(sel, |el| el.font_weight(gpui::FontWeight::BOLD))
+                    .cursor_pointer()
+                    .hover(|st| st.border_color(c(theme::accent())))
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_theme(kind, cx)))
+                    .child(swatch)
+                    .child(kind.label()),
+            );
+        }
+        let look_sect = card()
+            .child(sect_title("外观 · 即时生效，记在本机 ~/.config/aaa-ui/ui.toml"))
+            .child(chips);
+
+        // ── ③ 可编辑配置 ────────────────────────────────────────────────
         let field = |label: &'static str, input: gpui::Entity<super::MiniInput>| {
             div()
                 .flex()
@@ -224,7 +271,7 @@ impl RootView {
                     div()
                         .font_family("Menlo")
                         .text_size(px(9.5))
-                        .text_color(c(theme::FAINT))
+                        .text_color(c(theme::faint()))
                         .child(label),
                 )
                 .child(input)
@@ -289,7 +336,7 @@ impl RootView {
                 div()
                     .mt(px(8.))
                     .text_size(px(10.5))
-                    .text_color(c(theme::FAINT))
+                    .text_color(c(theme::faint()))
                     .child("「连接」只改本机指向；「保存」写入 daemon 配置并重启它（有存活会话会被拒绝）。修改项目目录时会先询问是否迁移现有项目。"),
             );
 
@@ -306,6 +353,7 @@ impl RootView {
                     .gap(px(14.))
                     .max_w(px(720.))
                     .child(pair_sect)
+                    .child(look_sect)
                     .child(cfg_sect),
             )
     }

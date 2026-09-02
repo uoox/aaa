@@ -4,8 +4,11 @@
 //! 提交走 POST /sessions/:id/answer，由 daemon 翻译成对话框按键。⌘E 切换。
 //!
 //! 拉取模型：打开时全量补齐（seq 游标循环直到追平 last_seq），此后靠
-//! /events 的 messages_changed 帧增量拉。`supported:false`（shell、
-//! reasonix 等）或 404（v1 daemon）→ 上层自动回落终端并隐藏切换入口。
+//! /events 的 messages_changed 帧增量拉。`supported:false`（shell）或 404
+//! （v1 daemon）→ 上层自动回落终端并隐藏切换入口。
+//!
+//! 谁在说话一眼可辨：用户一侧是靠右的主色淡底气泡（上方一行时间小字）；Claude
+//! 一侧通栏、无底，上方一行「✻ Claude」主色小字。
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -170,7 +173,7 @@ pub struct MessagesView {
 
 impl MessagesView {
     pub fn new(sid: String, net: Net, cx: &mut Context<Self>) -> Self {
-        let input = cx.new(|cx| MiniInput::new(cx, "对 agent 说点什么… (回车发送)"));
+        let input = cx.new(|cx| MiniInput::new(cx, "对 Claude 说点什么… (回车发送)"));
         let mut v = MessagesView {
             sid,
             net,
@@ -502,21 +505,21 @@ impl MessagesView {
                     .px(px(10.))
                     .py(px(5.))
                     .rounded(px(8.))
-                    .bg(c(theme::TERM_BG))
+                    .bg(c(theme::inset()))
                     .cursor_pointer()
                     .on_click(cx.listener(move |v: &mut Self, _, _, cx| v.toggle_expand(seq, cx)))
                     .child(
                         div()
                             .text_size(px(10.5))
                             .italic()
-                            .text_color(c(theme::FAINT))
+                            .text_color(c(theme::faint()))
                             .child(if expanded { "▾ 思考" } else { "▸ 思考" }),
                     )
                     .child(
                         div()
                             .text_size(px(11.5))
                             .italic()
-                            .text_color(c(theme::FAINT))
+                            .text_color(c(theme::faint()))
                             .when(!expanded, |el| {
                                 el.overflow_hidden().text_ellipsis().whitespace_nowrap()
                             })
@@ -531,10 +534,10 @@ impl MessagesView {
                     .map(|t| (t.name.clone(), t.summary.clone(), t.status.clone()))
                     .unwrap_or_default();
                 let status_color = match status.as_str() {
-                    "ok" => theme::GREEN,
-                    "err" => theme::RED,
-                    "running" => theme::AMBER,
-                    _ => theme::DIM,
+                    "ok" => theme::green(),
+                    "err" => theme::red(),
+                    "running" => theme::amber(),
+                    _ => theme::dim(),
                 };
                 let label: SharedString = if m.kind == "tool_result" {
                     "⎿ 结果".into()
@@ -568,7 +571,7 @@ impl MessagesView {
                                     .text_size(px(11.5))
                                     .font_family("Menlo")
                                     .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(c(theme::INK))
+                                    .text_color(c(theme::ink()))
                                     .child(label),
                             )
                             .child(
@@ -580,7 +583,7 @@ impl MessagesView {
                                     .whitespace_nowrap()
                                     .text_size(px(11.5))
                                     .font_family("Menlo")
-                                    .text_color(c(theme::DIM))
+                                    .text_color(c(theme::dim()))
                                     .child(SharedString::from(summary)),
                             ),
                     )
@@ -592,10 +595,10 @@ impl MessagesView {
                                 .px(px(8.))
                                 .py(px(6.))
                                 .rounded(px(8.))
-                                .bg(c(theme::TERM_BG))
+                                .bg(c(theme::inset()))
                                 .text_size(px(11.))
                                 .font_family("Menlo")
-                                .text_color(c(theme::DIM))
+                                .text_color(c(theme::dim()))
                                 .child(text),
                         )
                     })
@@ -605,47 +608,32 @@ impl MessagesView {
             // 就退回普通 assistant 气泡，至少把题面露出来
             _ if m.kind == "question" => match &m.question {
                 Some(spec) => self.question_card(m, spec, pending, cx),
-                None => assistant_bubble(text),
+                None => assistant_block(assistant_text(text)),
             },
             // 表单的回答画在用户一侧，加一行「回答」小字与普通输入区分
             _ if m.kind == "answer" => {
                 let err = m.tool.as_ref().is_some_and(|t| t.status == "err");
                 let (caption, color) = if err {
-                    ("回答 · 出错", theme::RED)
+                    ("回答 · 出错", theme::red())
                 } else {
-                    ("回答", theme::FAINT)
+                    ("回答", theme::faint())
                 };
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .items_end()
-                    .gap(px(2.))
-                    .child(
-                        div()
-                            .text_size(px(10.5))
-                            .font_family("Menlo")
-                            .text_color(c(color))
-                            .child(caption),
-                    )
-                    .child(user_bubble(text))
-                    .into_any_element()
+                user_column(Some((caption.into(), color)), user_bubble(text))
             }
-            _ if m.role == "user" => div()
-                .w_full()
-                .flex()
-                .justify_end()
-                .child(user_bubble(text))
-                .into_any_element(),
+            // 用户的话：靠右气泡，上方压一行发出时间（transcript 带 ts 才有）
+            _ if m.role == "user" => user_column(
+                time_caption(&m.ts).map(|t| (SharedString::from(t), theme::faint())),
+                user_bubble(text),
+            ),
             _ if m.role == "system" => div()
                 .w_full()
                 .text_size(px(10.5))
-                .text_color(c(theme::FAINT))
+                .text_color(c(theme::faint()))
                 .child(text)
                 .into_any_element(),
             _ => {
-                // assistant 文本 = CommonMark：气泡（SURFACE、宽度上限）不变，里面换成块列。
-                // 缓存未命中（理论上不会）就现场解析；解析结果为空 → 回落纯文本气泡。
+                // assistant 文本 = CommonMark：通栏块列，上方「✻ Claude」小字。
+                // 缓存未命中（理论上不会）就现场解析；解析结果为空 → 回落纯文本。
                 let parsed;
                 let blocks: &[Block] = if is_markdown(m) {
                     match self.md.get(&m.seq) {
@@ -659,27 +647,20 @@ impl MessagesView {
                     &[]
                 };
                 if blocks.is_empty() {
-                    assistant_bubble(text)
+                    assistant_block(assistant_text(text))
                 } else {
                     let mut ids = MdIds { seq: m.seq, next: 0 };
-                    div()
-                        .w_full()
-                        .flex()
-                        .child(
-                            div()
-                                .max_w(relative(0.86))
-                                .px(px(12.))
-                                .py(px(7.))
-                                .rounded(px(12.))
-                                .bg(c(theme::SURFACE))
-                                .text_size(px(12.5))
-                                .text_color(c(theme::INK))
-                                .flex()
-                                .flex_col()
-                                .gap(px(6.))
-                                .children(md_blocks(blocks, &mut ids)),
-                        )
-                        .into_any_element()
+                    assistant_block(
+                        div()
+                            .w_full()
+                            .text_size(px(12.5))
+                            .text_color(c(theme::ink()))
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.))
+                            .children(md_blocks(blocks, &mut ids))
+                            .into_any_element(),
+                    )
                 }
             }
         }
@@ -721,8 +702,8 @@ impl MessagesView {
             .p(px(10.))
             .rounded(px(10.))
             .border_1()
-            .border_color(ca(theme::AMBER, 0.55))
-            .bg(ca(theme::AMBER, 0.08))
+            .border_color(ca(theme::amber(), 0.55))
+            .bg(ca(theme::amber(), 0.08))
             .when(!interactive, |el| el.opacity(0.6));
 
         // 顶行：表单标识 + 已答态标签
@@ -736,7 +717,7 @@ impl MessagesView {
                         .flex_1()
                         .text_size(px(10.5))
                         .font_family("Menlo")
-                        .text_color(c(theme::AMBER))
+                        .text_color(c(theme::amber()))
                         .child(if interactive {
                             "? 等你选择"
                         } else {
@@ -751,8 +732,8 @@ impl MessagesView {
                             .rounded(px(4.))
                             .text_size(px(10.))
                             .font_family("Menlo")
-                            .text_color(c(theme::DIM))
-                            .bg(ca(theme::INK, 0.06))
+                            .text_color(c(theme::dim()))
+                            .bg(ca(theme::ink(), 0.06))
                             .child(t),
                     )
                 }),
@@ -771,10 +752,10 @@ impl MessagesView {
                 .px(px(12.))
                 .py(px(4.))
                 .rounded(px(6.))
-                .bg(c(theme::CYAN))
+                .bg(c(theme::accent()))
                 .text_size(px(12.))
                 .font_weight(gpui::FontWeight::BOLD)
-                .text_color(c(0x0b2830))
+                .text_color(c(theme::on_accent()))
                 .child(label);
             if complete && !submitting {
                 btn = btn
@@ -793,7 +774,7 @@ impl MessagesView {
                 div()
                     .px(px(4.))
                     .text_size(px(11.))
-                    .text_color(c(theme::RED))
+                    .text_color(c(theme::red()))
                     .child(SharedString::from(err.clone())),
             );
         }
@@ -824,7 +805,7 @@ impl MessagesView {
                 .w(px(16.))
                 .text_size(px(12.))
                 .font_family("Menlo")
-                .text_color(c(if on { theme::CYAN } else { theme::DIM }))
+                .text_color(c(if on { theme::accent() } else { theme::dim() }))
                 .child(glyph)
         };
 
@@ -834,7 +815,7 @@ impl MessagesView {
                 div()
                     .text_size(px(10.5))
                     .font_family("Menlo")
-                    .text_color(c(theme::FAINT))
+                    .text_color(c(theme::faint()))
                     .child(SharedString::from(q.header.clone())),
             );
         }
@@ -842,7 +823,7 @@ impl MessagesView {
             div()
                 .text_size(px(13.))
                 .font_weight(gpui::FontWeight::BOLD)
-                .text_color(c(theme::INK))
+                .text_color(c(theme::ink()))
                 .child(SharedString::from(q.question.clone())),
         );
 
@@ -866,14 +847,14 @@ impl MessagesView {
                         .child(
                             div()
                                 .text_size(px(12.5))
-                                .text_color(c(theme::INK))
+                                .text_color(c(theme::ink()))
                                 .child(SharedString::from(opt.label.clone())),
                         )
                         .when(!opt.description.is_empty(), |el| {
                             el.child(
                                 div()
                                     .text_size(px(11.))
-                                    .text_color(c(theme::DIM))
+                                    .text_color(c(theme::dim()))
                                     .child(SharedString::from(opt.description.clone())),
                             )
                         }),
@@ -881,7 +862,7 @@ impl MessagesView {
             if clickable {
                 row = row
                     .cursor_pointer()
-                    .hover(|s| s.bg(ca(theme::AMBER, 0.12)))
+                    .hover(|s| s.bg(ca(theme::amber(), 0.12)))
                     .on_click(cx.listener(move |v: &mut Self, _, _, cx| {
                         v.toggle_option(seq, qi, oi, multi, cx)
                     }));
@@ -903,14 +884,14 @@ impl MessagesView {
                     div()
                         .flex_none()
                         .text_size(px(12.5))
-                        .text_color(c(theme::INK))
+                        .text_color(c(theme::ink()))
                         .child("其它"),
                 )
                 .child(div().flex_1().min_w(px(0.)).child(input.clone())),
             _ => other_row.child(
                 div()
                     .text_size(px(12.5))
-                    .text_color(c(theme::DIM))
+                    .text_color(c(theme::dim()))
                     .child("其它…"),
             ),
         };
@@ -918,36 +899,94 @@ impl MessagesView {
     }
 }
 
-/// assistant 文本气泡（左侧）
-fn assistant_bubble(text: SharedString) -> gpui::AnyElement {
+/// Claude 的一段：左侧、通栏、不再有气泡底；上方一行「✻ Claude」主色小字标明说话的人
+fn assistant_block(body: AnyElement) -> AnyElement {
     div()
         .w_full()
         .flex()
+        .flex_col()
+        .gap(px(3.))
         .child(
             div()
-                .max_w(relative(0.86))
-                .px(px(12.))
-                .py(px(7.))
-                .rounded(px(12.))
-                .bg(c(theme::SURFACE))
-                .text_size(px(12.5))
-                .text_color(c(theme::INK))
-                .child(text),
+                .text_size(px(10.5))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(c(theme::accent()))
+                .child("✻ Claude"),
         )
+        .child(body)
         .into_any_element()
 }
 
-/// 用户一侧的青色气泡（调用方负责靠右）
+/// 非 Markdown 的 assistant 文本（解析为空 / question 缺表单时的兜底）
+fn assistant_text(text: SharedString) -> AnyElement {
+    div()
+        .w_full()
+        .text_size(px(12.5))
+        .text_color(c(theme::ink()))
+        .child(text)
+        .into_any_element()
+}
+
+/// 用户一侧的一列：可选的小字说明（时间 / 「回答」）靠右压在气泡上方
+fn user_column(caption: Option<(SharedString, u32)>, bubble: gpui::Div) -> AnyElement {
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .items_end()
+        .gap(px(2.))
+        .when_some(caption, |el, (text, color)| {
+            el.child(
+                div()
+                    .text_size(px(10.))
+                    .font_family("Menlo")
+                    .text_color(c(color))
+                    .child(text),
+            )
+        })
+        .child(bubble)
+        .into_any_element()
+}
+
+/// 用户一侧的气泡（调用方负责靠右）：主色淡底 + 主色描边，右下角收小一点像
+/// 「说出去的话」；浅色主题底再淡一档，免得糊成一块
 fn user_bubble(text: SharedString) -> gpui::Div {
+    let p = theme::palette();
     div()
         .max_w(relative(0.78))
         .px(px(12.))
         .py(px(7.))
         .rounded(px(12.))
-        .bg(ca(theme::CYAN, 0.16))
+        .rounded_br(px(5.))
+        .bg(ca(p.accent, if p.is_dark { 0.18 } else { 0.14 }))
+        .border_1()
+        .border_color(ca(p.accent, 0.35))
         .text_size(px(12.5))
-        .text_color(c(theme::INK))
+        .text_color(c(p.ink))
         .child(text)
+}
+
+/// 用户消息上方的时间小字：transcript 的 ISO 时间 → 本地时区 HH:mm。
+/// 解析不了（旧 daemon 不带 ts / 格式怪）就不显示，不猜。
+pub fn time_caption(ts: &str) -> Option<String> {
+    time_caption_in(ts, &chrono::Local)
+}
+
+fn time_caption_in<Tz: chrono::TimeZone>(ts: &str, tz: &Tz) -> Option<String>
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let ts = ts.trim();
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) {
+        return Some(dt.with_timezone(tz).format("%H:%M").to_string());
+    }
+    // 没有时区 / 秒的裸 ISO（"2026-09-02T10:05"）：按字面取 HH:mm，不换时区
+    let b = ts.as_bytes();
+    let looks_iso = b.len() >= 16
+        && b[10] == b'T'
+        && b[13] == b':'
+        && b[11..13].iter().chain(&b[14..16]).all(u8::is_ascii_digit);
+    looks_iso.then(|| ts[11..16].to_string())
 }
 
 /// 只有 assistant 的 text 走 Markdown；user / tool / thinking / system / question 保持纯文本
@@ -972,9 +1011,6 @@ impl MdIds {
         ElementId::from(format!("md-{kind}-{}-{}", self.seq, self.next))
     }
 }
-
-/// 代码 span 的文字色：亮青（ANSI 14），在 TERM_BG 上可读且与链接的 CYAN 区分
-const CODE_INK: u32 = 0x7fdbef;
 
 fn md_blocks(blocks: &[Block], ids: &mut MdIds) -> Vec<AnyElement> {
     blocks.iter().map(|b| md_block(b, ids)).collect()
@@ -1027,7 +1063,7 @@ fn md_block(b: &Block, ids: &mut MdIds) -> AnyElement {
                                 .flex_none()
                                 .w(px(marker_w))
                                 .text_size(px(12.5))
-                                .text_color(c(theme::DIM))
+                                .text_color(c(theme::dim()))
                                 .child(marker),
                         )
                         .child(
@@ -1044,9 +1080,9 @@ fn md_block(b: &Block, ids: &mut MdIds) -> AnyElement {
         }
         Block::Quote(children) => div()
             .border_l(px(3.))
-            .border_color(ca(theme::FAINT, 0.6))
+            .border_color(ca(theme::faint(), 0.6))
             .pl(px(10.))
-            .text_color(c(theme::DIM))
+            .text_color(c(theme::dim()))
             .flex()
             .flex_col()
             .gap(px(6.))
@@ -1056,7 +1092,7 @@ fn md_block(b: &Block, ids: &mut MdIds) -> AnyElement {
             .w_full()
             .h(px(1.))
             .my(px(4.))
-            .bg(c(theme::EDGE))
+            .bg(c(theme::edge()))
             .into_any_element(),
     }
 }
@@ -1094,16 +1130,16 @@ fn md_inline(spans: &[Span], ids: &mut MdIds) -> AnyElement {
             styled = true;
         }
         if s.code {
-            hl.background_color = Some(c(theme::TERM_BG).into());
-            hl.color = Some(c(CODE_INK).into());
+            hl.background_color = Some(c(theme::term_bg()).into());
+            hl.color = Some(c(theme::code_ink()).into());
             families.push((range.clone(), "Menlo".into()));
             styled = true;
         }
         if let Some(url) = &s.link {
-            hl.color = Some(c(theme::CYAN).into());
+            hl.color = Some(c(theme::accent()).into());
             hl.underline = Some(UnderlineStyle {
                 thickness: px(1.),
-                color: Some(c(theme::CYAN).into()),
+                color: Some(c(theme::accent()).into()),
                 wavy: false,
             });
             link_ranges.push(range.clone());
@@ -1143,7 +1179,7 @@ fn md_mono_block(ids: &mut MdIds, kind: &str, text: &str, size: f32, lang: &str)
             div()
                 .font_family("Menlo")
                 .text_size(px(size))
-                .text_color(c(theme::TERM_FG))
+                .text_color(c(theme::term_fg()))
                 .whitespace_nowrap()
                 .child(SharedString::from(text.to_string())),
         );
@@ -1151,7 +1187,11 @@ fn md_mono_block(ids: &mut MdIds, kind: &str, text: &str, size: f32, lang: &str)
         .relative()
         .w_full()
         .rounded(px(8.))
-        .bg(c(theme::TERM_BG))
+        .bg(c(theme::term_bg()))
+        // 浅色主题里终端底与页面底太接近，描一圈边才看得出是个块
+        .when(!theme::palette().is_dark, |el| {
+            el.border_1().border_color(c(theme::edge()))
+        })
         .child(body)
         .when(!lang.is_empty(), |el| {
             el.child(
@@ -1161,7 +1201,7 @@ fn md_mono_block(ids: &mut MdIds, kind: &str, text: &str, size: f32, lang: &str)
                     .right(px(8.))
                     .text_size(px(9.5))
                     .font_family("Menlo")
-                    .text_color(c(theme::FAINT))
+                    .text_color(c(theme::faint()))
                     .child(SharedString::from(lang.to_string())),
             )
         })
@@ -1181,7 +1221,7 @@ impl Render for MessagesView {
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_color(c(theme::FAINT))
+                .text_color(c(theme::faint()))
                 .text_size(px(12.))
                 .child(msg)
         };
@@ -1216,7 +1256,7 @@ impl Render for MessagesView {
         };
         let mut root = div()
             .size_full()
-            .bg(c(theme::BG))
+            .bg(c(theme::bg()))
             .flex()
             .flex_col()
             .on_key_down(cx.listener(Self::on_key_down))
@@ -1233,8 +1273,8 @@ impl Render for MessagesView {
                     .px(px(12.))
                     .py(px(8.))
                     .border_t_1()
-                    .border_color(c(theme::EDGE))
-                    .bg(c(theme::SURFACE))
+                    .border_color(c(theme::edge()))
+                    .bg(c(theme::surface()))
                     .child(div().flex_1().child(self.input.clone()))
                     .child(
                         div()
@@ -1242,10 +1282,10 @@ impl Render for MessagesView {
                             .px(px(12.))
                             .py(px(4.))
                             .rounded(px(6.))
-                            .bg(c(theme::CYAN))
+                            .bg(c(theme::accent()))
                             .text_size(px(12.))
                             .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(c(0x0b2830))
+                            .text_color(c(theme::on_accent()))
                             .cursor_pointer()
                             .hover(|s| s.opacity(0.85))
                             .on_click(cx.listener(|v: &mut Self, _, _, cx| v.send(cx)))
@@ -1366,6 +1406,38 @@ mod tests {
         let a = draft(&[1], "  ").to_answer();
         assert_eq!(a.selected, vec![1]);
         assert_eq!(a.other, None);
+    }
+
+    #[test]
+    fn time_caption_is_hhmm_in_target_zone() {
+        use chrono::{FixedOffset, Utc};
+        let ts = "2026-09-02T09:59:59.900Z";
+        assert_eq!(time_caption_in(ts, &Utc).as_deref(), Some("09:59"));
+        let cst = FixedOffset::east_opt(8 * 3600).unwrap();
+        assert_eq!(time_caption_in(ts, &cst).as_deref(), Some("17:59"));
+        // 带偏移的输入照样归到目标时区
+        assert_eq!(
+            time_caption_in("2026-09-02T23:30:00+08:00", &Utc).as_deref(),
+            Some("15:30")
+        );
+        // 裸 ISO 没时区：按字面
+        assert_eq!(
+            time_caption_in("2026-09-02T10:05", &Utc).as_deref(),
+            Some("10:05")
+        );
+        assert_eq!(
+            time_caption_in(" 2026-09-02T10:05:33 ", &Utc).as_deref(),
+            Some("10:05")
+        );
+        // 空 / 垃圾 / 只有日期 → 不显示
+        assert_eq!(time_caption_in("", &Utc), None);
+        assert_eq!(time_caption_in("yesterday", &Utc), None);
+        assert_eq!(time_caption_in("2026-09-02", &Utc), None);
+        assert_eq!(time_caption_in("2026-09-02Tab:cd", &Utc), None);
+        // 本地时区版本：至少是个 HH:mm 形状
+        let local = time_caption(ts).unwrap();
+        assert_eq!(local.len(), 5);
+        assert_eq!(&local[2..3], ":");
     }
 
     #[test]

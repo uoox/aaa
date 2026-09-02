@@ -1,4 +1,5 @@
-//! 共享 UI 小件：颜色转换、状态点、agent 标签、按钮底座。
+//! 共享 UI 小件：颜色转换、状态点、按钮底座。颜色一律取自当前主题
+//! （`theme::xxx()`），实心按钮上的字色由底色亮度推出（`theme::text_on`）。
 
 use gpui::{Div, Rgba, SharedString, Stateful, div, prelude::*, px, rgb, rgba};
 
@@ -24,20 +25,6 @@ pub fn dot(color: u32) -> Div {
         .bg(c(color))
 }
 
-/// agent 彩色小标签
-pub fn agent_chip(agent: &str, label: impl Into<SharedString>) -> Div {
-    let color = theme::agent_color(agent);
-    div()
-        .px(px(6.))
-        .py(px(1.))
-        .rounded(px(4.))
-        .text_size(px(10.))
-        .font_family("Menlo")
-        .text_color(c(color))
-        .bg(ca(color, 0.13))
-        .child(label.into())
-}
-
 /// 工具栏按钮底座（调用方自行加 .on_click）
 pub fn tbtn(id: impl Into<gpui::ElementId>, label: impl Into<SharedString>) -> Stateful<Div> {
     div()
@@ -46,12 +33,12 @@ pub fn tbtn(id: impl Into<gpui::ElementId>, label: impl Into<SharedString>) -> S
         .py(px(4.))
         .rounded(px(6.))
         .border_1()
-        .border_color(c(theme::EDGE_LIGHT))
-        .bg(c(theme::SURFACE_RAISED))
+        .border_color(c(theme::edge_light()))
+        .bg(c(theme::surface_raised()))
         .text_size(px(12.))
-        .text_color(c(theme::INK))
+        .text_color(c(theme::ink()))
         .cursor_pointer()
-        .hover(|s| s.border_color(c(theme::CYAN)))
+        .hover(|s| s.border_color(c(theme::accent())))
         .child(label.into())
 }
 
@@ -65,10 +52,10 @@ pub fn btn_primary(
         .px(px(14.))
         .py(px(5.))
         .rounded(px(6.))
-        .bg(c(theme::CYAN))
+        .bg(c(theme::accent()))
         .text_size(px(12.5))
         .font_weight(gpui::FontWeight::BOLD)
-        .text_color(c(0x0b2830))
+        .text_color(c(theme::on_accent()))
         .cursor_pointer()
         .hover(|s| s.opacity(0.85))
         .child(label.into())
@@ -85,12 +72,12 @@ pub fn btn_secondary(
         .py(px(5.))
         .rounded(px(6.))
         .border_1()
-        .border_color(c(theme::EDGE_LIGHT))
-        .bg(c(theme::SURFACE_RAISED))
+        .border_color(c(theme::edge_light()))
+        .bg(c(theme::surface_raised()))
         .text_size(px(12.5))
-        .text_color(c(theme::INK))
+        .text_color(c(theme::ink()))
         .cursor_pointer()
-        .hover(|s| s.border_color(c(theme::DIM)))
+        .hover(|s| s.border_color(c(theme::dim())))
         .child(label.into())
 }
 
@@ -101,10 +88,10 @@ pub fn btn_danger(id: impl Into<gpui::ElementId>, label: impl Into<SharedString>
         .px(px(14.))
         .py(px(5.))
         .rounded(px(6.))
-        .bg(c(theme::RED))
+        .bg(c(theme::red()))
         .text_size(px(12.5))
         .font_weight(gpui::FontWeight::BOLD)
-        .text_color(c(0x2b0d0d))
+        .text_color(c(theme::text_on(theme::red())))
         .cursor_pointer()
         .hover(|s| s.opacity(0.85))
         .child(label.into())

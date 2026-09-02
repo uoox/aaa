@@ -39,11 +39,11 @@ impl EventListener for ProxyListener {
 
 fn color_for_index(idx: usize) -> alacritty_terminal::vte::ansi::Rgb {
     let raw = match idx {
-        0..=255 => theme::indexed_color(idx as u8),
-        256 => theme::TERM_FG,
-        257 => theme::TERM_BG,
-        258 => theme::CYAN, // cursor
-        _ => theme::TERM_FG,
+        0..=255 => theme::palette().indexed_color(idx as u8),
+        256 => theme::term_fg(),
+        257 => theme::term_bg(),
+        258 => theme::accent(), // cursor
+        _ => theme::term_fg(),
     };
     alacritty_terminal::vte::ansi::Rgb {
         r: (raw >> 16) as u8,

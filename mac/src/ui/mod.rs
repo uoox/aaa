@@ -18,7 +18,7 @@ use gpui::{
 
 use crate::model::*;
 use crate::net::{ConnState, Net, UiEvent};
-use crate::theme;
+use crate::theme::{self, ThemeKind};
 use kit::*;
 use messages_view::MessagesView;
 use mini_input::MiniInput;
@@ -172,8 +172,8 @@ fn next_session_id(alive: &[String], current: Option<&str>) -> Option<String> {
 
 pub enum Modal {
     None,
+    /// 新建项目：只填名字，agent 固定 claude（2026-09-03 起只支持 Claude Code）
     NewProject {
-        agent_idx: usize,
         busy: bool,
     },
     DeleteConfirm {
@@ -210,6 +210,8 @@ pub struct RootView {
     pub ssd_mounted: bool,
     pub sessions: Vec<Session>,
     pub projects: Vec<Project>,
+    /// /agents 剔掉终端后的表（只剩 claude）。新建项目不再选 agent，留它只为
+    /// 读 `available`：daemon 的 PATH 里找不到 claude 时弹窗里提示一句
     pub agents: Vec<AgentInfo>,
     /// 配对二维码模块（(宽, 黑白位图)；fetch 时编码一次，渲染帧只读）
     pub qr_modules: Option<(usize, Vec<bool>)>,
@@ -240,6 +242,8 @@ pub struct RootView {
     // 侧栏宽度（拖右边缘调整，松手落盘）与拖动中的 (按下时鼠标 x, 按下时宽度)
     pub sidebar_w: f32,
     sidebar_drag: Option<(f32, f32)>,
+    /// 当前主题（与 theme::current 同步）：设置页切换，随 ui.toml 落盘
+    pub theme: ThemeKind,
 
     // 输入框
     pub name_input: Entity<MiniInput>,
@@ -271,6 +275,11 @@ impl RootView {
                 }
             }
         });
+
+        // 本机偏好先于首帧：主题必须在第一次 render 之前生效，否则会闪一帧黑暗
+        let ui_state = UiState::load();
+        let theme_kind = ThemeKind::from_str(&ui_state.theme);
+        theme::set_current(theme_kind);
 
         let name_input = cx.new(|cx| MiniInput::new(cx, "留空 = 时间戳目录名"));
         let host_input = cx.new(|cx| MiniInput::new(cx, "127.0.0.1"));
@@ -304,8 +313,9 @@ impl RootView {
             msg_mode: HashSet::new(),
             ports_cache: HashMap::new(),
             user_killed: HashSet::new(),
-            sidebar_w: UiState::load().sidebar_w,
+            sidebar_w: ui_state.sidebar_w,
             sidebar_drag: None,
+            theme: theme_kind,
             name_input,
             host_input,
             port_input,
@@ -564,7 +574,7 @@ impl RootView {
         self.spawn_fetch(
             self.net.agents(),
             |r, a: Vec<AgentInfo>, cx| {
-                // 终端（terminal:true / shell）不是 agent 选项，进表前剔掉
+                // 终端（terminal:true / shell）不是 agent，进表前剔掉；剩下只有 claude
                 let a = pickable_agents(a);
                 if !a.is_empty() {
                     r.agents = a;
@@ -766,14 +776,12 @@ impl RootView {
         }
         // 新建项目弹窗里回车 = 「创建并进入」。MiniInput 不消费 enter，
         // 这里在根上接住（IME 组字中的确认回车走 input handler，到不了这）。
-        if ks.key == "enter"
-            && let Modal::NewProject { agent_idx, .. } = self.modal
-        {
+        if ks.key == "enter" && matches!(self.modal, Modal::NewProject { .. }) {
             // IME 组字中的回车是「确认候选词」，不是「创建」——不能抢
             if self.name_input.read(cx).composing() {
                 return;
             }
-            self.confirm_create_project(agent_idx, cx);
+            self.confirm_create_project(cx);
             cx.stop_propagation();
         }
     }
@@ -814,19 +822,15 @@ impl RootView {
             let active = self.page == Page::Session(id.clone());
             // 在问的会话点亮黄点，哪怕屏幕还在变
             let dot_color = if s.asking {
-                theme::AMBER
+                theme::amber()
             } else {
                 theme::state_color(s.state.as_str())
             };
-            let agent_label: SharedString = if s.agent == "shell" {
-                "term".into()
-            } else {
-                s.agent.clone().into()
-            };
+            // 只有 Claude 一种 agent，行尾不再挂 agent 名；终端另有面板
             row_base(("sb-sess", ix).into())
                 .group("sb-row")
-                .when(active, |el| el.bg(c(theme::SURFACE_RAISED)))
-                .hover(|st| st.bg(c(theme::SURFACE_RAISED)))
+                .when(active, |el| el.bg(c(theme::surface_raised())))
+                .hover(|st| st.bg(c(theme::surface_raised())))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.open_session(id.clone(), cx);
                 }))
@@ -838,15 +842,8 @@ impl RootView {
                         .text_ellipsis()
                         .whitespace_nowrap()
                         .text_size(px(12.5))
-                        .text_color(c(if exited { theme::DIM } else { theme::INK }))
+                        .text_color(c(if exited { theme::dim() } else { theme::ink() }))
                         .child(SharedString::from(s.display_title())),
-                )
-                .child(
-                    div()
-                        .text_size(px(10.))
-                        .font_family("Menlo")
-                        .text_color(c(theme::FAINT))
-                        .child(agent_label),
                 )
                 .child(
                     // × = 关闭这个 TUI/Shell：终止进程、项目回到下分区。
@@ -858,8 +855,8 @@ impl RootView {
                         .px(px(3.))
                         .rounded(px(4.))
                         .text_size(px(10.))
-                        .text_color(c(theme::FAINT))
-                        .hover(|st| st.text_color(c(theme::RED)).bg(c(theme::EDGE_LIGHT)))
+                        .text_color(c(theme::faint()))
+                        .hover(|st| st.text_color(c(theme::red())).bg(c(theme::edge_light())))
                         // 非当前行悬停才现身；invisible 连命中盒一起去掉
                         .when(!active, |el| {
                             el.invisible().group_hover("sb-row", |st| st.visible())
@@ -894,7 +891,7 @@ impl RootView {
                     div()
                         .text_size(px(10.))
                         .font_family("Menlo")
-                        .text_color(c(theme::FAINT))
+                        .text_color(c(theme::faint()))
                         .child(SharedString::from(format!("{label} {n}"))),
                 )
         };
@@ -906,9 +903,9 @@ impl RootView {
                 .collect()
         };
         let buckets: [(&'static str, u32, Vec<&Session>); 3] = [
-            ("执行中", theme::GREEN, by(Bucket::Running)),
-            ("待回复", theme::AMBER, by(Bucket::Asking)),
-            ("已完成", theme::FAINT, by(Bucket::Done)),
+            ("执行中", theme::green(), by(Bucket::Running)),
+            ("待回复", theme::amber(), by(Bucket::Asking)),
+            ("已完成", theme::faint(), by(Bucket::Done)),
         ];
         let mut active_col = div().flex().flex_col().gap(px(1.));
         let mut ix = 0usize;
@@ -938,15 +935,10 @@ impl RootView {
                 .clone()
                 .filter(|t| !t.is_empty())
                 .unwrap_or_else(|| p.name.clone());
-            let agent_label: SharedString = match p.agent.as_deref() {
-                Some("shell") => "term".into(),
-                Some(a) => a.to_string().into(),
-                None => "".into(),
-            };
             idle_col = idle_col.child(
                 row_base(("sb-proj", ix).into())
                     .group("sb-idle")
-                    .hover(|st| st.bg(c(theme::SURFACE_RAISED)))
+                    .hover(|st| st.bg(c(theme::surface_raised())))
                     .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, _, cx| {
                         if ev.click_count() >= 2 {
                             this.open_project(&proj, cx);
@@ -959,15 +951,8 @@ impl RootView {
                             .text_ellipsis()
                             .whitespace_nowrap()
                             .text_size(px(12.))
-                            .text_color(c(theme::DIM))
+                            .text_color(c(theme::dim()))
                             .child(SharedString::from(title)),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .font_family("Menlo")
-                            .text_color(c(theme::FAINT))
-                            .child(agent_label),
                     )
                     .child(
                         div()
@@ -976,8 +961,8 @@ impl RootView {
                             .px(px(3.))
                             .rounded(px(4.))
                             .text_size(px(10.))
-                            .text_color(c(theme::FAINT))
-                            .hover(|st| st.text_color(c(theme::RED)).bg(c(theme::EDGE_LIGHT)))
+                            .text_color(c(theme::faint()))
+                            .hover(|st| st.text_color(c(theme::red())).bg(c(theme::edge_light())))
                             .invisible()
                             .group_hover("sb-idle", |st| st.visible())
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -996,7 +981,7 @@ impl RootView {
 
         let (conn_color, conn_text) = match self.conn {
             ConnState::Connected => (
-                theme::GREEN,
+                theme::green(),
                 format!(
                     "daemon v{}",
                     self.health
@@ -1005,8 +990,8 @@ impl RootView {
                         .unwrap_or("?")
                 ),
             ),
-            ConnState::Connecting => (theme::AMBER, "连接中…".to_string()),
-            ConnState::Disconnected => (theme::RED, "未连接".to_string()),
+            ConnState::Connecting => (theme::amber(), "连接中…".to_string()),
+            ConnState::Disconnected => (theme::red(), "未连接".to_string()),
         };
 
         div()
@@ -1016,24 +1001,24 @@ impl RootView {
             .flex()
             .flex_col()
             .overflow_hidden() // 拖窄时标题按 ellipsis 收，不许挤出侧栏
-            .bg(c(theme::SURFACE))
+            .bg(c(theme::surface()))
             .child(
                 row_base("sb-new".into())
                     .mt(px(10.))
                     .mb(px(4.))
                     .border_1()
-                    .border_color(c(theme::EDGE_LIGHT))
-                    .hover(|st| st.bg(c(theme::SURFACE_RAISED)).border_color(c(theme::CYAN)))
+                    .border_color(c(theme::edge_light()))
+                    .hover(|st| st.bg(c(theme::surface_raised())).border_color(c(theme::accent())))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.open_new_project_modal(window, cx);
                     }))
-                    .child(div().text_size(px(13.)).text_color(c(theme::CYAN)).child("＋"))
+                    .child(div().text_size(px(13.)).text_color(c(theme::accent())).child("＋"))
                     .child(div().flex_1().text_size(px(12.5)).child("新建项目"))
                     .child(
                         div()
                             .text_size(px(10.))
                             .font_family("Menlo")
-                            .text_color(c(theme::FAINT))
+                            .text_color(c(theme::faint()))
                             .child("⌘N"),
                     ),
             )
@@ -1049,7 +1034,7 @@ impl RootView {
                             .h(px(1.))
                             .mx(px(10.))
                             .my(px(7.))
-                            .bg(c(theme::EDGE)),
+                            .bg(c(theme::edge())),
                     )
                     .child(idle_col),
             )
@@ -1063,14 +1048,14 @@ impl RootView {
                     .px(px(16.))
                     .py(px(9.))
                     .border_t_1()
-                    .border_color(c(theme::EDGE))
+                    .border_color(c(theme::edge()))
                     .child(dot(conn_color))
                     .child(
                         div()
                             .flex_1()
                             .text_size(px(11.))
                             .font_family("Menlo")
-                            .text_color(c(theme::DIM))
+                            .text_color(c(theme::dim()))
                             .child(SharedString::from(conn_text)),
                     )
                     .child(
@@ -1079,11 +1064,11 @@ impl RootView {
                             .cursor_pointer()
                             .text_size(px(13.))
                             .text_color(if self.page == Page::Settings {
-                                c(theme::CYAN)
+                                c(theme::accent())
                             } else {
-                                c(theme::DIM)
+                                c(theme::dim())
                             })
-                            .hover(|st| st.text_color(c(theme::CYAN)))
+                            .hover(|st| st.text_color(c(theme::accent())))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.page = Page::Settings;
                                 cx.notify();
@@ -1102,8 +1087,8 @@ impl RootView {
             .flex_none()
             .h_full()
             .cursor_col_resize()
-            .bg(c(if dragging { theme::CYAN } else { theme::EDGE }))
-            .hover(|st| st.bg(c(theme::CYAN)))
+            .bg(c(if dragging { theme::accent() } else { theme::edge() }))
+            .hover(|st| st.bg(c(theme::accent())))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, ev: &MouseDownEvent, _, cx| {
@@ -1128,12 +1113,44 @@ impl RootView {
     fn on_sidebar_drag_end(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
         if self.sidebar_drag.take().is_some() {
             // 只在松手时落盘：拖动中每帧写文件没有意义
-            UiState {
-                sidebar_w: self.sidebar_w,
-            }
-            .save();
+            self.ui_state().save();
             cx.notify();
         }
+    }
+
+    /// 本机偏好的当前快照（落盘用）
+    fn ui_state(&self) -> UiState {
+        UiState {
+            sidebar_w: self.sidebar_w,
+            theme: self.theme.as_str().to_string(),
+        }
+    }
+
+    /// 切主题：进程级调色板换掉、落盘、整窗重画。终端 / 消息流 / 输入框是独立
+    /// 实体，一并 notify，保证同一帧换色而不是谁先动谁先变。
+    pub(super) fn set_theme(&mut self, kind: ThemeKind, cx: &mut Context<Self>) {
+        if self.theme == kind {
+            return;
+        }
+        theme::set_current(kind);
+        self.theme = kind;
+        self.ui_state().save();
+        for t in self.terminals.values() {
+            t.update(cx, |_, cx| cx.notify());
+        }
+        for v in self.msg_views.values() {
+            v.update(cx, |_, cx| cx.notify());
+        }
+        for i in [
+            &self.name_input,
+            &self.host_input,
+            &self.port_input,
+            &self.token_input,
+            &self.root_input,
+        ] {
+            i.update(cx, |_, cx| cx.notify());
+        }
+        cx.notify();
     }
 
     fn render_statusbar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -1144,21 +1161,21 @@ impl RootView {
             .h(px(26.))
             .flex_none()
             .px(px(12.))
-            .bg(c(theme::SURFACE))
+            .bg(c(theme::surface()))
             .border_t_1()
-            .border_color(c(theme::EDGE))
+            .border_color(c(theme::edge()))
             .text_size(px(11.))
             .font_family("Menlo")
-            .text_color(c(theme::DIM));
+            .text_color(c(theme::dim()));
         match &self.page {
             Page::Session(id) => {
                 if let Some(s) = self.session(id) {
-                    let agent_part = match &s.resume_id {
-                        Some(r) if !r.is_empty() => {
-                            format!("{} · resume {}", s.agent, &r[..r.len().min(6)])
-                        }
-                        _ => s.agent.clone(),
-                    };
+                    // 只有 Claude 一种 agent，不再报 agent 名；有 resume id 才多一格
+                    let resume_part = s
+                        .resume_id
+                        .as_deref()
+                        .filter(|r| !r.is_empty())
+                        .map(|r| format!("resume {}", &r[..r.len().min(6)]));
                     let state_color = theme::state_color(s.state.as_str());
                     let sid = s.id.clone();
                     let exited = s.state == SessionState::Exited;
@@ -1176,7 +1193,7 @@ impl RootView {
                                 .whitespace_nowrap()
                                 .child(SharedString::from(s.project_path.clone())),
                         )
-                        .child(SharedString::from(agent_part));
+                        .when_some(resume_part, |bar, t| bar.child(SharedString::from(t)));
 
                     // 消息流 ⇄ 终端 切换（shell 无消息流；探明不支持后隐藏）
                     let msg_supported = self
@@ -1192,8 +1209,8 @@ impl RootView {
                                 .px(px(6.))
                                 .rounded(px(4.))
                                 .cursor_pointer()
-                                .text_color(c(if on { theme::CYAN } else { theme::FAINT }))
-                                .hover(|st| st.bg(c(theme::SURFACE_RAISED)))
+                                .text_color(c(if on { theme::accent() } else { theme::faint() }))
+                                .hover(|st| st.bg(c(theme::surface_raised())))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.toggle_msg_mode(cx);
                                 }))
@@ -1211,8 +1228,8 @@ impl RootView {
                                     .px(px(6.))
                                     .rounded(px(4.))
                                     .cursor_pointer()
-                                    .text_color(c(theme::CYAN))
-                                    .hover(|st| st.bg(c(theme::SURFACE_RAISED)))
+                                    .text_color(c(theme::accent()))
+                                    .hover(|st| st.bg(c(theme::surface_raised())))
                                     .on_click(cx.listener(move |_, _, _, cx| {
                                         cx.open_url(&url);
                                     }))
@@ -1226,8 +1243,8 @@ impl RootView {
                             .id("ports-refresh")
                             .px(px(4.))
                             .cursor_pointer()
-                            .text_color(c(theme::FAINT))
-                            .hover(|st| st.text_color(c(theme::CYAN)))
+                            .text_color(c(theme::faint()))
+                            .hover(|st| st.text_color(c(theme::accent())))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.fetch_ports(sid_ports.clone(), cx);
                             }))
@@ -1242,7 +1259,7 @@ impl RootView {
                             .rounded(px(4.))
                             .cursor_pointer()
                             .text_color(c(color))
-                            .hover(|st| st.bg(c(theme::SURFACE_RAISED)))
+                            .hover(|st| st.bg(c(theme::surface_raised())))
                             .child(label)
                     };
                     let sid_rename = sid.clone();
@@ -1250,13 +1267,13 @@ impl RootView {
                     let sid_del = sid.clone();
                     bar = bar
                         .child(div().ml_auto())
-                        .child(act("sess-rename", "重命名", theme::DIM).on_click(cx.listener(
+                        .child(act("sess-rename", "重命名", theme::dim()).on_click(cx.listener(
                             move |this, _, window, cx| {
                                 this.open_rename_modal(sid_rename.clone(), window, cx);
                             },
                         )));
                     if !exited {
-                        bar = bar.child(act("sess-kill", "终止", theme::AMBER).on_click(
+                        bar = bar.child(act("sess-kill", "终止", theme::amber()).on_click(
                             cx.listener(move |this, _, _, cx| {
                                 this.modal = Modal::ConfirmKill {
                                     id: sid_kill.clone(),
@@ -1265,7 +1282,7 @@ impl RootView {
                             }),
                         ));
                     }
-                    bar = bar.child(act("sess-del", "删除", theme::RED).on_click(cx.listener(
+                    bar = bar.child(act("sess-del", "删除", theme::red()).on_click(cx.listener(
                         move |this, _, _, cx| {
                             this.modal = Modal::ConfirmDeleteSession {
                                 id: sid_del.clone(),
@@ -1276,7 +1293,7 @@ impl RootView {
 
                     // 「待回复」盖过状态字：asking 是结构化事实，比 running/waiting 更要紧
                     let (label, color) = if s.asking {
-                        ("待回复", theme::AMBER)
+                        ("待回复", theme::amber())
                     } else {
                         (theme::state_label(s.state.as_str()), state_color)
                     };
@@ -1316,18 +1333,18 @@ impl RootView {
                 .gap(px(8.))
                 .px(px(12.))
                 .py(px(6.))
-                .bg(ca(theme::RED, 0.14))
+                .bg(ca(theme::red(), 0.14))
                 .border_b_1()
-                .border_color(c(theme::RED))
+                .border_color(c(theme::red()))
                 .text_size(px(12.))
-                .text_color(c(theme::RED))
+                .text_color(c(theme::red()))
                 .cursor_pointer()
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.error = None;
                     cx.notify();
                 }))
                 .child(SharedString::from(err))
-                .child(div().ml_auto().text_color(c(theme::DIM)).child("点击关闭")),
+                .child(div().ml_auto().text_color(c(theme::dim())).child("点击关闭")),
         )
     }
 }
@@ -1359,7 +1376,7 @@ impl Render for RootView {
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .text_color(c(theme::FAINT))
+                                .text_color(c(theme::faint()))
                                 .child("会话未打开"),
                         ),
                     }
@@ -1372,7 +1389,7 @@ impl Render for RootView {
                         .items_center()
                         .justify_center()
                         .gap(px(6.))
-                        .text_color(c(theme::FAINT))
+                        .text_color(c(theme::faint()))
                         .child(div().text_size(px(13.)).child("双击左侧项目开启会话"))
                         .child(
                             div()
@@ -1386,7 +1403,7 @@ impl Render for RootView {
             }
         });
 
-        let mut main = div().flex_1().min_w(px(0.)).flex().flex_col().bg(c(theme::BG));
+        let mut main = div().flex_1().min_w(px(0.)).flex().flex_col().bg(c(theme::bg()));
         if let Some(toast) = self.render_error_toast(cx) {
             main = main.child(toast);
         }
@@ -1396,11 +1413,11 @@ impl Render for RootView {
                     .flex_none()
                     .px(px(12.))
                     .py(px(5.))
-                    .bg(ca(theme::AMBER, 0.1))
+                    .bg(ca(theme::amber(), 0.1))
                     .border_b_1()
-                    .border_color(ca(theme::AMBER, 0.4))
+                    .border_color(ca(theme::amber(), 0.4))
                     .text_size(px(11.5))
-                    .text_color(c(theme::AMBER))
+                    .text_color(c(theme::amber()))
                     .child("SSD 未挂载：创建 / 启动 / 删除已禁用（绝不建占位目录），挂载恢复后自动解除"),
             );
         }
@@ -1409,8 +1426,8 @@ impl Render for RootView {
         let mut root = div()
             .size_full()
             .flex()
-            .bg(c(theme::BG))
-            .text_color(c(theme::INK))
+            .bg(c(theme::bg()))
+            .text_color(c(theme::ink()))
             .text_size(px(13.))
             .on_key_down(cx.listener(Self::on_root_key))
             .child(self.render_sidebar(cx))
