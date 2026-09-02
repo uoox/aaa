@@ -492,10 +492,7 @@ private fun StreamRow(
             expanded[item.turnKey] = expanded[item.turnKey] != true
         }
         is StreamItem.Step -> StepRow(item.msg)
-        is StreamItem.Reply -> Text(
-            rememberLinkified(item.msg), color = Tok.Ink, fontSize = 15.sp, lineHeight = 21.75.sp,
-            modifier = Modifier.fillMaxWidth(),
-        )
+        is StreamItem.Reply -> MarkdownBody(item.msg.text, 15.sp, Tok.Ink, modifier = Modifier.fillMaxWidth())
         is StreamItem.Question -> QuestionCard(item.msg, formState(item.msg)) { answers -> onAnswer(item.msg.seq, answers) }
         is StreamItem.Answer -> AnswerBlock(item.msg)
     }
@@ -553,8 +550,8 @@ private fun StepRow(m: ChatMessage) {
                 rememberLinkified(m), color = Tok.Faint, fontSize = 11.sp,
                 modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
             )
-            else -> Text(
-                rememberLinkified(m), color = Tok.Dim, fontSize = 13.sp,
+            else -> MarkdownBody(
+                m.text, 13.5.sp, Tok.Dim,
                 modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
             )
         }

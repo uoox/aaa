@@ -9,6 +9,7 @@ serialization = "1.7.3"
 coroutines = "1.9.0"
 zxingEmbedded = "4.3.0"
 junit = "4.13.2"
+commonmark = "0.24.0"
 
 [libraries]
 androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "activityCompose" }
@@ -24,5 +25,8 @@ serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-jso
 coroutines-android = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-android", version.ref = "coroutines" }
 zxing-embedded = { module = "com.journeyapps:zxing-android-embedded", version.ref = "zxingEmbedded" }
 junit = { module = "junit:junit", version.ref = "junit" }
+commonmark = { module = "org.commonmark:commonmark", version.ref = "commonmark" }
+commonmark-gfm-tables = { module = "org.commonmark:commonmark-ext-gfm-tables", version.ref = "commonmark" }
+commonmark-gfm-strikethrough = { module = "org.commonmark:commonmark-ext-gfm-strikethrough", version.ref = "commonmark" }
 
 [plugins]
