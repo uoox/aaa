@@ -62,17 +62,27 @@ import kotlinx.coroutines.launch
 const val DEFAULT_AGENT = "claude"
 
 /**
- * 项目行的三态。一个项目只有一个 agent（建项目时定死，从不切换），项目 ↔ 会话
- * 事实上一对一，所以会话状态直接挂在项目行上，首页不再单开会话页。终端永远不代表项目。全部由客户端
- * 把 projects × sessions 两个流拼出来，daemon 不用改。
- *
- * 枚举顺序就是首页分组顺序。
+ * 项目行的状态，只决定色点与摘要，**不决定分组**。一个项目只有一个 agent（建项目时
+ * 定死，从不切换），项目 ↔ 会话事实上一对一，所以会话状态直接挂在项目行上，首页不再
+ * 单开会话页。终端永远不代表项目。全部由客户端把 projects × sessions 两个流拼出来，
+ * daemon 不用改。
  */
 enum class ProjectState(val label: String) {
     NEEDS_REPLY("待回复"),
     RUNNING("执行中"),
     DONE("已完成"),
     NEVER("未开始"),
+}
+
+/**
+ * 首页两栏（2026-09-03 用户拍板，三端一致）：**激活** = 有存活会话（running / waiting，
+ * 在问只点亮黄点）；**未激活** = 其余（exited、只有旧对话、从没跑过）。以前按四态分组，
+ * 几个会话同时在跑时行在「执行中 / 待回复 / 已完成」之间跳来跳去，点都点不准。
+ * 枚举顺序就是首页分组顺序。
+ */
+enum class ProjectGroup(val label: String) {
+    ACTIVE("激活"),
+    INACTIVE("未激活"),
 }
 
 /** 首页一行要的全部东西，纯数据，方便单测。 */
@@ -84,10 +94,10 @@ data class ProjectRow(
     /** 第二行那一句话。 */
     val summary: String,
 ) {
-    /** 组内排序键：有会话按最近输出，没有按目录 mtime；都是 daemon 给的 ISO 时间串，字典序即时间序。 */
-    val sortKey: String get() = primary?.last_output_at?.takeIf { it.isNotBlank() } ?: project.mtime
-    /** 行尾的相对时间用同一个来源。 */
-    val timeIso: String get() = sortKey
+    /** 激活 = 主会话活着。exited 的会话只是历史，项目回到未激活栏，点一行即 resume。 */
+    val group: ProjectGroup get() = if (primary != null && primary.state != "exited") ProjectGroup.ACTIVE else ProjectGroup.INACTIVE
+    /** 行尾的相对时间：有会话按最近输出，没有按目录 mtime；都是 daemon 给的 ISO 时间串。 */
+    val timeIso: String get() = primary?.last_output_at?.takeIf { it.isNotBlank() } ?: project.mtime
 }
 
 /** 用户拍板口径：待回复 = asking，与 state 无关。 */
@@ -151,11 +161,26 @@ fun projectRows(projects: List<Project>, sessions: List<Session>): List<ProjectR
     ProjectRow(p, primary, state, projectSummary(p, primary, state))
 }
 
-/** 按 [ProjectState] 顺序分组，组内最近的在前，空组不出现。 */
-fun groupProjectRows(rows: List<ProjectRow>): List<Pair<ProjectState, List<ProjectRow>>> =
-    ProjectState.entries
-        .map { st -> st to rows.filter { it.state == st }.sortedByDescending { it.sortKey } }
+/**
+ * 两栏分组，空栏不出现。**顺序不随状态或输出变**：激活栏按会话开启时间
+ * （created_at 升序，末尾最新）再按路径稳住，几个会话同时在跑也不跳行；
+ * 未激活栏按项目名，一眼找得到。状态交给色点。
+ */
+fun groupProjectRows(rows: List<ProjectRow>): List<Pair<ProjectGroup, List<ProjectRow>>> =
+    ProjectGroup.entries
+        .map { g ->
+            val inGroup = rows.filter { it.group == g }
+            g to when (g) {
+                ProjectGroup.ACTIVE -> inGroup.sortedWith(compareBy({ it.primary?.created_at.orEmpty() }, { it.project.path }))
+                ProjectGroup.INACTIVE -> inGroup.sortedWith(compareBy({ it.project.name.lowercase() }, { it.project.path }))
+            }
+        }
         .filter { it.second.isNotEmpty() }
+
+private fun ProjectGroup.dotColor(): Color = when (this) {
+    ProjectGroup.ACTIVE -> Tok.Green
+    ProjectGroup.INACTIVE -> Tok.Faint
+}
 
 private fun ProjectState.dotColor(): Color = when (this) {
     ProjectState.NEEDS_REPLY -> Tok.Amber
@@ -286,16 +311,16 @@ fun ProjectsHome(store: AppStore, nav: NavHostController) {
                 }
             }
             LazyColumn(Modifier.fillMaxSize()) {
-                groups.forEach { (state, rows) ->
-                    item(key = "hdr-${state.name}") {
+                groups.forEach { (group, rows) ->
+                    item(key = "hdr-${group.name}") {
                         Row(
                             Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 2.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            StateDot(state.dotColor(), 6)
+                            StateDot(group.dotColor(), 6)
                             Spacer(Modifier.width(7.dp))
                             Text(
-                                "${state.label} ${rows.size}", color = Tok.Faint, fontSize = 12.sp,
+                                "${group.label} ${rows.size}", color = Tok.Faint, fontSize = 12.sp,
                                 fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace,
                             )
                         }

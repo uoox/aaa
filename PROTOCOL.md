@@ -60,7 +60,7 @@ daemon 在启动时用 `zsh -lic` 问一次「终端里应有的 PATH」（带�
 
 ## 终端（2026-09-02：常驻工具，不与 agent 平齐）
 
-- 终端 = `agent:"shell"` 的会话，但**不是项目的会话**：不出现在项目/会话列表和三态分组里，不参与项目主会话判定；daemon 开 shell 会话**不登记项目**（在项目根开也不会把根目录变成项目）。
+- 终端 = `agent:"shell"` 的会话，但**不是项目的会话**：不出现在项目/会话列表的激活栏里，不参与项目主会话判定；daemon 开 shell 会话**不登记项目**（在项目根开也不会把根目录变成项目）。
 - 客户端把它做成**常驻多标签面板**：Android 在首页右上角、设置齿轮左边一个入口；mac 在左侧栏底部、`daemon vX` 状态行上方一个入口。标签 = 存活的 shell 会话按 `created_at` 排序，标为「终端 1…n」（不在项目根开的追加 ` · <目录名>`）；「+」= `POST /sessions {project_path: <health.project_root>, agent:"shell", resume:false, fresh:true}`；关标签 = kill 后 DELETE。
 - 终端没有回放价值：客户端看到 shell 会话 `exited` 就 `DELETE /sessions/:id`（daemon 侧仍按普通会话持久化，200 条上限兜底）。
 - 「在此目录开终端」保留：在该项目目录开一个 shell 会话，同样归终端面板管。
@@ -92,7 +92,13 @@ daemon 在启动时用 `zsh -lic` 问一次「终端里应有的 PATH」（带�
 状态机（2026-09-02 简化）：屏幕内容在变 → `running`；进程存活 + **可见屏幕 6s 没变** → `waiting`（这轮干完了，轮到你）；进程退出 → `exited`（保留屏幕 + 回滚缓冲，daemon 重启后仍可查看回放）。
 daemon **不再读屏猜「它在问什么」**：没有 `idle`，没有 `question`，没有提示模式匹配。agent 在等一个具体回答这件事只认一个来源——claude transcript 里的 `AskUserQuestion` 工具调用（结构化，见「消息流」），`asking` 就是它的镜像；其它 agent 没有这种结构化信号，`asking` 恒为 false。
 
-三态口径（客户端分组，三端一致）：**待回复** = `asking`；**执行中** = `running`；**已完成** = 其余（`waiting`、`exited`）。
+GUI 列表口径（2026-09-03，mac 侧栏 / Android 首页一致）——**两栏，不按状态分组**：
+- **激活** = 有存活项目会话（`running` / `waiting`，终端不算）。行首色点表状态：绿 = `running`，黄 = `asking` 或 `waiting`（轮到你）。
+- **未激活** = 其余项目：会话已 `exited`、只有旧对话、从没跑过。**`exited` 会话不进列表**——进程没了它就只是历史，项目回到未激活栏，点/双击即 resume（`POST /sessions` `resume:true`）。
+- **顺序稳定**：激活栏按会话 `created_at` 升序（末尾最新），状态、最近输出都不参与排序，多个会话同时在跑也不跳行；未激活栏 mac 按注册表顺序、Android 按项目名。
+- **关闭确认只在还在执行时弹**：`running` 且不 `asking` → 确认后 `kill`；`waiting` / `asking` → 直接 `kill`；`exited` → 只收起页面，不删记录。
+
+CLI 的 `ls` / 交互菜单仍按「执行中 / 待回复 / 已完成」三组打印（待回复 = `asking`，已完成 = `waiting`），那是一次性文本输出，不存在跳行问题。
 
 ## REST（前缀 `/api/v1`）
 

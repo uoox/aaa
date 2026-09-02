@@ -26,15 +26,6 @@ impl SessionState {
             SessionState::Exited => "exited",
         }
     }
-    /// 排序权重：还在跑的在前，跑完的其次，退出的最后
-    /// （在问的会话另由 `Session::asking` 提到最前，见 ui::sort_key）
-    pub fn sort_weight(&self) -> u8 {
-        match self {
-            SessionState::Running => 0,
-            SessionState::Waiting => 1,
-            SessionState::Exited => 2,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -718,12 +709,5 @@ mod tests {
         let old: UiState = toml::from_str("sidebar_w = 250.0\n").unwrap();
         assert_eq!(old.theme, "dark");
         assert_eq!(old.sidebar_w, 250.0);
-    }
-
-    #[test]
-    fn state_sort_order() {
-        // running < waiting < exited；「在问」不是状态，由 ui::sort_key 另行提前
-        assert!(SessionState::Running.sort_weight() < SessionState::Waiting.sort_weight());
-        assert!(SessionState::Waiting.sort_weight() < SessionState::Exited.sort_weight());
     }
 }

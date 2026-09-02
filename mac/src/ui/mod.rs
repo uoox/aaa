@@ -45,35 +45,28 @@ fn page_after_close(current: &Page, closed: &str, open_order: &[String]) -> Page
         .unwrap_or(Page::Home)
 }
 
-/// 侧栏三态口径（PROTOCOL「会话模型」，三端一致）：待回复 = asking；
-/// 执行中 = running 且不在问；已完成 = 其余（waiting、exited）。
-/// 终端（shell）不是项目会话，不进任何一组 → None，归终端面板管（PROTOCOL「终端」）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Bucket {
-    Asking,
-    Running,
-    Done,
+/// 侧栏两栏口径（2026-09-03 用户拍板，PROTOCOL「会话模型」）：
+/// 上栏「激活」= 存活的项目会话（running / waiting；asking 只点亮黄点，不单开一组）；
+/// 下栏「未激活」= 其余项目。**exited 会话不进侧栏**——进程没了它就只是历史，
+/// 项目回到下栏，双击即 resume。以前把 exited 摆在上栏「已完成」里，终止一个会话
+/// 后它留在上面、项目又同时回到下面，看起来像「上栏残留了一个项目」。
+/// 终端（shell）不是项目会话，两栏都不进，归终端面板管（PROTOCOL「终端」）。
+fn is_active(s: &Session) -> bool {
+    !s.is_terminal() && s.state != SessionState::Exited
 }
 
-fn bucket_of(s: &Session) -> Option<Bucket> {
-    if s.is_terminal() {
-        return None;
-    }
-    Some(if s.asking {
-        Bucket::Asking
-    } else if s.state == SessionState::Running {
-        Bucket::Running
-    } else {
-        Bucket::Done
-    })
+/// 关闭前要不要确认：只有还在执行（running 且不在问）的会话被顺手点掉最伤。
+/// waiting / asking 都是「等你」，exited 没进程可杀——这些关掉没损失，不打断。
+fn kill_needs_confirm(s: &Session) -> bool {
+    s.state == SessionState::Running && !s.asking
 }
 
-/// 有存活会话的项目路径（决定项目待在上分区还是下分区）。终端不算：
+/// 有存活会话的项目路径（决定项目待在上栏还是下栏）。终端不算：
 /// 在某个项目目录里开个 shell 不该把这个项目「激活」。
 fn alive_paths(sessions: &[Session]) -> Vec<&str> {
     sessions
         .iter()
-        .filter(|s| !s.is_terminal() && s.state != SessionState::Exited)
+        .filter(|s| is_active(s))
         .map(|s| s.project_path.as_str())
         .collect()
 }
@@ -82,7 +75,7 @@ fn alive_paths(sessions: &[Session]) -> Vec<&str> {
 fn cyclable_ids(sessions: &[Session]) -> Vec<String> {
     sessions
         .iter()
-        .filter(|s| !s.is_terminal() && s.state != SessionState::Exited)
+        .filter(|s| is_active(s))
         .map(|s| s.id.clone())
         .collect()
 }
@@ -147,14 +140,12 @@ fn resolve_active_terminal(active: Option<&str>, tabs: &[String]) -> Option<Stri
     }
 }
 
-/// 列表排序键：在问的排最前，其次按状态（running < waiting < exited），
-/// 同态里最近有输出的在前。
-fn sort_key(s: &Session) -> (bool, u8, std::cmp::Reverse<&str>) {
-    (
-        !s.asking,
-        s.state.sort_weight(),
-        std::cmp::Reverse(s.last_output_at.as_str()),
-    )
+/// 列表排序键：按开启时间（`created_at` 升序，末尾最新）再按 id 稳住。
+/// 状态、最近输出都**不**参与排序——多个会话同时在跑时，按状态/活跃度排会
+/// 让行在侧栏里跳来跳去，点都点不准；状态交给行首色点表达。
+/// created_at 是同一格式的 ISO 时间串，字典序即时间序。
+fn sort_key(s: &Session) -> (&str, &str) {
+    (s.created_at.as_str(), s.id.as_str())
 }
 
 /// Ctrl-Tab：在存活会话里循环。`alive` 按侧栏顺序；当前不在列表里（主页 /
@@ -655,7 +646,7 @@ impl RootView {
         true
     }
 
-    /// 收起本地 tab（不碰 daemon）。侧栏 × 的完整语义在 confirm_kill 里：
+    /// 收起本地 tab（不碰 daemon）。侧栏 × 的完整语义在 kill_session 里：
     /// 先 kill 会话再调这里收 tab；删除会话、session_removed 也走这条清理。
     pub fn close_tab(&mut self, id: &str, cx: &mut Context<Self>) {
         self.terminals.remove(id);
@@ -738,15 +729,16 @@ impl RootView {
                 return;
             }
             match self.page.clone() {
-                // 与侧栏 × 同一套语义：存活 → 终止确认；已退出 → 删除确认
+                // 与侧栏 × 同一套语义：执行中 → 确认后终止；等你的直接终止；
+                // 已退出的没进程可杀，只收起这个页（记录留着，下次双击 resume）
                 Page::Session(id) => {
                     let Some(s) = self.session(&id) else { return };
-                    self.modal = if s.state == SessionState::Exited {
-                        Modal::ConfirmDeleteSession { id }
+                    if s.state == SessionState::Exited {
+                        self.close_tab(&id, cx);
                     } else {
-                        Modal::ConfirmKill { id }
-                    };
-                    cx.notify();
+                        let confirm = kill_needs_confirm(s);
+                        self.request_kill(id, confirm, cx);
+                    }
                     cx.stop_propagation();
                 }
                 // 终端标签便宜，不问直接关
@@ -806,19 +798,17 @@ impl RootView {
                 .cursor_pointer()
         };
 
-        // ── 上分区：会话按三态分组（用户拍板的口径，2026-09-02，三端一致）──
-        //   待回复 = asking（claude transcript 里有一条 AskUserQuestion 没答——
-        //            结构化事实，不是读屏猜的）
-        //   执行中 = running 且不在问（屏幕还在变）
-        //   已完成 = 其余：waiting（这轮干完了，轮到你）、exited
-        //   问题本身不在侧栏画：进消息流，表单原生呈现、原地作答
-        //   终端（shell）不在这里：它归底部的终端面板（PROTOCOL「终端」）
+        // ── 上栏：激活的会话（存活的项目会话，按开启顺序，不按状态分组）──
+        //   状态只用行首色点说话：黄 = asking（claude transcript 里有一条
+        //   AskUserQuestion 没答——结构化事实，不是读屏猜的）/ waiting（轮到你），
+        //   绿 = running。问题本身不在侧栏画：进消息流，表单原生呈现、原地作答。
+        //   exited 不在这里（项目回下栏）；终端（shell）也不在（归终端面板）。
         let alive_paths = alive_paths(&self.sessions);
 
         let session_row = |s: &Session, ix: usize| {
             let id = s.id.clone();
             let id_close = s.id.clone();
-            let exited = s.state == SessionState::Exited;
+            let confirm = kill_needs_confirm(s);
             let active = self.page == Page::Session(id.clone());
             // 在问的会话点亮黄点，哪怕屏幕还在变
             let dot_color = if s.asking {
@@ -842,13 +832,12 @@ impl RootView {
                         .text_ellipsis()
                         .whitespace_nowrap()
                         .text_size(px(12.5))
-                        .text_color(c(if exited { theme::dim() } else { theme::ink() }))
+                        .text_color(c(theme::ink()))
                         .child(SharedString::from(s.display_title())),
                 )
                 .child(
-                    // × = 关闭这个 TUI/Shell：终止进程、项目回到下分区。
-                    // 一律先弹确认——还在跑的 agent 被顺手点掉最伤。
-                    // 已退出的会话没进程可杀，× 直接走「删除会话」确认。
+                    // × = 关闭这个会话：终止进程、项目回到下栏。
+                    // 只有还在执行的才弹确认（被顺手点掉最伤）；等你的直接关。
                     div()
                         .id(("sb-close", ix))
                         .flex_none()
@@ -863,16 +852,7 @@ impl RootView {
                         })
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
-                            this.modal = if exited {
-                                Modal::ConfirmDeleteSession {
-                                    id: id_close.clone(),
-                                }
-                            } else {
-                                Modal::ConfirmKill {
-                                    id: id_close.clone(),
-                                }
-                            };
-                            cx.notify();
+                            this.request_kill(id_close.clone(), confirm, cx);
                         }))
                         .child("✕"),
                 )
@@ -896,38 +876,27 @@ impl RootView {
                 )
         };
 
-        let by = |b: Bucket| -> Vec<&Session> {
-            self.sessions
-                .iter()
-                .filter(|s| bucket_of(s) == Some(b))
-                .collect()
-        };
-        let buckets: [(&'static str, u32, Vec<&Session>); 3] = [
-            ("执行中", theme::green(), by(Bucket::Running)),
-            ("待回复", theme::amber(), by(Bucket::Asking)),
-            ("已完成", theme::faint(), by(Bucket::Done)),
-        ];
+        // self.sessions 已按 created_at 排好（sort_sessions），这里只过滤不再排
+        let active: Vec<&Session> = self.sessions.iter().filter(|s| is_active(s)).collect();
         let mut active_col = div().flex().flex_col().gap(px(1.));
-        let mut ix = 0usize;
-        for (label, color, group) in buckets {
-            if group.is_empty() {
-                continue;
-            }
-            active_col = active_col.child(group_header(label, color, group.len()));
-            for s in group {
+        if !active.is_empty() {
+            active_col = active_col.child(group_header("激活", theme::green(), active.len()));
+            for (ix, s) in active.iter().enumerate() {
                 active_col = active_col.child(session_row(s, ix));
-                ix += 1;
             }
         }
 
-        // ── 下分区：未激活的项目（双击开启会话并移入上分区） ─────────────
-        let mut idle_col = div().flex().flex_col().gap(px(1.));
-        for (ix, p) in self
+        // ── 下栏：未激活的项目（双击开启会话并移入上栏） ─────────────
+        let idle: Vec<&Project> = self
             .projects
             .iter()
             .filter(|p| !alive_paths.contains(&p.path.as_str()))
-            .enumerate()
-        {
+            .collect();
+        let mut idle_col = div().flex().flex_col().gap(px(1.));
+        if !idle.is_empty() {
+            idle_col = idle_col.child(group_header("未激活", theme::faint(), idle.len()));
+        }
+        for (ix, p) in idle.into_iter().enumerate() {
             let proj = p.clone();
             let del_path = p.path.clone();
             let title = p
@@ -1273,12 +1242,10 @@ impl RootView {
                             },
                         )));
                     if !exited {
+                        let confirm = kill_needs_confirm(s);
                         bar = bar.child(act("sess-kill", "终止", theme::amber()).on_click(
                             cx.listener(move |this, _, _, cx| {
-                                this.modal = Modal::ConfirmKill {
-                                    id: sid_kill.clone(),
-                                };
-                                cx.notify();
+                                this.request_kill(sid_kill.clone(), confirm, cx);
                             }),
                         ));
                     }
@@ -1496,32 +1463,53 @@ mod tests {
     }
 
     #[test]
-    fn three_buckets_follow_asking_then_state() {
-        // 待回复 = asking，不管屏幕是不是还在变
-        assert_eq!(bucket_of(&sess("a", SessionState::Running, true, "")), Some(Bucket::Asking));
-        assert_eq!(bucket_of(&sess("a", SessionState::Waiting, true, "")), Some(Bucket::Asking));
-        assert_eq!(bucket_of(&sess("a", SessionState::Running, false, "")), Some(Bucket::Running));
-        // waiting 与 exited 都是「已完成」
-        assert_eq!(bucket_of(&sess("a", SessionState::Waiting, false, "")), Some(Bucket::Done));
-        assert_eq!(bucket_of(&sess("a", SessionState::Exited, false, "")), Some(Bucket::Done));
-        // 终端（shell）不进三态：哪怕 running / asking 也不在侧栏分组里
+    fn active_means_alive_project_session() {
+        // 上栏只看「活着的项目会话」：状态/在问与否都不分组
+        assert!(is_active(&sess("a", SessionState::Running, true, "")));
+        assert!(is_active(&sess("a", SessionState::Waiting, true, "")));
+        assert!(is_active(&sess("a", SessionState::Running, false, "")));
+        assert!(is_active(&sess("a", SessionState::Waiting, false, "")));
+        // exited 不进侧栏：项目回下栏，双击 resume
+        assert!(!is_active(&sess("a", SessionState::Exited, false, "")));
+        // 终端（shell）哪怕 running / asking 也不在上栏
         let mut term = sess("t", SessionState::Running, true, "");
         term.agent = "shell".into();
-        assert_eq!(bucket_of(&term), None);
+        assert!(!is_active(&term));
     }
 
     #[test]
-    fn asking_sorts_first_then_state_then_recency() {
+    fn only_executing_sessions_ask_before_kill() {
+        assert!(kill_needs_confirm(&sess("a", SessionState::Running, false, "")));
+        // 在问 = 等你，哪怕屏幕还在变也不打断
+        assert!(!kill_needs_confirm(&sess("a", SessionState::Running, true, "")));
+        assert!(!kill_needs_confirm(&sess("a", SessionState::Waiting, false, "")));
+        assert!(!kill_needs_confirm(&sess("a", SessionState::Exited, false, "")));
+    }
+
+    #[test]
+    fn order_follows_created_at_not_state() {
+        let mk = |id: &str, state, asking, created: &str| {
+            let mut s = sess(id, state, asking, "2026-09-02T12:00:00Z");
+            s.created_at = created.into();
+            s
+        };
         let mut v = [
-            sess("exited", SessionState::Exited, false, "2026-09-02T10:00:00Z"),
-            sess("wait-old", SessionState::Waiting, false, "2026-09-02T09:00:00Z"),
-            sess("run", SessionState::Running, false, "2026-09-02T08:00:00Z"),
-            sess("ask", SessionState::Waiting, true, "2026-09-02T07:00:00Z"),
-            sess("wait-new", SessionState::Waiting, false, "2026-09-02T11:00:00Z"),
+            mk("wait", SessionState::Waiting, false, "2026-09-02T10:00:00Z"),
+            mk("ask", SessionState::Waiting, true, "2026-09-02T09:00:00Z"),
+            mk("run", SessionState::Running, false, "2026-09-02T11:00:00Z"),
+            mk("exited", SessionState::Exited, false, "2026-09-02T08:00:00Z"),
         ];
         v.sort_by(|a, b| sort_key(a).cmp(&sort_key(b)));
         let ids: Vec<&str> = v.iter().map(|s| s.id.as_str()).collect();
-        assert_eq!(ids, ["ask", "run", "wait-new", "wait-old", "exited"]);
+        // 先开的在前，状态变了顺序不动
+        assert_eq!(ids, ["exited", "ask", "wait", "run"]);
+        // 同刻按 id 稳住
+        let mut tie = [
+            mk("b", SessionState::Running, false, "2026-09-02T10:00:00Z"),
+            mk("a", SessionState::Waiting, false, "2026-09-02T10:00:00Z"),
+        ];
+        tie.sort_by(|a, b| sort_key(a).cmp(&sort_key(b)));
+        assert_eq!(tie[0].id, "a");
     }
 
     fn tsess(id: &str, agent: &str, state: SessionState, path: &str, created: &str) -> Session {
@@ -1581,8 +1569,8 @@ mod tests {
         let exited = tsess("d", "claude", Exited, "/p/d", "");
         let term_live = tsess("t1", "shell", Running, "/p/a", "");
         let term_dead = tsess("t2", "shell", Exited, "/p/t", "");
-        assert_eq!(bucket_of(&term_live), None, "终端不进三态");
-        assert_eq!(bucket_of(&term_dead), None);
+        assert!(!is_active(&term_live), "终端不进上栏");
+        assert!(!is_active(&term_dead));
 
         let all = vec![running, asking, done, exited, term_live, term_dead];
         // 存活的项目会话才算「激活」：exited 不算，shell 也不算（/p/t 不该出现）

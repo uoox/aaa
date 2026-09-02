@@ -79,17 +79,38 @@ class ProjectStateTest {
         assertEquals(p.session_title, projectSummary(p, untitled, ProjectState.RUNNING))
     }
 
-    @Test fun groupsFollowEnumOrderAndDropEmptyOnes() {
+    @Test fun twoGroupsAliveVersusRest() {
         val running = s("r", "running", "2026-09-02T10:00:00Z")
         val rows = projectRows(listOf(bare, p), listOf(running))
         val groups = groupProjectRows(rows)
-        assertEquals(listOf(ProjectState.RUNNING, ProjectState.NEVER), groups.map { it.first })
+        assertEquals(listOf(ProjectGroup.ACTIVE, ProjectGroup.INACTIVE), groups.map { it.first })
         assertEquals("a", groups[0].second.single().project.name)
+        assertEquals("b", groups[1].second.single().project.name)
+        // 会话退出了就不再「激活」：项目回到未激活栏（旧对话还在，点一行 resume）
+        val exited = s("x", "exited", "2026-09-02T11:00:00Z")
+        assertEquals(listOf(ProjectGroup.INACTIVE), groupProjectRows(projectRows(listOf(p), listOf(exited))).map { it.first })
+        // waiting / asking 都还活着，都在激活栏
+        val asking = s("q", "waiting", "2026-09-02T11:00:00Z", asking = true)
+        assertEquals(ProjectGroup.ACTIVE, projectRows(listOf(p), listOf(asking)).single().group)
     }
 
-    @Test fun withinAGroupNewestFirst() {
+    @Test fun activeOrderFollowsCreatedAtNotState() {
+        val p2 = p.copy(path = "/r/c", name = "c")
+        val p3 = p.copy(path = "/r/d", name = "d")
+        // c 先开、a 后开、d 最后开；状态和最近输出故意反着来
+        val late = s("a1", "running", "2026-09-02T12:00:00Z").copy(created_at = "2026-09-02T09:00:00Z")
+        val early = s("c1", "waiting", "2026-09-02T08:00:00Z", path = p2.path).copy(created_at = "2026-09-02T07:00:00Z")
+        val last = s("d1", "waiting", "2026-09-02T13:00:00Z", path = p3.path, asking = true).copy(created_at = "2026-09-02T10:00:00Z")
+        val rows = projectRows(listOf(p, p2, p3), listOf(late, early, last))
+        assertEquals(listOf("c", "a", "d"), groupProjectRows(rows).single().second.map { it.project.name })
+        // 状态翻转顺序不变
+        val flipped = listOf(late.copy(state = "waiting", asking = true), early.copy(state = "running"), last.copy(state = "running", asking = false))
+        assertEquals(listOf("c", "a", "d"), groupProjectRows(projectRows(listOf(p, p2, p3), flipped)).single().second.map { it.project.name })
+    }
+
+    @Test fun inactiveOrderIsByName() {
         val p2 = p.copy(path = "/r/c", name = "c", mtime = "2026-09-02T00:00:00Z")
-        val rows = projectRows(listOf(p, p2), emptyList())
-        assertEquals(listOf("c", "a"), groupProjectRows(rows).single().second.map { it.project.name })
+        val rows = projectRows(listOf(p2, p), emptyList())
+        assertEquals(listOf("a", "c"), groupProjectRows(rows).single().second.map { it.project.name })
     }
 }

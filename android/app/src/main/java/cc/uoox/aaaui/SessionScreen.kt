@@ -843,6 +843,14 @@ fun SessionMenuSheet(
     var urlsDialog by remember { mutableStateOf<List<String>?>(null) }
 
     fun toast(msg: String) = Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+    /** 结束进程（用户自己动的手：随后的 exited 不弹通知），关掉操作单 */
+    fun doKill() {
+        scope.launch {
+            store.markUserKilled(s.id)
+            runCatching { store.client?.kill(s.id) }.onFailure { toast("失败：${it.message}") }
+        }
+        onDismiss()
+    }
 
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = Tok.Surface) {
         Column(Modifier.padding(bottom = 20.dp)) {
@@ -899,7 +907,10 @@ fun SessionMenuSheet(
                 Text("${settings.fontSize}", color = Tok.Ink, fontFamily = FontFamily.Monospace)
                 TextButton(onClick = { scope.launch { store.settings.setFontSize(settings.fontSize + 1) } }) { Text("＋", fontSize = 16.sp) }
             }
-            if (s.state != "exited") SheetItem("⛔", "结束进程", "保留回放", danger = true) { killDialog = true }
+            // 只有还在执行（running 且不在问）的才确认——顺手点掉最伤；等你的直接结束
+            if (s.state != "exited") SheetItem("⛔", "结束进程", "保留回放", danger = true) {
+                if (s.state == "running" && !s.asking) killDialog = true else doKill()
+            }
             SheetItem("🗑", "删除会话记录", null, danger = true) { deleteDialog = true }
             TextButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) { Text("取消", color = Tok.Dim) }
         }
@@ -926,14 +937,8 @@ fun SessionMenuSheet(
         )
     }
     if (killDialog) {
-        ConfirmDialog("结束进程？", "进程将被终止，屏幕回放保留。", "结束",
-            onConfirm = {
-                scope.launch {
-                    store.markUserKilled(s.id)
-                    runCatching { store.client?.kill(s.id) }.onFailure { toast("失败：${it.message}") }
-                }
-                killDialog = false; onDismiss()
-            }, onCancel = { killDialog = false })
+        ConfirmDialog("结束进程？", "会话仍在执行中，进程将被终止，屏幕回放保留。", "结束",
+            onConfirm = { killDialog = false; doKill() }, onCancel = { killDialog = false })
     }
     if (deleteDialog) {
         ConfirmDialog("删除会话记录？", "删除会话与回放（进程若存活将先结束），不可恢复。", "删除",

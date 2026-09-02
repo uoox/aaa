@@ -154,12 +154,23 @@ impl RootView {
         cx.notify();
     }
 
-    fn confirm_kill(&mut self, id: String, cx: &mut Context<Self>) {
+    /// 侧栏 × / ⌘W / 工具栏「终止」的统一入口：`confirm` 为真（还在执行）先弹确认，
+    /// 否则直接终止——等你的会话关掉没损失，不打断。
+    pub(super) fn request_kill(&mut self, id: String, confirm: bool, cx: &mut Context<Self>) {
+        if confirm {
+            self.modal = Modal::ConfirmKill { id };
+            cx.notify();
+        } else {
+            self.kill_session(id, cx);
+        }
+    }
+
+    /// 终止会话并收起本地 tab：项目从上栏回到下栏。确认弹窗的「终止」也走这里。
+    pub(super) fn kill_session(&mut self, id: String, cx: &mut Context<Self>) {
         let fut = self.net.kill_session(&id);
         self.modal = Modal::None;
         // 自己终止的会话，随后的 exited 不弹通知
         self.user_killed.insert(id.clone());
-        // 关 TUI = 终止 + 收起 tab：项目从上分区回到下分区
         self.close_tab(&id, cx);
         self.spawn_fetch(fut, |_, _: serde_json::Value, _| {}, true, cx);
         cx.notify();
@@ -466,17 +477,9 @@ impl RootView {
             )
     }
 
-    /// 关闭 TUI 的提示语：还在跑的进程要说得更重
-    fn kill_warning(&self, id: &str) -> String {
-        let running = self
-            .sessions
-            .iter()
-            .any(|s| s.id == id && s.state == crate::model::SessionState::Running);
-        if running {
-            "会话仍在执行中（可能还有后台任务）。关闭会终止整个进程树（TERM，2 秒后 KILL），项目回到下方未激活区，下次双击可 resume。".into()
-        } else {
-            "进程将被终止（TERM，2 秒后 KILL），项目回到下方未激活区，下次双击可 resume。".into()
-        }
+    /// 关闭确认只在会话还在执行时弹（等你的直接关，见 `request_kill`），提示语只有这一种
+    fn kill_warning(&self, _id: &str) -> String {
+        "会话仍在执行中（可能还有后台任务）。关闭会终止整个进程树（TERM，2 秒后 KILL），项目回到下方未激活栏，下次双击可 resume。".into()
     }
 
     fn render_confirm_kill(&self, id: String, cx: &mut Context<Self>) -> gpui::Div {
@@ -514,7 +517,7 @@ impl RootView {
                     )
                     .child(btn_danger("kill-ok", "终止").on_click(cx.listener(
                         move |this, _, _, cx| {
-                            this.confirm_kill(id.clone(), cx);
+                            this.kill_session(id.clone(), cx);
                         },
                     ))),
             )
