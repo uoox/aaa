@@ -1,4 +1,5 @@
-//! 模态框：新建项目（含 6 agent 选择）/ 换 agent / 删除确认（purge 报告）。
+//! 模态框：新建项目（含 agent 选择；终端不是 agent，不在里面）/ 删除确认
+//! （purge 报告）/ 会话终止、删除、重命名 / 配置变更确认。
 
 use anyhow::anyhow;
 use gpui::{Context, SharedString, Window, div, prelude::*, px};
@@ -38,8 +39,8 @@ impl RootView {
             .get(agent_idx)
             .map(|a| a.id.clone())
             .unwrap_or_else(|| "claude".into());
-        // shell 也写注册表：名册以注册表为准，且不写的话 daemon 端「没登记」
-        // 会回落成 claude，从终端页建的文件夹一转头就变 claude 项目了
+        // 选的 agent 一并写注册表：名册以注册表为准，不写的话 daemon 端
+        // 「没登记」会回落成 claude（self.agents 已剔掉终端，这里不会是 shell）
         let project_agent = Some(agent.clone());
         let fallback_path = name.as_ref().and_then(|n| {
             self.health
@@ -248,19 +249,11 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         let mut list = div().flex().flex_col().gap(px(4.));
+        // self.agents 进表前已经剔掉终端（pickable_agents），这里都是真 agent
         for (ix, a) in self.agents.iter().enumerate() {
             let is_sel = selected == Some(ix);
-            let is_shell = a.id == "shell";
-            let chip_label: SharedString = if is_shell {
-                "zsh".into()
-            } else {
-                a.id.clone().into()
-            };
-            let label: SharedString = if is_shell {
-                "普通终端".into()
-            } else {
-                a.label.clone().into()
-            };
+            let chip_label: SharedString = a.id.clone().into();
+            let label: SharedString = a.label.clone().into();
             let cmd: SharedString = a.cmd.clone().unwrap_or_default().into();
             list = list.child(
                 div()
@@ -272,7 +265,6 @@ impl RootView {
                     .py(px(7.))
                     .rounded(px(8.))
                     .border_1()
-                    .when(is_shell, |el| el.border_dashed())
                     .border_color(if is_sel {
                         c(theme::CYAN)
                     } else {

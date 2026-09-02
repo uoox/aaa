@@ -5,6 +5,7 @@ mod messages_view;
 mod mini_input;
 mod modals;
 mod settings;
+mod terminal_panel;
 mod terminal_view;
 
 use std::collections::{HashMap, HashSet};
@@ -28,6 +29,8 @@ pub enum Page {
     Home,
     Session(String),
     Settings,
+    /// 常驻多标签终端面板（侧栏底部入口），标签 = 存活的 shell 会话
+    Terminal,
 }
 
 /// 关掉 `closed` 之后停在哪一页：只有关的正是当前页才换页，换到剩下的最近一个
@@ -44,6 +47,7 @@ fn page_after_close(current: &Page, closed: &str, open_order: &[String]) -> Page
 
 /// 侧栏三态口径（PROTOCOL「会话模型」，三端一致）：待回复 = asking；
 /// 执行中 = running 且不在问；已完成 = 其余（waiting、exited）。
+/// 终端（shell）不是项目会话，不进任何一组 → None，归终端面板管（PROTOCOL「终端」）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Bucket {
     Asking,
@@ -51,13 +55,95 @@ enum Bucket {
     Done,
 }
 
-fn bucket_of(s: &Session) -> Bucket {
-    if s.asking {
+fn bucket_of(s: &Session) -> Option<Bucket> {
+    if s.is_terminal() {
+        return None;
+    }
+    Some(if s.asking {
         Bucket::Asking
     } else if s.state == SessionState::Running {
         Bucket::Running
     } else {
         Bucket::Done
+    })
+}
+
+/// 有存活会话的项目路径（决定项目待在上分区还是下分区）。终端不算：
+/// 在某个项目目录里开个 shell 不该把这个项目「激活」。
+fn alive_paths(sessions: &[Session]) -> Vec<&str> {
+    sessions
+        .iter()
+        .filter(|s| !s.is_terminal() && s.state != SessionState::Exited)
+        .map(|s| s.project_path.as_str())
+        .collect()
+}
+
+/// ⌃Tab 循环的候选：存活的非终端会话，按侧栏顺序。
+fn cyclable_ids(sessions: &[Session]) -> Vec<String> {
+    sessions
+        .iter()
+        .filter(|s| !s.is_terminal() && s.state != SessionState::Exited)
+        .map(|s| s.id.clone())
+        .collect()
+}
+
+/// shell 会话按 `created_at` 升序（末尾最新），不看状态——回收 exited 标签时
+/// 要按「它还在时」的顺序挑邻居，所以状态过滤留给调用方。
+fn sorted_terminals<'a>(sessions: impl IntoIterator<Item = &'a Session>) -> Vec<&'a Session> {
+    let mut v: Vec<&Session> = sessions.into_iter().filter(|s| s.is_terminal()).collect();
+    // created_at 是同一格式的 ISO 时间串，字典序即时间序；同刻按 id 稳住顺序
+    v.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+    v
+}
+
+/// 终端面板的标签：存活的 shell 会话按 `created_at` 升序（末尾最新），标
+/// 「终端 N」；不在项目根开的追加 ` · <目录名>`（PROTOCOL「终端」）。
+/// 返回 (会话 id, 标签文字)。
+fn terminal_tabs<'a>(
+    sessions: impl IntoIterator<Item = &'a Session>,
+    root: &str,
+) -> Vec<(String, String)> {
+    let live = sorted_terminals(
+        sessions
+            .into_iter()
+            .filter(|s| s.state != SessionState::Exited),
+    );
+    let root = root.trim_end_matches('/');
+    live.iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let mut label = format!("终端 {}", i + 1);
+            let path = s.project_path.trim_end_matches('/');
+            if !path.is_empty() && path != root {
+                let leaf = path
+                    .rsplit('/')
+                    .next()
+                    .filter(|l| !l.is_empty())
+                    .unwrap_or(path);
+                label.push_str(" · ");
+                label.push_str(leaf);
+            }
+            (s.id.clone(), label)
+        })
+        .collect()
+}
+
+/// 关掉标签 `closed` 后该激活哪个：优先右邻，没有就左邻（浏览器的习惯）；
+/// `closed` 不在列表里（已经被别处关掉）就退到最新的一个。`tabs` 含 `closed`。
+fn next_terminal_after_close(tabs: &[String], closed: &str) -> Option<String> {
+    let Some(pos) = tabs.iter().position(|t| t == closed) else {
+        return tabs.last().cloned();
+    };
+    tabs.get(pos + 1)
+        .or_else(|| pos.checked_sub(1).and_then(|p| tabs.get(p)))
+        .cloned()
+}
+
+/// 当前激活标签仍存活就用它，否则回落到最新的（`tabs` 按 created_at 升序）。
+fn resolve_active_terminal(active: Option<&str>, tabs: &[String]) -> Option<String> {
+    match active {
+        Some(a) if tabs.iter().any(|t| t == a) => Some(a.to_string()),
+        _ => tabs.last().cloned(),
     }
 }
 
@@ -129,10 +215,18 @@ pub struct RootView {
     pub qr_modules: Option<(usize, Vec<bool>)>,
     pub endpoint_from_config: bool,
 
-    // 终端
+    // 终端视图（会话页与终端面板共用一张表：key = 会话 id）
     terminals: HashMap<String, Entity<TerminalView>>,
+    /// 会话页的打开顺序（关当前页时回落用）；终端标签不进这里
     open_order: Vec<String>,
     pending_focus: Option<String>,
+
+    // 终端面板
+    /// 当前标签；None / 指向已死会话时回落到最新存活的
+    active_terminal: Option<String>,
+    /// 已发过 DELETE 的终端会话：exited 的 shell 只删一次，关标签的也记在这
+    /// （随后的 exited 帧不再重复删），session_removed 时清掉
+    deleted_terminals: HashSet<String>,
 
     // v1.1 消息流：按需创建的视图 + 处于消息流模式的会话（⌘E 切换）
     msg_views: HashMap<String, Entity<MessagesView>>,
@@ -198,12 +292,14 @@ impl RootView {
             ssd_mounted: true,
             sessions: Vec::new(),
             projects: Vec::new(),
-            agents: builtin_agents(),
+            agents: pickable_agents(builtin_agents()),
             qr_modules: None,
             endpoint_from_config,
             terminals: HashMap::new(),
             open_order: Vec::new(),
             pending_focus: None,
+            active_terminal: None,
+            deleted_terminals: HashSet::new(),
             msg_views: HashMap::new(),
             msg_mode: HashSet::new(),
             ports_cache: HashMap::new(),
@@ -270,6 +366,7 @@ impl RootView {
                 self.sessions = sessions;
                 self.sort_sessions();
                 self.sync_msg_alive_all(cx);
+                self.sessions_changed(cx);
                 cx.notify();
             }
             DaemonEvent::Session { session } => {
@@ -277,6 +374,11 @@ impl RootView {
                 self.upsert_session(session, cx);
             }
             DaemonEvent::SessionRemoved { id } => {
+                // 当前终端标签被别处（CLI / 手机）删掉：趁顺序还在先挑好邻居
+                if self.active_terminal.as_deref() == Some(id.as_str()) {
+                    let order = self.live_terminal_ids();
+                    self.active_terminal = next_terminal_after_close(&order, &id);
+                }
                 self.sessions.retain(|s| s.id != id);
                 self.terminals.remove(&id);
                 self.msg_views.remove(&id);
@@ -284,7 +386,9 @@ impl RootView {
                 self.open_order.retain(|x| x != &id);
                 self.ports_cache.remove(&id);
                 self.user_killed.remove(&id);
+                self.deleted_terminals.remove(&id);
                 self.page = page_after_close(&self.page, &id, &self.open_order);
+                self.sessions_changed(cx);
                 cx.notify();
             }
             DaemonEvent::ProjectsChanged {} => self.fetch_projects(cx),
@@ -344,8 +448,11 @@ impl RootView {
     /// 系统通知：只有一种——「完成」（2026-09-02 用户拍板，PROTOCOL「WS」通知策略）。
     /// running→waiting（这轮干完了）与 running→exited（非本机手动 kill）各弹一条。
     /// 不识别里面在问什么、不按问题去重、没有冷却、没有空转告警；问题本身由
-    /// 消息流按结构化数据原生呈现。
+    /// 消息流按结构化数据原生呈现。终端不通知：shell 退出不是「完成」。
     fn maybe_notify(&mut self, new: &Session, cx: &Context<Self>) {
+        if new.is_terminal() {
+            return;
+        }
         let old_state = self
             .sessions
             .iter()
@@ -391,6 +498,7 @@ impl RootView {
         if let Some(v) = self.msg_views.get(&id) {
             v.update(cx, |v, cx| v.set_session(alive, Some(&created), cx));
         }
+        self.sessions_changed(cx);
         cx.notify();
     }
 
@@ -456,6 +564,8 @@ impl RootView {
         self.spawn_fetch(
             self.net.agents(),
             |r, a: Vec<AgentInfo>, cx| {
+                // 终端（terminal:true / shell）不是 agent 选项，进表前剔掉
+                let a = pickable_agents(a);
                 if !a.is_empty() {
                     r.agents = a;
                 }
@@ -470,6 +580,7 @@ impl RootView {
                 r.sessions = s;
                 r.sort_sessions();
                 r.sync_msg_alive_all(cx);
+                r.sessions_changed(cx);
                 cx.notify();
             },
             false,
@@ -507,17 +618,31 @@ impl RootView {
     // ── 会话操作 ────────────────────────────────────────────────────────
 
     pub fn open_session(&mut self, id: String, cx: &mut Context<Self>) {
-        if !self.terminals.contains_key(&id) {
-            let net = self.net.clone();
-            let sid = id.clone();
-            let term = cx.new(|cx| TerminalView::new(sid, &net, cx));
-            self.terminals.insert(id.clone(), term);
+        // shell 会话没有会话页：一律去终端面板（旧注册表项目、别处开的 shell 都走这）
+        if self.session(&id).is_some_and(Session::is_terminal) {
+            self.focus_terminal(id, cx);
+            return;
+        }
+        if self.ensure_terminal_view(&id, cx) {
             self.open_order.push(id.clone());
         }
         self.fetch_ports(id.clone(), cx);
         self.page = Page::Session(id.clone());
         self.pending_focus = Some(id);
         cx.notify();
+    }
+
+    /// 没有就建这个会话的终端视图（attach WS 随之建立）。返回是否新建。
+    /// 会话页与终端面板共用：前者另记 open_order，后者不记。
+    fn ensure_terminal_view(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
+        if self.terminals.contains_key(id) {
+            return false;
+        }
+        let net = self.net.clone();
+        let sid = id.to_string();
+        let term = cx.new(|cx| TerminalView::new(sid, &net, cx));
+        self.terminals.insert(id.to_string(), term);
+        true
     }
 
     /// 收起本地 tab（不碰 daemon）。侧栏 × 的完整语义在 confirm_kill 里：
@@ -544,11 +669,16 @@ impl RootView {
         );
     }
 
-    /// 项目行双击 / 打开按钮：resume 最近会话
+    /// 项目行双击 / 打开按钮：resume 最近会话。
+    /// 注册表里 agent=shell 的旧项目：没有会话页可开，改在该目录开终端标签
+    /// （不 fresh：已有存活 shell 就切过去，双击「没反应」再点不会开出第二个）。
     pub fn open_project(&mut self, project: &Project, cx: &mut Context<Self>) {
         let agent = project.agent.clone().unwrap_or_else(|| "claude".into());
-        let resume = agent != "shell";
-        let fut = self.net.create_session(project.path.clone(), agent, resume);
+        if agent == "shell" {
+            self.create_terminal_in(project.path.clone(), false, cx);
+            return;
+        }
+        let fut = self.net.create_session(project.path.clone(), agent, true);
         self.spawn_fetch(
             fut,
             |r, s: Session, cx| {
@@ -569,12 +699,7 @@ impl RootView {
 
     /// Ctrl-Tab / 双击下分区都会走到的「激活会话」帮手
     fn cycle_session(&mut self, cx: &mut Context<Self>) {
-        let alive: Vec<String> = self
-            .sessions
-            .iter()
-            .filter(|s| s.state != SessionState::Exited)
-            .map(|s| s.id.clone())
-            .collect();
+        let alive = cyclable_ids(&self.sessions);
         let cur = match &self.page {
             Page::Session(id) => Some(id.as_str()),
             _ => None,
@@ -584,7 +709,8 @@ impl RootView {
         }
     }
 
-    /// App 级快捷键：⌘N/Ctrl-N 新建项目，Ctrl-Tab 切换激活会话。
+    /// App 级快捷键：⌘N/Ctrl-N 新建项目，Ctrl-Tab 切换激活会话，⌘E 消息流⇄终端，
+    /// ⌘W 关闭当前会话 / 终端标签。
     /// 挂在根节点上吃冒泡：终端把 Ctrl-Tab 放行、⌘ 组合本来就不吞。
     fn on_root_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let ks = &ev.keystroke;
@@ -594,6 +720,34 @@ impl RootView {
                 self.open_new_project_modal(window, cx);
             }
             cx.stop_propagation();
+            return;
+        }
+        if ks.key == "w" && m.platform {
+            // 弹窗开着时不接：⌘W 关掉底下的会话而弹窗还在，太诡异
+            if !matches!(self.modal, Modal::None) {
+                return;
+            }
+            match self.page.clone() {
+                // 与侧栏 × 同一套语义：存活 → 终止确认；已退出 → 删除确认
+                Page::Session(id) => {
+                    let Some(s) = self.session(&id) else { return };
+                    self.modal = if s.state == SessionState::Exited {
+                        Modal::ConfirmDeleteSession { id }
+                    } else {
+                        Modal::ConfirmKill { id }
+                    };
+                    cx.notify();
+                    cx.stop_propagation();
+                }
+                // 终端标签便宜，不问直接关
+                Page::Terminal => {
+                    if let Some(id) = self.active_terminal.clone() {
+                        self.close_terminal(&id, cx);
+                        cx.stop_propagation();
+                    }
+                }
+                Page::Home | Page::Settings => {}
+            }
             return;
         }
         if ks.key == "tab" && m.control {
@@ -650,12 +804,8 @@ impl RootView {
         //   执行中 = running 且不在问（屏幕还在变）
         //   已完成 = 其余：waiting（这轮干完了，轮到你）、exited
         //   问题本身不在侧栏画：进消息流，表单原生呈现、原地作答
-        let alive_paths: Vec<&str> = self
-            .sessions
-            .iter()
-            .filter(|s| s.state != SessionState::Exited)
-            .map(|s| s.project_path.as_str())
-            .collect();
+        //   终端（shell）不在这里：它归底部的终端面板（PROTOCOL「终端」）
+        let alive_paths = alive_paths(&self.sessions);
 
         let session_row = |s: &Session, ix: usize| {
             let id = s.id.clone();
@@ -750,7 +900,10 @@ impl RootView {
         };
 
         let by = |b: Bucket| -> Vec<&Session> {
-            self.sessions.iter().filter(|s| bucket_of(s) == b).collect()
+            self.sessions
+                .iter()
+                .filter(|s| bucket_of(s) == Some(b))
+                .collect()
         };
         let buckets: [(&'static str, u32, Vec<&Session>); 3] = [
             ("执行中", theme::GREEN, by(Bucket::Running)),
@@ -900,6 +1053,8 @@ impl RootView {
                     )
                     .child(idle_col),
             )
+            // 终端面板入口：常驻工具，坐在 daemon 状态行上方
+            .child(self.render_terminal_entry(cx))
             .child(
                 div()
                     .flex()
@@ -1134,12 +1289,17 @@ impl RootView {
                     bar.child("会话不存在")
                 }
             }
-            _ => {
-                let asking = self.sessions.iter().filter(|s| s.asking).count();
+            Page::Terminal => self.render_terminal_statusbar(bar),
+            Page::Home | Page::Settings => {
+                // 终端不是会话，不进这里的计数
+                let total = self.sessions.iter().filter(|s| !s.is_terminal()).count();
+                let asking = self
+                    .sessions
+                    .iter()
+                    .filter(|s| !s.is_terminal() && s.asking)
+                    .count();
                 bar.child(SharedString::from(format!(
-                    "{} 个会话 · {} 个待回复",
-                    self.sessions.len(),
-                    asking
+                    "{total} 个会话 · {asking} 个待回复"
                 )))
             }
         }
@@ -1218,10 +1378,11 @@ impl Render for RootView {
                             div()
                                 .text_size(px(11.))
                                 .font_family("Menlo")
-                                .child("⌘N 新建项目 · ⌃Tab 切换会话"),
+                                .child("⌘N 新建项目 · ⌃Tab 切换会话 · ⌘W 关闭会话"),
                         ),
                 ),
                 Page::Settings => el.child(self.render_settings(window, cx)),
+                Page::Terminal => el.child(self.render_terminal_page(cx)),
             }
         });
 
@@ -1320,12 +1481,16 @@ mod tests {
     #[test]
     fn three_buckets_follow_asking_then_state() {
         // 待回复 = asking，不管屏幕是不是还在变
-        assert_eq!(bucket_of(&sess("a", SessionState::Running, true, "")), Bucket::Asking);
-        assert_eq!(bucket_of(&sess("a", SessionState::Waiting, true, "")), Bucket::Asking);
-        assert_eq!(bucket_of(&sess("a", SessionState::Running, false, "")), Bucket::Running);
+        assert_eq!(bucket_of(&sess("a", SessionState::Running, true, "")), Some(Bucket::Asking));
+        assert_eq!(bucket_of(&sess("a", SessionState::Waiting, true, "")), Some(Bucket::Asking));
+        assert_eq!(bucket_of(&sess("a", SessionState::Running, false, "")), Some(Bucket::Running));
         // waiting 与 exited 都是「已完成」
-        assert_eq!(bucket_of(&sess("a", SessionState::Waiting, false, "")), Bucket::Done);
-        assert_eq!(bucket_of(&sess("a", SessionState::Exited, false, "")), Bucket::Done);
+        assert_eq!(bucket_of(&sess("a", SessionState::Waiting, false, "")), Some(Bucket::Done));
+        assert_eq!(bucket_of(&sess("a", SessionState::Exited, false, "")), Some(Bucket::Done));
+        // 终端（shell）不进三态：哪怕 running / asking 也不在侧栏分组里
+        let mut term = sess("t", SessionState::Running, true, "");
+        term.agent = "shell".into();
+        assert_eq!(bucket_of(&term), None);
     }
 
     #[test]
@@ -1340,6 +1505,99 @@ mod tests {
         v.sort_by(|a, b| sort_key(a).cmp(&sort_key(b)));
         let ids: Vec<&str> = v.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(ids, ["ask", "run", "wait-new", "wait-old", "exited"]);
+    }
+
+    fn tsess(id: &str, agent: &str, state: SessionState, path: &str, created: &str) -> Session {
+        Session {
+            id: id.into(),
+            agent: agent.into(),
+            state,
+            project_path: path.into(),
+            created_at: created.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn terminal_tabs_ordered_by_created_and_labelled() {
+        use SessionState::*;
+        let root = "/Volumes/SSD/project";
+        let sessions = vec![
+            // 故意乱序放：标签顺序只看 created_at
+            tsess("t2", "shell", Running, "/Volumes/SSD/project/aaa-ui", "2026-09-02T10:02:00Z"),
+            tsess("c1", "claude", Running, root, "2026-09-02T10:00:00Z"), // 不是终端
+            tsess("t1", "shell", Waiting, "/Volumes/SSD/project/", "2026-09-02T10:01:00Z"), // 根（带尾斜杠）
+            tsess("t3", "shell", Exited, root, "2026-09-02T10:03:00Z"), // 已退出不算
+            tsess("t4", "shell", Waiting, "/tmp/x/", "2026-09-02T10:04:00Z"),
+        ];
+        let tabs = terminal_tabs(&sessions, root);
+        let expect: Vec<(String, String)> = [
+            ("t1", "终端 1"),
+            ("t2", "终端 2 · aaa-ui"),
+            ("t4", "终端 3 · x"),
+        ]
+        .iter()
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect();
+        // 编号是存活标签里的序号：t3 退出后 t4 是「终端 3」而不是 4
+        assert_eq!(tabs, expect);
+        assert!(terminal_tabs(&Vec::<Session>::new(), root).is_empty());
+        // project_path 为空（daemon 字段不全）按根处理，不追加目录名
+        let bare = vec![tsess("t9", "shell", Running, "", "2026-09-02T10:00:00Z")];
+        assert_eq!(terminal_tabs(&bare, root)[0].1, "终端 1");
+        // 同一时刻按 id 稳住顺序
+        let tie = vec![
+            tsess("t_b", "shell", Running, root, "2026-09-02T10:00:00Z"),
+            tsess("t_a", "shell", Running, root, "2026-09-02T10:00:00Z"),
+        ];
+        let tie_ids: Vec<String> = terminal_tabs(&tie, root).into_iter().map(|(i, _)| i).collect();
+        assert_eq!(tie_ids, ids(&["t_a", "t_b"]));
+    }
+
+    #[test]
+    fn alive_paths_and_cycling_ignore_terminals() {
+        use SessionState::*;
+        let running = tsess("a", "claude", Running, "/p/a", "");
+        let mut asking = tsess("b", "claude", Waiting, "/p/b", "");
+        asking.asking = true;
+        let done = tsess("c", "codex", Waiting, "/p/c", "");
+        let exited = tsess("d", "claude", Exited, "/p/d", "");
+        let term_live = tsess("t1", "shell", Running, "/p/a", "");
+        let term_dead = tsess("t2", "shell", Exited, "/p/t", "");
+        assert_eq!(bucket_of(&term_live), None, "终端不进三态");
+        assert_eq!(bucket_of(&term_dead), None);
+
+        let all = vec![running, asking, done, exited, term_live, term_dead];
+        // 存活的项目会话才算「激活」：exited 不算，shell 也不算（/p/t 不该出现）
+        assert_eq!(alive_paths(&all), vec!["/p/a", "/p/b", "/p/c"]);
+        // ⌃Tab 只在存活的非终端会话里转
+        assert_eq!(cyclable_ids(&all), ids(&["a", "b", "c"]));
+    }
+
+    #[test]
+    fn closing_terminal_tab_picks_neighbour() {
+        let tabs = ids(&["a", "b", "c"]);
+        // 优先右邻
+        assert_eq!(next_terminal_after_close(&tabs, "b").as_deref(), Some("c"));
+        assert_eq!(next_terminal_after_close(&tabs, "a").as_deref(), Some("b"));
+        // 最右边的关掉 → 左邻
+        assert_eq!(next_terminal_after_close(&tabs, "c").as_deref(), Some("b"));
+        // 只剩一个 → 没了
+        assert_eq!(next_terminal_after_close(&ids(&["a"]), "a"), None);
+        // 关的不在列表里（别处已删）→ 最新的
+        assert_eq!(next_terminal_after_close(&tabs, "zz").as_deref(), Some("c"));
+        assert_eq!(next_terminal_after_close(&[], "a"), None);
+    }
+
+    #[test]
+    fn active_terminal_resolution() {
+        let tabs = ids(&["a", "b", "c"]);
+        // 当前还活着就不动
+        assert_eq!(resolve_active_terminal(Some("b"), &tabs).as_deref(), Some("b"));
+        // 指向已死 / 没有当前 → 最新（末尾）
+        assert_eq!(resolve_active_terminal(Some("gone"), &tabs).as_deref(), Some("c"));
+        assert_eq!(resolve_active_terminal(None, &tabs).as_deref(), Some("c"));
+        assert_eq!(resolve_active_terminal(Some("a"), &[]), None);
     }
 
     #[test]

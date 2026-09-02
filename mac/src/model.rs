@@ -73,6 +73,12 @@ pub struct Session {
 }
 
 impl Session {
+    /// 终端 = `agent:"shell"` 的会话：常驻工具，不是项目的会话（PROTOCOL「终端」）。
+    /// 不进三态分组、不算项目激活、不参与 ⌃Tab，归终端面板管。
+    pub fn is_terminal(&self) -> bool {
+        self.agent == "shell"
+    }
+
     /// 侧栏/tab 显示名：title 为空时退回 agent 或 zsh
     pub fn display_title(&self) -> String {
         if !self.title.is_empty() {
@@ -131,6 +137,10 @@ pub struct AgentInfo {
     pub resume_cmd: Option<String>,
     #[serde(default = "default_true")]
     pub available: bool,
+    /// daemon 标记：这是终端而不是 agent（目前只有 shell）。新建项目的 agent
+    /// 选择里不出现；旧 daemon 不带此字段时按 id 兜底判断，见 `pickable_agents`。
+    #[serde(default)]
+    pub terminal: bool,
 }
 
 fn default_true() -> bool {
@@ -145,6 +155,7 @@ pub fn builtin_agents() -> Vec<AgentInfo> {
         cmd: Some(cmd.into()),
         resume_cmd: None,
         available: true,
+        terminal: id == "shell",
     };
     vec![
         mk("claude", "Claude", "claude --dangerously-skip-permissions"),
@@ -152,8 +163,17 @@ pub fn builtin_agents() -> Vec<AgentInfo> {
         mk("pi", "Pi", "pi"),
         mk("reasonix", "Reasonix", "reasonix --permission-mode bypassPermissions"),
         mk("agy", "Antigravity", "agy --dangerously-skip-permissions"),
-        mk("shell", "普通终端", "exec zsh -l"),
+        mk("shell", "终端", "exec zsh -l"),
     ]
+}
+
+/// 新建项目 / 换 agent 可选的 agent：剔掉终端（`terminal:true`，旧 daemon 靠 id）。
+/// 终端是常驻工具，从侧栏底部的面板开，不是项目的 agent 选择。
+pub fn pickable_agents(agents: Vec<AgentInfo>) -> Vec<AgentInfo> {
+    agents
+        .into_iter()
+        .filter(|a| !a.terminal && a.id != "shell")
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -474,6 +494,31 @@ mod tests {
         assert_eq!(s.pid, Some(12345));
         assert_eq!(s.exit_code, None);
         assert_eq!(s.display_title(), "aaa-ui 交互原型设计");
+    }
+
+    #[test]
+    fn terminal_flag_and_picker() {
+        // daemon 打了 terminal:true → 不是 agent
+        let a: AgentInfo =
+            serde_json::from_str(r#"{"id":"shell","label":"终端","terminal":true}"#).unwrap();
+        assert!(a.terminal);
+        // 旧 daemon 没这字段 → false，但 id 兜底仍能把 shell 挑出去
+        let b: AgentInfo = serde_json::from_str(r#"{"id":"shell","label":"终端"}"#).unwrap();
+        assert!(!b.terminal);
+        let c: AgentInfo = serde_json::from_str(r#"{"id":"claude"}"#).unwrap();
+        assert!(!c.terminal);
+        let picked = pickable_agents(vec![a, b, c]);
+        assert_eq!(picked.len(), 1);
+        assert_eq!(picked[0].id, "claude");
+        // 内置兜底表：shell 带 terminal 标记，挑选后不见
+        assert!(builtin_agents().iter().any(|a| a.id == "shell" && a.terminal));
+        assert!(pickable_agents(builtin_agents()).iter().all(|a| a.id != "shell"));
+        assert_eq!(pickable_agents(builtin_agents()).len(), 5);
+        // 会话侧：agent=shell 就是终端
+        let s: Session = serde_json::from_str(r#"{"id":"s_1","agent":"shell"}"#).unwrap();
+        assert!(s.is_terminal());
+        let s: Session = serde_json::from_str(r#"{"id":"s_2","agent":"claude"}"#).unwrap();
+        assert!(!s.is_terminal());
     }
 
     #[test]

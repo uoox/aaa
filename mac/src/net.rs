@@ -209,6 +209,22 @@ impl Net {
             serde_json::json!({"project_path": project_path, "agent": agent, "resume": resume}),
         )
     }
+    /// 开一个终端（shell 会话）。`fresh:true` 是关键：POST /sessions 默认幂等
+    /// （同目录同 agent 有存活会话就直接返回它），终端面板的「+」要的正是
+    /// 第二个 shell，所以必须显式要求新开。shell 无 resume。
+    pub fn create_terminal(
+        &self,
+        project_path: String,
+        fresh: bool,
+    ) -> impl Future<Output = Result<Session>> + use<> {
+        self.post_json(
+            "/sessions",
+            serde_json::json!({
+                "project_path": project_path, "agent": "shell",
+                "resume": false, "fresh": fresh,
+            }),
+        )
+    }
     pub fn session_input(
         &self,
         id: &str,
@@ -585,6 +601,30 @@ mod tests {
         assert_eq!(v["project_path"], "/Volumes/SSD/project/x");
         assert_eq!(v["agent"], "claude");
         assert_eq!(v["resume"], true);
+    }
+
+    #[test]
+    fn rest_create_terminal_is_fresh_shell() {
+        // 终端面板「+」：agent 固定 shell、不 resume、fresh:true 才会真开第二个
+        let (port, req_rx) = one_shot_server(
+            "HTTP/1.1 200 OK",
+            r#"{"id":"s_t1","agent":"shell","project_path":"/Volumes/SSD/project"}"#,
+        );
+        let net = test_net(port);
+        let s = futures::executor::block_on(
+            net.create_terminal("/Volumes/SSD/project".into(), true),
+        )
+        .unwrap();
+        assert_eq!(s.id, "s_t1");
+        assert!(s.is_terminal());
+        let req = req_rx.recv().unwrap();
+        assert!(req.starts_with("POST /api/v1/sessions HTTP/1.1"));
+        let body_start = req.find("\r\n\r\n").unwrap() + 4;
+        let v: serde_json::Value = serde_json::from_str(&req[body_start..]).unwrap();
+        assert_eq!(v["project_path"], "/Volumes/SSD/project");
+        assert_eq!(v["agent"], "shell");
+        assert_eq!(v["resume"], false);
+        assert_eq!(v["fresh"], true);
     }
 
     #[test]
