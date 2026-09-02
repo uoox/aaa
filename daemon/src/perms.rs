@@ -12,6 +12,7 @@ pub struct PermStatus {
     pub id: &'static str,
     pub label: &'static str,
     pub status: &'static str, // granted|denied|undetermined|unknown|needs_settings
+    pub hint: &'static str,
 }
 
 pub const PERM_IDS: &[(&str, &str)] = &[
@@ -196,15 +197,35 @@ fn home() -> std::path::PathBuf {
 
 #[cfg(target_os = "macos")]
 fn full_disk_status() -> &'static str {
-    let tcc = home()
-        .join("Library")
+    let library = home().join("Library");
+    let tcc = library
         .join("Application Support")
         .join("com.apple.TCC")
         .join("TCC.db");
-    match std::fs::File::open(&tcc) {
-        Ok(_) => "granted",
-        Err(_) => "needs_settings",
+    // On macOS 27 the per-user TCC.db path above does not exist for this
+    // purpose, so probing it alone incorrectly reports needs_settings. Fall
+    // back to attempting reads of known FDA-gated directories.
+    let protected_dirs = ["Safari", "Mail", "Messages", "Cookies", "HomeKit"];
+    let candidates = std::iter::once(std::fs::File::open(tcc).map(|_| ())).chain(
+        protected_dirs
+            .into_iter()
+            .map(|name| std::fs::read_dir(library.join(name)).map(|_| ())),
+    );
+    fda_verdict(candidates)
+}
+
+fn fda_verdict(results: impl IntoIterator<Item = std::io::Result<()>>) -> &'static str {
+    for result in results {
+        match result {
+            Ok(()) => return "granted",
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                return "needs_settings";
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {}
+        }
     }
+    "unknown"
 }
 
 #[cfg(target_os = "macos")]
@@ -214,14 +235,14 @@ fn status_one(id: &str) -> &'static str {
             if unsafe { ffi::AXIsProcessTrusted() } {
                 "granted"
             } else {
-                "undetermined" // API can't distinguish denied vs never-asked
+                "needs_settings" // API can't distinguish denied vs never-asked
             }
         }
         "screen_recording" => {
             if unsafe { ffi::CGPreflightScreenCaptureAccess() } {
                 "granted"
             } else {
-                "undetermined"
+                "needs_settings"
             }
         }
         "input_monitoring" => match unsafe { ffi::IOHIDCheckAccess(1) } {
@@ -266,7 +287,32 @@ fn status_one(_id: &str) -> &'static str {
 pub fn status_all() -> Vec<PermStatus> {
     PERM_IDS
         .iter()
-        .map(|(id, label)| PermStatus { id, label, status: status_one(id) })
+        .map(|(id, label)| {
+            let status = status_one(id);
+            let hint = match (*id, status) {
+                ("accessibility" | "screen_recording", "needs_settings") => {
+                    "弹窗只有「打开系统设置」——在列表里把 aaa-daemon 勾上，然后重启 daemon 才读得到"
+                }
+                ("input_monitoring", "denied" | "undetermined") => {
+                    "系统设置 → 隐私与安全性 → 输入监控 勾上 aaa-daemon，然后重启 daemon"
+                }
+                ("full_disk_access", "needs_settings") => {
+                    "系统设置 → 隐私与安全性 → 完全磁盘访问权限 → + 加入 ~/.local/bin/aaa-daemon（⌘⇧G 输路径），然后重启 daemon"
+                }
+                ("full_disk_access", "unknown") => "探针找不到受保护目录，无法判断",
+                ("automation_system_events" | "automation_finder", "undetermined") => {
+                    "aaa perms <id> 弹窗后点允许（daemon 会先把目标 App 拉起来）"
+                }
+                ("automation_system_events" | "automation_finder", "denied") => {
+                    "系统设置 → 隐私与安全性 → 自动化 里把 aaa-daemon → 目标 勾上"
+                }
+                ("camera" | "microphone", status) if status != "granted" => {
+                    "daemon 没有 Info.plist，系统不给弹窗；一般用不到"
+                }
+                _ => "",
+            };
+            PermStatus { id, label, status, hint }
+        })
         .collect()
 }
 
@@ -301,12 +347,38 @@ pub fn request(ids: &[String]) -> (Vec<&'static str>, Vec<&'static str>) {
         }
         if want("automation_system_events") {
             std::thread::spawn(|| {
+                // -600 (procNotFound) short-circuits AEDeterminePermissionToAutomateTarget
+                // without showing a dialog, so launch the target and let it register first.
+                let _ = std::process::Command::new("open")
+                    .args(["-g", "-j", "-b", "com.apple.systemevents"])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn();
+                for _ in 0..30 {
+                    if ffi::ae_determine("com.apple.systemevents", false) != -600 {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
                 let _ = ffi::ae_determine("com.apple.systemevents", true);
             });
             triggered.push("automation_system_events");
         }
         if want("automation_finder") {
             std::thread::spawn(|| {
+                // -600 (procNotFound) short-circuits AEDeterminePermissionToAutomateTarget
+                // without showing a dialog, so launch the target and let it register first.
+                let _ = std::process::Command::new("open")
+                    .args(["-g", "-j", "-b", "com.apple.finder"])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn();
+                for _ in 0..30 {
+                    if ffi::ae_determine("com.apple.finder", false) != -600 {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
                 let _ = ffi::ae_determine("com.apple.finder", true);
             });
             triggered.push("automation_finder");
@@ -336,7 +408,44 @@ pub fn request(ids: &[String]) -> (Vec<&'static str>, Vec<&'static str>) {
 /// CLI: `aaa-daemon perms status`.
 pub fn cli_status() {
     for p in status_all() {
-        println!("{:26} {:14} {}", p.id, p.status, p.label);
+        if p.hint.is_empty() {
+            println!("{:26} {:14} {}", p.id, p.status, p.label);
+        } else {
+            println!("{:26} {:14} {} — {}", p.id, p.status, p.label, p.hint);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fda_verdict;
+    use std::io::{Error, ErrorKind};
+
+    #[test]
+    fn fda_ok_first_is_granted() {
+        assert_eq!(fda_verdict([Ok(()), Err(Error::from(ErrorKind::NotFound))]), "granted");
+    }
+
+    #[test]
+    fn fda_not_found_then_permission_denied_needs_settings() {
+        assert_eq!(
+            fda_verdict([
+                Err(Error::from(ErrorKind::NotFound)),
+                Err(Error::from(ErrorKind::PermissionDenied)),
+            ]),
+            "needs_settings"
+        );
+    }
+
+    #[test]
+    fn fda_all_not_found_is_unknown() {
+        assert_eq!(
+            fda_verdict([
+                Err(Error::from(ErrorKind::NotFound)),
+                Err(Error::from(ErrorKind::NotFound)),
+            ]),
+            "unknown"
+        );
     }
 }
 

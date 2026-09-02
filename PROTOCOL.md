@@ -11,7 +11,7 @@ daemon 与三个客户端的唯一协调契约。实现与本文冲突时，以�
 │ (Kotlin 原生)│                          └──────────────────┘
 ├─────────────┤                                    ▲
 │  aaa (CLI)  │◄───────────────────────────────────┘
-│ (Rust 终端) │  同一套 API，同一批会话
+│ (bash 脚本) │  同一套 API，同一批会话
 └─────────────┘
 ```
 
@@ -59,7 +59,7 @@ launchd 起的 daemon 因此会让每个 agent 都 `command not found`，`shell`
 daemon 在启动时用 `zsh -lic` 问一次「终端里应有的 PATH」（带超时），再把 `~/.local/bin`、
 `~/.npm-global/bin` 等常见安装位置并进去兜底；`/agents` 的 `available` 用**同一份** PATH 判断，
 所以「显示可用」与「真能启动」不会打架。
-会话查找（resume 用）、cwd 探测、purge 的具体逻辑**逐条移植** `~/.local/bin/aaa` 内嵌 Python（AAA_PY 的 find/detect/collect/purge），存储布局见该脚本注释。
+会话查找（resume 用）、cwd 探测、purge 的具体逻辑**逐条移植** 旧版 zsh 脚本 `~/.local/bin/aaal` 内嵌 Python（AAA_PY 的 find/detect/collect/purge），存储布局见该脚本注释。
 
 ## 会话模型
 
@@ -140,15 +140,17 @@ server → client JSON 文本帧：
 `GET /mac/permissions` →
 
 ```jsonc
-[{"id":"accessibility","label":"辅助功能","status":"granted"},   // granted|denied|undetermined|unknown|needs_settings
- {"id":"screen_recording","label":"屏幕录制","status":"undetermined"},
- {"id":"input_monitoring","label":"输入监控","status":"denied"},
- {"id":"full_disk_access","label":"完全磁盘访问","status":"needs_settings"},
- {"id":"automation_system_events","label":"自动化 · System Events","status":"undetermined"},
- {"id":"automation_finder","label":"自动化 · Finder","status":"undetermined"},
- {"id":"camera","label":"摄像头","status":"unknown"},
- {"id":"microphone","label":"麦克风","status":"unknown"}]
+[{"id":"accessibility","label":"辅助功能","status":"granted","hint":""},   // granted|needs_settings
+ {"id":"screen_recording","label":"屏幕录制","status":"needs_settings","hint":"弹窗只有「打开系统设置」——在列表里把 aaa-daemon 勾上，然后重启 daemon 才读得到"},
+ {"id":"input_monitoring","label":"输入监控","status":"denied","hint":"系统设置 → 隐私与安全性 → 输入监控 勾上 aaa-daemon，然后重启 daemon"},
+ {"id":"full_disk_access","label":"完全磁盘访问","status":"needs_settings","hint":"系统设置 → 隐私与安全性 → 完全磁盘访问权限 → + 加入 ~/.local/bin/aaa-daemon（⌘⇧G 输路径），然后重启 daemon"},
+ {"id":"automation_system_events","label":"自动化 · System Events","status":"undetermined","hint":"aaa perms <id> 弹窗后点允许（daemon 会先把目标 App 拉起来）"},
+ {"id":"automation_finder","label":"自动化 · Finder","status":"undetermined","hint":"aaa perms <id> 弹窗后点允许（daemon 会先把目标 App 拉起来）"},
+ {"id":"camera","label":"摄像头","status":"unknown","hint":"daemon 没有 Info.plist，系统不给弹窗；一般用不到"},
+ {"id":"microphone","label":"麦克风","status":"unknown","hint":"daemon 没有 Info.plist，系统不给弹窗；一般用不到"}]
 ```
+
+每个权限条目都会携带 `hint` 字符串；没有可操作提示时为空字符串。accessibility / screen_recording 的状态只有 `granted` 或 `needs_settings`；full_disk_access 的状态只有 `granted`、`needs_settings` 或 `unknown`。
 
 `POST /mac/permissions/request` body `{"ids":["all"]}` → 202 `{"triggered":[…],"opened_settings":[…]}`。
 实现（daemon 进程内直接调用，弹窗出现在 Mac 屏幕上）：
@@ -156,9 +158,11 @@ server → client JSON 文本帧：
 - accessibility: `AXIsProcessTrustedWithOptions(kAXTrustedCheckOptionPrompt=true)`
 - screen_recording: `CGPreflightScreenCaptureAccess` / `CGRequestScreenCaptureAccess`
 - input_monitoring: `IOHIDCheckAccess` / `IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)`
-- automation_*: `AEDeterminePermissionToAutomateTarget`（askUserIfNeeded=true）
-- camera/microphone: `AVCaptureDevice`（objc2；实现困难可报 unknown）
-- full_disk_access: 无 API 可弹，探测（尝试读 `~/Library/Application Support/com.apple.TCC/TCC.db`）+ `open "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"`
+- automation_*: daemon 先通过 `open -g -j -b` 拉起目标 App，再轮询其状态后调用 `AEDeterminePermissionToAutomateTarget`（askUserIfNeeded=true），确保弹窗实际出现
+- camera/microphone: `AVCaptureDevice.authorizationStatus(for:)` 经 objc runtime 直调（无 Info.plist 用途声明，不能弹窗，只读状态）
+- full_disk_access: 无 API 可弹，依次尝试读取 legacy `TCC.db` 与 `~/Library/Safari`、`Mail`、`Messages`、`Cookies`、`HomeKit` 等 FDA 保护目录，再打开 `x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles`
+
+accessibility、screen_recording、full_disk_access、input_monitoring 的变更需要重启 daemon 才能被观测到；探针结果按运行中的进程缓存 TCC 授权。AAA.app 本体不申请任何 TCC 权限——归责全在 aaa-daemon，agent 子进程继承。
 
 客户端设置页展示状态列表 + 「一键申请全部」按钮；从手机点按钮时提示「弹窗将出现在 Mac 上，请在 Mac 前完成一次」。
 
@@ -225,9 +229,12 @@ Mac 客户端把 payload 渲染成二维码；Android 扫码解析后逐个 host
 CLI 开的会话在 Mac App 和手机上同样可见、可接管。旧的 zsh 菜单脚本改名 `aaal` 保留，作为 daemon
 不可用时的兜底（它把 agent 直接跑在当前终端里，不常驻）。
 
+`aaa` 现在是 `cli/aaa` bash 脚本，依赖 bash ≥3.2、curl、python3，无需构建。CLI 动词保持不变；
+`ls` 与交互菜单按「执行中 / 待回复 / 已完成」顺序分组会话；`perms` 会在每个权限的状态旁打印 `hint` 提示文本。
+
 - 连接：默认读 `~/.config/aaa-daemon/config.toml` 取 port + token 连本机；`AAA_HOST=主机:2730`
   + `AAA_TOKEN=…` 指向另一台机器的 daemon。本机连不上时尝试 `launchctl kickstart` 唤醒一次。
-- 无参数 = 交互菜单：**活会话在上**（等待输入的排最前）、其次「项目管理 / macOS 权限 / New \<agent\>」。
+- 无参数 = 交互菜单：会话按「执行中 / 待回复 / 已完成」三组列出（序号贯通三组，与 `aaa ls` 一致），其次「项目管理 / macOS 权限 / New \<agent\>」。
 - 动词：`ls` `ps` `wait` `status` `perms` `new` `open` `attach` `say` `kill` `rm` `rename`，
   列表类均有 `--json`。目标可写会话 id / id 前缀 / `ls` 序号 / 项目名 / `.`（当前目录所属项目）。
 - `attach` = 直接连 `/sessions/:id/attach`：本地终端进 raw 模式，stdin 原样转发为二进制帧，

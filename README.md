@@ -12,7 +12,7 @@ Mac 上会话常驻不掉线，手机上两步答一句，终端里 `aaa` 依然
 │(Kotlin 原生)│                           └──────────────────┘
 ├─────────────┤                                    ▲
 │  aaa (CLI)  │◄───────────────────────────────────┘
-│ (Rust 终端) │       同一套 API，同一批会话
+│ (bash 终端) │       同一套 API，同一批会话
 └─────────────┘
 ```
 
@@ -21,7 +21,8 @@ Mac 上会话常驻不掉线，手机上两步答一句，终端里 `aaa` 依然
 
 | 目录 | 内容 |
 |---|---|
-| `daemon/` | Rust 常驻服务：PTY 池 + 服务端 VT + 全套 API + aaa 逻辑移植 + TCC 权限 + checkpoint/消息流/收件箱/watchdog。**新的 `aaa` CLI 也在这里**（`src/cli/`），与 daemon 共用配置类型 |
+| `daemon/` | Rust 常驻服务：PTY 池 + 服务端 VT + 全套 API + aaa 逻辑移植 + TCC 权限 + checkpoint/消息流/收件箱/watchdog |
+| `cli/` | `aaa` 终端客户端：一个可移植 bash 脚本（bash ≥ 3.2 + curl + python3 标准库），`curl` 下来即用，不用编译 |
 | `mac/` | gpui 原生客户端（tty7 路线，alacritty_terminal + 自绘渲染） |
 | `android/` | Kotlin/Compose 原生客户端（vendor Termux 终端引擎，无 WebView） |
 | `brand/` | 品牌标志：`logo.py` 一次运行导出 macOS `.icns` 与 Android 各密度自适应图标 |
@@ -31,10 +32,11 @@ Mac 上会话常驻不掉线，手机上两步答一句，终端里 `aaa` 依然
 ## 部署（Mac，一次性）
 
 ```bash
-# 1. daemon + CLI 一起编出来（daemon crate 有两个 bin）
+# 1. 编 daemon；CLI 是脚本，直接装
 cd daemon && cargo build --release
 cp target/release/aaa-daemon ~/.local/bin/aaa-daemon
-cp target/release/aaa        ~/.local/bin/aaa
+codesign --force --sign "$(security find-identity -v -p codesigning | grep -q 'AAA Local Signing' && echo 'AAA Local Signing' || echo -)" ~/.local/bin/aaa-daemon
+install -m755 ../cli/aaa ~/.local/bin/aaa
 
 # 2. 首次运行生成 ~/.config/aaa-daemon/config.toml（含随机 token），确认能起来后 Ctrl-C
 aaa-daemon run
@@ -69,13 +71,22 @@ config.toml 要点：`port=2730`（=0xAAA）、`project_root=/Volumes/SSD/projec
 > 然后 `aaa-daemon service uninstall && aaa-daemon service install`。
 > daemon 自身不会因此卡住：读不到项目根时它照常监听、`/health.root_state=denied`，并在日志和 API
 > 错误里直接给出这段修法。
-> 注意 ad-hoc 签名每次重新构建都会让这个授权失效，需要重新勾一次。
+> **签名要用稳定身份，不要 ad-hoc。** TCC 授权绑定的是代码签名；ad-hoc（`--sign -`）签名每次重新构建都不同，
+> 上面勾好的完全磁盘访问等授权会随之全部失效。本机做一个自签名证书 `AAA Local Signing`（钥匙串访问 →
+> 证书助理 → 创建证书，类型「代码签名」）之后，每次装 daemon 都用它签，授权就跨构建保留：
+> ```bash
+> if security find-identity -v -p codesigning | grep -q "AAA Local Signing"; then
+>   codesign --force --sign "AAA Local Signing" ~/.local/bin/aaa-daemon
+> else
+>   codesign --force --sign - ~/.local/bin/aaa-daemon    # 没有该证书时才退回 ad-hoc（授权会随构建丢）
+> fi
+> ```
 
-> **升级二进制时先 `rm` 再 `cp`**：直接 `cp` 覆盖正在运行的二进制会写坏它的 ad-hoc 签名，
+> **升级二进制时先 `rm` 再 `cp`**：直接 `cp` 覆盖正在运行的二进制会写坏它的签名，
 > 之后每次执行都被 macOS 直接 `SIGKILL`（现象是命令无输出、退出码 137）。
 > ```bash
 > rm -f ~/.local/bin/aaa-daemon && cp daemon/target/release/aaa-daemon ~/.local/bin/aaa-daemon
-> codesign --force --sign - ~/.local/bin/aaa-daemon
+> codesign --force --sign "AAA Local Signing" ~/.local/bin/aaa-daemon   # 见上；无证书则 --sign -
 > aaa-daemon service uninstall && aaa-daemon service install   # plist 记的是绝对路径，重新登记
 > ```
 
@@ -84,19 +95,27 @@ SSD 未挂载时 daemon 只读降级、绝不 mkdir 项目根。
 
 ## aaa（终端）
 
+`cli/aaa` 是一个 bash 脚本（bash ≥ 3.2 + curl + python3 标准库，无 jq、无编译），macOS / Linux / Termux 通用：
+
+```bash
+install -m755 cli/aaa ~/.local/bin/aaa                       # 本地 checkout
+curl -fsSL https://raw.githubusercontent.com/uoox/aaa/main/cli/aaa -o ~/.local/bin/aaa && chmod +x ~/.local/bin/aaa   # 任意机器
 ```
-aaa                      交互菜单（活会话在上，等待输入的排最前）
+
+```
+aaa                      交互菜单（执行中 / 待回复 / 已完成 分组；数字接入，p 项目 m 权限 n 新建）
 aaa ls [-a] [--json]     会话列表          aaa ps [--json]     项目列表
 aaa new [名字] [-a AGENT]  新建项目目录 + 开会话并接入
-aaa open <目标>           进入项目（有活会话就接回，否则 resume）
+aaa open <目标> [--fresh]  进入项目（有活会话就接回，否则 resume；--fresh 强制再开一个并行会话）
 aaa attach <目标>         接入会话（Ctrl-] 脱离，会话继续跑）
 aaa say <目标> <文本…>     写一句进会话并回车（回答提问用）
 aaa kill / rm / rename <目标>
-aaa wait [--json]        只列等待输入的会话（脚本/通知用）
+aaa wait [--json]        只列等待输入且带提问的会话（脚本/通知用）
 aaa status [--json]      daemon 状态       aaa perms [all|<id…>]  macOS 权限
 ```
 
 目标可写：会话 id 或其前缀、`aaa ls` 里的序号、项目名、或 `.`（当前目录所属项目）。
+`ls` 按「执行中 / 待回复 / 已完成」分组，序号贯通三组，已退出永远排最后（默认隐藏）。详见 `cli/README.md`。
 
 连接默认读 `~/.config/aaa-daemon/config.toml`；`AAA_HOST=主机:2730 AAA_TOKEN=…` 可指向另一台机器的 daemon
 （tailscale 直接过去，不用 SSH）。本机 daemon 掉了会先试一次 `launchctl kickstart` 再报错。
@@ -153,7 +172,8 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 ## 开发
 
 ```bash
-cd daemon  && cargo test           # 109 tests（含 CLI）
+cd daemon  && cargo test           # daemon 单元 + 集成测试
+bash -n cli/aaa                    # CLI 是脚本：语法检查 + 对着活 daemon 跑 aaa ls / aaa status
 cd mac     && cargo test           # 47 tests
 cd android && ./gradlew test        # 178 tests
 ```
