@@ -312,8 +312,17 @@ pub fn build_replay_from_parser(parser: &mut vt100::Parser) -> Vec<u8> {
         out.extend_from_slice(line.trim_end().as_bytes());
         out.extend_from_slice(b"\r\n");
     }
+    // 备用屏要先切过去再画：客户端的模拟器才会把内容放进备用屏，TUI 退出时
+    // 发的 1049l 也才能把它的主屏（上面的回滚）复原。
+    if parser.screen().alternate_screen() {
+        out.extend_from_slice(b"\x1b[?1049h");
+    }
     out.extend_from_slice(b"\x1b[2J\x1b[H\x1b[0m");
-    out.extend_from_slice(&parser.screen().contents_formatted());
+    // state_formatted = 画面 + **终端状态**（鼠标上报 1000/1006、括号粘贴、
+    // 应用光标键、键盘模式、光标显隐）。过去只发 contents_formatted，
+    // 在 TUI 启动之后才 attach 的客户端永远不知道对方要鼠标，点击/滚轮
+    // 都被当成本地选区——claude code 的鼠标在 AAA 里「不好使」的根源。
+    out.extend_from_slice(&parser.screen().state_formatted());
     out
 }
 
@@ -675,6 +684,25 @@ mod tests {
         let p0 = text.find("line-0\r\n").unwrap();
         let p24 = text.find("line-24").unwrap();
         assert!(p0 < p24);
+    }
+
+    #[test]
+    fn replay_carries_terminal_modes_for_late_attachers() {
+        // claude code 的真实开场：备用屏 + 鼠标上报 1000/1006 + 括号粘贴
+        let mut parser = vt100::Parser::new(24, 80, 100);
+        parser.process(b"\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[?2004hhello");
+        let replay = build_replay_from_parser(&mut parser);
+        let text = String::from_utf8_lossy(&replay);
+        for mode in ["\x1b[?1049h", "\x1b[?1000h", "\x1b[?1006h", "\x1b[?2004h"] {
+            assert!(text.contains(mode), "replay must re-enable {mode:?}: {text:?}");
+        }
+        assert!(text.contains("hello"));
+        // 没开鼠标的普通 shell：不能凭空给客户端打开鼠标上报
+        let mut plain = vt100::Parser::new(24, 80, 100);
+        plain.process(b"$ ls\r\n");
+        let replay = build_replay_from_parser(&mut plain);
+        let text = String::from_utf8_lossy(&replay);
+        assert!(!text.contains("\x1b[?1000h") && !text.contains("\x1b[?1049h"), "{text:?}");
     }
 
     #[test]

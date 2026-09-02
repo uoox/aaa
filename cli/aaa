@@ -16,7 +16,7 @@ HELP="aaa — AAA daemon 的命令行前端
   aaa                      交互菜单（执行中 / 待回复 / 已完成 分组；数字接入会话，p 项目 m 权限 n 新建）
   aaa ls [-a] [--json]     会话列表（-a 含已退出）
   aaa ps [--json]          项目列表
-  aaa new [名字] [-a AGENT]  新建项目目录 + 开一个会话并接入
+  aaa new [名字]            新建项目目录 + 开一个 Claude Code 会话并接入
   aaa open <目标> [--fresh]   进入项目（有活会话就接回，否则 resume；--fresh 强制再开一个并行会话）
   aaa attach <目标>         接入会话（Ctrl-] 脱离，会话继续跑）
   aaa say <目标> <文本…>     把一句话写进会话并回车（回答提问用）
@@ -249,9 +249,7 @@ def state_label(s):
     return st
 
 def agent_color(agent):
-    return {"claude": C("\x1b[38;5;179m"), "codex": C("\x1b[38;5;111m"),
-            "pi": C("\x1b[38;5;150m"), "reasonix": C("\x1b[38;5;175m"),
-            "agy": C("\x1b[38;5;140m")}.get(agent, GREY)
+    return {"claude": C("\x1b[38;5;179m")}.get(agent, GREY)
 
 def perm_status(status):
     return {"granted": (GREEN, "已授权"), "denied": (RED, "已拒绝"),
@@ -555,7 +553,7 @@ def cmd_menu_projects(args):
     lines.append(EOL)
     if status:
         lines.append("  %s%s%s%s" % (CYAN, truncate(status, max(cols - 4, 10)), RESET, EOL))
-    lines.append("  %sEnter 进入 · a 换 agent · n 新建 · d 删除 · r 刷新 · q 返回%s%s" % (DIM, RESET, EOL))
+    lines.append("  %sEnter 进入 · n 新建 · d 删除 · r 刷新 · q 返回%s%s" % (DIM, RESET, EOL))
     frame(lines)
 
 def cmd_menu_perms(args):
@@ -580,23 +578,6 @@ def cmd_menu_perms(args):
     if status:
         lines.append("  %s%s%s%s" % (CYAN, truncate(status, max(cols - 4, 10)), RESET, EOL))
     lines.append("  %sEnter 申请这一项 · a 一键全授 · r 刷新 · q 返回%s%s" % (DIM, RESET, EOL))
-    frame(lines)
-
-def cmd_menu_pick(args):
-    mapf, title, idx = args[0], args[1], int(args[2])
-    # 终端不是 agent（/agents 里 terminal:true）：新建项目 / 换 agent 都不列它
-    agents = [a for a in load() if not a.get("terminal") and S(a, "id") != "shell"]
-    with open(mapf, "w", encoding="utf-8") as f:
-        for i, a in enumerate(agents):
-            f.write(SEP.join([str(i + 1), clean(S(a, "id")), clean(S(a, "label"))]) + "\n")
-    idx = min(max(idx, 0), max(len(agents) - 1, 0))
-    lines = ["  %s%s%s%s" % (BOLD, title, RESET, EOL), EOL]
-    for n, a in enumerate(agents):
-        mark = "" if a.get("available", True) else "%s (未安装)%s" % (GREY, RESET)
-        lines.append(" %s %s%d%s %s%s%s%s%s" % (marker(n == idx), DIM, n + 1, RESET,
-                                               agent_color(S(a, "id")), S(a, "label"), RESET, mark, EOL))
-    lines.append(EOL)
-    lines.append("  %s↑↓ · Enter 选择 · 数字直选 · q 取消%s%s" % (DIM, RESET, EOL))
     frame(lines)
 
 # ---- attach: a minimal WebSocket client over the raw tty ----
@@ -818,7 +799,7 @@ COMMANDS = {
     "perm-summary": cmd_perm_summary, "purge-summary": cmd_purge_summary, "fields": cmd_fields,
     "resolve": cmd_resolve, "find-project": cmd_find_project, "live-for-path": cmd_live_for_path,
     "menu": cmd_menu, "menu-projects": cmd_menu_projects, "menu-perms": cmd_menu_perms,
-    "menu-pick": cmd_menu_pick, "attach": cmd_attach,
+    "attach": cmd_attach,
     "json": lambda args: out(pretty(load())),
     "errmsg": lambda args: out(err_message(sys.stdin.buffer.read().decode("utf-8", "replace"))),
 }
@@ -1169,52 +1150,6 @@ confirm() {
   case $ans in y|Y|yes) return 0;; *) return 1;; esac
 }
 
-# pick_agent TITLE → PICKED (agent id), or 1 when cancelled
-pick_agent() {
-  local title=$1 idx=0 agents count line
-  agents=$(api GET /api/v1/agents) || return 1
-  clear_screen
-  while :; do
-    printf '%s' "$agents" | py menu-pick "$MAPFILE" "$title" "$idx"
-    count=$(map_count)
-    [ "$count" -gt 0 ] || return 1
-    read_key
-    case $KEY in
-      up) idx=$(( (idx + count - 1) % count )) ;;
-      down) idx=$(( (idx + 1) % count )) ;;
-      enter) line=$(map_row $((idx + 1))); IFS=$US read -r _ PICKED _ <<<"$line"; return 0 ;;
-      [1-9]) if [ "$KEY" -le "$count" ]; then line=$(map_row "$KEY"); IFS=$US read -r _ PICKED _ <<<"$line"; return 0; fi ;;
-      q|esc|ctrl-c|eof) return 1 ;;
-    esac
-  done
-}
-
-# menu_attach ID TITLE NAME → MENU_STATUS
-menu_attach() {
-  clear_screen
-  attach_raw "$1" "$2"
-  case $? in
-    0) MENU_STATUS="已脱离 $3（仍在运行）" ;;
-    3) MENU_STATUS="$3 会话已结束" ;;
-    *) MENU_STATUS="attach 失败" ;;
-  esac
-}
-
-# a live session of the project if it has one, else resume the project's agent
-menu_open_project() { # PATH AGENT NAME
-  local sessions line sid stitle s
-  sessions=$(api GET /api/v1/sessions) || { MENU_STATUS=$(cat "$ERRFILE"); return; }
-  line=$(printf '%s' "$sessions" | py live-for-path "$1")
-  if [ -n "$line" ]; then
-    IFS=$US read -r sid stitle <<<"$line"
-  else
-    s=$(create_session "$1" "$2" true false) || { MENU_STATUS=$(cat "$ERRFILE"); return; }
-    IFS=$US read -r sid stitle <<<"$(printf '%s' "$s" | py fields id title)"
-  fi
-  menu_attach "$sid" "$3 · $stitle" "$3"
-}
-
-# new folder + a fresh session, no git anything
 menu_new_project() { # AGENT
   local p ppath pname s sid
   prompt "项目名（留空=时间戳）" || { MENU_STATUS=''; return; }
@@ -1255,18 +1190,6 @@ menu_projects() {
         menu_open_project "$ppath" "$pagent" "$pname"; status=$MENU_STATUS
         new=$(api GET /api/v1/projects) && projects=$new
         clear_screen ;;
-      a)
-        [ "$count" -gt 0 ] || continue
-        line=$(map_row $((idx + 1))); IFS=$US read -r _ ppath pagent pname <<<"$line"
-        if pick_agent "换 agent"; then
-          if api POST /api/v1/projects/agent "$(printf '{"path":%s,"agent":%s}' "$(json_str "$ppath")" "$(json_str "$PICKED")")" >/dev/null; then
-            status="$pname → $PICKED"
-            new=$(api GET /api/v1/projects) && projects=$new
-          else
-            status=$(cat "$ERRFILE")
-          fi
-        fi
-        clear_screen ;;
       d)
         [ "$count" -gt 0 ] || continue
         line=$(map_row $((idx + 1))); IFS=$US read -r _ ppath pagent pname <<<"$line"
@@ -1280,10 +1203,8 @@ menu_projects() {
         fi
         clear_screen ;;
       n)
-        if pick_agent "新项目用哪个 agent"; then
-          menu_new_project "$PICKED"; status=$MENU_STATUS
-          new=$(api GET /api/v1/projects) && projects=$new
-        fi
+        menu_new_project claude; status=$MENU_STATUS
+        new=$(api GET /api/v1/projects) && projects=$new
         clear_screen ;;
       r) new=$(api GET /api/v1/projects) && projects=$new; status='' ;;
       q|esc|ctrl-c|eof) break ;;
@@ -1363,7 +1284,7 @@ menu() {
       p) menu_projects; status=$MENU_STATUS
          new=$(api GET /api/v1/sessions) && sessions=$new ;;
       m) menu_perms; status=$MENU_STATUS ;;
-      n) if pick_agent "新项目用哪个 agent"; then menu_new_project "$PICKED"; status=$MENU_STATUS; fi
+      n) menu_new_project claude; status=$MENU_STATUS
          new=$(api GET /api/v1/sessions) && sessions=$new
          clear_screen ;;
       r) new=$(api GET /api/v1/sessions) && sessions=$new
@@ -1396,7 +1317,8 @@ HDRFILE=$(umask 077 && mktemp "${TMPDIR:-/tmp}/aaa.hdr.XXXXXX") || die "mktemp �
 chmod 600 "$HDRFILE"
 
 # flags belong to verbs: ls takes -a/--all/--json, the other listings --json,
-# new -a/--agent AGENT, open --fresh. Nothing else is a flag — `aaa say 2 yes
+# open --fresh (new -a/--agent is accepted for compatibility but only claude is
+# allowed: this app runs Claude Code only). Nothing else is a flag — `aaa say 2 yes
 # -v` sends "yes -v" — `--` ends flag parsing, and for say/rename parsing
 # stops at the target so the rest of the line is verbatim text.
 POS=(); AGENT_FLAG=''; JSON=0; ALL=0; FRESH=0
@@ -1432,7 +1354,11 @@ case $cmd in
   status|st) cmd_status ;;
   perms|permissions)
     if [ "$npos" -eq 0 ]; then cmd_perms; else cmd_perms_request "${POS[@]}"; fi ;;
-  new|n) cmd_new "$target" "${AGENT_FLAG:-claude}" ;;
+  new|n)
+    case "${AGENT_FLAG:-claude}" in
+      claude) cmd_new "$target" claude ;;
+      *) die "只支持 Claude Code（-a ${AGENT_FLAG} 不再可用）" ;;
+    esac ;;
   open|o) need_target; cmd_open "$target" ;;
   attach|a) need_target; cmd_attach "$target" ;;
   kill|k) need_target; cmd_kill "$target" ;;

@@ -2,8 +2,8 @@
 //! parse it into a structured message list (mobile main view).
 //!
 //! claude: full support (user/assistant/tool_use/tool_result/thinking, filters
-//! isSidechain/isMeta and injected blocks). codex/pi: best effort.
-//! reasonix/agy/shell: `supported:false`.
+//! isSidechain/isMeta and injected blocks). 本应用只认 Claude Code；终端
+//! （shell）`supported:false`。
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -65,7 +65,7 @@ pub struct Msg {
 }
 
 pub struct MsgStore {
-    pub source: &'static str, // claude | codex | pi | none
+    pub source: &'static str, // claude | none
     pub supported: bool,
     pub file: Option<PathBuf>,
     pub offset: u64,
@@ -85,11 +85,6 @@ impl MsgStore {
     pub fn for_agent(agent: &str) -> Self {
         let (supported, source) = match agent {
             "claude" => (true, "claude"),
-            "codex" => (true, "codex"),
-            "pi" => (true, "pi"),
-            "reasonix" => (true, "reasonix"),
-            // agy 的会话存储是 SQLite/protobuf，行级 tail 解析不可行 → 诚实
-            // 回落终端视图
             _ => (false, "none"),
         };
         MsgStore {
@@ -446,250 +441,10 @@ pub fn parse_claude_line(store: &mut MsgStore, v: &Value) {
     }
 }
 
-// ---------- codex (best effort, rollout format) ----------
-
-pub fn parse_codex_line(store: &mut MsgStore, v: &Value) {
-    let ty = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
-    let ts = v.get("timestamp").and_then(|t| t.as_str()).unwrap_or("");
-    let Some(p) = v.get("payload") else { return };
-    let pty = p.get("type").and_then(|t| t.as_str()).unwrap_or("");
-    match (ty, pty) {
-        // user/assistant text comes through event_msg (response_item messages
-        // of role developer/system are injected context — skip them)
-        ("event_msg", "user_message") => {
-            if let Some(m) = p.get("message").and_then(|m| m.as_str()) {
-                if usable_user_text(m) {
-                    store.push(ts, "user", "text", cap(m.trim(), TEXT_CAP), None);
-                }
-            }
-        }
-        ("event_msg", "agent_message") => {
-            if let Some(m) = p.get("message").and_then(|m| m.as_str()) {
-                if !m.trim().is_empty() {
-                    store.push(ts, "assistant", "text", cap(m.trim(), TEXT_CAP), None);
-                }
-            }
-        }
-        ("response_item", "reasoning") => {
-            let mut text = content_text(p.get("content"));
-            if text.is_empty() {
-                text = content_text(p.get("summary"));
-            }
-            if !text.trim().is_empty() {
-                store.push(ts, "assistant", "thinking", cap(text.trim(), TEXT_CAP), None);
-            }
-        }
-        ("response_item", "function_call") => {
-            let name = p.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
-            if let Some(id) = p.get("call_id").and_then(|i| i.as_str()) {
-                store.tool_names.insert(id.to_string(), name.clone());
-            }
-            // arguments is a JSON string; prefer cmd/command fields
-            let args_raw = p.get("arguments").and_then(|a| a.as_str()).unwrap_or("");
-            let summary = serde_json::from_str::<Value>(args_raw)
-                .ok()
-                .and_then(|a| {
-                    let key = a.get("cmd").or_else(|| a.get("command"))?;
-                    match key {
-                        Value::String(s) => Some(s.clone()),
-                        Value::Array(items) => Some(
-                            items
-                                .iter()
-                                .filter_map(|i| i.as_str())
-                                .collect::<Vec<_>>()
-                                .join(" "),
-                        ),
-                        _ => None,
-                    }
-                })
-                .unwrap_or_else(|| args_raw.to_string());
-            store.push(
-                ts,
-                "tool",
-                "tool_use",
-                String::new(),
-                Some(ToolInfo {
-                    name,
-                    summary: cap(&one_line(&summary), SUMMARY_CAP),
-                    status: "running".to_string(),
-                }),
-            );
-        }
-        ("response_item", "function_call_output") => {
-            let out = p.get("output").and_then(|o| o.as_str()).unwrap_or("").to_string();
-            let name = p
-                .get("call_id")
-                .and_then(|i| i.as_str())
-                .and_then(|id| store.tool_names.get(id).cloned())
-                .unwrap_or_default();
-            // best-effort status from "exited with code N"
-            let status = out
-                .find("exited with code ")
-                .and_then(|i| {
-                    out["exited with code ".len() + i..]
-                        .split_whitespace()
-                        .next()
-                        .and_then(|c| c.trim_matches(|ch: char| !ch.is_ascii_digit()).parse::<i64>().ok())
-                })
-                .map(|c| if c == 0 { "ok" } else { "err" })
-                .unwrap_or("ok");
-            store.push(
-                ts,
-                "tool",
-                "tool_result",
-                cap(out.trim(), RESULT_CAP),
-                Some(ToolInfo { name, summary: String::new(), status: status.to_string() }),
-            );
-        }
-        _ => {}
-    }
-}
-
-// ---------- pi (best effort) ----------
-
-pub fn parse_pi_line(store: &mut MsgStore, v: &Value) {
-    let ty = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
-    let ts = v
-        .get("timestamp")
-        .and_then(|t| t.as_str())
-        .unwrap_or("");
-    // shapes seen in the wild: {"type":"message","message":{"role","content"}}
-    // or claude-like {"type":"user"/"assistant","message":{...}}
-    let msg = v.get("message");
-    let role = msg
-        .and_then(|m| m.get("role"))
-        .and_then(|r| r.as_str())
-        .unwrap_or(match ty {
-            "user" => "user",
-            "assistant" => "assistant",
-            _ => "",
-        });
-    if !matches!(role, "user" | "assistant") {
-        return;
-    }
-    if !matches!(ty, "message" | "user" | "assistant") {
-        return;
-    }
-    let text = content_text(msg.and_then(|m| m.get("content")));
-    let text = text.trim();
-    if text.is_empty() {
-        return;
-    }
-    if role == "user" && !usable_user_text(text) {
-        return;
-    }
-    store.push(ts, role, "text", cap(text, TEXT_CAP), None);
-}
-
-// ---------- reasonix ----------
-
-/// reasonix 的 sessions/*.jsonl 是标准 chat 格式：
-/// `{"role":"user","content":…,"raw_content":…}`（raw_content = 用户敲的原文）
-/// `{"role":"assistant","content":…,"reasoning_content":…,"tool_calls":[{id,name,arguments}]}`
-/// `{"role":"tool","content":…,"name":…,"tool_call_id":…,"tool_execution":{"state":…}}`
-pub fn parse_reasonix_line(store: &mut MsgStore, v: &Value) {
-    match v.get("role").and_then(|r| r.as_str()).unwrap_or("") {
-        "user" => {
-            let text = v
-                .get("raw_content")
-                .or_else(|| v.get("content"))
-                .map(|c| content_text(Some(c)))
-                .unwrap_or_default();
-            if usable_user_text(&text) {
-                store.push("", "user", "text", cap(text.trim(), TEXT_CAP), None);
-            }
-        }
-        "assistant" => {
-            if let Some(t) = v.get("reasoning_content").and_then(|c| c.as_str()) {
-                if !t.trim().is_empty() {
-                    store.push("", "assistant", "thinking", cap(t.trim(), TEXT_CAP), None);
-                }
-            }
-            let text = content_text(v.get("content"));
-            if !text.trim().is_empty() {
-                store.push("", "assistant", "text", cap(text.trim(), TEXT_CAP), None);
-            }
-            if let Some(calls) = v.get("tool_calls").and_then(|c| c.as_array()) {
-                for tc in calls {
-                    let name = tc.get("name").and_then(|n| n.as_str()).unwrap_or("tool");
-                    // arguments 是字符串化的 JSON，解开再复用摘要器
-                    let args: Option<Value> = tc
-                        .get("arguments")
-                        .and_then(|a| a.as_str())
-                        .and_then(|s| serde_json::from_str(s).ok());
-                    let summary = summarize_reasonix_args(name, args.as_ref());
-                    if let Some(id) = tc.get("id").and_then(|i| i.as_str()) {
-                        store.tool_names.insert(id.to_string(), name.to_string());
-                    }
-                    store.push(
-                        "",
-                        "tool",
-                        "tool_use",
-                        String::new(),
-                        Some(ToolInfo {
-                            name: name.to_string(),
-                            summary,
-                            status: "running".into(),
-                        }),
-                    );
-                }
-            }
-        }
-        "tool" => {
-            let name = v
-                .get("tool_call_id")
-                .and_then(|i| i.as_str())
-                .and_then(|i| store.tool_names.get(i).cloned())
-                .or_else(|| v.get("name").and_then(|n| n.as_str()).map(String::from))
-                .unwrap_or_default();
-            let failed = v
-                .pointer("/tool_execution/state")
-                .and_then(|s| s.as_str())
-                .is_some_and(|s| s == "failed")
-                || content_text(v.get("content")).starts_with("error:");
-            let text = content_text(v.get("content"));
-            store.push(
-                "",
-                "tool",
-                "tool_result",
-                cap(text.trim(), RESULT_CAP),
-                Some(ToolInfo {
-                    name,
-                    summary: String::new(),
-                    status: if failed { "err".into() } else { "ok".into() },
-                }),
-            );
-        }
-        _ => {}
-    }
-}
-
-/// reasonix 工具入参摘要：bash 显示命令，文件类显示路径，其余找第一个字符串
-fn summarize_reasonix_args(name: &str, args: Option<&Value>) -> String {
-    let Some(args) = args else { return String::new() };
-    let by_key = |k: &str| args.get(k).and_then(|v| v.as_str()).map(String::from);
-    let s = match name {
-        "bash" | "shell" => by_key("command"),
-        "read" | "write" | "edit" => by_key("path").or_else(|| by_key("file_path")),
-        _ => None,
-    };
-    let s = s
-        .or_else(|| {
-            args.as_object()
-                .and_then(|o| o.values().find_map(|v| v.as_str().map(String::from)))
-        })
-        .unwrap_or_default();
-    cap(&one_line(&s), SUMMARY_CAP)
-}
-
 fn parse_line(store: &mut MsgStore, line: &str) {
     let Ok(v) = serde_json::from_str::<Value>(line) else { return };
-    match store.source {
-        "claude" => parse_claude_line(store, &v),
-        "codex" => parse_codex_line(store, &v),
-        "pi" => parse_pi_line(store, &v),
-        "reasonix" => parse_reasonix_line(store, &v),
-        _ => {}
+    if store.source == "claude" {
+        parse_claude_line(store, &v);
     }
 }
 
@@ -718,18 +473,6 @@ fn head_cwd_matches(source: &str, file: &Path, project_path: &str) -> bool {
         "claude" => head
             .iter()
             .find_map(|o| o.get("cwd").and_then(|c| c.as_str()).map(String::from)),
-        "codex" => head.iter().find_map(|o| {
-            (o.get("type").and_then(|t| t.as_str()) == Some("session_meta"))
-                .then(|| o.get("payload")?.get("cwd")?.as_str().map(String::from))
-                .flatten()
-        }),
-        "pi" => head.iter().find_map(|o| {
-            (o.get("type").and_then(|t| t.as_str()) == Some("session"))
-                .then(|| o.get("cwd")?.as_str().map(String::from))
-                .flatten()
-        }),
-        // reasonix：cwd 已编码在候选目录名里，候选本身就是本项目的
-        "reasonix" => return true,
         _ => None,
     };
     match cwd {
@@ -769,62 +512,6 @@ pub fn discover_file(
             }
             v
         }
-        "codex" => {
-            let mut v = Vec::new();
-            let root = paths.codex_root();
-            if let Ok(y) = std::fs::read_dir(&root) {
-                for y in y.flatten().map(|e| e.path()).filter(|p| p.is_dir()) {
-                    if let Ok(m) = std::fs::read_dir(&y) {
-                        for m in m.flatten().map(|e| e.path()).filter(|p| p.is_dir()) {
-                            if let Ok(d) = std::fs::read_dir(&m) {
-                                for d in d.flatten().map(|e| e.path()).filter(|p| p.is_dir()) {
-                                    if let Ok(f) = std::fs::read_dir(&d) {
-                                        for f in f.flatten().map(|e| e.path()) {
-                                            let n = f
-                                                .file_name()
-                                                .and_then(|n| n.to_str())
-                                                .unwrap_or("");
-                                            if n.starts_with("rollout-") && n.ends_with(".jsonl") {
-                                                v.push(f);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            v
-        }
-        "pi" => {
-            let mut v = Vec::new();
-            if let Ok(rd) = std::fs::read_dir(paths.pi_root()) {
-                for d in rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()) {
-                    if let Ok(rd2) = std::fs::read_dir(&d) {
-                        for f in rd2.flatten().map(|e| e.path()) {
-                            if f.extension().and_then(|e| e.to_str()) == Some("jsonl") {
-                                v.push(f);
-                            }
-                        }
-                    }
-                }
-            }
-            v
-        }
-        "reasonix" => {
-            // cwd 直接编码在目录名里（/ → -），不用扫全根
-            let mut v = Vec::new();
-            let dir = crate::stores::rnx_dir(paths, project_path).join("sessions");
-            if let Ok(rd) = std::fs::read_dir(&dir) {
-                for f in rd.flatten().map(|e| e.path()) {
-                    if f.extension().and_then(|e| e.to_str()) == Some("jsonl") {
-                        v.push(f);
-                    }
-                }
-            }
-            v
-        }
         _ => return None,
     };
 
@@ -833,10 +520,7 @@ pub fn discover_file(
     for f in candidates {
         let (_, mt) = crate::stores::fstat(&f);
         if let Some(rid) = resume_id {
-            let stem_match = match source {
-                "claude" | "reasonix" => f.file_stem().and_then(|s| s.to_str()) == Some(rid),
-                _ => false,
-            };
+            let stem_match = source == "claude" && f.file_stem().and_then(|s| s.to_str()) == Some(rid);
             if stem_match {
                 resume_file = Some((mt, f.clone()));
             }
@@ -902,7 +586,7 @@ pub fn poll_session(
     let (agent_ok, project_path, resume_id, created_epoch, exited) = {
         let meta = sess.meta.lock().unwrap();
         (
-            matches!(meta.agent.as_str(), "claude" | "codex" | "pi" | "reasonix"),
+            meta.agent == "claude",
             meta.project_path.clone(),
             meta.resume_id.clone(),
             meta.created_at.timestamp() as f64,
@@ -985,39 +669,6 @@ mod tests {
         ingest(store, body.as_bytes());
     }
 
-    #[test]
-    fn reasonix_parse_roundtrip() {
-        let mut store = MsgStore::for_agent("reasonix");
-        assert!(store.supported);
-        feed_lines(
-            &mut store,
-            &[
-                json!({"role":"system","content":"You are Reasonix"}),
-                json!({"role":"user","content":"<reasoning-language>注入块</reasoning-language>"}),
-                json!({"role":"user","content":"帮我查 dae 状态","raw_content":"帮我查 dae 状态"}),
-                json!({"role":"assistant","reasoning_content":"先看配置",
-                       "tool_calls":[{"id":"call_1","name":"bash","arguments":"{\"command\":\"ls /etc/dae\"}"}]}),
-                json!({"role":"tool","tool_call_id":"call_1","name":"bash","content":"config.dae",
-                       "tool_execution":{"state":"done"}}),
-                json!({"role":"tool","tool_call_id":"call_1","name":"bash","content":"error: command exited: 1",
-                       "tool_execution":{"state":"failed"}}),
-                json!({"role":"assistant","content":"dae 配置正常。"}),
-            ],
-        );
-        let msgs: Vec<_> = store.slice(0, 100);
-        let kinds: Vec<&str> = msgs.iter().map(|m| m.kind.as_str()).collect();
-        assert_eq!(
-            kinds,
-            ["text", "thinking", "tool_use", "tool_result", "tool_result", "text"],
-            "system 与注入块被过滤"
-        );
-        assert_eq!(msgs[0].text, "帮我查 dae 状态");
-        let tu = msgs[2].tool.as_ref().unwrap();
-        assert_eq!((tu.name.as_str(), tu.summary.as_str()), ("bash", "ls /etc/dae"));
-        assert_eq!(msgs[3].tool.as_ref().unwrap().status, "ok");
-        assert_eq!(msgs[4].tool.as_ref().unwrap().status, "err");
-        assert_eq!(msgs[5].role, "assistant");
-    }
 
     #[test]
     fn claude_full_parse_with_filters() {
@@ -1140,51 +791,15 @@ mod tests {
         assert_eq!(store.msgs[0].text, "跨块消息");
     }
 
-    #[test]
-    fn codex_best_effort_parse() {
-        let mut store = MsgStore::for_agent("codex");
-        feed_lines(
-            &mut store,
-            &[
-                json!({"timestamp":"T0","type":"session_meta","payload":{"id":"x","cwd":"/p"}}),
-                json!({"timestamp":"T1","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"<app-context>injected</app-context>"}]}}),
-                json!({"timestamp":"T2","type":"event_msg","payload":{"type":"user_message","message":"卸载 brew-browser\n"}}),
-                json!({"timestamp":"T3","type":"response_item","payload":{"type":"reasoning","summary":[],"content":[{"type":"reasoning_text","text":"**Planning**"}]}}),
-                json!({"timestamp":"T4","type":"event_msg","payload":{"type":"agent_message","message":"我先定位安装位置。"}}),
-                json!({"timestamp":"T5","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"brew list\"}","call_id":"c1"}}),
-                json!({"timestamp":"T6","type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"Wall time: 0.6\nProcess exited with code 1\n"}}),
-            ],
-        );
-        let msgs: Vec<&Msg> = store.slice(0, 100);
-        assert_eq!(msgs.len(), 5, "developer injection filtered: {msgs:?}");
-        assert_eq!((msgs[0].role.as_str(), msgs[0].text.as_str()), ("user", "卸载 brew-browser"));
-        assert_eq!(msgs[1].kind, "thinking");
-        assert_eq!(msgs[2].role, "assistant");
-        assert_eq!(msgs[3].tool.as_ref().unwrap().summary, "brew list");
-        assert_eq!(msgs[3].tool.as_ref().unwrap().name, "exec_command");
-        assert_eq!(msgs[4].tool.as_ref().unwrap().status, "err");
-        assert_eq!(msgs[4].tool.as_ref().unwrap().name, "exec_command");
-    }
 
     #[test]
-    fn pi_best_effort_and_unknown_agents() {
-        let mut store = MsgStore::for_agent("pi");
-        assert!(store.supported);
-        feed_lines(
-            &mut store,
-            &[
-                json!({"type":"session","id":"s","cwd":"/p"}),
-                json!({"type":"message","message":{"role":"user","content":[{"type":"text","text":"你好"}]},"timestamp":"T"}),
-                json!({"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"回复"}]}}),
-                json!({"type":"weird","payload":{}}),
-            ],
-        );
-        assert_eq!(store.last_seq(), 2);
-        let none = MsgStore::for_agent("shell");
-        assert!(!none.supported);
-        assert_eq!(none.source, "none");
-        assert!(MsgStore::for_agent("reasonix").supported, "reasonix 现已支持");
-        assert!(!MsgStore::for_agent("agy").supported, "agy 存储是 SQLite，回落终端");
+    fn only_claude_is_supported() {
+        assert!(MsgStore::for_agent("claude").supported);
+        for other in ["shell", "codex", "pi", "reasonix", "agy", "grok"] {
+            let st = MsgStore::for_agent(other);
+            assert!(!st.supported, "{other} 不再解析");
+            assert_eq!(st.source, "none");
+        }
     }
 
     #[test]

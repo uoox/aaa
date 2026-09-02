@@ -16,32 +16,6 @@ pub const AGENTS: &[AgentDef] = &[
         resume_cmd: Some("claude --resume %ID% --dangerously-skip-permissions"),
     },
     AgentDef {
-        id: "codex",
-        label: "Codex",
-        cmd: "codex --dangerously-bypass-approvals-and-sandbox",
-        resume_cmd: Some("codex resume %ID% --dangerously-bypass-approvals-and-sandbox"),
-    },
-    AgentDef {
-        id: "pi",
-        label: "Pi",
-        cmd: "pi",
-        // pi sessions are stored per-cwd; --continue means "most recent in this
-        // directory" (the found id only triggers the resume branch).
-        resume_cmd: Some("pi --continue"),
-    },
-    AgentDef {
-        id: "reasonix",
-        label: "Reasonix",
-        cmd: "reasonix --permission-mode bypassPermissions",
-        resume_cmd: Some("reasonix --continue --permission-mode bypassPermissions"),
-    },
-    AgentDef {
-        id: "agy",
-        label: "Antigravity",
-        cmd: "agy --dangerously-skip-permissions",
-        resume_cmd: Some("agy --conversation %ID% --dangerously-skip-permissions"),
-    },
-    AgentDef {
         id: "shell",
         label: "终端",
         cmd: "exec zsh -l",
@@ -245,13 +219,14 @@ mod tests {
 
     #[test]
     fn table_matches_protocol() {
-        assert_eq!(AGENTS.len(), 6);
+        // 2026-09-03 起只支持 Claude Code；shell 是终端面板，不是 agent
+        assert_eq!(AGENTS.len(), 2);
         assert_eq!(get("claude").unwrap().cmd, "claude --dangerously-skip-permissions");
         assert_eq!(
-            build_resume_cmd(get("codex").unwrap(), "abc-123").unwrap(),
-            "codex resume abc-123 --dangerously-bypass-approvals-and-sandbox"
+            build_resume_cmd(get("claude").unwrap(), "abc-123").unwrap(),
+            "claude --resume abc-123 --dangerously-skip-permissions"
         );
-        assert_eq!(build_resume_cmd(get("pi").unwrap(), "x").unwrap(), "pi --continue");
+        assert!(get("codex").is_none() && get("agy").is_none());
         assert!(build_resume_cmd(get("shell").unwrap(), "x").is_none());
     }
 
@@ -266,10 +241,10 @@ mod tests {
         // a name with a space is shell-quoted
         let q = with_remote_control_name("claude x".into(), get("claude").unwrap(), "my proj");
         assert_eq!(q, "claude x --remote-control 'my proj'");
-        // other agents untouched
+        // the terminal is untouched
         assert_eq!(
-            with_remote_control_name("codex y".into(), get("codex").unwrap(), "aaa-ui"),
-            "codex y"
+            with_remote_control_name("exec zsh -l".into(), get("shell").unwrap(), "aaa-ui"),
+            "exec zsh -l"
         );
         // blank name untouched
         assert_eq!(

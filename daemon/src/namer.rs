@@ -290,22 +290,10 @@ impl<'a> Namer<'a> {
         name
     }
 
-    pub fn reasonix_name(&self, meta_path: &Path) -> String {
-        let Ok(body) = std::fs::read_to_string(meta_path) else { return String::new() };
-        let Ok(v) = serde_json::from_str::<Value>(&body) else { return String::new() };
-        let t = v.get("preview").and_then(|p| p.as_str()).unwrap_or("");
-        if usable_prompt(t) {
-            clean_title(t)
-        } else {
-            String::new()
-        }
-    }
-
     /// SESSION_NAMER dispatch table.
     pub fn name_for(&self, cache: &mut CwdCache, agent: &str, path: &Path) -> String {
         match agent {
             "claude" => self.claude_name(cache, path),
-            "reasonix" => self.reasonix_name(path),
             _ => String::new(),
         }
     }
@@ -443,14 +431,4 @@ mod tests {
         assert_eq!(clean_title("  a \t b  "), "a b");
     }
 
-    #[test]
-    fn reasonix_meta_preview() {
-        let (dir, paths) = setup();
-        let meta = dir.path().join("x.jsonl.meta");
-        std::fs::write(&meta, r#"{"preview":"帮我修这个 bug"}"#).unwrap();
-        let namer = Namer::new(&paths, false);
-        assert_eq!(namer.reasonix_name(&meta), "帮我修这个 bug");
-        std::fs::write(&meta, r#"{"preview":"<injected>"}"#).unwrap();
-        assert_eq!(namer.reasonix_name(&meta), "");
-    }
 }

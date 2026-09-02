@@ -21,7 +21,7 @@ Mac 上会话常驻不掉线，手机上两步答一句，终端里 `aaa` 依然
 
 | 目录 | 内容 |
 |---|---|
-| `daemon/` | Rust 常驻服务：PTY 池 + 服务端 VT + 全套 API + aaa 逻辑移植 + TCC 权限 + checkpoint/消息流/收件箱/表单作答 |
+| `daemon/` | Rust 常驻服务：PTY 池 + 服务端 VT + 全套 API + Claude 会话存储读取 + TCC 权限 + checkpoint/消息流/收件箱/表单作答 |
 | `cli/` | `aaa` 终端客户端：一个可移植 bash 脚本（bash ≥ 3.2 + curl + python3 标准库），`curl` 下来即用，不用编译 |
 | `mac/` | gpui 原生客户端（tty7 路线，alacritty_terminal + 自绘渲染） |
 | `android/` | Kotlin/Compose 原生客户端（vendor Termux 终端引擎，无 WebView） |
@@ -101,7 +101,7 @@ curl -fsSL https://raw.githubusercontent.com/uoox/aaa/main/cli/aaa -o ~/.local/b
 ```
 aaa                      交互菜单（执行中 / 待回复 / 已完成 分组；数字接入，p 项目 m 权限 n 新建）
 aaa ls [-a] [--json]     会话列表          aaa ps [--json]     项目列表
-aaa new [名字] [-a AGENT]  新建项目目录 + 开会话并接入
+aaa new [名字]            新建项目目录 + 开 Claude Code 会话并接入
 aaa open <目标> [--fresh]  进入项目（有活会话就接回，否则 resume；--fresh 强制再开一个并行会话）
 aaa attach <目标>         接入会话（Ctrl-] 脱离，会话继续跑）
 aaa say <目标> <文本…>     写一句进会话并回车（回答提问用）
@@ -164,7 +164,6 @@ agent 的提问在消息流里是**原生表单**：单选、复选、「其它�
 ## 已知限制
 
 - 活会话不跨 daemon 重启（exited 回放会恢复）；重启 daemon 前先收尾要紧会话。
-- codex/pi 消息流解析基于 2026-08 存储格式样本，上游变更需跟进；reasonix/agy 回落终端。
 - Android 深度 Doze 下 events WS 可能被限流，「完成」通知可能迟到（没有服务端推送兜底）。
 - `refs/aaa-ckpt` 只增不减，尚无 GC。
 

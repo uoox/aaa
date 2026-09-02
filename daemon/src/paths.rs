@@ -35,24 +35,9 @@ impl Paths {
         Self { home: home.into() }
     }
 
-    // ---- agent session stores (mirror AAA_PY) ----
+    // ---- Claude Code 会话存储（本应用只认 Claude Code） ----
     pub fn claude_root(&self) -> PathBuf {
         self.home.join(".claude").join("projects")
-    }
-    pub fn agy_root(&self) -> PathBuf {
-        self.home.join(".gemini").join("antigravity-cli")
-    }
-    pub fn grok_root(&self) -> PathBuf {
-        self.home.join(".grok").join("sessions")
-    }
-    pub fn codex_root(&self) -> PathBuf {
-        self.home.join(".codex").join("sessions")
-    }
-    pub fn pi_root(&self) -> PathBuf {
-        self.home.join(".pi").join("agent").join("sessions")
-    }
-    pub fn rnx_root(&self) -> PathBuf {
-        self.home.join(".reasonix").join("projects")
     }
 
     /// `~/.cache/aaa-cwds.json` — shared with the aaa CLI, format-compatible.

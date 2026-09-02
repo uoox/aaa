@@ -28,7 +28,7 @@ daemon 与三个客户端的唯一协调契约。实现与本文冲突时，以�
 | `~/.local/state/aaa-daemon/` | 会话元数据、已退出会话的回放、日志 |
 | `/Volumes/SSD/project` | 项目根（config 可改） |
 | `/Volumes/SSD/project/.aaa-agents` | **沿用 aaa CLI 的注册表**：每行 `<目录>\t<agent>[\t<对话id>]`，原子整体重写。第三列是该目录最近一次 resume 用的 agent 对话 id：目录迁移后 agent 存储按旧 cwd 查不到会话，靠它兜底（`POST /sessions` resume 命中时回写；`PUT /config` 迁移前全量采集） |
-| `~/.cache/aaa-cwds.json` | **沿用 aaa CLI 的缓存**：键 `claude:<path>` `codex:<path>` `pi:<path>` `cname2:<path>` `ainame:<path>`，读写保持兼容 |
+| `~/.cache/aaa-cwds.json` | **沿用 aaa CLI 的缓存**：键 `claude:<path>`（jsonl → cwd）、`cname2:<path>` / `ainame:<path>`（命名缓存）；文件里旧的 `codex:` / `pi:` 键保留不读，格式兼容 |
 
 config.toml 结构：
 
@@ -43,15 +43,11 @@ remote_control_name = true    # claude 会话给 Remote Control 起项目名（�
 
 历史上的 `[ntfy]` / `[watchdog]` 段已废弃（2026-09-02），旧文件里留着也能解析，只是被忽略。
 
-## Agent 表（与 aaa CLI 完全一致）
+## Agent 表（2026-09-03 起只支持 Claude Code）
 
 | id | label | 新会话命令 | resume 命令（%ID% 替换） |
 |---|---|---|---|
 | claude | Claude | `claude --dangerously-skip-permissions` | `claude --resume %ID% --dangerously-skip-permissions` |
-| codex | Codex | `codex --dangerously-bypass-approvals-and-sandbox` | `codex resume %ID% --dangerously-bypass-approvals-and-sandbox` |
-| pi | Pi | `pi` | `pi --continue` |
-| reasonix | Reasonix | `reasonix --permission-mode bypassPermissions` | `reasonix --continue --permission-mode bypassPermissions` |
-| agy | Antigravity | `agy --dangerously-skip-permissions` | `agy --conversation %ID% --dangerously-skip-permissions` |
 | shell | 终端 | `exec zsh -l` | —（shell 无 resume）。**不是 agent**：`/agents` 里带 `terminal:true`，新建项目 / 换 agent 的选择里没有它，见「终端」 |
 
 启动方式：`zsh -lc 'cd <dir> && <cmd>'`，并**由 daemon 显式设置 `PATH`**。
@@ -60,7 +56,7 @@ launchd 起的 daemon 因此会让每个 agent 都 `command not found`，`shell`
 daemon 在启动时用 `zsh -lic` 问一次「终端里应有的 PATH」（带超时），再把 `~/.local/bin`、
 `~/.npm-global/bin` 等常见安装位置并进去兜底；`/agents` 的 `available` 用**同一份** PATH 判断，
 所以「显示可用」与「真能启动」不会打架。
-会话查找（resume 用）、cwd 探测、purge 的具体逻辑**逐条移植** 旧版 zsh 脚本 `~/.local/bin/aaal` 内嵌 Python（AAA_PY 的 find/detect/collect/purge），存储布局见该脚本注释。
+会话查找（resume 用）、cwd 探测、purge 只针对 Claude Code 的存储（`~/.claude/projects/<cwd 编码>/<id>.jsonl`，cwd 取自 jsonl 头部记录；`~/.cache/aaa-cwds.json` 里 `claude:<path>` 键与旧 CLI 兼容）。codex / pi / reasonix / agy / grok 的存储读取、解析、purge 已于 2026-09-03 全部移除——本应用是 Claude Code 的指挥台，不再是多 agent 启动器。`Project.agent` / `Session.agent` 字段保留（值只会是 `claude`，终端是 `shell`）。
 
 ## 终端（2026-09-02：常驻工具，不与 agent 平齐）
 
@@ -127,7 +123,7 @@ daemon **不再读屏猜「它在问什么」**：没有 `idle`，没有 `questi
 ### `/api/v1/sessions/:id/attach`
 
 - 连接后 server 先发一个文本帧 `{"t":"hello","session":{…},"rows":R,"cols":C}`。
-- 随后 server 发二进制帧：先是**整屏重绘**（回滚缓冲尾部若干行 + ANSI 清屏 + vt100 `contents_formatted()` 生成的当前屏幕），之后持续转发 PTY 原始输出字节。
+- 随后 server 发二进制帧：先是**整屏重绘**（回滚缓冲尾部若干行 + 若在备用屏则 `?1049h` + ANSI 清屏 + vt100 `state_formatted()`：当前屏幕**加终端状态**——鼠标上报 1000/1006、括号粘贴、应用光标键、光标显隐），之后持续转发 PTY 原始输出字节。状态必须随重绘下发：claude code 一启动就开鼠标上报，晚于它 attach 的客户端若不知道，点击/滚轮就会被当成本地选区（2026-09-03 修）。
 - client → server：二进制帧 = 原样写入 PTY 的输入字节；文本帧 = 控制消息 `{"t":"resize","cols":C,"rows":R}`。
 - 多客户端可同时 attach 同一会话（尺寸取最后 resize 者）。
 
@@ -202,11 +198,11 @@ Mac 客户端把 payload 渲染成二维码；Android 扫码解析后逐个 host
 
 ### 消息流（手机主视图，终端保留可切换）
 
-- `GET /sessions/:id/messages?after=<seq>&limit=<n=200>` → `{"supported":bool,"source":"claude|codex|pi|none","last_seq":N,"messages":[…]}`
+- `GET /sessions/:id/messages?after=<seq>&limit=<n=200>` → `{"supported":bool,"source":"claude|none","last_seq":N,"messages":[…]}`
 - 消息结构：`{"seq":N,"ts":"…","role":"user|assistant|tool|system","kind":"text|thinking|tool_use|tool_result|question|answer","text":"…","tool":{"name":"Bash","summary":"cargo build","status":"ok|err|running"}|null,"question":{…}?}`
 - **表单（claude）**：`AskUserQuestion` 工具调用不当普通 tool_use 显示，而是 `kind:"question"`（role assistant）：`text` = 第一题题面，`tool.summary` = 各题 header 用 ` · ` 连接，并附 `"question":{"questions":[{"header":"Color","question":"Pick a color","options":[{"label":"Red","description":"A warm color"}],"multi_select":false}]}`（原样来自工具入参，`multiSelect` 已转 snake_case）。它的 tool_result 变成 `kind:"answer"`（role **user**）：`text` 为用户的回答（单题就是答案本身；多题每行 `题面 → 答案`），`tool.status` 沿用 ok/err。**待答** = 最新一条 question 后面没有 answer，且它不早于本进程 `created_at`（resume 进来的旧 transcript 里悬着的问题，新进程不会再弹框，不算）。这就是会话 `asking` 的定义。
 - 客户端渲染约定：`question` 一律**原生对话框**——单选画单选、`multi_select` 画复选、末尾固定一条「其它…」自填；已有 answer 的表单折成已答态；待答且会话存活时才可交互，提交走 `POST /sessions/:id/answer`。不折叠进过程；`answer` 画在用户一侧。
-- daemon 在会话 spawn/resume 后定位该会话的 agent 存储文件（resume 已知文件；新会话按 cwd 匹配 + mtime ≥ 启动时刻轮询发现）并增量 tail 解析。**claude 必须支持**（jsonl：user/assistant/tool_use/tool_result/thinking，过滤 isSidechain 与注入块），codex/pi/reasonix 尽力而为（reasonix：chat-jsonl，raw_content 为用户原文，tool_execution.state=failed → err），agy/shell 返回 `supported:false`（agy 存储为 SQLite，客户端回落终端视图）。resume 场景：旧 id 的 transcript 只是延迟兜底（~30s），发现会话自己写的新文件后自动升级；同目录并发会话不共享同一存储文件（已被认领的候选跳过）。
+- daemon 在会话 spawn/resume 后定位该会话的 Claude transcript（resume 已知文件；新会话按 cwd 匹配 + mtime ≥ 启动时刻轮询发现）并增量 tail 解析（jsonl：user/assistant/tool_use/tool_result/thinking，过滤 isSidechain 与注入块）。shell（终端）返回 `supported:false`。resume 场景：旧 id 的 transcript 只是延迟兜底（~30s），发现会话自己写的新文件后自动升级；同目录并发会话不共享同一存储文件（已被认领的候选跳过）。
 - `/events` 新帧：`{"t":"messages_changed","id":"s_…","last_seq":N}`（≥500ms 节流）。客户端收到后增量拉取。
 - `/events` 心跳：服务端每 20s 发一个 WS Ping；客户端应以「45s 无任何帧」为读超时并重连（overlay 网络半开连接检测）。
 
@@ -264,7 +260,7 @@ CLI 开的会话在 Mac App 和手机上同样可见、可接管。旧的 zsh �
 | cyan | `#53c6dd` | 主操作/选中 |
 | magenta | `#c583e0` | 品牌（banner） |
 | green / amber / red | `#5ecb8f` / `#e3b45c` / `#e57373` | running / waiting / exited |
-| agent 色 | claude `#e8b46a` · codex `#8fd0ff` · pi `#b5e08f` · reasonix `#e08fb5` · agy `#c8a8f0` | 标签 |
+| agent 色 | claude `#e8b46a`（唯一 agent；终端标签用 DIM） | 标签 |
 
 状态点语义：绿=运行中、黄=等待输入（一等状态：置顶、高亮、推送）、灰=空闲、红=已退出。
 终端字体：等宽（mac 端 SF Mono/Menlo 族，Android 端打包 JetBrains Mono 或系统 monospace）。

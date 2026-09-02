@@ -1,7 +1,6 @@
 //! CLI entry + daemon run loop.
 
 use std::net::SocketAddr;
-use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -331,13 +330,13 @@ async fn name_one_session(app: &SharedApp) {
         meta.needs_name
             && !meta.custom_title
             && meta.state != State::Running
-            && matches!(meta.agent.as_str(), "claude" | "reasonix")
+            && meta.agent == "claude"
     });
     let Some(sess) = candidate else {
         // clear the flag for agents we can't name so we don't rescan forever
         for s in app.pool.all() {
             let mut meta = s.meta.lock().unwrap();
-            if meta.needs_name && !matches!(meta.agent.as_str(), "claude" | "reasonix") {
+            if meta.needs_name && meta.agent != "claude" {
                 meta.needs_name = false;
             }
         }
@@ -365,14 +364,6 @@ async fn name_one_session(app: &SharedApp) {
                 }
                 best.map(|(_, p)| namer.claude_name(&mut cache, &p))
                     .unwrap_or_default()
-            }
-            "reasonix" => {
-                let st = crate::stores::rnx_stat(&app2.paths, &cwd);
-                if st.meta.is_empty() {
-                    String::new()
-                } else {
-                    namer.reasonix_name(Path::new(&st.meta))
-                }
             }
             _ => String::new(),
         };
