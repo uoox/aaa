@@ -81,8 +81,7 @@ impl ThemeKind {
 
 /// 一套主题的全部令牌。字段名沿用设计令牌表；`accent` 即原来的 CYAN 角色
 /// （主操作 / 选中 / 链接），`inset` 是输入框、折叠面板这类「下沉底」——深色
-/// 主题就是终端底，浅色主题另给一块近白（终端底在 Claude 橙里是深色的，INK 字
-/// 落上去会看不见）。
+/// 主题就是终端底，浅色主题另给一块近白，与终端底分开调。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Palette {
     pub bg: u32,
@@ -167,8 +166,9 @@ static LIGHT: Palette = Palette {
     is_dark: false,
 };
 
-/// Claude 橙：Anthropic 的象牙白 + 陶土橙；终端是一块暖色深底，ANSI 走 gruvbox-dark
-/// （黑略亮于终端底，保证可见）。品牌辅色不用橙的邻色，留一个哑紫（plum）做区分。
+/// Claude 橙：Anthropic 的象牙白 + 陶土橙；终端也是亮底暗字（暖白纸面，和界面一体），
+/// ANSI 走 gruvbox-light 一路——同明亮主题的道理，浅底上 8–15 比 0–7 更沉而不是更亮，
+/// 7 white 给成暖灰。品牌辅色不用橙的邻色，留一个哑紫（plum）做区分。
 static CLAUDE: Palette = Palette {
     bg: 0xfaf9f5,
     surface: 0xf0eee6,
@@ -178,8 +178,8 @@ static CLAUDE: Palette = Palette {
     ink: 0x141413,
     dim: 0x5e5d59,
     faint: 0x91908a,
-    term_bg: 0x2a2825,
-    term_fg: 0xf0eee6,
+    term_bg: 0xfffdf7,
+    term_fg: 0x141413,
     accent: 0xd97757,
     magenta: 0x9b6b9e,
     green: 0x2f855a,
@@ -187,22 +187,22 @@ static CLAUDE: Palette = Palette {
     red: 0xc0392b,
     inset: 0xfffefa,
     ansi: [
-        0x3c3836, // 0 black（略亮于 term-bg）
+        0x3c3836, // 0 black
         0xcc241d, // 1 red
         0x98971a, // 2 green
         0xd79921, // 3 yellow
         0x458588, // 4 blue
         0xb16286, // 5 magenta
         0x689d6a, // 6 cyan
-        0xebdbb2, // 7 white
-        0x928374, // 8 bright black
-        0xfb4934, // 9 bright red
-        0xb8bb26, // 10 bright green
-        0xfabd2f, // 11 bright yellow
-        0x83a598, // 12 bright blue
-        0xd3869b, // 13 bright magenta
-        0x8ec07c, // 14 bright cyan
-        0xfbf1c7, // 15 bright white
+        0xa89984, // 7 white（暖灰，亮底可见）
+        0x7c6f64, // 8 bright black
+        0x9d0006, // 9 bright red
+        0x79740e, // 10 bright green
+        0xb57614, // 11 bright yellow
+        0x076678, // 12 bright blue
+        0x8f3f71, // 13 bright magenta
+        0x427b58, // 14 bright cyan
+        0x141413, // 15 bright white（= ink）
     ],
     is_dark: false,
 };
@@ -489,10 +489,20 @@ mod tests {
         assert_ne!(d.accent, c.accent);
         assert!(d.is_dark);
         assert!(!l.is_dark);
-        assert!(!c.is_dark, "Claude 橙是象牙白纸面，终端才是深的");
+        assert!(!c.is_dark, "Claude 橙是象牙白纸面");
         // 用户拍板的关键色
         assert_eq!(c.accent, 0xd97757);
-        assert_eq!(c.term_bg, 0x2a2825);
+        // 三套里只有黑暗是暗底终端；两套浅色主题终端都是亮底暗字
+        assert!(luminance(d.term_bg) < 0.2);
+        for p in [l, c] {
+            assert!(luminance(p.term_bg) > 0.9, "浅色主题终端底要是亮的");
+            assert!(luminance(p.term_fg) < 0.2, "浅色主题终端字要是暗的");
+            assert!(luminance(p.code_ink()) < 0.4, "代码字色要在亮底上可读");
+            // 亮底上 16 色都得有足够对比：没有一个 ANSI 色比底还亮
+            for (i, &a) in p.ansi.iter().enumerate() {
+                assert!(luminance(a) < 0.6, "{i}: ansi 色 {a:06x} 在亮底上看不见");
+            }
+        }
         assert_eq!(l.accent, 0x0f8a9e);
         // 浅色主题的下沉底不能是深色终端底：INK 字要落在上面
         assert!(luminance(l.inset) > 0.5);

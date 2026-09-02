@@ -47,10 +47,9 @@ import java.time.format.DateTimeFormatter
 
 /**
  * 一套完整配色。三套：黑暗（原 prototype.html 的 token，一个值都没改）、明亮、
- * Claude 橙（Anthropic 品牌的米白 + 赭橙，终端保留暗底）。纯数据，PaletteTest 直接跑。
+ * Claude 橙（Anthropic 品牌的米白 + 赭橙，终端也是暖白底墨字）。纯数据，PaletteTest 直接跑。
  *
- * [isDark] 说的是**界面**底色深浅——决定系统栏图标颜色与 Material 基线；Claude 橙的
- * 终端是暗的，但界面是亮的，所以它是 false。
+ * [isDark] 说的是**界面**底色深浅——决定系统栏图标颜色与 Material 基线。
  */
 data class Palette(
     /** 设置里存的键：dark / light / claude。 */
@@ -77,10 +76,18 @@ data class Palette(
     val red: Color,
     /** 代码块 / 思考行 / 工具输出这类「凹下去」的小面板底色——界面侧的，跟终端无关。 */
     val inset: Color,
-    /** 终端画布底色与默认前景。ANSI 16 色沿用 termux 默认。 */
+    /** 终端画布底色与默认前景。 */
     val termBg: Color,
     val termFg: Color,
+    /**
+     * 终端 ANSI 16 色。null = 沿用 termux 默认（xterm 一路，为黑底设计）；亮底主题必须
+     * 自带一套——xterm 的亮黄 #FFFF54、亮青 #54FFFF 落在白纸上根本看不见，而 Claude Code
+     * 的警告 / 提示恰恰爱用这几个。规则同 mac：浅底上 8–15 比 0–7 更沉而不是更亮。
+     */
+    val ansi: List<Color>? = null,
 ) {
+    init { require(ansi == null || ansi.size == 16) { "ansi 必须是 16 色" } }
+
     companion object {
         val Dark = Palette(
             name = "dark", label = "黑暗", isDark = true,
@@ -99,6 +106,11 @@ data class Palette(
             accent = Color(0xFF0F8A9E), onAccent = Color(0xFFFFFFFF), magenta = Color(0xFF7B4FA8),
             green = Color(0xFF2E7D32), amber = Color(0xFFB26A00), red = Color(0xFFC62828),
             inset = Color(0xFFE9EDF1), termBg = Color(0xFFFFFFFF), termFg = Color(0xFF1B2229),
+            // one-light；与 mac 的 LIGHT.ansi 逐色相同
+            ansi = listOf(
+                0xFF383A42, 0xFFE45649, 0xFF50A14F, 0xFFC18401, 0xFF4078F2, 0xFFA626A4, 0xFF0184BC, 0xFFA0A1A7,
+                0xFF696C77, 0xFFCA1243, 0xFF3E8E3D, 0xFF986801, 0xFF2F5FCC, 0xFF8B1E89, 0xFF0B6A9C, 0xFF1B2229,
+            ).map(::Color),
         )
         val Claude = Palette(
             name = "claude", label = "Claude 橙", isDark = false,
@@ -107,7 +119,12 @@ data class Palette(
             ink = Color(0xFF141413), dim = Color(0xFF5E5D59), faint = Color(0xFF91908A),
             accent = Color(0xFFD97757), onAccent = Color(0xFF141413), magenta = Color(0xFFD97757),
             green = Color(0xFF2F855A), amber = Color(0xFFB8860B), red = Color(0xFFC0392B),
-            inset = Color(0xFFE8E6DC), termBg = Color(0xFF2A2825), termFg = Color(0xFFF0EEE6),
+            inset = Color(0xFFE8E6DC), termBg = Color(0xFFFFFDF7), termFg = Color(0xFF141413),
+            // gruvbox-light；与 mac 的 CLAUDE.ansi 逐色相同
+            ansi = listOf(
+                0xFF3C3836, 0xFFCC241D, 0xFF98971A, 0xFFD79921, 0xFF458588, 0xFFB16286, 0xFF689D6A, 0xFFA89984,
+                0xFF7C6F64, 0xFF9D0006, 0xFF79740E, 0xFFB57614, 0xFF076678, 0xFF8F3F71, 0xFF427B58, 0xFF141413,
+            ).map(::Color),
         )
 
         /** 设置页的排列顺序。 */
@@ -200,13 +217,21 @@ fun Palette.materialScheme(): ColorScheme {
     )
 }
 
+/** termux 出厂的 ANSI 16 色，第一次改表之前抄一份，切回黑暗主题时用它还原。 */
+private val termuxDefaultAnsi: IntArray by lazy { TerminalColors.COLOR_SCHEME.mDefaultColors.copyOf(16) }
+
 /**
- * 把主题的终端前景/背景写进 termux 的全局配色表（新建的模拟器从这里拷贝默认色），
- * 并让 [session] 已有的模拟器重读一遍。光标色按背景明暗自动挑黑/白。
- * ANSI 16 色不动：Claude Code 主要用 256 色/真彩，默认前景才是决定可读性的那个。
+ * 把主题的终端前景/背景和 ANSI 16 色写进 termux 的全局配色表（新建的模拟器从这里拷贝
+ * 默认色），并让 [session] 已有的模拟器重读一遍。光标色按背景明暗自动挑黑/白。
+ * 256 色立方 / 灰阶不动——它们两种底色上都还过得去，真彩更与主题无关。
  */
 fun applyTerminalPalette(p: Palette, session: TerminalSession? = null) {
     val scheme = TerminalColors.COLOR_SCHEME
+    val defaults = termuxDefaultAnsi // 先触发快照，再往表里写
+    val ansi = p.ansi
+    for (i in 0 until 16) {
+        scheme.mDefaultColors[i] = ansi?.get(i)?.toArgb() ?: defaults[i]
+    }
     scheme.mDefaultColors[TextStyle.COLOR_INDEX_FOREGROUND] = p.termFg.toArgb()
     scheme.mDefaultColors[TextStyle.COLOR_INDEX_BACKGROUND] = p.termBg.toArgb()
     scheme.setCursorColorForBackground()

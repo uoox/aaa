@@ -41,14 +41,30 @@ class PaletteTest {
         assertTrue(d.isDark)
     }
 
-    @Test fun lightThemesAreLightAndClaudeKeepsAWarmDarkTerminal() {
+    @Test fun lightThemesHaveLightTerminals() {
         assertFalse(Palette.Light.isDark)
         assertFalse(Palette.Claude.isDark)
         assertEquals(Color(0xFFD97757), Palette.Claude.accent)
-        assertEquals(Color(0xFF2A2825), Palette.Claude.termBg)
-        assertEquals(Color(0xFFF0EEE6), Palette.Claude.termFg)
+        // 两套浅色主题的终端都是亮底暗字；Claude 橙的底是暖白，字就是界面的墨
+        assertTrue(Palette.Claude.termBg.luminance() > 0.9f)
+        assertEquals(Palette.Claude.ink, Palette.Claude.termFg)
         assertEquals(Color(0xFFFFFFFF), Palette.Light.termBg)
         assertEquals(Palette.Light.ink, Palette.Light.termFg)
+    }
+
+    @Test fun lightTerminalsBringTheirOwnAnsiAndDarkKeepsTermux() {
+        // 黑暗沿用 termux 出厂 16 色；亮底主题必须自带一套，且没有一个色比底还亮
+        assertEquals(null, Palette.Dark.ansi)
+        listOf(Palette.Light, Palette.Claude).forEach { p ->
+            val ansi = p.ansi!!
+            assertEquals(16, ansi.size)
+            ansi.forEachIndexed { i, c ->
+                assertTrue("${p.name}[$i] 在亮底上看不见", c.luminance() < 0.6f)
+            }
+            // 15 bright white = 墨色，7 white 是灰而不是白
+            assertEquals(p.ink, ansi[15])
+            assertTrue(ansi[7].luminance() > ansi[15].luminance())
+        }
     }
 
     @Test fun terminalForegroundContrastsWithItsBackgroundOnEveryTheme() {

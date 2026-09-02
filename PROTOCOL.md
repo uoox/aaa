@@ -254,7 +254,7 @@ CLI 开的会话在 Mac App 和手机上同样可见、可接管。旧的 zsh �
 - `attach` = 直接连 `/sessions/:id/attach`：本地终端进 raw 模式，stdin 原样转发为二进制帧，
   窗口大小变化发 `{"t":"resize"}`。**Ctrl-]** 脱离，会话继续留在 daemon 里。
 
-> **主题（2026-09-03）**：两端各有三套主题——黑暗（下表的原始令牌）、明亮（#F6F7F9 底 / #1B2229 墨 / 强调 #0F8A9E）、Claude 橙（Anthropic 象牙 #FAF9F5 底 / #141413 墨 / 强调 #D97757，终端画布暖黑 #2A2825）。令牌是**角色**（bg / surface / ink / dim / faint / edge / accent / term_bg …），下表数值是黑暗主题的取值；原「CYAN」角色改叫 accent。设置里切换，mac 存 `~/.config/aaa-ui/ui.toml`，Android 存 DataStore `theme`。消息流里用户消息是右对齐的强调色气泡，Claude 的回复是整宽正文 + 「✻ Claude」小字标题。
+> **主题（2026-09-03）**：两端各有三套主题——黑暗（下表的原始令牌）、明亮（#F6F7F9 底 / #1B2229 墨 / 强调 #0F8A9E）、Claude 橙（Anthropic 象牙 #FAF9F5 底 / #141413 墨 / 强调 #D97757，终端暖白 #FFFDF7 底 / 墨字，ANSI 走 gruvbox-light）。三套里只有黑暗是暗底终端；两套浅色主题的终端 ANSI 16 色各自带一套亮底可读的（明亮 one-light、Claude gruvbox-light），两端逐色相同。令牌是**角色**（bg / surface / ink / dim / faint / edge / accent / term_bg …），下表数值是黑暗主题的取值；原「CYAN」角色改叫 accent。设置里切换，mac 存 `~/.config/aaa-ui/ui.toml`，Android 存 DataStore `theme`。消息流里用户消息是右对齐的强调色气泡，Claude 的回复是整宽正文 + 「✻ Claude」小字标题。
 
 ## 设计令牌（两端 UI 必须一致，来源 prototype.html）
 
