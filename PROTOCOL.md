@@ -52,7 +52,7 @@ remote_control_name = true    # claude 会话给 Remote Control 起项目名（�
 | pi | Pi | `pi` | `pi --continue` |
 | reasonix | Reasonix | `reasonix --permission-mode bypassPermissions` | `reasonix --continue --permission-mode bypassPermissions` |
 | agy | Antigravity | `agy --dangerously-skip-permissions` | `agy --conversation %ID% --dangerously-skip-permissions` |
-| shell | 终端 | `exec zsh -l` | —（shell 无 resume） |
+| shell | 终端 | `exec zsh -l` | —（shell 无 resume）。**不是 agent**：`/agents` 里带 `terminal:true`，新建项目 / 换 agent 的选择里没有它，见「终端」 |
 
 启动方式：`zsh -lc 'cd <dir> && <cmd>'`，并**由 daemon 显式设置 `PATH`**。
 不能指望 login shell：非交互的 `zsh -l` 只读 `.zprofile`、不读 `.zshrc`，而 PATH 通常维护在后者——
@@ -61,6 +61,18 @@ daemon 在启动时用 `zsh -lic` 问一次「终端里应有的 PATH」（带�
 `~/.npm-global/bin` 等常见安装位置并进去兜底；`/agents` 的 `available` 用**同一份** PATH 判断，
 所以「显示可用」与「真能启动」不会打架。
 会话查找（resume 用）、cwd 探测、purge 的具体逻辑**逐条移植** 旧版 zsh 脚本 `~/.local/bin/aaal` 内嵌 Python（AAA_PY 的 find/detect/collect/purge），存储布局见该脚本注释。
+
+## 终端（2026-09-02：常驻工具，不与 agent 平齐）
+
+- 终端 = `agent:"shell"` 的会话，但**不是项目的会话**：不出现在项目/会话列表和三态分组里，不参与项目主会话判定；daemon 开 shell 会话**不登记项目**（在项目根开也不会把根目录变成项目）。
+- 客户端把它做成**常驻多标签面板**：Android 在首页右上角、设置齿轮左边一个入口；mac 在左侧栏底部、`daemon vX` 状态行上方一个入口。标签 = 存活的 shell 会话按 `created_at` 排序，标为「终端 1…n」（不在项目根开的追加 ` · <目录名>`）；「+」= `POST /sessions {project_path: <health.project_root>, agent:"shell", resume:false, fresh:true}`；关标签 = kill 后 DELETE。
+- 终端没有回放价值：客户端看到 shell 会话 `exited` 就 `DELETE /sessions/:id`（daemon 侧仍按普通会话持久化，200 条上限兜底）。
+- 「在此目录开终端」保留：在该项目目录开一个 shell 会话，同样归终端面板管。
+
+## 消息流渲染约定
+
+- assistant 的 `text`（回复与过程中的中途文本）按 **CommonMark** 渲染：标题、粗斜体、行内代码、围栏代码块（等宽 + 横向滚动 + 语言标签）、有序/无序/嵌套列表、引用、分隔线、链接（可点）、GFM 表格与删除线尽力支持。用户消息、工具输出、thinking 保持纯文本。两端解析器：mac `pulldown-cmark`，Android `org.commonmark`。
+- mac 快捷键：⌘N 新建、⌃Tab 切换会话、⌘E 消息流⇄终端、**⌘W 关闭当前会话**（存活 → 终止确认；已退出 → 删除确认；终端面板里 = 关闭当前标签）。
 
 ## 会话模型
 

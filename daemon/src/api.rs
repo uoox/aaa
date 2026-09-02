@@ -221,6 +221,8 @@ async fn agents_list(State(app): State<SharedApp>) -> Json<Value> {
                 "cmd": a.cmd,
                 "resume_cmd": a.resume_cmd,
                 "available": agents::which(agents::agent_bin(a), &home).is_some(),
+                // 终端不是 agent：新建项目/会话的选择里没有它，它是常驻的终端面板
+                "terminal": a.id == "shell",
             })
         })
         .collect();
@@ -495,7 +497,8 @@ async fn sessions_create(
     // 名册维护：开会话的目录必须在注册表里（项目列表以注册表为准）。
     // 已登记的不动——用户手动设过的 agent 不被这次会话的选择覆盖。
     // 登记失败就不开会话：一个跑着会话却不在名册里的项目治理不了。
-    {
+    // 终端（shell）例外：它是常驻工具，在项目根或任意目录开都不算建项目。
+    if agent.id != "shell" {
         let app2 = Arc::clone(&app);
         let target = canon_str.clone();
         let agent_id = agent.id;

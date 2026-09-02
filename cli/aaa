@@ -584,7 +584,8 @@ def cmd_menu_perms(args):
 
 def cmd_menu_pick(args):
     mapf, title, idx = args[0], args[1], int(args[2])
-    agents = load()
+    # 终端不是 agent（/agents 里 terminal:true）：新建项目 / 换 agent 都不列它
+    agents = [a for a in load() if not a.get("terminal") and S(a, "id") != "shell"]
     with open(mapf, "w", encoding="utf-8") as f:
         for i, a in enumerate(agents):
             f.write(SEP.join([str(i + 1), clean(S(a, "id")), clean(S(a, "label"))]) + "\n")
