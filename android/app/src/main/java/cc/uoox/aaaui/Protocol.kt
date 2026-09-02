@@ -32,7 +32,7 @@ import java.net.URLDecoder
 )
 
 @Serializable data class Health(val version: String = "", val ssd_mounted: Boolean = false, val project_root: String = "", val uptime_s: Long = 0)
-@Serializable data class Agent(val id: String, val label: String, val available: Boolean = false)
+@Serializable data class Agent(val id: String, val label: String, val available: Boolean = false, val terminal: Boolean = false)
 @Serializable data class Project(
     val path: String,
     val name: String,

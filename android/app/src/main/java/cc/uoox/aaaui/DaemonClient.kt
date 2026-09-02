@@ -104,10 +104,11 @@ class DaemonClient(
 
     suspend fun sessions(): List<Session> = json.decodeFromString(ListSerializer(Session.serializer()), get("/sessions"))
 
-    suspend fun createSession(projectPath: String, agent: String, resume: Boolean, feedInbox: Boolean = true): Session {
+    suspend fun createSession(projectPath: String, agent: String, resume: Boolean, feedInbox: Boolean = true, fresh: Boolean = false): Session {
         val body = buildJsonObject {
             put("project_path", projectPath); put("agent", agent); put("resume", resume)
             if (!feedInbox) put("feed_inbox", false)
+            if (fresh) put("fresh", true)
         }
         return json.decodeFromString(post("/sessions", body.toString()))
     }

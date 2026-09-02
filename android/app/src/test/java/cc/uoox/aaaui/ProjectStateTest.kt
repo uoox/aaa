@@ -38,8 +38,13 @@ class ProjectStateTest {
         val shell = s("sh", "running", "2026-09-02T12:00:00Z").copy(agent = "shell")
         val idle = s("i", "idle", "2026-09-02T08:00:00Z")
         assertSame(idle, primarySessionFor(p, listOf(shell, idle)))
-        // claude 会话一个都没有时才退到终端
-        assertSame(shell, primarySessionFor(p, listOf(shell)))
+        assertNull(primarySessionFor(p, listOf(shell)))
+    }
+
+    @Test fun shellNeverBecomesPrimaryEvenWhenNewestAndRealSessionExited() {
+        val shell = s("sh", "running", "2026-09-02T12:00:00Z").copy(agent = "shell")
+        val exited = s("x", "exited", "2026-09-02T08:00:00Z")
+        assertSame(exited, primarySessionFor(p, listOf(exited, shell)))
     }
 
     @Test fun liveSessionWinsOverANewerExitedOne() {

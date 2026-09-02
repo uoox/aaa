@@ -36,6 +36,11 @@ class ProtocolTest {
         assertFalse(json.decodeFromString<Session>("""{"id":"s_2","state":"idle"}""").asking)
     }
 
+    @Test fun agentTerminalFieldDefaultsAndParses() {
+        assertTrue(json.decodeFromString<Agent>("""{"id":"shell","label":"终端","terminal":true}""").terminal)
+        assertFalse(json.decodeFromString<Agent>("""{"id":"claude","label":"Claude"}""").terminal)
+    }
+
     @Test fun questionMessageCarriesTheForm() {
         val m = json.decodeFromString<ChatMessage>(
             """{"seq":7,"ts":"2026-09-02T10:00:00.000Z","role":"assistant","kind":"question","text":"Pick fruits",

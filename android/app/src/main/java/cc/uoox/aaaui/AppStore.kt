@@ -69,6 +69,7 @@ class AppStore private constructor(context: Context) {
     private var loopJob: Job? = null
     private val reconnectKick = Channel<Unit>(Channel.CONFLATED)
     private val prevStates = HashMap<String, String>()
+    private val shellDeletes = java.util.Collections.synchronizedSet(mutableSetOf<String>())
     private val attachments = HashMap<String, TerminalAttachment>()
     private val pendingRelease = HashMap<String, Job>()
 
@@ -176,14 +177,16 @@ class AppStore private constructor(context: Context) {
                     frame.sessions.forEach { prevStates[it.id] = it.state }
                 }
                 _sessions.value = frame.sessions
+                frame.sessions.filter { it.agent == "shell" && it.state == "exited" }.forEach(::cleanupExitedShell)
             }
             is EventFrame.SessionUpdate -> {
                 val s = frame.session
                 val prev = synchronized(prevStates) { val p = prevStates[s.id]; prevStates[s.id] = s.state; p }
                 _sessions.value = _sessions.value.filter { it.id != s.id } + s
-                if (s.state == "waiting" && prev == "running") _notifyEvents.tryEmit(NotifyEvent.Done(s, exited = false))
+                if (s.agent == "shell" && s.state == "exited") cleanupExitedShell(s)
+                if (s.agent != "shell" && s.state == "waiting" && prev == "running") _notifyEvents.tryEmit(NotifyEvent.Done(s, exited = false))
                 // 本机手动终止的会话不弹「会话结束」——自己动的手不用报告
-                if (s.state == "exited" && prev == "running" && !userKilled.remove(s.id)) {
+                if (s.agent != "shell" && s.state == "exited" && prev == "running" && !userKilled.remove(s.id)) {
                     _notifyEvents.tryEmit(NotifyEvent.Done(s, exited = true))
                 }
             }
@@ -199,6 +202,12 @@ class AppStore private constructor(context: Context) {
             is EventFrame.MessagesChanged, is EventFrame.InboxChanged -> _frames.tryEmit(frame)
             is EventFrame.Unknown -> { }
         }
+    }
+
+    /** 终端退出后没有回放价值，尽快从 daemon 与本地 attach 注册表清掉。 */
+    private fun cleanupExitedShell(s: Session) {
+        releaseAttachmentNow(s.id)
+        if (shellDeletes.add(s.id)) scope.launch { runCatching { client?.deleteSession(s.id) } }
     }
 
     // ---------- 终端 attach 注册表 ----------
@@ -271,3 +280,6 @@ class AppStore private constructor(context: Context) {
         runCatching { api.health() }.onSuccess { _health.value = it }
     }
 }
+
+fun terminalSessions(sessions: List<Session>): List<Session> =
+    sessions.filter { it.agent == "shell" && it.state != "exited" }.sortedBy { it.created_at }

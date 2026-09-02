@@ -129,6 +129,9 @@ fun AaaApp(
             composable("pair") { PairScreen(store) { nav.navigate("home") { popUpTo("pair") { inclusive = true } } } }
             composable("home") { HomeScreen(store, nav) }
             composable("settings") { SettingsScreen(store, nav) }
+            composable("terminal?focus={focus}", arguments = listOf(androidx.navigation.navArgument("focus") { defaultValue = "" })) { entry ->
+                TerminalScreen(store, nav, focusId = entry.arguments?.getString("focus").orEmpty())
+            }
             composable(
                 "session/{id}?prefill={prefill}",
                 arguments = listOf(
@@ -147,6 +150,10 @@ fun AaaApp(
             }
         }
     }
+}
+
+fun NavHostController.openTerminal(focusId: String? = null) {
+    navigate("terminal?focus=${Uri.encode(focusId ?: "")}") { launchSingleTop = true }
 }
 
 // ---------- A1 配对 ----------
@@ -280,7 +287,7 @@ fun HomeScreen(store: AppStore, nav: NavHostController) {
 
 // ---------- A5 新建（也用于「用其它 agent 打开」） ----------
 
-private val NEW_AGENTS = listOf("claude", "codex", "pi", "reasonix", "agy", "shell")
+private val NEW_AGENTS = listOf("claude", "codex", "pi", "reasonix", "agy")
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -292,7 +299,7 @@ fun NewSessionSheet(store: AppStore, nav: NavHostController, initialPath: String
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var agents by remember { mutableStateOf<List<Agent>>(emptyList()) }
-    LaunchedEffect(Unit) { runCatching { store.client?.agents()?.let { agents = it } } }
+    LaunchedEffect(Unit) { runCatching { store.client?.agents()?.let { agents = it.filterNot { agent -> agent.terminal } } } }
 
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = Tok.Surface) {
         Column(Modifier.padding(horizontal = 16.dp).padding(bottom = 24.dp)) {

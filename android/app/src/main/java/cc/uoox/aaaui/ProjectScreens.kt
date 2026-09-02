@@ -60,7 +60,7 @@ import kotlinx.coroutines.launch
 
 /**
  * 项目行的三态。一个项目只有一个 agent（建项目时定死，从不切换），项目 ↔ 会话
- * 事实上一对一，所以会话状态直接挂在项目行上，首页不再单开会话页。全部由客户端
+ * 事实上一对一，所以会话状态直接挂在项目行上，首页不再单开会话页。终端永远不代表项目。全部由客户端
  * 把 projects × sessions 两个流拼出来，daemon 不用改。
  *
  * 枚举顺序就是首页分组顺序。
@@ -92,10 +92,10 @@ fun Session.needsReply(): Boolean = asking
 
 /**
  * 主会话：优先活着的（非 exited），待回复 < 执行中 < 其它，同级按最近输出；
- * 全都退出了就取最近退出的那个。
+ * 全都退出了就取最近退出的那个；终端永远不进入候选池。
  */
 fun primarySessionFor(project: Project, sessions: List<Session>): Session? {
-    val all = sessions.filter { it.project_path == project.path }
+    val all = sessions.filter { it.project_path == project.path && it.agent != "shell" }
     if (all.isEmpty()) return null
     // 项目的 agent 建项目时就定了；同目录里另开的终端（shell）不能替它代表项目状态，
     // 只有项目 agent 的会话一个都没有时才退到其它会话
@@ -247,6 +247,13 @@ fun ProjectsHome(store: AppStore, nav: NavHostController) {
             if (health?.ssd_mounted == false) {
                 Text("SSD ✗", color = Tok.Red, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.width(4.dp))
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = { nav.openTerminal() }) {
+                    Text(">_", color = Tok.Dim, fontSize = 16.sp, fontFamily = FontFamily.Monospace)
+                }
+                val terminalCount = terminalSessions(sessions).size
+                if (terminalCount > 0) Text(terminalCount.toString(), color = Tok.Cyan, fontSize = 10.sp)
             }
             IconButton(onClick = { nav.navigate("settings") }) {
                 Text("⚙", color = Tok.Dim, fontSize = 20.sp)
@@ -431,8 +438,8 @@ fun ProjectActionsSheet(
             SheetItem("＞", "在此目录开终端", "zsh") {
                 scope.launch {
                     try {
-                        val sess = store.client?.createSession(p.path, "shell", resume = false) ?: return@launch
-                        onDismiss(); openSession(sess.id, "")
+                        val sess = store.client?.createSession(p.path, "shell", resume = false, fresh = true) ?: return@launch
+                        onDismiss(); nav.openTerminal(sess.id)
                     } catch (e: Exception) { toast("失败：${e.message}") }
                 }
             }
