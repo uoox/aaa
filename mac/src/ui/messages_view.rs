@@ -1130,7 +1130,7 @@ fn md_inline(spans: &[Span], ids: &mut MdIds) -> AnyElement {
             styled = true;
         }
         if s.code {
-            hl.background_color = Some(c(theme::term_bg()).into());
+            hl.background_color = Some(c(theme::code_bg()).into());
             hl.color = Some(c(theme::code_ink()).into());
             families.push((range.clone(), "Menlo".into()));
             styled = true;

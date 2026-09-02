@@ -303,6 +303,12 @@ pub fn inset() -> u32 {
 pub fn code_ink() -> u32 {
     palette().code_ink()
 }
+/// 行内代码的底：黑暗主题是终端底（比正文底更深，一眼分出来）；浅色主题的终端底
+/// 跟纸面几乎同色，改用 surface_raised 才看得出是块芯片
+pub fn code_bg() -> u32 {
+    let p = palette();
+    if p.is_dark { p.term_bg } else { p.surface_raised }
+}
 /// 实心主按钮上的字色
 pub fn on_accent() -> u32 {
     text_on(accent())
