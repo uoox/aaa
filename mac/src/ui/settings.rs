@@ -195,6 +195,9 @@ impl RootView {
         if let Some(h) = &self.health {
             info = info
                 .child(kv_row("版本", format!("aaa-daemon v{}", h.version), None))
+                .when(h.update_pending, |el| {
+                    el.child(kv_row("更新", "有新构建，需重启才生效".into(), Some(theme::amber())))
+                })
                 .child(kv_row("运行", format!("{} 分钟", h.uptime_s / 60), None))
                 .child(kv_row("项目根", h.project_root.clone(), None))
                 .child(kv_row(
@@ -209,6 +212,20 @@ impl RootView {
         }
         if let Some(ep) = &ep {
             info = info.child(kv_row("地址", format!("{}:{}", ep.host, ep.port), None));
+        }
+        // 重启：有新构建时用主色提醒，其余时候是个普通次要按钮
+        if self.health.is_some() {
+            let pending = self.health.as_ref().is_some_and(|h| h.update_pending);
+            let btn = if pending {
+                btn_primary("restart-daemon", "重启 daemon")
+            } else {
+                btn_secondary("restart-daemon", "重启 daemon")
+            };
+            info = info.child(
+                div().pt(px(8.)).child(
+                    btn.on_click(cx.listener(|this, _, _, cx| this.request_restart_daemon(cx))),
+                ),
+            );
         }
         let pair_sect = card()
             .child(sect_title("配对 · Android 扫码自动填入地址与 TOKEN"))

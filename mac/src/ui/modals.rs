@@ -197,6 +197,7 @@ impl RootView {
             } => self.render_delete_confirm(paths, report, *busy, cx),
             Modal::RenameSession { id } => self.render_rename_session(id.clone(), cx),
             Modal::ConfirmKill { id } => self.render_confirm_kill(id.clone(), cx),
+            Modal::ConfirmRestart { alive } => self.render_confirm_restart(*alive, cx),
             Modal::ConfirmDeleteSession { id } => {
                 self.render_confirm_delete_session(id.clone(), cx)
             }
@@ -546,6 +547,74 @@ impl RootView {
             cx,
         );
         cx.notify();
+    }
+
+    /// 设置页「重启 daemon」：没有存活会话直接重启，有就先弹 ConfirmRestart
+    pub(super) fn request_restart_daemon(&mut self, cx: &mut Context<Self>) {
+        let alive = self.sessions.iter().filter(|s| super::is_active(s)).count();
+        if alive > 0 {
+            self.modal = Modal::ConfirmRestart { alive };
+            cx.notify();
+        } else {
+            self.restart_daemon(false, cx);
+        }
+    }
+
+    pub(super) fn restart_daemon(&mut self, force: bool, cx: &mut Context<Self>) {
+        self.modal = Modal::None;
+        let net = self.net.clone();
+        cx.spawn(async move |this, cx| {
+            let res = net.restart_daemon(force).await;
+            let _ = this.update(cx, |r, cx| {
+                match res {
+                    Ok(_) => {
+                        // exec 期间连接会断一下；置成连接中，重连逻辑自己接上
+                        r.conn = super::ConnState::Connecting;
+                        r.health = None;
+                    }
+                    Err(e) => r.set_error(format!("重启失败：{e}"), cx),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn render_confirm_restart(&self, alive: usize, cx: &mut Context<Self>) -> gpui::Div {
+        self.modal_box()
+            .child(
+                div()
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_size(px(15.))
+                    .pb(px(10.))
+                    .child("重启 daemon？"),
+            )
+            .child(
+                div()
+                    .text_size(px(12.5))
+                    .text_color(c(theme::dim()))
+                    .pb(px(14.))
+                    .child(SharedString::from(format!(
+                        "有 {alive} 个会话还活着。daemon 的 PTY 都是它的子进程，重启会把它们一起终止；屏幕回放保留，之后可以从项目行 resume。"
+                    ))),
+            )
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap(px(8.))
+                    .child(
+                        btn_secondary("rs-cancel", "取消").on_click(cx.listener(|this, _, _, cx| {
+                            this.modal = Modal::None;
+                            cx.notify();
+                        })),
+                    )
+                    .child(
+                        btn_danger("rs-ok", "终止并重启")
+                            .on_click(cx.listener(|this, _, _, cx| this.restart_daemon(true, cx))),
+                    ),
+            )
     }
 
     fn render_confirm_config(

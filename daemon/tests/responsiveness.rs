@@ -42,6 +42,7 @@ fn build_app(root: &Path, home: &Path) -> aaa_daemon::api::SharedApp {
         inbox: std::sync::Mutex::new(inbox),
         root_state: std::sync::atomic::AtomicU8::new(aaa_daemon::rootcheck::RootState::Ok.as_u8()),
         restarting: std::sync::atomic::AtomicBool::new(false),
+        exe_mtime_at_start: None,
     })
 }
 

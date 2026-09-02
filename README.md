@@ -53,7 +53,7 @@ aaa perms all                     # 或 aaa perms 只看状态
 ```
 
 config.toml 要点：`port=2730`（=0xAAA）、`project_root=/Volumes/SSD/project`、`namer`（haiku 会话命名）、
-`auto_trust`（默认 true：新项目第一屏的 Claude Code 信任对话框由 daemon 替你按 Enter）、`[checkpoint] enabled/auto_init_git/interval_minutes/auto_init_max_mb`。旧的 `[watchdog]`/`[ntfy]` 段已废弃（留着无害）。
+`auto_trust`（默认 true：新项目第一屏的 Claude Code 信任对话框由 daemon 替你按 Enter）、两端设置页有「重启 daemon」按钮（`POST /restart`；有活会话先确认再强制），二进制重新构建后设置页会亮「有新构建，需重启」。`[checkpoint] enabled/auto_init_git/interval_minutes/auto_init_max_mb`。旧的 `[watchdog]`/`[ntfy]` 段已废弃（留着无害）。
 
 > **`auto_init_git` 默认 false**：项目常常只是一个任务目录（笔记、抓取、一堆 yml），
 > 替你 `git init` 不是 daemon 该做的事。已经是 git 仓库的项目照常有检查点/diff/回滚；

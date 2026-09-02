@@ -17,6 +17,14 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import android.widget.Toast
+import kotlinx.coroutines.delay
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -44,7 +52,33 @@ fun SettingsScreen(store: AppStore, nav: NavHostController) {
     val conn by store.connState.collectAsState()
     val health by store.health.collectAsState()
 
+    val sessions by store.sessions.collectAsState()
+    var restartDialog by remember { mutableStateOf(false) }
+
     LaunchedEffect(conn) { if (conn is ConnState.Connected) store.refreshHealth() }
+
+    fun restartDaemon(force: Boolean) {
+        scope.launch {
+            try {
+                store.client?.restartDaemon(force)
+                Toast.makeText(context, "已发出重启，稍候自动重连", Toast.LENGTH_SHORT).show()
+                delay(2500); store.refreshHealth(); store.refreshSessions()
+            } catch (e: Exception) {
+                Toast.makeText(context, "重启失败：${e.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+    if (restartDialog) {
+        val alive = sessions.count { it.state != "exited" }
+        AlertDialog(
+            onDismissRequest = { restartDialog = false },
+            containerColor = Tok.Raised,
+            title = { Text("重启 daemon？", color = Tok.Ink) },
+            text = { Text("有 $alive 个会话还活着。daemon 的 PTY 都是它的子进程，重启会把它们一起终止；屏幕回放保留，之后可从项目行继续。", color = Tok.Dim) },
+            confirmButton = { TextButton(onClick = { restartDialog = false; restartDaemon(true) }) { Text("终止并重启", color = Tok.Red) } },
+            dismissButton = { TextButton(onClick = { restartDialog = false }) { Text("取消", color = Tok.Dim) } },
+        )
+    }
 
     Column(Modifier.fillMaxSize().background(Tok.Bg)) {
         // 顶栏：与 InboxScreen / SessionScreen 同一套「‹ + 标题」写法，不引 TopAppBar
@@ -127,14 +161,6 @@ fun SettingsScreen(store: AppStore, nav: NavHostController) {
                     }
                 }
             }
-            // 终端字号：双指缩放也会改它（并记住），这里是精确调 / 改回默认的地方
-            Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("终端字号", color = Tok.Ink, fontSize = 14.sp, modifier = Modifier.weight(1f))
-                TextButton(onClick = { scope.launch { store.settings.setFontSize(settings.fontSize - 1) } }) { Text("－", color = Tok.Ink) }
-                Text("${settings.fontSize}", color = Tok.Ink, fontSize = 14.sp, fontFamily = FontFamily.Monospace)
-                TextButton(onClick = { scope.launch { store.settings.setFontSize(settings.fontSize + 1) } }) { Text("＋", color = Tok.Ink) }
-                if (settings.fontSize != 14) TextButton(onClick = { scope.launch { store.settings.setFontSize(14) } }) { Text("重置", fontSize = 12.sp) }
-            }
         }
 
         // ---------- 界面 ----------
@@ -159,6 +185,8 @@ fun SettingsScreen(store: AppStore, nav: NavHostController) {
                 TextButton(onClick = { scope.launch { store.settings.setFontSize(settings.fontSize - 1) } }) { Text("−", fontSize = 18.sp) }
                 Text("${settings.fontSize}", color = Tok.Ink, fontFamily = FontFamily.Monospace)
                 TextButton(onClick = { scope.launch { store.settings.setFontSize(settings.fontSize + 1) } }) { Text("＋", fontSize = 16.sp) }
+                // 双指缩放也会改它并记住；一次误捏之后从这里回默认
+                if (settings.fontSize != 14) TextButton(onClick = { scope.launch { store.settings.setFontSize(14) } }) { Text("重置", fontSize = 12.sp) }
             }
         }
 
@@ -179,6 +207,17 @@ fun SettingsScreen(store: AppStore, nav: NavHostController) {
                 }
                 SettingRow("项目根") { Text(h.project_root, color = Tok.Dim, fontSize = 12.sp, fontFamily = FontFamily.Monospace) }
                 SettingRow("运行时长") { Text(formatUptime(h.uptime_s), color = Tok.Dim, fontSize = 13.sp) }
+                if (h.update_pending) {
+                    SettingRow("更新") { Text("有新构建，需重启才生效", color = Tok.Amber, fontSize = 13.sp) }
+                }
+                // 重启：daemon 的 PTY 都是它的子进程，有存活会话时先问一声再强制
+                val alive = sessions.count { it.state != "exited" }
+                SettingRow("重启 daemon") {
+                    Button(
+                        onClick = { if (alive > 0) restartDialog = true else restartDaemon(false) },
+                        colors = if (h.update_pending) ButtonDefaults.buttonColors() else ButtonDefaults.outlinedButtonColors(),
+                    ) { Text(if (alive > 0) "重启（$alive 个活会话）" else "重启", fontSize = 13.sp) }
+                }
             }
         }
         }

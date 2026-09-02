@@ -174,6 +174,10 @@ pub enum Modal {
     ConfirmKill {
         id: String,
     },
+    /// 重启 daemon 会终止全部存活会话：有几个就先问一声
+    ConfirmRestart {
+        alive: usize,
+    },
     ConfirmDeleteSession {
         id: String,
     },

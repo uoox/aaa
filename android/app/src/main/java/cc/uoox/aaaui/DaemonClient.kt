@@ -84,6 +84,8 @@ class DaemonClient(
     // ---------- v1 ----------
 
     suspend fun health(): Health = json.decodeFromString(get("/health"))
+    /** `POST /restart`：force = 连存活会话一起终止。有存活会话且不 force → 409 */
+    suspend fun restartDaemon(force: Boolean): String = post("/restart", """{"force":$force}""")
     suspend fun agents(): List<Agent> = json.decodeFromString(ListSerializer(Agent.serializer()), get("/agents"))
     suspend fun projects(): List<Project> = json.decodeFromString(ListSerializer(Project.serializer()), get("/projects"))
 

@@ -123,6 +123,7 @@ fn run() {
         inbox: std::sync::Mutex::new(inbox),
         root_state: std::sync::atomic::AtomicU8::new(root_state.as_u8()),
         restarting: std::sync::atomic::AtomicBool::new(false),
+        exe_mtime_at_start: crate::api::exe_mtime(),
     });
 
     let rt = tokio::runtime::Builder::new_multi_thread()

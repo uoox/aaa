@@ -48,6 +48,14 @@ pub struct App {
     /// `PUT /config` 已受理、self-exec 在倒计时：期间拒绝新建会话和第二个
     /// 配置写——409 检查到 exec 之间开出来的 PTY 会被无声杀掉。
     pub restarting: std::sync::atomic::AtomicBool,
+    /// 启动时本二进制的 mtime。/health 拿它和磁盘上现在的比：不一样 = 有新构建
+    /// 还没跑起来，客户端据此提示「需重启」。
+    pub exe_mtime_at_start: Option<std::time::SystemTime>,
+}
+
+/// 现在磁盘上 aaa-daemon 二进制的 mtime（None = 读不到，当作没变）
+pub fn exe_mtime() -> Option<std::time::SystemTime> {
+    std::env::current_exe().ok()?.metadata().ok()?.modified().ok()
 }
 
 impl App {
@@ -207,7 +215,74 @@ async fn health(State(app): State<SharedApp>) -> Json<Value> {
         "root_state": app.root_state().code(),
         "project_root": app.cfg.project_root,
         "uptime_s": app.started.elapsed().as_secs(),
+        // 二进制被重新构建过、进程还是旧的：设置页据此亮「需重启」
+        "update_pending": app.exe_mtime_at_start.is_some() && exe_mtime() != app.exe_mtime_at_start,
+        "restarting": app.restarting.load(std::sync::atomic::Ordering::SeqCst),
     }))
+}
+
+#[derive(Deserialize, Default)]
+struct RestartBody {
+    #[serde(default)]
+    force: bool,
+}
+
+/// 有存活会话时能不能重启：不 force 一律拒绝并把它们的名字报出来，
+/// 让客户端有话可说（「先结束这 3 个」）。
+pub fn restart_blockers(alive: &[String], force: bool) -> Result<(), String> {
+    if alive.is_empty() || force {
+        Ok(())
+    } else {
+        Err(format!(
+            "有 {} 个存活会话（{}）。重启会终止它们，先结束或勾选强制",
+            alive.len(),
+            alive.join("、")
+        ))
+    }
+}
+
+/// `POST /restart`：exec 自身（PID 不变，launchd 不受影响）。所有 PTY 都是本进程的
+/// 子进程，重启 = 全部终止；所以有存活会话时要 `force`，并且先把它们正经 kill 掉
+/// （屏幕回放留着），不让它们在 exec 时无声消失。
+async fn restart(
+    State(app): State<SharedApp>,
+    body: Option<Json<RestartBody>>,
+) -> ApiResult<Json<Value>> {
+    let force = body.map(|b| b.force).unwrap_or(false);
+    if app
+        .restarting
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        )
+        .is_err()
+    {
+        return Err(ApiError::conflict("daemon 已在重启"));
+    }
+    let alive: Vec<Arc<crate::pool::Session>> = app
+        .pool
+        .list()
+        .into_iter()
+        .filter(|s| s.state() != SState::Exited)
+        .collect();
+    let titles: Vec<String> = alive.iter().map(|s| s.meta.lock().unwrap().title.clone()).collect();
+    if let Err(msg) = restart_blockers(&titles, force) {
+        app.restarting.store(false, std::sync::atomic::Ordering::SeqCst);
+        return Err(ApiError::conflict(msg));
+    }
+    for s in &alive {
+        s.meta.lock().unwrap().user_killed = true;
+        kill_and_wait(s, 25, 120).await;
+    }
+    crate::daemon::restart_self_after_ms(600);
+    Ok(Json(json!({
+        "ok": true,
+        "restarting": true,
+        "killed": titles,
+        "note": "daemon 将在 1 秒内重启，客户端会自动重连"
+    })))
 }
 
 async fn agents_list(State(app): State<SharedApp>) -> Json<Value> {
@@ -1366,12 +1441,22 @@ pub fn router(app: SharedApp) -> Router {
         .route("/api/v1/mac/permissions/request", post(mac_permissions_request))
         .route("/api/v1/pair", get(pair_handler))
         .route("/api/v1/config", get(config_get).put(config_put))
+        .route("/api/v1/restart", post(restart))
         .layer(middleware::from_fn_with_state(Arc::clone(&app), auth_mw))
         .with_state(app)
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn restart_refuses_live_sessions_unless_forced() {
+        assert!(restart_blockers(&[], false).is_ok());
+        let two = ["改登录页".to_string(), "aaa-ui".to_string()];
+        let err = restart_blockers(&two, false).unwrap_err();
+        assert!(err.contains("2 个") && err.contains("改登录页、aaa-ui"));
+        assert!(restart_blockers(&two, true).is_ok());
+    }
+
     #[test]
     fn multiline_input_is_a_bracketed_paste_only_when_the_tui_asked() {
         assert_eq!(encode_input("hi", true), b"hi".to_vec());

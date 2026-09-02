@@ -249,6 +249,10 @@ impl Net {
             serde_json::json!({ "answers": answers }),
         )
     }
+    /// `POST /restart`：force = 连存活会话一起终止
+    pub fn restart_daemon(&self, force: bool) -> impl Future<Output = Result<serde_json::Value>> + use<> {
+        self.post_json("/restart", serde_json::json!({ "force": force }))
+    }
     pub fn kill_session(&self, id: &str) -> impl Future<Output = Result<serde_json::Value>> + use<> {
         self.post_json(&format!("/sessions/{id}/kill"), serde_json::json!({}))
     }

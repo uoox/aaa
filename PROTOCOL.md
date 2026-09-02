@@ -122,6 +122,7 @@ CLI 的 `ls` / 交互菜单仍按「执行中 / 待回复 / 已完成」三组�
 | POST | `/mac/permissions/request` | 见「macOS 权限」 |
 | GET | `/pair` | `{payload}`，二维码内容（见「配对」） |
 | GET | `/config` | `{port, token, project_root}`（以磁盘 config.toml 为准） |
+| POST | `/restart` | `{force?}`：daemon `exec` 自身（PID 不变，launchd 不受影响）。PTY 都是子进程，重启 = 全部终止，所以有非 exited 会话且不 `force` → 409（消息里列出它们）；`force` 时先逐个 kill（回放保留）再重启。`/health` 多两个字段：`update_pending`（磁盘上的二进制比运行中的新）、`restarting` |
 | PUT | `/config` | `{port?, token?, project_root?, migrate?}`。**写盘 + daemon 自我重启**（`exec` 自身，PID 不变，launchd 托管不受影响）；有非 exited 会话 → 409。`project_root` 变更且 `migrate=true`：先把各项目对话 id 采进注册表，再整根 `rename`（同卷限定，跨卷报错让人手动拷），最后重写注册表路径前缀；`migrate=false` 时要求新目录已存在，只改指向 |
 
 ## WS

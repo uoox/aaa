@@ -115,6 +115,9 @@ pub struct Health {
     pub project_root: String,
     #[serde(default)]
     pub uptime_s: u64,
+    /// 二进制被重新构建过、跑的还是旧进程：设置页亮「需重启」
+    #[serde(default)]
+    pub update_pending: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
