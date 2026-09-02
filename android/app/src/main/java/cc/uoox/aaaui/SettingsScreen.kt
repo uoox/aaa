@@ -127,6 +127,14 @@ fun SettingsScreen(store: AppStore, nav: NavHostController) {
                     }
                 }
             }
+            // 终端字号：双指缩放也会改它（并记住），这里是精确调 / 改回默认的地方
+            Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("终端字号", color = Tok.Ink, fontSize = 14.sp, modifier = Modifier.weight(1f))
+                TextButton(onClick = { scope.launch { store.settings.setFontSize(settings.fontSize - 1) } }) { Text("－", color = Tok.Ink) }
+                Text("${settings.fontSize}", color = Tok.Ink, fontSize = 14.sp, fontFamily = FontFamily.Monospace)
+                TextButton(onClick = { scope.launch { store.settings.setFontSize(settings.fontSize + 1) } }) { Text("＋", color = Tok.Ink) }
+                if (settings.fontSize != 14) TextButton(onClick = { scope.launch { store.settings.setFontSize(14) } }) { Text("重置", fontSize = 12.sp) }
+            }
         }
 
         // ---------- 界面 ----------

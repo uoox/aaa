@@ -127,6 +127,8 @@ fun SessionScreen(
     var composer by rememberSaveable { mutableStateOf(prefill) }
     var showMenu by remember { mutableStateOf(false) }
     var ctrlSticky by remember { mutableStateOf(false) }
+    // 终端视图的键位条 + 输入框：默认收起，右下角 ⌨ 放出来；不持久化，每次进来都是收起的
+    var keysOpen by rememberSaveable { mutableStateOf(false) }
 
     // 终端 attach：实例归 AppStore 管（折叠/展开会重建本 composable），这里只负责
     // 把当前这份 TerminalView / Context 绑上去，并跟着 daemon 重连重新取一次。
@@ -221,7 +223,8 @@ fun SessionScreen(
         }
     }
 
-    Column(Modifier.fillMaxSize().background(Tok.Bg).navigationBarsPadding().imePadding()) {
+    Box(Modifier.fillMaxSize().background(Tok.Bg).navigationBarsPadding().imePadding()) {
+    Column(Modifier.fillMaxSize()) {
         // 顶栏
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
@@ -280,9 +283,14 @@ fun SessionScreen(
                     viewClientFactory = { view ->
                         object : TerminalViewClient {
                             override fun onScale(scale: Float): Float {
+                                // 双指缩放改的是全局字号并且会记住——一次误捏就让所有终端变大。
+                                // 所以每一步都报出来（toast），并把上限收到 22。要精确就去设置里调。
                                 if (scale < 0.9f || scale > 1.1f) {
-                                    val target = (settings.fontSize * scale).toInt().coerceIn(8, 28)
-                                    scope.launch { store.settings.setFontSize(target) }
+                                    val target = (settings.fontSize * scale).toInt().coerceIn(10, 22)
+                                    if (target != settings.fontSize) {
+                                        scope.launch { store.settings.setFontSize(target) }
+                                        Toast.makeText(context, "终端字号 $target（设置里可改回）", Toast.LENGTH_SHORT).show()
+                                    }
                                     return 1.0f
                                 }
                                 return scale
@@ -324,8 +332,8 @@ fun SessionScreen(
             }
         }
 
-        // 快捷键条（仅终端视图）
-        if (!showMessages) {
+        // 快捷键条（仅终端视图，且要先用 ⌨ 放出来）
+        if (!showMessages && keysOpen) {
             Row(
                 Modifier.fillMaxWidth().background(Tok.Surface).horizontalScroll(rememberScrollState())
                     .padding(horizontal = 8.dp, vertical = 5.dp),
@@ -335,10 +343,7 @@ fun SessionScreen(
                 // cursor 模式给出正确的转义序列；字面符号直接写进 PTY。
                 fun key(code: Int) = { terminalViewRef.value?.handleKeyCode(code, 0); Unit }
                 fun lit(ch: String) = { attachment?.session?.write(ch); Unit }
-                // ⌨ 收起 / 放出预输入框。收起后点终端直接拉软键盘、键入直达 PTY；选择全局记住。
-                KeyChip("⌨", active = !settings.terminalComposerHidden) {
-                    scope.launch { store.settings.setTerminalComposerHidden(!settings.terminalComposerHidden) }
-                }
+                KeyChip("⌨", active = true) { keysOpen = false }
                 KeyChip("Esc", onClick = key(KeyEvent.KEYCODE_ESCAPE))
                 KeyChip("Tab", onClick = key(KeyEvent.KEYCODE_TAB))
                 KeyChip("Ctrl", active = ctrlSticky) { ctrlSticky = !ctrlSticky }
@@ -346,9 +351,12 @@ fun SessionScreen(
                 KeyChip("↓", onClick = key(KeyEvent.KEYCODE_DPAD_DOWN))
                 KeyChip("←", onClick = key(KeyEvent.KEYCODE_DPAD_LEFT))
                 KeyChip("→", onClick = key(KeyEvent.KEYCODE_DPAD_RIGHT))
+                KeyChip("⏎", onClick = key(KeyEvent.KEYCODE_ENTER))
+                // Claude Code 的输入框里换行：`\` + Return（官方的「quick escape」，任何终端都认）。
+                // 不用 Shift/Alt+Enter 的转义序列——那要终端和 TUI 两头都配好才不会被当成 Esc。
+                KeyChip("换行", onClick = lit("\\\r"))
                 KeyChip("Home", onClick = key(KeyEvent.KEYCODE_MOVE_HOME))
                 KeyChip("End", onClick = key(KeyEvent.KEYCODE_MOVE_END))
-                KeyChip("⏎", onClick = key(KeyEvent.KEYCODE_ENTER))
                 // 手机键盘上最难摸到的几个：flag 的 -、路径与 slash 命令的 /、管道、家目录
                 KeyChip("-", onClick = lit("-"))
                 KeyChip("/", onClick = lit("/"))
@@ -359,8 +367,8 @@ fun SessionScreen(
             }
         }
 
-        // composer（终端视图下可用键位条的 ⌨ 收起；消息流视图始终在）
-        if (showMessages || !settings.terminalComposerHidden) {
+        // composer：消息流视图始终在；终端视图下跟键位条一起收放
+        if (showMessages || keysOpen) {
             Row(
                 Modifier.fillMaxWidth().background(Tok.Surface).padding(horizontal = 8.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -368,7 +376,8 @@ fun SessionScreen(
                 Text("📎", fontSize = 18.sp, modifier = Modifier.clickable { filePicker.launch("*/*") }.padding(6.dp))
                 OutlinedTextField(
                     composer, { composer = it },
-                    placeholder = { Text("输入消息，⏎ 发送", color = Tok.Faint, fontSize = 13.sp) },
+                    // 键盘回车是换行；多行文本 daemon 会包成一次粘贴发进去，不会在第一行就提交
+                    placeholder = { Text("输入消息，可多行", color = Tok.Faint, fontSize = 13.sp) },
                     modifier = Modifier.weight(1f),
                     maxLines = 4,
                     textStyle = androidx.compose.ui.text.TextStyle(color = Tok.Ink, fontSize = 14.sp),
@@ -380,6 +389,11 @@ fun SessionScreen(
                 ) { Text("发送") }
             }
         }
+    }
+    // 终端视图下键位条收起时：右下角一枚 ⌨ 把它放出来（悬浮在终端上，不占一行）
+    if (!showMessages && !keysOpen) {
+        Box(Modifier.align(Alignment.BottomEnd).padding(end = 14.dp, bottom = 14.dp)) { KeyChip("⌨") { keysOpen = true } }
+    }
     }
 
     if (showMenu && s != null) {

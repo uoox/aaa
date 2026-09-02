@@ -112,7 +112,7 @@ CLI 的 `ls` / 交互菜单仍按「执行中 / 待回复 / 已完成」三组�
 | POST | `/projects/agent` | `{path, agent}` 写注册表 |
 | GET | `/sessions` | 全部会话（含 exited） |
 | POST | `/sessions` | `{project_path, agent, resume}`；resume=true 时按 aaa 逻辑找最近会话套 resume 模板；目录不存在则创建（但见 SSD 守卫） |
-| POST | `/sessions/:id/input` | `{text, enter}`：写入 PTY（enter 补 `\r`）。composer 用 |
+| POST | `/sessions/:id/input` | `{text, enter}`：写入 PTY（enter 补 `\r`）。composer 用。**多行文本**：TUI 开着 bracketed paste（DECSET 2004）时包成一次粘贴、换行归一为 CR，否则每个换行都是一次提交；没开 2004 的 shell 只做 CR 归一 |
 | POST | `/sessions/:id/answer` | `{answers:[{selected:[0,2], other:"自填文本"|null}, …]}`：回答当前待答的 AskUserQuestion 表单，一项对应一个问题（顺序同 `question.questions`），`selected` 是 0 起的选项下标，`other` 是「其它」自填。daemon 负责把选择翻译成 Claude Code 对话框的按键并确认对话框已关闭（见「回答表单」）。无待答问题 / 非 claude 会话 / 对话框没吃下 → 409；答案形状不对 → 400 |
 | POST | `/sessions/:id/kill` | TERM，2s 后 KILL；记录保留为 exited |
 | DELETE | `/sessions/:id` | 删除记录与回放（活着先 kill） |

@@ -628,6 +628,23 @@ struct InputBody {
     enter: bool,
 }
 
+/// 手机 composer 发来的文本怎么写进 PTY。单行原样；**多行**在 TUI 开了 bracketed
+/// paste（DECSET 2004，Claude Code 一直开着）时包成一次粘贴，行尾归一成 CR——
+/// 否则每个换行都是一次 Return，消息在第一行就被提交了。TUI 没开 2004 时（纯 shell）
+/// 只做 CR 归一：那本来就是一行一条命令。
+pub fn encode_input(text: &str, bracketed: bool) -> Vec<u8> {
+    let multi = text.contains('\n') || text.contains('\r');
+    let body = text.replace("\r\n", "\r").replace('\n', "\r");
+    if multi && bracketed {
+        let mut v = b"\x1b[200~".to_vec();
+        v.extend_from_slice(body.as_bytes());
+        v.extend_from_slice(b"\x1b[201~");
+        v
+    } else {
+        body.into_bytes()
+    }
+}
+
 async fn session_input(
     State(app): State<SharedApp>,
     UrlPath(id): UrlPath<String>,
@@ -643,9 +660,13 @@ async fn session_input(
     // widget takes the text but swallows the Return, leaving the message
     // sitting unsent in the box — exactly what the phone composer produces.
     // A plain shell is line-buffered and does not care either way.
+    let bracketed = {
+        let guard = sess.parser.lock().unwrap();
+        guard.as_ref().is_some_and(|p| p.screen().bracketed_paste())
+    };
     let text = body.text;
     if !text.is_empty() {
-        sess.write_input(text.as_bytes())
+        sess.write_input(&encode_input(&text, bracketed))
             .map_err(|e| ApiError::internal(format!("pty write: {e}")))?;
     }
     if body.enter {
@@ -1351,6 +1372,15 @@ pub fn router(app: SharedApp) -> Router {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn multiline_input_is_a_bracketed_paste_only_when_the_tui_asked() {
+        assert_eq!(encode_input("hi", true), b"hi".to_vec());
+        assert_eq!(encode_input("a\nb", true), b"\x1b[200~a\rb\x1b[201~".to_vec());
+        assert_eq!(encode_input("a\r\nb\n", true), b"\x1b[200~a\rb\r\x1b[201~".to_vec());
+        // 没开 2004 的 shell：不包，只归一换行
+        assert_eq!(encode_input("a\nb", false), b"a\rb".to_vec());
+    }
+
     use super::*;
 
     #[test]
