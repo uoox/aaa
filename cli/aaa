@@ -248,9 +248,6 @@ def state_label(s):
         return "已退出" if code in (None, 0) else "退出 %s" % code
     return st
 
-def agent_color(agent):
-    return {"claude": C("\x1b[38;5;179m")}.get(agent, GREY)
-
 def perm_status(status):
     return {"granted": (GREEN, "已授权"), "denied": (RED, "已拒绝"),
             "undetermined": (YELLOW, "未申请"),
@@ -260,21 +257,19 @@ def session_row(s, w):
     st = S(s, "state")
     dot = state_color(st) + "●" + RESET
     name = BOLD + cell(S(s, "project_name"), 14) + RESET
-    agent = agent_color(S(s, "agent")) + cell(S(s, "agent"), 9) + RESET
     state = state_color(st) + cell(state_label(s), 9) + RESET
     when = DIM + cell(ago(S(s, "last_output_at")), 5) + RESET
-    head = truncate(headline(s), max(w - 43, 10))   # 1+1+14+1+9+1+9+1+5+1 = 43
-    return "%s %s %s %s %s %s%s%s" % (dot, name, agent, state, when, DIM, head, RESET)
+    head = truncate(headline(s), max(w - 33, 10))   # 1+1+14+1+9+1+5+1 = 33
+    return "%s %s %s %s %s%s%s" % (dot, name, state, when, DIM, head, RESET)
 
 def project_row(p, w):
     name = BOLD + cell(S(p, "name"), 18) + RESET
-    agent = agent_color(S(p, "agent")) + cell(S(p, "agent"), 9) + RESET
     size = cell(human_size(int(S(p, "dir_size", 0) or 0)), 6)
     c = S(p, "ctx_size", 0) or 0
     ctx = cell(human_size(int(c)), 6) if c > 0 else cell("-", 6)
     when = cell(ago(S(p, "mtime")), 5)
-    title = truncate(S(p, "session_title"), max(w - 49, 10))  # 18+1+9+1+6+1+6+1+5+1
-    return "%s %s %s%s %s %s%s %s%s%s" % (name, agent, DIM, size, ctx, when, RESET, CYAN, title, RESET)
+    title = truncate(S(p, "session_title"), max(w - 39, 10))  # 18+1+6+1+6+1+5+1
+    return "%s %s%s %s %s%s %s%s%s" % (name, DIM, size, ctx, when, RESET, CYAN, title, RESET)
 
 def display_key(k):
     if not k: return "·"

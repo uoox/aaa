@@ -19,8 +19,6 @@ data class AppSettings(
     val serviceEnabled: Boolean = false,
     val defaultUi: String = "messages", // "messages" | "terminal"
     val fontSize: Int = 14,
-    /** 终端视图下收起预输入框，直接在 shell 里打字；全局记住用户的选择。 */
-    val terminalComposerHidden: Boolean = false,
     val mutedProjects: Set<String> = emptySet(),
     /** 界面主题：dark | light | claude（见 Palette）。 */
     val theme: String = "dark",
@@ -36,7 +34,6 @@ class SettingsStore(private val context: Context) {
         val SERVICE_ENABLED = booleanPreferencesKey("service_enabled")
         val DEFAULT_UI = stringPreferencesKey("default_ui")
         val FONT_SIZE = intPreferencesKey("font_size")
-        val TERMINAL_COMPOSER_HIDDEN = booleanPreferencesKey("terminal_composer_hidden")
         val MUTED_PROJECTS = stringSetPreferencesKey("muted_projects")
         val THEME = stringPreferencesKey("theme")
     }
@@ -50,7 +47,6 @@ class SettingsStore(private val context: Context) {
             serviceEnabled = p[K.SERVICE_ENABLED] ?: false,
             defaultUi = p[K.DEFAULT_UI] ?: "messages",
             fontSize = p[K.FONT_SIZE] ?: 14,
-            terminalComposerHidden = p[K.TERMINAL_COMPOSER_HIDDEN] ?: false,
             mutedProjects = p[K.MUTED_PROJECTS] ?: emptySet(),
             theme = p[K.THEME] ?: "dark",
         )
@@ -72,7 +68,6 @@ class SettingsStore(private val context: Context) {
     suspend fun setServiceEnabled(v: Boolean) = context.dataStore.edit { it[K.SERVICE_ENABLED] = v }
     suspend fun setDefaultUi(v: String) = context.dataStore.edit { it[K.DEFAULT_UI] = v }
     suspend fun setFontSize(v: Int) = context.dataStore.edit { it[K.FONT_SIZE] = v.coerceIn(8, 28) }
-    suspend fun setTerminalComposerHidden(v: Boolean) = context.dataStore.edit { it[K.TERMINAL_COMPOSER_HIDDEN] = v }
     /** 只存认识的名字：不认识的落回黑暗，读的那头就不用再兜底。 */
     suspend fun setTheme(v: String) = context.dataStore.edit { it[K.THEME] = Palette.forName(v).name }
 

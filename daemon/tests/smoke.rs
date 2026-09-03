@@ -637,7 +637,6 @@ async fn ssd_guard_returns_503_and_never_mkdirs() {
     for (method, path, body) in [
         ("POST", "/api/v1/projects", serde_json::json!({"name":"x"})),
         ("POST", "/api/v1/projects/delete", serde_json::json!({"paths":["/x"]})),
-        ("POST", "/api/v1/projects/agent", serde_json::json!({"path":"/x","agent":"claude"})),
         ("POST", "/api/v1/sessions", serde_json::json!({"project_path":"/x","agent":"shell"})),
     ] {
         let (code, resp) = http(method, port, path, Some(TOKEN), Some(body));

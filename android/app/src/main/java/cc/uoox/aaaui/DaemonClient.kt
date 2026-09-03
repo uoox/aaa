@@ -100,10 +100,6 @@ class DaemonClient(
         return json.decodeFromJsonElement(ListSerializer(ProjectDeleteResult.serializer()), resp["results"]!!)
     }
 
-    suspend fun setProjectAgent(path: String, agent: String) {
-        post("/projects/agent", buildJsonObject { put("path", path); put("agent", agent) }.toString())
-    }
-
     suspend fun sessions(): List<Session> = json.decodeFromString(ListSerializer(Session.serializer()), get("/sessions"))
 
     suspend fun createSession(projectPath: String, agent: String, resume: Boolean, feedInbox: Boolean = true, fresh: Boolean = false): Session {

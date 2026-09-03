@@ -71,10 +71,30 @@ pub fn build_resume_cmd(agent: &AgentDef, sid: &str) -> Option<String> {
         .map(|tpl| tpl.replace("%ID%", &shell_quote(sid)))
 }
 
-/// The argv used to spawn a session: `zsh -lc 'cd <dir> && <cmd>'`.
+/// The login shell sessions run under: zsh where present (macOS default),
+/// otherwise bash (Linux boxes without zsh).
+pub fn login_shell() -> &'static str {
+    if std::path::Path::new("/bin/zsh").exists() || std::path::Path::new("/usr/bin/zsh").exists() {
+        "zsh"
+    } else {
+        "bash"
+    }
+}
+
+/// The agent's command line with the login shell filled in (the table says
+/// `zsh`; a Linux host without zsh gets bash).
+pub fn spawn_cmd(agent: &AgentDef) -> String {
+    if agent.id == "shell" {
+        format!("exec {} -l", login_shell())
+    } else {
+        agent.cmd.to_string()
+    }
+}
+
+/// The argv used to spawn a session: `<shell> -lc 'cd <dir> && <cmd>'`.
 pub fn spawn_argv(dir: &str, cmd: &str) -> Vec<String> {
     vec![
-        "zsh".to_string(),
+        login_shell().to_string(),
         "-lc".to_string(),
         format!("cd {} && {}", shell_quote(dir), cmd),
     ]

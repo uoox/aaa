@@ -1,51 +1,48 @@
 # AAA
 
-Claude Code 的远程工具：会话跑在一台常驻的 Mac 上，Mac App、手机、终端随时接上去，
-看进度、答问题、开新活。
+一个 Claude Code daemon，加三个客户端。
+
+daemon 常驻在一台机器上，持有 Claude Code 会话的 PTY，通过 Claude Code hooks 精确知道每个会话在跑、在等、在问什么；
+Mac App、Android App 和终端里的 `aaa` 接上去看进度、答问题、开新活。客户端断开，会话照样跑。
 
 ```
-┌─────────────┐   内网 REST + WS   ┌──────────────┐   PTY   ┌─────────────┐
-│  Mac App    │◄─────────────────►│  aaa-daemon  │◄───────►│ Claude Code │
-│  Android    │◄─────────────────►│  :2730       │         │ + shell     │
-│  aaa (CLI)  │◄─────────────────►│  launchd 常驻 │         └─────────────┘
-└─────────────┘                   └──────────────┘
+┌─────────────┐   内网 REST + WS   ┌──────────────────┐  PTY + hooks  ┌─────────────┐
+│  Mac App    │◄─────────────────►│    aaa-daemon    │◄─────────────►│ Claude Code │
+│  Android    │◄─────────────────►│  :2730  常驻服务  │               │ + shell     │
+│  aaa (CLI)  │◄─────────────────►│  会话池 · 消息流   │               └─────────────┘
+└─────────────┘                   └──────────────────┘
 ```
-
-三个客户端接的是同一批会话：终端里开的，Mac 上接着看，手机上答一句。
-会话活在 daemon 里，客户端断开它照样跑。
 
 | 目录 | 内容 |
 |---|---|
-| `daemon/` | Rust 常驻服务：PTY 池、服务端终端、REST/WS API、消息流解析、表单作答、checkpoint |
+| `daemon/` | Rust 常驻服务：PTY 池、服务端终端、hooks 事件源、REST/WS API、消息流解析、表单作答、checkpoint |
 | `mac/` | macOS 原生客户端（gpui） |
 | `android/` | Android 原生客户端（Kotlin/Compose，终端用 ConnectBot termlib） |
 | `cli/` | `aaa` 终端客户端，一个 bash 脚本 |
+| `install.sh` | daemon + CLI 一键安装（macOS / Linux） |
 | `PROTOCOL.md` | 三端与 daemon 的契约 |
 
 ## 安装
 
-从 [Releases](https://github.com/uoox/aaa/releases) 下载：
-
-- `aaa-cli-*.tar.gz`：`aaa-daemon` 和 `aaa`，放进 `~/.local/bin`
-- `AAA-*-macos-arm64.zip`：Mac App，解压到 `/Applications`
-- `AAA-*-android.apk`：手机端
-
-daemon 装好后常驻：
+daemon 与 CLI，macOS 或 Linux：
 
 ```bash
-aaa-daemon service install     # 写 launchd plist 并启动，配置在 ~/.config/aaa-daemon/config.toml
+curl -fsSL https://raw.githubusercontent.com/uoox/aaa/main/install.sh | bash
 ```
 
-首次运行会生成随机 token。手机扫 Mac App 设置页的二维码配对，或手输 `主机:2730` 加 token。
-手机与 Mac 之间需要能直连，比如 tailscale 一类的内网。
+macOS arm64 下载预编译包；其它平台用本机 Rust 从源码编。脚本把 `aaa-daemon` 和 `aaa` 装进 `~/.local/bin`，
+登记为常驻服务（launchd 或 systemd --user），首次启动生成 `~/.config/aaa-daemon/config.toml` 和随机 token。
 
-> 项目根放在外置卷（`/Volumes/…`）时，要给 `~/.local/bin/aaa-daemon` 开「完全磁盘访问权限」，
-> 并用一个固定的自签名证书签名，否则重新构建后授权会失效。细节见 `daemon/README.md`。
+客户端从 [Releases](https://github.com/uoox/aaa/releases) 下载：`AAA-*-macos-arm64.zip` 解压到 `/Applications`，
+`AAA-*-android.apk` 装到手机。手机扫 Mac App 设置页的二维码配对，或手输 `主机:2730` 加 token。
+手机与 daemon 之间要能直连，比如 tailscale 一类的内网。
+
+> daemon 需要本机能运行 `claude`。项目根放在外置卷（`/Volumes/…`）时要给 `aaa-daemon` 开完全磁盘访问权限并用固定签名，见 `daemon/README.md`。
 
 ## 用法
 
-- **Mac App**：左栏是会话，顶部输入框输文件夹名回车即新建项目。⌘N 新建、⌃Tab 切会话、⌘E 消息流与终端互切、⌘W 关闭。
-- **Android**：Claude 跑完一轮会收到「完成」通知，点开直达会话；提问以原生表单作答；右上切终端。
+- **Mac App**：左栏是会话，顶部输入框输文件夹名回车即新建项目。⌘N 新建、⌃Tab 切会话、⌘E 消息流与终端互切、⌘W 关闭。消息流里过程步骤折叠成一行，📎 上传文件后以 `@路径` 引用。
+- **Android**：Claude 跑完一轮收到「完成」通知，点开直达会话；提问以原生表单作答；系统分享或 📎 把文件传进项目。
 - **终端**：
 
 ```

@@ -123,7 +123,7 @@ private fun ShareScreen(store: AppStore, uri: Uri?, sharedText: String?, onDone:
                             context.startActivity(
                                 Intent(context, MainActivity::class.java)
                                     .putExtra(MainActivity.EXTRA_SESSION_ID, liveSession.id)
-                                    .putExtra(MainActivity.EXTRA_PREFILL, savedPath)
+                                    .putExtra(MainActivity.EXTRA_PREFILL, "@$savedPath ")
                                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
                             )
                             onDone()

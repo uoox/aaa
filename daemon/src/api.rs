@@ -480,28 +480,6 @@ async fn projects_delete(
     Ok(Json(json!({"results": results})))
 }
 
-#[derive(Deserialize)]
-struct SetProjectAgent {
-    path: String,
-    agent: String,
-}
-
-async fn projects_agent(
-    State(app): State<SharedApp>,
-    Json(body): Json<SetProjectAgent>,
-) -> ApiResult<Json<Value>> {
-    ssd_guard(&app)?;
-    if agents::get(&body.agent).is_none() {
-        return Err(ApiError::agent_unknown(&body.agent));
-    }
-    let _reg_lock = crate::registry::lock();
-    let mut reg = Registry::load(&app.cfg.project_root);
-    reg.set(&body.path, &body.agent)
-        .map_err(|e| ApiError::internal(format!("registry: {e}")))?;
-    app.hub.projects_changed();
-    Ok(Json(json!({"ok": true})))
-}
-
 async fn sessions_list(State(app): State<SharedApp>) -> Json<Value> {
     let list: Vec<Value> = app.pool.list().iter().map(|s| s.to_json()).collect();
     Json(json!(list))
@@ -591,7 +569,7 @@ async fn sessions_create(
     }
 
     // resume: port of aaa launch_agent_in (find most recent session for cwd)
-    let mut cmd = agent.cmd.to_string();
+    let mut cmd = agents::spawn_cmd(agent);
     let mut resume_id = None;
     if body.resume && agent.resume_cmd.is_some() {
         let app2 = Arc::clone(&app);
@@ -644,6 +622,14 @@ async fn sessions_create(
     } else {
         cmd
     };
+    // hooks 设置片段（事件源，见 hooks.rs）；写不出来只是退回屏幕启发式，不阻止开会话
+    let cmd = match crate::hooks::ensure_settings(&app) {
+        Ok(p) => crate::hooks::with_settings(cmd, agent, &p),
+        Err(e) => {
+            eprintln!("hooks settings unavailable ({e}); session runs without hooks");
+            cmd
+        }
+    };
     let spec = SpawnSpec {
         project_path: canon_str.clone(),
         project_name: project_name.clone(),
@@ -675,6 +661,43 @@ async fn sessions_create(
         });
     }
     Ok(Json(sess.to_json()))
+}
+
+/// Claude Code hook 回调（hooks.rs）。永远快速 200：hooks 是 async 的，Claude 不等我们，
+/// 但也不该看到错误提示。找不到归属会话的事件丢弃。
+async fn hook_event(
+    State(app): State<SharedApp>,
+    UrlPath(event): UrlPath<String>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> Json<Value> {
+    let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let sid = headers
+        .get(crate::hooks::SESSION_HEADER)
+        .and_then(|h| h.to_str().ok())
+        .map(str::to_string);
+    let Some(sess) = crate::hooks::resolve(&app, sid.as_deref(), &v) else {
+        return Json(json!({}));
+    };
+    let applied = crate::hooks::apply(&sess, &event, &v, Instant::now());
+    if applied.dirty {
+        sess.mark_dirty();
+    }
+    if let Some((dir, id)) = applied.learned_id {
+        // 注册表第三列：迁移后 resume 的兜底，现在从事件里直接拿到
+        let root = app.cfg.project_root.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            let _reg_lock = crate::registry::lock();
+            let mut reg = Registry::load(&root);
+            let _ = reg.set_id(&dir, "claude", &id);
+        })
+        .await;
+    }
+    if applied.entered_waiting {
+        let app2 = Arc::clone(&app);
+        let _ = tokio::task::spawn_blocking(move || crate::feed::on_waiting(&app2, sess)).await;
+    }
+    Json(json!({}))
 }
 
 fn get_session(app: &App, id: &str) -> ApiResult<Arc<crate::pool::Session>> {
@@ -1435,7 +1458,6 @@ pub fn router(app: SharedApp) -> Router {
         .route("/api/v1/agents", get(agents_list))
         .route("/api/v1/projects", get(projects_list).post(projects_create))
         .route("/api/v1/projects/delete", post(projects_delete))
-        .route("/api/v1/projects/agent", post(projects_agent))
         .route("/api/v1/sessions", get(sessions_list).post(sessions_create))
         .route("/api/v1/sessions/{id}", delete(session_delete))
         .route("/api/v1/sessions/{id}/input", post(session_input))
@@ -1454,6 +1476,7 @@ pub fn router(app: SharedApp) -> Router {
             post(project_upload)
                 .layer(axum::extract::DefaultBodyLimit::max(UPLOAD_LIMIT)),
         )
+        .route("/api/v1/hooks/{event}", post(hook_event))
         .route("/api/v1/sessions/{id}/attach", get(ws_attach))
         .route("/api/v1/events", get(ws_events))
         .route("/api/v1/mac/permissions", get(mac_permissions))

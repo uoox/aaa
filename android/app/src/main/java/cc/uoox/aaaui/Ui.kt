@@ -43,7 +43,7 @@ import java.time.format.DateTimeFormatter
 // ---------- 配色 ----------
 
 /**
- * 一套完整配色。三套：黑暗（原 prototype.html 的 token，一个值都没改）、明亮、
+ * 一套完整配色。三套：黑暗（PROTOCOL.md 的原始 token，一个值都没改）、明亮、
  * Claude 橙（Anthropic 品牌的米白 + 赭橙，终端也是暖白底墨字）。纯数据，PaletteTest 直接跑。
  *
  * [isDark] 说的是**界面**底色深浅——决定系统栏图标颜色与 Material 基线。
@@ -133,7 +133,7 @@ data class Palette(
 }
 
 /**
- * 设计 token（PROTOCOL.md · prototype.html）。调用点仍旧读 `Tok.Bg`、`Tok.Ink`……，
+ * 设计 token（PROTOCOL.md「设计令牌」）。调用点仍旧读 `Tok.Bg`、`Tok.Ink`……，
  * 值来自 [current]。current 是 snapshot state：组合期读到的每一个 Tok.X 都被 Compose
  * 追踪，换主题时凡是画过颜色的地方自动重组，不必整棵树 key 重建；非组合代码
  * （TerminalHost 里的 View 回调、AndroidView.update）读到的就是当下的值。

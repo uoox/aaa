@@ -12,15 +12,17 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
+use std::time::Duration;
 
 use gpui::{
-    AnyElement, Context, ElementId, Entity, FontStyle, FontWeight, HighlightStyle,
-    InteractiveText, KeyDownEvent, ScrollHandle, SharedString, StrikethroughStyle, StyledText,
-    UnderlineStyle, Window, div, prelude::*, px, relative,
+    Animation, AnimationExt as _, AnyElement, Context, ElementId, Entity, FontStyle, FontWeight,
+    HighlightStyle, InteractiveText, KeyDownEvent, Pixels, ScrollHandle, SharedString,
+    StrikethroughStyle, StyledText, UnderlineStyle, Window, div, prelude::*, px, relative,
 };
 
 use super::kit::{c, ca};
 use super::mini_input::MiniInput;
+use super::stream_fold::{self, StreamItem};
 use crate::markdown::{self, Block, Span};
 use crate::model::{AnswerItem, ChatMessage, QuestionItem, QuestionSpec};
 use crate::net::Net;
@@ -28,6 +30,9 @@ use crate::theme;
 
 /// 内存里最多留这么多条：够回看，不至于无限膨胀
 const KEEP: usize = 2000;
+
+/// 离底部不到这么多像素就算「在底部」：新消息到来时跟到底，浮动 ↓ 也不出现
+const BOTTOM_SLACK: f32 = 40.;
 
 /// 一道题的草稿：勾选的选项下标 + 「其它」自填（镜像自该题的 MiniInput）
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -146,6 +151,8 @@ pub struct MessagesView {
     loading: bool,
     /// 已展开的 thinking / tool 消息 seq（点击切换）
     expanded: HashSet<u64>,
+    /// 已展开的过程折叠，按轮 key（轮首条消息的 seq）记；live 尾轮也默认折叠
+    fold_open: HashSet<u64>,
     /// assistant text 消息的 Markdown 块缓存（seq → blocks）：fetch 到达时解析一次，
     /// 渲染帧只读。seq 的正文不会变（dedup 保留首次到达的版本），所以不需要失效逻辑。
     md: HashMap<u64, Vec<Block>>,
@@ -157,6 +164,9 @@ pub struct MessagesView {
     sending: bool,
     /// 会话进程是否还活着（上层按 session 事件同步）；退出后表单一律只读
     alive: bool,
+    /// 项目目录：附件上传的去处（`_inbox/`）
+    project_path: String,
+    uploading: bool,
     /// 会话进程的 created_at（ISO 秒级）；早于它的悬置问题不算待答
     since: Option<String>,
     /// 表单草稿：question 消息 seq → 每题一份
@@ -182,12 +192,15 @@ impl MessagesView {
             supported: None,
             loading: false,
             expanded: HashSet::new(),
+            fold_open: HashSet::new(),
             md: HashMap::new(),
             scroll: ScrollHandle::new(),
             input,
             wants_focus: true,
             sending: false,
             alive: true,
+            project_path: String::new(),
+            uploading: false,
             since: None,
             drafts: HashMap::new(),
             other_inputs: HashMap::new(),
@@ -207,6 +220,63 @@ impl MessagesView {
 
     /// 上层在 session / snapshot 事件里同步：进程退了，表单就不能再交互；
     /// created_at 用来判掉 resume 带进来的旧问题
+    pub fn set_project_path(&mut self, p: String) {
+        self.project_path = p;
+    }
+
+    /// 📎：选一个文件上传进项目 `_inbox/`，路径以 `@路径 ` 追加到 composer——Claude Code
+    /// 的 @ 引用，图片直接看、文件直接读。发送仍由用户按回车。
+    fn attach(&mut self, cx: &mut Context<Self>) {
+        if self.uploading || self.project_path.is_empty() {
+            return;
+        }
+        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("上传到项目收件箱".into()),
+        });
+        let net = self.net.clone();
+        let project = self.project_path.clone();
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = rx.await else { return };
+            let Some(path) = paths.into_iter().next() else { return };
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "file".into());
+            let Ok(bytes) = std::fs::read(&path) else {
+                log::warn!("读不了 {}", path.display());
+                return;
+            };
+            let _ = this.update(cx, |v: &mut MessagesView, cx| {
+                v.uploading = true;
+                cx.notify();
+            });
+            let res = net.upload(&project, &name, bytes).await;
+            let _ = this.update(cx, |v: &mut MessagesView, cx| {
+                v.uploading = false;
+                match res {
+                    Ok(saved) => {
+                        let cur = v.input.read(cx).text.clone();
+                        let mut next = cur.trim_end().to_string();
+                        if !next.is_empty() {
+                            next.push(' ');
+                        }
+                        next.push('@');
+                        next.push_str(&saved);
+                        next.push(' ');
+                        v.input.update(cx, |i, cx| i.set_text(next, cx));
+                        v.wants_focus = true;
+                    }
+                    Err(e) => log::warn!("上传失败: {e}"),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub fn set_session(&mut self, alive: bool, created_at: Option<&str>, cx: &mut Context<Self>) {
         let since = created_at.filter(|s| !s.is_empty()).map(str::to_string);
         if self.alive == alive && self.since == since {
@@ -285,6 +355,9 @@ impl MessagesView {
                     Ok(r) => {
                         v.supported = Some(r.supported);
                         if !r.messages.is_empty() {
+                            // 跟不跟到底看的是变化**之前**的位置：用户正在翻历史时新消息不拽人
+                            let was_at_bottom = v.near_bottom();
+                            let had = !v.msgs.is_empty();
                             // assistant 文本按 CommonMark 解析一次进缓存；其余角色 / 种类保持纯文本
                             for m in r.messages.iter().filter(|m| is_markdown(m)) {
                                 v.md.entry(m.seq).or_insert_with(|| markdown::parse(&m.text));
@@ -299,7 +372,9 @@ impl MessagesView {
                                 v.md.retain(|seq, _| *seq >= min_seq);
                             }
                             v.last_seq = v.msgs.last().map(|m| m.seq).unwrap_or(0);
-                            v.scroll.scroll_to_bottom();
+                            if stream_fold::should_follow_tail(was_at_bottom, had, !v.msgs.is_empty()) {
+                                v.scroll.scroll_to_bottom();
+                            }
                             v.ensure_form_state(cx);
                         }
                         if r.supported && v.last_seq < r.last_seq {
@@ -331,6 +406,25 @@ impl MessagesView {
         if !self.expanded.remove(&seq) {
             self.expanded.insert(seq);
         }
+        cx.notify();
+    }
+
+    fn toggle_fold(&mut self, key: u64, cx: &mut Context<Self>) {
+        if !self.fold_open.remove(&key) {
+            self.fold_open.insert(key);
+        }
+        cx.notify();
+    }
+
+    /// 列表此刻是否在底部（含 BOTTOM_SLACK 的余量）。ScrollHandle 的 offset.y 向下滚
+    /// 越负、max_offset.y 是可滚的总量，两者相加就是离底距离；还没排过版（都是 0）
+    /// 或内容装得下时也算在底部——没东西可滚，浮动按钮不该出现。
+    fn near_bottom(&self) -> bool {
+        distance_to_bottom(self.scroll.offset().y, self.scroll.max_offset().y) <= px(BOTTOM_SLACK)
+    }
+
+    fn scroll_to_end(&mut self, cx: &mut Context<Self>) {
+        self.scroll.scroll_to_bottom();
         cx.notify();
     }
 
@@ -631,39 +725,124 @@ impl MessagesView {
                 .text_color(c(theme::faint()))
                 .child(text)
                 .into_any_element(),
-            _ => {
-                // assistant 文本 = CommonMark：通栏块列，上方「✻ Claude」小字。
-                // 缓存未命中（理论上不会）就现场解析；解析结果为空 → 回落纯文本。
-                let parsed;
-                let blocks: &[Block] = if is_markdown(m) {
-                    match self.md.get(&m.seq) {
-                        Some(b) => b,
-                        None => {
-                            parsed = markdown::parse(&m.text);
-                            &parsed
-                        }
-                    }
-                } else {
-                    &[]
-                };
-                if blocks.is_empty() {
-                    assistant_block(assistant_text(text))
-                } else {
-                    let mut ids = MdIds { seq: m.seq, next: 0 };
-                    assistant_block(
-                        div()
-                            .w_full()
-                            .text_size(px(12.5))
-                            .text_color(c(theme::ink()))
-                            .flex()
-                            .flex_col()
-                            .gap(px(6.))
-                            .children(md_blocks(blocks, &mut ids))
-                            .into_any_element(),
-                    )
+            // assistant 文本 = CommonMark：通栏块列，上方「✻ Claude」小字
+            _ => assistant_block(self.assistant_body(m, 12.5, theme::ink())),
+        }
+    }
+
+    /// assistant 文本的正文：缓存里的 Markdown 块列；缓存未命中（理论上不会）就现场
+    /// 解析；解析结果为空 → 回落纯文本。回复用 ink 12.5，折叠里的中途文本压成 dim 12。
+    fn assistant_body(&self, m: &ChatMessage, size: f32, color: u32) -> AnyElement {
+        let parsed;
+        let blocks: &[Block] = if is_markdown(m) {
+            match self.md.get(&m.seq) {
+                Some(b) => b,
+                None => {
+                    parsed = markdown::parse(&m.text);
+                    &parsed
                 }
             }
+        } else {
+            &[]
+        };
+        if blocks.is_empty() {
+            return div()
+                .w_full()
+                .text_size(px(size))
+                .text_color(c(color))
+                .child(SharedString::from(m.text.clone()))
+                .into_any_element();
         }
+        let mut ids = MdIds { seq: m.seq, next: 0 };
+        div()
+            .w_full()
+            .text_size(px(size))
+            .text_color(c(color))
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .children(md_blocks(blocks, &mut ids))
+            .into_any_element()
+    }
+
+    /// 过程折叠行：一行紧凑淡字，▸/▾ 小箭头，工具名等宽；live 尾轮用脉动的主色点
+    /// 代替箭头，折叠着也报最近一步在干什么。整行可点，悬停淡底。
+    fn fold_row(
+        &self,
+        turn_key: u64,
+        steps: &[&ChatMessage],
+        live_tail: Option<&ChatMessage>,
+        live: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let open = self.fold_open.contains(&turn_key);
+        let n = stream_fold::step_count(steps);
+        let label: SharedString = match (live, open) {
+            (true, true) => format!("进行中 · {n} 步").into(),
+            (true, false) => stream_fold::live_label(steps, live_tail).into(),
+            (false, true) => format!("过程 · {n} 步").into(),
+            (false, false) => stream_fold::fold_label(steps).into(),
+        };
+        let marker: AnyElement = if live {
+            div()
+                .w(px(6.))
+                .h(px(6.))
+                .rounded_full()
+                .bg(c(theme::accent()))
+                .with_animation(
+                    ElementId::from(format!("fold-pulse-{turn_key}")),
+                    Animation::new(Duration::from_millis(1100)).repeat(),
+                    |el, t| {
+                        // 0→1→0 的呼吸：t 过半往回走
+                        let breath = if t < 0.5 { t * 2. } else { 2. - t * 2. };
+                        el.opacity(0.35 + 0.65 * breath)
+                    },
+                )
+                .into_any_element()
+        } else {
+            div()
+                .text_size(px(10.))
+                .text_color(c(theme::faint()))
+                .child(if open { "▾" } else { "▸" })
+                .into_any_element()
+        };
+        div()
+            .id(("fold", turn_key as usize))
+            .w_full()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .px(px(6.))
+            .py(px(3.))
+            .rounded(px(6.))
+            .cursor_pointer()
+            .hover(|s| s.bg(ca(theme::ink(), 0.05)))
+            .on_click(cx.listener(move |v: &mut Self, _, _, cx| v.toggle_fold(turn_key, cx)))
+            .child(div().flex_none().w(px(10.)).flex().justify_center().child(marker))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .text_size(px(11.))
+                    .font_family("Menlo")
+                    .text_color(c(if live { theme::dim() } else { theme::faint() }))
+                    .child(label),
+            )
+            .into_any_element()
+    }
+
+    /// 展开后的单步：思考 / 工具 / system 复用原有行（各自的展开开关照旧），
+    /// 中途的 assistant 文本压成 dim 小字、不带「✻ Claude」头。整体缩进 12px。
+    fn step_row(&self, m: &ChatMessage, pending: Option<u64>, cx: &mut Context<Self>) -> AnyElement {
+        let inner = if is_markdown(m) {
+            self.assistant_body(m, 12., theme::dim())
+        } else {
+            self.row(m, pending, cx)
+        };
+        div().w_full().pl(px(12.)).child(inner).into_any_element()
     }
 
     /// 表单卡片：琥珀描边，逐题画选项，待答时底部有「提交」
@@ -917,7 +1096,24 @@ fn assistant_block(body: AnyElement) -> AnyElement {
         .into_any_element()
 }
 
-/// 非 Markdown 的 assistant 文本（解析为空 / question 缺表单时的兜底）
+/// 离底距离：ScrollHandle 向下滚 offset.y 越负，max_offset.y 是可滚总量。
+/// 内容装得下 / 还没排版时两者都是 0 → 0（算在底部）。
+fn distance_to_bottom(offset_y: Pixels, max_y: Pixels) -> Pixels {
+    (max_y + offset_y).max(px(0.))
+}
+
+/// 列表里相邻项之间的上边距：轮与轮之间 14（新一轮从用户消息开始），展开的步骤
+/// 之间 3，同轮内 User→Fold→Reply 8；首项 0。
+fn item_gap(index: usize, item: &StreamItem) -> f32 {
+    match item {
+        _ if index == 0 => 0.,
+        StreamItem::User(_) => 14.,
+        StreamItem::Step(_) => 3.,
+        _ => 8.,
+    }
+}
+
+/// 非 Markdown 的 assistant 文本（question 缺表单时的兜底）
 fn assistant_text(text: SharedString) -> AnyElement {
     div()
         .w_full()
@@ -1234,24 +1430,73 @@ impl Render for MessagesView {
             placeholder(msg).into_any_element()
         } else {
             let pending = pending_question_seq(&self.msgs, self.alive, self.since.as_deref());
-            let rows: Vec<gpui::AnyElement> = self
-                .msgs
-                .clone()
+            // live = 会话活着且最后一轮还没有回复：过程行画成「进行中」
+            let msgs = self.msgs.clone();
+            let live = stream_fold::tail_is_live(&msgs, self.alive);
+            let turns = stream_fold::fold_turns(&msgs, live);
+            let items = stream_fold::flatten(&turns, &self.fold_open);
+            let rows: Vec<gpui::AnyElement> = items
                 .iter()
-                .map(|m| self.row(m, pending, cx))
+                .enumerate()
+                .map(|(i, item)| {
+                    let el = match item {
+                        StreamItem::Fold {
+                            turn_key,
+                            steps,
+                            live_tail,
+                            live,
+                        } => self.fold_row(*turn_key, steps, *live_tail, *live, cx),
+                        StreamItem::Step(m) => self.step_row(m, pending, cx),
+                        StreamItem::User(m)
+                        | StreamItem::Reply(m)
+                        | StreamItem::Question(m)
+                        | StreamItem::Answer(m) => self.row(m, pending, cx),
+                    };
+                    div().w_full().mt(px(item_gap(i, item))).child(el).into_any_element()
+                })
                 .collect();
-            div()
+            let list = div()
                 .id("msgs-scroll")
-                .flex_1()
-                .min_h(px(0.))
+                .size_full()
                 .overflow_y_scroll()
                 .track_scroll(&self.scroll)
                 .px(px(16.))
                 .py(px(10.))
                 .flex()
                 .flex_col()
-                .gap(px(6.))
-                .children(rows)
+                .children(rows);
+            // 右下角浮动 ↓：没在底部时出现，点一下滚到底。滚轮事件会触发重绘，
+            // 所以这里按上一帧的 offset 判定就够了
+            let show_jump = !self.near_bottom();
+            div()
+                .relative()
+                .flex_1()
+                .min_h(px(0.))
+                .child(list)
+                .when(show_jump, |el| {
+                    el.child(
+                        div()
+                            .id("msgs-jump-end")
+                            .absolute()
+                            .bottom(px(14.))
+                            .right(px(18.))
+                            .w(px(32.))
+                            .h(px(32.))
+                            .rounded_full()
+                            .bg(c(theme::surface_raised()))
+                            .border_1()
+                            .border_color(c(theme::edge()))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_size(px(15.))
+                            .text_color(c(theme::accent()))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(c(theme::surface())))
+                            .on_click(cx.listener(|v: &mut Self, _, _, cx| v.scroll_to_end(cx)))
+                            .child("↓"),
+                    )
+                })
                 .into_any_element()
         };
         let mut root = div()
@@ -1275,6 +1520,19 @@ impl Render for MessagesView {
                     .border_t_1()
                     .border_color(c(theme::edge()))
                     .bg(c(theme::surface()))
+                    .child(
+                        div()
+                            .id("msg-attach")
+                            .px(px(6.))
+                            .py(px(4.))
+                            .rounded(px(6.))
+                            .text_size(px(13.))
+                            .text_color(c(if self.uploading { theme::faint() } else { theme::dim() }))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(ca(theme::ink(), 0.06)))
+                            .on_click(cx.listener(|v: &mut Self, _, _, cx| v.attach(cx)))
+                            .child(if self.uploading { "…" } else { "📎" }),
+                    )
                     .child(div().flex_1().child(self.input.clone()))
                     .child(
                         div()
@@ -1438,6 +1696,43 @@ mod tests {
         let local = time_caption(ts).unwrap();
         assert_eq!(local.len(), 5);
         assert_eq!(&local[2..3], ":");
+    }
+
+    #[test]
+    fn distance_to_bottom_uses_negative_offset() {
+        // 顶部：offset 0，可滚 500 → 离底 500
+        assert_eq!(distance_to_bottom(px(0.), px(500.)), px(500.));
+        // 滚到底：offset = -max
+        assert_eq!(distance_to_bottom(px(-500.), px(500.)), px(0.));
+        // 差 30px 在余量之内
+        assert!(distance_to_bottom(px(-470.), px(500.)) <= px(BOTTOM_SLACK));
+        assert!(distance_to_bottom(px(-400.), px(500.)) > px(BOTTOM_SLACK));
+        // 内容装得下 / 还没排版：都是 0 → 在底部
+        assert_eq!(distance_to_bottom(px(0.), px(0.)), px(0.));
+        // 过冲（回弹中）不出负数
+        assert_eq!(distance_to_bottom(px(-520.), px(500.)), px(0.));
+    }
+
+    #[test]
+    fn item_gaps_follow_turn_structure() {
+        let u = msg(1, "text");
+        let t = msg(2, "tool_use");
+        assert_eq!(item_gap(0, &StreamItem::User(&u)), 0.);
+        assert_eq!(item_gap(3, &StreamItem::User(&u)), 14.);
+        assert_eq!(item_gap(3, &StreamItem::Step(&t)), 3.);
+        assert_eq!(item_gap(3, &StreamItem::Reply(&u)), 8.);
+        assert_eq!(
+            item_gap(
+                3,
+                &StreamItem::Fold {
+                    turn_key: 1,
+                    steps: vec![&t],
+                    live_tail: None,
+                    live: false
+                }
+            ),
+            8.
+        );
     }
 
     #[test]

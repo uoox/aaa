@@ -1,4 +1,4 @@
-//! 设计令牌（来源 PROTOCOL.md「设计令牌」表，与 prototype.html 一致）。
+//! 设计令牌（来源 PROTOCOL.md「设计令牌」表）。
 //! 全部以 0xRRGGBB u32 存储，UI 层用 `gpui::rgb()` 转换。
 //!
 //! 2026-09-03 起有三套主题（黑暗 / 明亮 / Claude 橙），进程内可切换：

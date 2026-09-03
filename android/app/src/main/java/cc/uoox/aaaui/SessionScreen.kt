@@ -202,7 +202,8 @@ fun SessionScreen(
                     val (name, bytes) = readUri(context, uri)
                     val saved = store.client?.upload(proj, name, bytes)
                     if (saved != null) {
-                        composer = (composer.trim() + " " + saved.saved_path).trim()
+                        // Claude Code 的 @路径 引用：图片直接看、文件直接读
+                        composer = (composer.trim() + " @" + saved.saved_path + " ").trimStart()
                         Toast.makeText(context, "已上传：${saved.saved_path}", Toast.LENGTH_SHORT).show()
                     }
                 } catch (e: Exception) { Toast.makeText(context, "上传失败：${e.message}", Toast.LENGTH_LONG).show() }

@@ -29,6 +29,14 @@ import java.net.URLDecoder
     val resume_id: String? = null,
     val created_at: String = "",
     val last_output_at: String = "",
+    /** v1.3：状态由 Claude Code hooks 驱动（不再是屏幕静默猜的） */
+    val hooked: Boolean = false,
+    /** StopFailure 的错误类型：rate_limit / overloaded / authentication_failed… */
+    val error: String? = null,
+    /** 正在整理上下文（PreCompact → PostCompact） */
+    val compacting: Boolean = false,
+    /** 用户自己结束的：退出不弹通知 */
+    val user_killed: Boolean = false,
 )
 
 @Serializable data class Health(

@@ -90,6 +90,20 @@ pub struct Meta {
     pub trust_presses: u8,
     #[serde(skip)]
     pub trust_pressed_inst: Option<Instant>,
+    /// 收到过至少一个 Claude Code hook 事件：状态由事件驱动，屏幕静默启发式退场
+    #[serde(skip)]
+    pub hooked: bool,
+    /// StopFailure 报的错误类型（rate_limit / overloaded / authentication_failed…），
+    /// 下一次提交清掉
+    #[serde(skip)]
+    pub error: Option<String>,
+    /// PreCompact 到 PostCompact 之间：正在整理上下文
+    #[serde(skip)]
+    pub compacting: bool,
+    /// PreToolUse(AskUserQuestion) 到达时刻：transcript 还没落盘的几秒内不许把
+    /// asking 又压回 false
+    #[serde(skip)]
+    pub asking_hint_inst: Option<Instant>,
 }
 
 fn default_true() -> bool {
@@ -134,6 +148,53 @@ fn iso(dt: &DateTime<Utc>) -> String {
 }
 
 impl Session {
+    /// 测试用：没有 PTY 的会话骨架（hooks / feed 单测）
+    #[cfg(test)]
+    pub fn for_test(agent: &str, project_path: &str) -> Session {
+        let now = Utc::now();
+        let (tx, _) = broadcast::channel(8);
+        Session {
+            id: "s_test".into(),
+            meta: Mutex::new(Meta {
+                title: "t".into(),
+                custom_title: false,
+                project_path: project_path.into(),
+                project_name: "p".into(),
+                agent: agent.into(),
+                state: State::Running,
+                rows: DEFAULT_ROWS,
+                cols: DEFAULT_COLS,
+                pid: None,
+                exit_code: None,
+                resume_id: None,
+                created_at: now,
+                last_output_at: now,
+                preview: String::new(),
+                feed_inbox: true,
+                ckpt_start_ref: None,
+                last_output_inst: None,
+                needs_name: false,
+                inbox_fed: false,
+                screen_hash: 0,
+                screen_changed_inst: None,
+                asking: false,
+                user_killed: false,
+                trust_presses: 0,
+                trust_pressed_inst: None,
+                hooked: false,
+                error: None,
+                compacting: false,
+                asking_hint_inst: None,
+            }),
+            parser: Mutex::new(None),
+            out_tx: tx,
+            live: Mutex::new(None),
+            dirty: AtomicBool::new(false),
+            msgs: Mutex::new(crate::messages::MsgStore::for_agent(agent)),
+            ckpt: Mutex::new(crate::checkpoint::CkptState::default()),
+        }
+    }
+
     pub fn to_json(&self) -> serde_json::Value {
         // refresh preview from the parser when we have one
         let preview = {
@@ -160,6 +221,11 @@ impl Session {
             "resume_id": meta.resume_id,
             "created_at": iso(&meta.created_at),
             "last_output_at": iso(&meta.last_output_at),
+            // v1.3（老客户端忽略未知字段）
+            "hooked": meta.hooked,
+            "error": meta.error,
+            "compacting": meta.compacting,
+            "user_killed": meta.user_killed,
         })
     }
 
@@ -465,11 +531,14 @@ impl SessionPool {
             })
             .map_err(|e| format!("openpty: {e}"))?;
 
+        let id = new_session_id();
         let argv = crate::agents::spawn_argv(&spec.project_path, &spec.cmd);
         let mut cmd = CommandBuilder::new(&argv[0]);
         cmd.args(&argv[1..]);
         cmd.cwd(&spec.project_path);
         cmd.env("TERM", "xterm-256color");
+        // hooks 用它在请求头里报出自己是哪个会话（hooks.rs）
+        cmd.env(crate::hooks::SESSION_ENV, &id);
         cmd.env("LANG", "en_US.UTF-8");
         // Without this every agent dies with "command not found" under
         // launchd: the inherited PATH is bare, and `zsh -lc` does not source
@@ -533,6 +602,10 @@ impl SessionPool {
             user_killed: false,
             trust_presses: 0,
             trust_pressed_inst: None,
+            hooked: false,
+            error: None,
+            compacting: false,
+            asking_hint_inst: None,
         };
         // Backpressure: send never blocks; a client that can't keep up drops
         // to Lagged and gets a fresh full redraw (api::attach_loop), so a slow
@@ -540,7 +613,7 @@ impl SessionPool {
         let (tx, _) = broadcast::channel(1024);
         let msgs = crate::messages::MsgStore::for_agent(&spec.agent);
         let sess = Arc::new(Session {
-            id: new_session_id(),
+            id,
             meta: Mutex::new(meta),
             parser: Mutex::new(Some(vt100::Parser::new(
                 DEFAULT_ROWS,
@@ -576,7 +649,9 @@ impl SessionPool {
                             let mut meta = rsess.meta.lock().unwrap();
                             meta.last_output_at = Utc::now();
                             meta.last_output_inst = Some(Instant::now());
-                            if meta.state != State::Running {
+                            // hooked 会话的 running/waiting 由 UserPromptSubmit/Stop 决定：
+                            // 等待中的光标闪烁、时钟重绘不算「在跑」
+                            if meta.state != State::Running && !meta.hooked {
                                 meta.state = State::Running;
                                 meta.needs_name = true;
                             }
@@ -662,7 +737,7 @@ impl SessionPool {
                     .or(meta.last_output_inst)
                     .map(|t| t.elapsed().as_secs_f64() >= SILENCE_SECS)
                     .unwrap_or(false);
-                if meta.state == State::Running && silent {
+                if meta.state == State::Running && silent && !meta.hooked {
                     meta.state = State::Waiting;
                     true
                 } else {

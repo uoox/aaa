@@ -198,6 +198,12 @@ fn run() {
                                 }
                             };
                             let mut meta = sess.meta.lock().unwrap();
+                            // hooks 刚报了 AskUserQuestion、transcript 还没落盘：几秒内不压回
+                            let hinted = meta
+                                .asking_hint_inst
+                                .map(|t| t.elapsed().as_secs() < 10)
+                                .unwrap_or(false);
+                            let asking = asking || (hinted && meta.state != State::Exited);
                             if meta.asking != asking {
                                 meta.asking = asking;
                                 drop(meta);

@@ -61,9 +61,32 @@ pub struct Session {
     pub created_at: String,
     #[serde(default)]
     pub last_output_at: String,
+    /// v1.3：状态由 Claude Code hooks 驱动
+    #[serde(default)]
+    pub hooked: bool,
+    /// StopFailure 的错误类型（rate_limit / overloaded / authentication_failed…）
+    #[serde(default)]
+    pub error: Option<String>,
+    /// 正在整理上下文
+    #[serde(default)]
+    pub compacting: bool,
+    /// 用户自己结束的：退出不弹通知
+    #[serde(default)]
+    pub user_killed: bool,
 }
 
 impl Session {
+    /// StopFailure 的错误类型 → 一句人话
+    pub fn error_label(&self) -> Option<String> {
+        self.error.as_deref().map(|k| match k {
+            "rate_limit" => "上轮出错：限流".to_string(),
+            "overloaded" => "上轮出错：服务过载".to_string(),
+            "authentication_failed" => "上轮出错：登录失效".to_string(),
+            "billing_error" => "上轮出错：账单问题".to_string(),
+            other => format!("上轮出错：{other}"),
+        })
+    }
+
     /// 终端 = `agent:"shell"` 的会话：常驻工具，不是项目的会话（PROTOCOL「终端」）。
     /// 不进三态分组、不算项目激活、不参与 ⌃Tab，归终端面板管。
     pub fn is_terminal(&self) -> bool {

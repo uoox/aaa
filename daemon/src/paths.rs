@@ -74,6 +74,15 @@ impl Paths {
         self.home.join(".claude").join("settings.json")
     }
 
+    /// Linux：systemd 用户单元
+    pub fn systemd_unit(&self) -> PathBuf {
+        self.home
+            .join(".config")
+            .join("systemd")
+            .join("user")
+            .join("aaa-daemon.service")
+    }
+
     pub fn launchd_plist(&self) -> PathBuf {
         self.home
             .join("Library")

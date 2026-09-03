@@ -159,10 +159,20 @@ fun projectStateOf(project: Project, primary: Session?): ProjectState = when {
 @Suppress("UNUSED_PARAMETER")
 fun projectSummary(project: Project, primary: Session?, state: ProjectState): String = when (state) {
     ProjectState.NEEDS_REPLY -> "等你回答"
-    ProjectState.RUNNING -> "执行中"
-    // 未激活的项目没什么可说的：点一行就是 resume，不必每行都写「点击继续」
-    ProjectState.DONE -> ""
+    ProjectState.RUNNING -> if (primary?.compacting == true) "整理上下文中" else "执行中"
+    // 未激活的项目没什么可说的：点一行就是 resume，不必每行都写「点击继续」。
+    // 上一轮以错误收场的除外：那句话值得留着
+    ProjectState.DONE -> primary?.error?.let { errorLabel(it) } ?: ""
     ProjectState.NEVER -> "未开始"
+}
+
+/** StopFailure 的错误类型 → 一句人话 */
+fun errorLabel(kind: String): String = when (kind) {
+    "rate_limit" -> "上轮出错：限流"
+    "overloaded" -> "上轮出错：服务过载"
+    "authentication_failed" -> "上轮出错：登录失效"
+    "billing_error" -> "上轮出错：账单问题"
+    else -> "上轮出错：$kind"
 }
 
 fun projectRows(projects: List<Project>, sessions: List<Session>): List<ProjectRow> = projects.map { p ->

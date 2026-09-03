@@ -5,6 +5,7 @@ mod messages_view;
 mod mini_input;
 mod modals;
 mod settings;
+mod stream_fold;
 mod terminal_panel;
 mod terminal_view;
 
@@ -228,9 +229,6 @@ pub struct RootView {
     pub ssd_mounted: bool,
     pub sessions: Vec<Session>,
     pub projects: Vec<Project>,
-    /// /agents 剔掉终端后的表（只剩 claude）。新建项目不再选 agent，留它只为
-    /// 读 `available`：daemon 的 PATH 里找不到 claude 时弹窗里提示一句
-    pub agents: Vec<AgentInfo>,
     /// 配对二维码模块（(宽, 黑白位图)；fetch 时编码一次，渲染帧只读）
     pub qr_modules: Option<(usize, Vec<bool>)>,
     pub endpoint_from_config: bool,
@@ -337,7 +335,6 @@ impl RootView {
             ssd_mounted: true,
             sessions: Vec::new(),
             projects: Vec::new(),
-            agents: pickable_agents(builtin_agents()),
             qr_modules: None,
             endpoint_from_config,
             terminals: HashMap::new(),
@@ -473,10 +470,12 @@ impl RootView {
                 .session(&id)
                 .map(|s| (s.state != SessionState::Exited, s.created_at.clone()))
                 .unwrap_or((false, String::new()));
+            let project_path = self.session(&id).map(|s| s.project_path.clone()).unwrap_or_default();
             self.msg_views
                 .entry(id.clone())
                 .or_insert_with(|| cx.new(|cx| MessagesView::new(sid, net, cx)))
                 .update(cx, |v, cx| {
+                    v.set_project_path(project_path);
                     v.set_session(alive, Some(&created), cx);
                     v.fetch(cx);
                     v.request_focus(cx);
@@ -643,19 +642,6 @@ impl RootView {
                     r.root_input.update(cx, |i, cx| i.set_text(root, cx));
                 }
                 r.health = Some(h);
-                cx.notify();
-            },
-            false,
-            cx,
-        );
-        self.spawn_fetch(
-            self.net.agents(),
-            |r, a: Vec<AgentInfo>, cx| {
-                // 终端（terminal:true / shell）不是 agent，进表前剔掉；剩下只有 claude
-                let a = pickable_agents(a);
-                if !a.is_empty() {
-                    r.agents = a;
-                }
                 cx.notify();
             },
             false,
@@ -1373,9 +1359,13 @@ impl RootView {
 
                     // 「待回复」盖过状态字：asking 是结构化事实，比 running/waiting 更要紧
                     let (label, color) = if s.asking {
-                        ("待回复", theme::amber())
+                        ("待回复".to_string(), theme::amber())
+                    } else if s.compacting {
+                        ("整理上下文中".to_string(), state_color)
+                    } else if let Some(e) = s.error_label() {
+                        (e, theme::amber())
                     } else {
-                        (theme::state_label(s.state.as_str()), state_color)
+                        (theme::state_label(s.state.as_str()).to_string(), state_color)
                     };
                     bar.child(
                         div()

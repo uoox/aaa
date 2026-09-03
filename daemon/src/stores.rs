@@ -5,8 +5,6 @@
 //!   claude:   ~/.claude/projects/*/<sid>.jsonl          (cwd field in lines)
 //!   codex:    ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl (first line session_meta with cwd/id)
 //!   pi:       ~/.pi/agent/sessions/--<cwd>--/<ts>_<uuid>.jsonl (first line type=session with cwd/id)
-//!   reasonix: ~/.reasonix/projects/<cwd with / -> ->/sessions/<sid>.jsonl (+ .meta)
-//!   agy:      ~/.gemini/antigravity-cli/  (history.jsonl / cache / conversations)
 //!   grok:     ~/.grok/sessions/<url-enc-cwd>/<sid>/    (legacy; purge only)
 //!
 //! SAFETY: every path this module deletes is composed from the injected

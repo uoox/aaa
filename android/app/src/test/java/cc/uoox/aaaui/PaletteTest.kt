@@ -31,7 +31,7 @@ class PaletteTest {
     }
 
     @Test fun darkKeepsThePrototypeTokens() {
-        // 黑暗 = 原 prototype.html 的值，一个都不许改
+        // 黑暗 = PROTOCOL.md 设计令牌表的原始值，一个都不许改
         val d = Palette.Dark
         assertEquals(Color(0xFF0E1216), d.bg)
         assertEquals(Color(0xFF1A222B), d.surface)

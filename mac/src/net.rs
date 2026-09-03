@@ -281,6 +281,52 @@ impl Net {
     pub fn pair(&self) -> impl Future<Output = Result<PairResponse>> + use<> {
         self.get_json("/pair")
     }
+    /// `POST /projects/upload?path=&name=`：原始字节进项目 `_inbox/`，回 `saved_path`
+    pub fn upload(
+        &self,
+        project_path: &str,
+        name: &str,
+        bytes: Vec<u8>,
+    ) -> impl Future<Output = Result<String>> + use<> {
+        let (tx, rx) = oneshot::channel();
+        let ep = self.endpoint();
+        let http = self.http.clone();
+        let path = format!(
+            "/projects/upload?path={}&name={}",
+            percent_encode(project_path),
+            percent_encode(name)
+        );
+        runtime().spawn(async move {
+            let res: Result<String> = async {
+                let ep = ep.ok_or_else(|| anyhow!("未连接：无 daemon 地址"))?;
+                let url = format!("{}{}", ep.http_base(), path);
+                let resp = http
+                    .post(&url)
+                    .header("Authorization", format!("Bearer {}", ep.token))
+                    .header("Content-Type", "application/octet-stream")
+                    .timeout(std::time::Duration::from_secs(120))
+                    .body(bytes)
+                    .send()
+                    .await?;
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                if !status.is_success() {
+                    let (code, message) = serde_json::from_str::<ApiError>(&text)
+                        .map(|e| (e.error.code, e.error.message))
+                        .unwrap_or_default();
+                    return Err(ApiFailure { status: status.as_u16(), code, message }.into());
+                }
+                let v: serde_json::Value = serde_json::from_str(&text)?;
+                v["saved_path"]
+                    .as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| anyhow!("响应缺 saved_path"))
+            }
+            .await;
+            let _ = tx.send(res);
+        });
+        async move { rx.await.unwrap_or_else(|_| Err(anyhow!("网络任务中断"))) }
+    }
     pub fn ports(&self, id: &str) -> impl Future<Output = Result<Vec<PortEntry>>> + use<> {
         self.get_json(&format!("/sessions/{id}/ports"))
     }
@@ -465,6 +511,19 @@ impl std::fmt::Display for ApiFailure {
 impl std::error::Error for ApiFailure {}
 
 /// 从请求错误里取 HTTP 状态码；不是 REST 层失败（没连上、超时、解析错）就 None
+/// 查询串里的路径 / 文件名：RFC 3986 unreserved 之外的一律 %XX
+pub fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
 pub fn http_status(e: &anyhow::Error) -> Option<u16> {
     e.downcast_ref::<ApiFailure>().map(|f| f.status)
 }

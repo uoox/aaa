@@ -78,6 +78,8 @@ pub struct MsgStore {
     /// 当前 file 来自 resume-id 兜底（旧 transcript）。resume 后 agent 会写
     /// **新**文件；兜底命中的旧文件永不增长，必须保留升级到新文件的机会。
     pub via_fallback: bool,
+    /// file 来自 hooks 的 transcript_path（确定事实）：不再做目录扫描式的发现/升级
+    pub authoritative: bool,
     pub dirty: bool,
 }
 
@@ -98,6 +100,7 @@ impl MsgStore {
             tool_names: HashMap::new(),
             discover_ticks: 0,
             via_fallback: false,
+            authoritative: false,
             dirty: false,
         }
     }
@@ -600,7 +603,9 @@ pub fn poll_session(
     if !store.supported {
         return None;
     }
-    if store.file.is_none() {
+    if store.authoritative {
+        // hooks 已给出 transcript 路径：直接尾随，不发现、不升级
+    } else if store.file.is_none() {
         // discovery: every 5th tick; stop after ~5 minutes for exited sessions
         if exited && store.discover_ticks > 300 {
             return None;

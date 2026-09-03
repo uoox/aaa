@@ -270,6 +270,10 @@ fn synthetic_session(app: &aaa_daemon::api::SharedApp, proj: &Path, start_ref: O
         user_killed: false,
         trust_presses: 0,
         trust_pressed_inst: None,
+        hooked: false,
+        error: None,
+        compacting: false,
+        asking_hint_inst: None,
     };
     let (tx, _) = tokio::sync::broadcast::channel(8);
     let id = "s_router01".to_string();

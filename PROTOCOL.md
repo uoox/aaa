@@ -81,6 +81,10 @@ daemon 在启动时用 `zsh -lic` 问一次「终端里应有的 PATH」（带�
   "agent": "claude",             // agent id 或 "shell"
   "state": "waiting",            // running | waiting | exited
   "asking": false,                // claude：transcript 里有一条 AskUserQuestion 还没被回答（结构化事实，不是猜的）
+  "hooked": true,                 // v1.3：状态由 Claude Code hooks 驱动（见「Claude Code hooks」）
+  "error": null,                  // v1.3：上一轮 StopFailure 的错误类型，下一次提交清空
+  "compacting": false,            // v1.3：PreCompact → PostCompact 之间
+  "user_killed": false,           // v1.3：用户主动结束的，客户端不弹「退出」通知
   "preview": "…最近 4 行纯文本…",
   "rows": 40, "cols": 120,
   "pid": 12345, "exit_code": null,
@@ -108,8 +112,7 @@ CLI 的 `ls` / 交互菜单仍按「执行中 / 待回复 / 已完成」三组�
 | GET | `/agents` | agent 表 + `available`（which 检查） |
 | GET | `/projects` | collect 移植：`[{path,name,mtime,dir_size,ctx_size,agent,session_title}]`，按 mtime 降序。**注册表就是项目名册**：根目录下未登记的目录（顺手 clone 的仓库、杂物）不出现在列表里；经 daemon 建项目/开会话的目录都会自动登记 |
 | POST | `/projects` | `{name?, agent?}`；name 经 slugify，空则 `YYYY-MM-DD-HHMM`；已存在 → 409；agent 给了就写注册表。**响应 = 完整项目对象（至少 `{path,name,agent}`）**，客户端依赖 `path` 直接开会话 |
-| POST | `/projects/delete` | `{paths:[…]}` → `{results:[{path, ok, purged:[{agent_label,count}]}]}`；目录删除 + 全 agent purge（含 grok 遗留） |
-| POST | `/projects/agent` | `{path, agent}` 写注册表 |
+| POST | `/projects/delete` | `{paths:[…]}` → `{results:[{path, ok, purged:[{agent_label,count}]}]}`；目录删除 + Claude Code 会话存储 purge（`purged` 里只会有 `Claude` 一项） |
 | GET | `/sessions` | 全部会话（含 exited） |
 | POST | `/sessions` | `{project_path, agent, resume}`；resume=true 时按 aaa 逻辑找最近会话套 resume 模板；目录不存在则创建（但见 SSD 守卫） |
 | POST | `/sessions/:id/input` | `{text, enter}`：写入 PTY（enter 补 `\r`）。composer 用。**多行文本**：TUI 开着 bracketed paste（DECSET 2004）时包成一次粘贴、换行归一为 CR，否则每个换行都是一次提交；没开 2004 的 shell 只做 CR 归一 |
@@ -117,7 +120,8 @@ CLI 的 `ls` / 交互菜单仍按「执行中 / 待回复 / 已完成」三组�
 | POST | `/sessions/:id/kill` | TERM，2s 后 KILL；记录保留为 exited |
 | DELETE | `/sessions/:id` | 删除记录与回放（活着先 kill） |
 | POST | `/sessions/:id/rename` | `{title}` |
-| GET | `/sessions/:id/ports` | 进程树监听端口 `[{port,cmd}]`（Web 预览入口用） |
+| GET | `/sessions/:id/ports` | 进程树监听端口 `[{port,cmd}]`（mac「Web 预览」入口用；其它客户端未接） |
+| POST | `/hooks/:event` | Claude Code hooks 回调（见「Claude Code hooks」）；头 `X-AAA-Session`；永远 200 `{}` |
 | GET | `/sessions/:id/screen` | daemon 侧 vt100 的屏幕文本 `{text, alternate_screen}`。非备用屏时 text 前带最近 500 行回滚；备用屏（Claude Code）只有可见画面。客户端「复制屏幕内容」「打开链接」用它。 |
 | GET | `/mac/permissions` | 见「macOS 权限」 |
 | POST | `/mac/permissions/request` | 见「macOS 权限」 |
@@ -147,7 +151,7 @@ server → client JSON 文本帧：
 {"t":"health","ssd_mounted":true}
 ```
 
-通知策略（客户端行为，2026-09-02 用户拍板）：**只有一种通知——「完成」**。`running→waiting` 与 `running→exited`（非本机用户手动 kill）各弹一条，标题带项目名，正文是会话标题。不识别「里面要回什么」、不按问题去重、没有高低优先级、没有空转告警；daemon 侧不推送（ntfy 已移除）。按项目静音仍是客户端本地配置。用户正盯着的会话（窗口前台且当前页就是它）不弹。
+通知策略（客户端行为，2026-09-02 用户拍板）：**只有一种通知——「完成」**。`running→waiting` 与 `running→exited`（非本机用户手动 kill）各弹一条，标题带项目名，正文是会话标题。不识别「里面要回什么」、不按问题去重、没有高低优先级、没有空转告警；daemon 侧不推送（ntfy 已移除）。按项目静音是客户端本地配置（目前只有 Android 实现）。用户正盯着的会话（窗口前台且当前页就是它）不弹。
 
 ## macOS 权限（一键授权）
 
@@ -180,7 +184,7 @@ server → client JSON 文本帧：
 
 accessibility、screen_recording、full_disk_access、input_monitoring 的变更需要重启 daemon 才能被观测到；探针结果按运行中的进程缓存 TCC 授权。AAA.app 本体不申请任何 TCC 权限——归责全在 aaa-daemon，agent 子进程继承。
 
-客户端设置页展示状态列表 + 「一键申请全部」按钮；从手机点按钮时提示「弹窗将出现在 Mac 上，请在 Mac 前完成一次」。
+权限状态列表与「一键申请全部」目前只在 CLI（`aaa perms`）里；mac / Android 设置页尚未接。
 
 ## 配对
 
@@ -188,9 +192,29 @@ accessibility、screen_recording、full_disk_access、input_monitoring 的变更
 hosts = daemon 探测到的 tailscale MagicDNS 名 / tailscale IP / easytier IP（带端口，按优先级排列）。
 Mac 客户端把 payload 渲染成二维码；Android 扫码解析后逐个 host 试连，成功即保存。手输兜底。
 
-## Claude Code hook（可选精确信号）
+## Claude Code hooks（v1.3，事件源）
 
-（Claude hooks 通道已于 2026-09-02 移除：`install-claude-hooks` 与 `/hooks/claude` 不再存在，状态只看屏幕是否在变、问题只看 transcript。）
+daemon 起 claude 会话时追加 `--settings ~/.local/state/aaa-daemon/claude-hooks.json`（自动生成、0600、含 token），
+片段里全是 `type: http` 的 hooks 指向 `POST /api/v1/hooks/<event>`，`async: true`，请求头
+`X-AAA-Session` 取自 PTY 环境变量 `AAA_SESSION`（= daemon 会话 id）。与用户自己的 settings 合并，不改用户文件。
+
+订阅的事件与用途：
+
+| 事件 | 作用 |
+|---|---|
+| `UserPromptSubmit` | `state=running`，清 `error` |
+| `Stop` / `Notification(idle_prompt)` | `state=waiting`（精确的「这轮跑完」；触发收件箱投喂） |
+| `StopFailure` | `state=waiting`，`error`=错误类型（rate_limit / overloaded / authentication_failed…） |
+| `PreToolUse`（matcher `AskUserQuestion`） | 立刻 `asking=true`，不等 transcript 落盘 |
+| `PreCompact` / `PostCompact` | `compacting` 开/关（「整理上下文中」） |
+| 任一事件 | `session_id` → `resume_id` 并写回注册表第三列；`transcript_path` → 消息流直接尾随这个文件，不再扫目录 |
+
+收到过事件的会话 `hooked=true`：其 running/waiting 只由事件决定，PTY 输出不再把它翻成 running，6 秒静默启发式也不再作用于它。
+没有 hooks 的会话（shell、旧版 Claude Code、写不出 settings 文件时）沿用屏幕启发式。
+
+会话对象新增字段（老客户端忽略）：`hooked`、`error`（string|null）、`compacting`、`user_killed`。
+
+Claude 以 `--dangerously-skip-permissions` 运行，`PermissionRequest` 不会发生，所以没有权限卡片。
 
 ## SSD 守卫（硬性约束）
 
@@ -202,7 +226,7 @@ Mac 客户端把 payload 渲染成二维码；Android 扫码解析后逐个 host
 - `root_state` 区分 `unmounted`（挂上就好）与 `denied`（要给 daemon 完全磁盘访问权限），两者修法完全不同，503 的 `message` 直接带上修法（手机端看不到 Mac 的日志）。
 - 状态由 5s 健康轮询维护；请求只读缓存值，不逐次探测。
 
-## v1.1 扩展（2026-08-30 用户拍板：消息流 / checkpoint+diff / 收件箱 / 上传 / watchdog / 通知细化）
+## v1.1 扩展（2026-08-30 用户拍板：消息流 / checkpoint+diff / 收件箱 / 上传 / 通知细化）
 
 ### 消息流（手机主视图，终端保留可切换）
 
@@ -242,7 +266,7 @@ Watchdog（`session_stalled` 事件 + 空转告警）、ntfy 推送、waiting �
 
 ## aaa CLI（第三个客户端）
 
-`aaa` 是 daemon 的终端前端，**不复制任何业务逻辑**：列表、新建、结束、回答全部走上面的 API，因此
+`aaa` 是 daemon 的终端前端，**不复制任何业务逻辑**：列表、新建、结束全部走上面的 API（`say` 走 `/input`；表单作答请 `attach` 进 TUI），因此
 CLI 开的会话在 Mac App 和手机上同样可见、可接管。
 
 `aaa` 现在是 `cli/aaa` bash 脚本，依赖 bash ≥3.2、curl、python3，无需构建。CLI 动词保持不变；
@@ -250,7 +274,7 @@ CLI 开的会话在 Mac App 和手机上同样可见、可接管。
 
 - 连接：默认读 `~/.config/aaa-daemon/config.toml` 取 port + token 连本机；`AAA_HOST=主机:2730`
   + `AAA_TOKEN=…` 指向另一台机器的 daemon。本机连不上时尝试 `launchctl kickstart` 唤醒一次。
-- 无参数 = 交互菜单：会话按「执行中 / 待回复 / 已完成」三组列出（序号贯通三组，与 `aaa ls` 一致），其次「项目管理 / macOS 权限 / New \<agent\>」。
+- 无参数 = 交互菜单：会话按「执行中 / 待回复 / 已完成」三组列出（序号贯通三组，与 `aaa ls` 一致），其次「项目管理 / macOS 权限 / 新建项目」。
 - 动词：`ls` `ps` `wait` `status` `perms` `new` `open` `attach` `say` `kill` `rm` `rename`，
   列表类均有 `--json`。目标可写会话 id / id 前缀 / `ls` 序号 / 项目名 / `.`（当前目录所属项目）。
 - `attach` = 直接连 `/sessions/:id/attach`：本地终端进 raw 模式，stdin 原样转发为二进制帧，
@@ -258,7 +282,7 @@ CLI 开的会话在 Mac App 和手机上同样可见、可接管。
 
 > **主题（2026-09-03）**：两端各有三套主题——黑暗（下表的原始令牌）、明亮（#F6F7F9 底 / #1B2229 墨 / 强调 #0F8A9E）、Claude 橙（Anthropic 象牙 #FAF9F5 底 / #141413 墨 / 强调 #D97757，终端暖白 #FFFDF7 底 / 墨字，ANSI 走 gruvbox-light）。三套里只有黑暗是暗底终端；两套浅色主题的终端 ANSI 16 色各自带一套亮底可读的（明亮 one-light、Claude gruvbox-light），两端逐色相同。令牌是**角色**（bg / surface / ink / dim / faint / edge / accent / term_bg …），下表数值是黑暗主题的取值；原「CYAN」角色改叫 accent。设置里切换，mac 存 `~/.config/aaa-ui/ui.toml`，Android 存 DataStore `theme`。消息流里用户消息是右对齐的强调色气泡，Claude 的回复是整宽正文 + 「✻ Claude」小字标题。
 
-## 设计令牌（两端 UI 必须一致，来源 prototype.html）
+## 设计令牌（两端 UI 必须一致）
 
 | 令牌 | 值 | 用途 |
 |---|---|---|
