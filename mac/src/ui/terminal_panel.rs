@@ -16,7 +16,7 @@ use crate::model::{Session, SessionState};
 use crate::theme;
 
 /// health 还没到时的项目根兜底（与新建项目弹窗的提示一致）
-const DEFAULT_ROOT: &str = "/Volumes/SSD/project";
+const DEFAULT_ROOT: &str = "~/project";
 
 impl RootView {
     /// daemon 的项目根；health 未到时兜底

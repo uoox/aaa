@@ -26,8 +26,8 @@ daemon 与三个客户端的唯一协调契约。实现与本文冲突时，以�
 |---|---|
 | `~/.config/aaa-daemon/config.toml` | daemon 配置（首次运行自动生成，含随机 token） |
 | `~/.local/state/aaa-daemon/` | 会话元数据、已退出会话的回放、日志 |
-| `/Volumes/SSD/project` | 项目根（config 可改） |
-| `/Volumes/SSD/project/.aaa-agents` | **沿用 aaa CLI 的注册表**：每行 `<目录>\t<agent>[\t<对话id>]`，原子整体重写。第三列是该目录最近一次 resume 用的 agent 对话 id：目录迁移后 agent 存储按旧 cwd 查不到会话，靠它兜底（`POST /sessions` resume 命中时回写；`PUT /config` 迁移前全量采集） |
+| `~/project` | 项目根默认值（config 可改；示例里写作 `/Volumes/SSD/project`） |
+| `<项目根>/.aaa-agents` | **沿用 aaa CLI 的注册表**：每行 `<目录>\t<agent>[\t<对话id>]`，原子整体重写。第三列是该目录最近一次 resume 用的 agent 对话 id：目录迁移后 agent 存储按旧 cwd 查不到会话，靠它兜底（`POST /sessions` resume 命中时回写；`PUT /config` 迁移前全量采集） |
 | `~/.cache/aaa-cwds.json` | **沿用 aaa CLI 的缓存**：键 `claude:<path>`（jsonl → cwd）、`cname2:<path>` / `ainame:<path>`（命名缓存）；文件里旧的 `codex:` / `pi:` 键保留不读，格式兼容 |
 
 config.toml 结构：
@@ -243,8 +243,7 @@ Watchdog（`session_stalled` 事件 + 空转告警）、ntfy 推送、waiting �
 ## aaa CLI（第三个客户端）
 
 `aaa` 是 daemon 的终端前端，**不复制任何业务逻辑**：列表、新建、结束、回答全部走上面的 API，因此
-CLI 开的会话在 Mac App 和手机上同样可见、可接管。旧的 zsh 菜单脚本改名 `aaal` 保留，作为 daemon
-不可用时的兜底（它把 agent 直接跑在当前终端里，不常驻）。
+CLI 开的会话在 Mac App 和手机上同样可见、可接管。
 
 `aaa` 现在是 `cli/aaa` bash 脚本，依赖 bash ≥3.2、curl、python3，无需构建。CLI 动词保持不变；
 `ls` 与交互菜单按「执行中 / 待回复 / 已完成」顺序分组会话（待回复 = `asking`）；`wait` 只列 `asking` 的会话；`perms` 会在每个权限的状态旁打印 `hint` 提示文本。

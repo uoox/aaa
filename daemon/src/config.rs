@@ -63,7 +63,7 @@ fn default_port() -> u16 {
     2730
 }
 fn default_project_root() -> PathBuf {
-    PathBuf::from("/Volumes/SSD/project")
+    crate::paths::Paths::from_env().home.join("project")
 }
 fn default_true() -> bool {
     true

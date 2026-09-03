@@ -321,7 +321,7 @@ impl RootView {
         let host_input = cx.new(|cx| MiniInput::new(cx, "127.0.0.1"));
         let port_input = cx.new(|cx| MiniInput::new(cx, "2730"));
         let token_input = cx.new(|cx| MiniInput::new(cx, "aaa_tk_…"));
-        let root_input = cx.new(|cx| MiniInput::new(cx, "/Volumes/SSD/project"));
+        let root_input = cx.new(|cx| MiniInput::new(cx, "~/project"));
         if let Some(ep) = &endpoint {
             host_input.update(cx, |i, cx| i.set_text(ep.host.clone(), cx));
             port_input.update(cx, |i, cx| i.set_text(ep.port.to_string(), cx));

@@ -101,13 +101,13 @@ mod tests {
         std::fs::write(
             &cache_path,
             format!(
-                r#"{{"claude:{f}":"/Users/l/project/x","codex:{f}":["sid-1","/p"],"cname2:{f}":[1700000000.5,"标题"],"ainame:{f}":[1234,"摘要标题"]}}"#,
+                r#"{{"claude:{f}":"/Users/x/project/x","codex:{f}":["sid-1","/p"],"cname2:{f}":[1700000000.5,"标题"],"ainame:{f}":[1234,"摘要标题"]}}"#,
                 f = f1.display()
             ),
         )
         .unwrap();
         let cache = CwdCache::load(&cache_path);
-        assert_eq!(cache.get(&format!("claude:{}", f1.display())).unwrap(), "/Users/l/project/x");
+        assert_eq!(cache.get(&format!("claude:{}", f1.display())).unwrap(), "/Users/x/project/x");
         assert_eq!(
             cache.get(&format!("codex:{}", f1.display())).unwrap(),
             &json!(["sid-1", "/p"])

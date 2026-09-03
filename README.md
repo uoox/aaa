@@ -1,181 +1,71 @@
 # AAA
 
-一个常驻 daemon + 三个原生客户端，把 `aaa` 那个交互脚本变成随时随地能用的东西：
-Mac 上会话常驻不掉线，手机上两步答一句，终端里 `aaa` 依然一敲就开。
+Claude Code 的远程工具：会话跑在一台常驻的 Mac 上，Mac App、手机、终端随时接上去，
+看进度、答问题、开新活。
 
 ```
-┌─────────────┐   tailscale / easytier    ┌──────────────────┐   spawn PTY    ┌─────────────┐
-│  AAA.app    │◄────── REST + WS ────────►│    aaa-daemon    │◄──────────────►│ agent CLIs  │
-│ (gpui 原生) │        Bearer token       │  Mac mini :2730  │    读会话存储   │ + zsh 终端  │
-├─────────────┤                           │  launchd 常驻    │                └─────────────┘
-│ AAA android │◄──────────────────────────│  PTY 池 + VT     │
-│(Kotlin 原生)│                           └──────────────────┘
-├─────────────┤                                    ▲
-│  aaa (CLI)  │◄───────────────────────────────────┘
-│ (bash 终端) │       同一套 API，同一批会话
-└─────────────┘
+┌─────────────┐   内网 REST + WS   ┌──────────────┐   PTY   ┌─────────────┐
+│  Mac App    │◄─────────────────►│  aaa-daemon  │◄───────►│ Claude Code │
+│  Android    │◄─────────────────►│  :2730       │         │ + shell     │
+│  aaa (CLI)  │◄─────────────────►│  launchd 常驻 │         └─────────────┘
+└─────────────┘                   └──────────────┘
 ```
 
-三个客户端没有主次：**同一个会话可以在终端里开、在 Mac App 里接着看、在手机上回答一句**，
-因为 PTY 活在 daemon 里，谁都只是接上去而已。
+三个客户端接的是同一批会话：终端里开的，Mac 上接着看，手机上答一句。
+会话活在 daemon 里，客户端断开它照样跑。
 
 | 目录 | 内容 |
 |---|---|
-| `daemon/` | Rust 常驻服务：PTY 池 + 服务端 VT + 全套 API + Claude 会话存储读取 + TCC 权限 + checkpoint/消息流/收件箱/表单作答 |
-| `cli/` | `aaa` 终端客户端：一个可移植 bash 脚本（bash ≥ 3.2 + curl + python3 标准库），`curl` 下来即用，不用编译 |
-| `mac/` | gpui 原生客户端（tty7 路线，alacritty_terminal + 自绘渲染） |
-| `android/` | Kotlin/Compose 原生客户端（终端用 ConnectBot termlib：libvterm + Compose，无 WebView） |
-| `brand/` | 品牌标志：`logo.py` 一次运行导出 macOS `.icns` 与 Android 各密度自适应图标 |
-| `PROTOCOL.md` | 四方唯一契约（API/状态机/CLI/设计令牌） |
-| `prototype.html` | 双端交互原型（已确认） |
+| `daemon/` | Rust 常驻服务：PTY 池、服务端终端、REST/WS API、消息流解析、表单作答、checkpoint |
+| `mac/` | macOS 原生客户端（gpui） |
+| `android/` | Android 原生客户端（Kotlin/Compose，终端用 ConnectBot termlib） |
+| `cli/` | `aaa` 终端客户端，一个 bash 脚本 |
+| `PROTOCOL.md` | 三端与 daemon 的契约 |
 
-## 部署（Mac，一次性）
+## 安装
 
-```bash
-# 1. 编 daemon；CLI 是脚本，直接装
-cd daemon && cargo build --release
-cp target/release/aaa-daemon ~/.local/bin/aaa-daemon
-codesign --force --sign "$(security find-identity -v -p codesigning | grep -q 'AAA Local Signing' && echo 'AAA Local Signing' || echo -)" ~/.local/bin/aaa-daemon
-install -m755 ../cli/aaa ~/.local/bin/aaa
+从 [Releases](https://github.com/uoox/aaa/releases) 下载：
 
-# 2. 首次运行生成 ~/.config/aaa-daemon/config.toml（含随机 token），确认能起来后 Ctrl-C
-aaa-daemon run
+- `aaa-cli-*.tar.gz`：`aaa-daemon` 和 `aaa`，放进 `~/.local/bin`
+- `AAA-*-macos-arm64.zip`：Mac App，解压到 `/Applications`
+- `AAA-*-android.apk`：手机端
 
-# 3. launchd 常驻（KeepAlive；日志在 ~/.local/state/aaa-daemon/）
-aaa-daemon service install        # 对应 uninstall / status
-
-# 3.5 项目根在外置卷上时，这一步是必须的（见下）
-open "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
-
-# 4. 一键申请全部 macOS 权限（弹窗在 Mac 上逐个允许；授权归到 daemon，所有 agent 子进程共享，
-#    此后手机远程操作不再被权限弹窗卡死）。也可以在 `aaa` 菜单里的「macOS 权限」进
-aaa perms all                     # 或 aaa perms 只看状态
-```
-
-config.toml 要点：`port=2730`（=0xAAA）、`project_root=/Volumes/SSD/project`、`namer`（haiku 会话命名）、
-`auto_trust`（默认 true：新项目第一屏的 Claude Code 信任对话框由 daemon 替你按 Enter）、两端设置页有「重启 daemon」按钮（`POST /restart`；有活会话先确认再强制），二进制重新构建后设置页会亮「有新构建，需重启」。`[checkpoint] enabled/auto_init_git/interval_minutes/auto_init_max_mb`。旧的 `[watchdog]`/`[ntfy]` 段已废弃（留着无害）。
-
-> **`auto_init_git` 默认 false**：项目常常只是一个任务目录（笔记、抓取、一堆 yml），
-> 替你 `git init` 不是 daemon 该做的事。已经是 git 仓库的项目照常有检查点/diff/回滚；
-> 想让非仓库目录也享受后悔药，再显式打开（届时 `auto_init_max_mb` 护栏仍生效）。
-
-> **项目根在外置卷（`/Volumes/…`）上时，daemon 需要「完全磁盘访问权限」。**
-> macOS 把可移动卷挡在 TCC 后面，而 launchd 起的进程没有任何「负责 App」持有这个授权——
-> 现象不是报错而是**卡死**：`stat` 能过，`opendir` 一直等一个没人去点的授权弹窗。
-> （拿 `/bin/ls` 做成 launchd job 一样会 `Operation not permitted`，这是系统策略不是 daemon 的锅。）
-> 到「系统设置 → 隐私与安全性 → 完全磁盘访问权限」把 `~/.local/bin/aaa-daemon` 加进去打开，
-> 然后 `aaa-daemon service uninstall && aaa-daemon service install`。
-> daemon 自身不会因此卡住：读不到项目根时它照常监听、`/health.root_state=denied`，并在日志和 API
-> 错误里直接给出这段修法。
-> **签名要用稳定身份，不要 ad-hoc。** TCC 授权绑定的是代码签名；ad-hoc（`--sign -`）签名每次重新构建都不同，
-> 上面勾好的完全磁盘访问等授权会随之全部失效。本机做一个自签名证书 `AAA Local Signing`（钥匙串访问 →
-> 证书助理 → 创建证书，类型「代码签名」）之后，每次装 daemon 都用它签，授权就跨构建保留：
-> ```bash
-> if security find-identity -v -p codesigning | grep -q "AAA Local Signing"; then
->   codesign --force --sign "AAA Local Signing" ~/.local/bin/aaa-daemon
-> else
->   codesign --force --sign - ~/.local/bin/aaa-daemon    # 没有该证书时才退回 ad-hoc（授权会随构建丢）
-> fi
-> ```
-
-> **升级二进制时先 `rm` 再 `cp`**：直接 `cp` 覆盖正在运行的二进制会写坏它的签名，
-> 之后每次执行都被 macOS 直接 `SIGKILL`（现象是命令无输出、退出码 137）。
-> ```bash
-> rm -f ~/.local/bin/aaa-daemon && cp daemon/target/release/aaa-daemon ~/.local/bin/aaa-daemon
-> codesign --force --sign "AAA Local Signing" ~/.local/bin/aaa-daemon   # 见上；无证书则 --sign -
-> aaa-daemon service uninstall && aaa-daemon service install   # plist 记的是绝对路径，重新登记
-> ```
-
-与旧 CLI 磁盘格式双向兼容（`.aaa-agents` 注册表、`~/.cache/aaa-cwds.json`）。
-SSD 未挂载时 daemon 只读降级、绝不 mkdir 项目根。
-
-## aaa（终端）
-
-`cli/aaa` 是一个 bash 脚本（bash ≥ 3.2 + curl + python3 标准库，无 jq、无编译），macOS / Linux / Termux 通用：
+daemon 装好后常驻：
 
 ```bash
-install -m755 cli/aaa ~/.local/bin/aaa                       # 本地 checkout
-curl -fsSL https://raw.githubusercontent.com/uoox/aaa/main/cli/aaa -o ~/.local/bin/aaa && chmod +x ~/.local/bin/aaa   # 任意机器
+aaa-daemon service install     # 写 launchd plist 并启动，配置在 ~/.config/aaa-daemon/config.toml
 ```
 
+首次运行会生成随机 token。手机扫 Mac App 设置页的二维码配对，或手输 `主机:2730` 加 token。
+手机与 Mac 之间需要能直连，比如 tailscale 一类的内网。
+
+> 项目根放在外置卷（`/Volumes/…`）时，要给 `~/.local/bin/aaa-daemon` 开「完全磁盘访问权限」，
+> 并用一个固定的自签名证书签名，否则重新构建后授权会失效。细节见 `daemon/README.md`。
+
+## 用法
+
+- **Mac App**：左栏是会话，顶部输入框输文件夹名回车即新建项目。⌘N 新建、⌃Tab 切会话、⌘E 消息流与终端互切、⌘W 关闭。
+- **Android**：Claude 跑完一轮会收到「完成」通知，点开直达会话；提问以原生表单作答；右上切终端。
+- **终端**：
+
 ```
-aaa                      交互菜单（执行中 / 待回复 / 已完成 分组；数字接入，p 项目 m 权限 n 新建）
-aaa ls [-a] [--json]     会话列表          aaa ps [--json]     项目列表
-aaa new [名字]            新建项目目录 + 开 Claude Code 会话并接入
-aaa open <目标> [--fresh]  进入项目（有活会话就接回，否则 resume；--fresh 强制再开一个并行会话）
-aaa attach <目标>         接入会话（Ctrl-] 脱离，会话继续跑）
-aaa say <目标> <文本…>     写一句进会话并回车（回答提问用）
+aaa                    交互菜单
+aaa ls / ps            会话 / 项目列表
+aaa new [名字]          新建项目并开会话
+aaa open <目标>         进入项目（接回活会话或 resume）
+aaa attach <目标>       接入会话，Ctrl-] 脱离
+aaa say <目标> <文本>    写一句进会话并回车
 aaa kill / rm / rename <目标>
-aaa wait [--json]        只列有表单等你回答的会话（asking）
-aaa status [--json]      daemon 状态       aaa perms [all|<id…>]  macOS 权限
 ```
 
-目标可写：会话 id 或其前缀、`aaa ls` 里的序号、项目名、或 `.`（当前目录所属项目）。
-`ls` 按「执行中 / 待回复 / 已完成」分组，序号贯通三组，已退出永远排最后（默认隐藏）。详见 `cli/README.md`。
+`AAA_HOST=主机:2730 AAA_TOKEN=…` 可指向另一台机器的 daemon。详见 `cli/README.md`。
 
-连接默认读 `~/.config/aaa-daemon/config.toml`；`AAA_HOST=主机:2730 AAA_TOKEN=…` 可指向另一台机器的 daemon
-（tailscale 直接过去，不用 SSH）。本机 daemon 掉了会先试一次 `launchctl kickstart` 再报错。
-
-> 旧的 zsh 菜单脚本改名 **`aaal`** 留在 `~/.local/bin/`：它不经过 daemon，把 agent 直接跑在当前终端里，
-> 是 daemon 不可用时的兜底。
-
-## macOS 客户端
+## 从源码构建
 
 ```bash
-cd mac
-export PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH"
-packaging/bundle.sh build      # → mac/target/AAA.app
-packaging/bundle.sh install    # → /Applications，之后 Spotlight 直接启动
+cd daemon  && cargo build --release && cargo test
+cd mac     && packaging/bundle.sh build        # → mac/target/AAA.app
+cd android && ./gradlew assembleDebug          # 需要 JDK 21 与 Android SDK
 ```
 
-同机启动会自动读 `~/.config/aaa-daemon/config.toml` 连 `127.0.0.1:2730`，无需配置。
-> 签名是 ad-hoc（本机无开发者证书），**TCC 授权绑定签名、每次重新构建即失效**——这正是权限由 daemon
-> 而非客户端持有的原因。
-
-左侧会话栏（顶部一个输入框：文件夹名 + 回车即新建项目，⌘N 把光标放进去；激活 / 未激活 两栏：上栏按开启顺序、刚激活的在底部，下栏最近关掉的在第一个，跨栏搬家有淡入位移动画；行内 × 关闭——只有执行中的才确认，栏宽可拖，底部常驻多标签终端面板）、
-终端（选区/选中复制/右键直接粘贴/Ctrl-V·Cmd-V/链接点击/CJK）、消息流 Markdown 渲染 + 原生表单作答（单选/复选/其它自填）、项目表格、「完成」系统通知、设置页出配对二维码。
-快捷键：⌘N 新建、⌃Tab 切换会话、⌘E 消息流⇄终端、⌘W 关闭会话。
-
-## Android 客户端
-
-```bash
-cd android
-export JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home
-export ANDROID_HOME=$HOME/Library/Android/sdk
-./gradlew assembleDebug            # → app/build/outputs/apk/debug/app-debug.apk
-adb install -r app/build/outputs/apk/debug/app-debug.apk
-```
-
-配对：扫 Mac 设置页二维码，或手输 `host:2730` + token（多 host 依次试连，tailscale 优先）。
-主视图为**消息流**（claude 完整解析；不支持的 agent 自动回落终端），右上可切终端，设置里改默认 UI。
-终端是 ConnectBot **termlib**（libvterm 走 JNI，Compose Canvas 渲染，Maven `org.connectbot:termlib`，不需要 NDK）加两层自己的东西：
-软键盘桥（TYPE_NULL + fullEditor，中文能组词，硬键盘 Ctrl/Alt 组合直达）和鼠标层（TUI 开鼠标上报时滑动＝滚轮、点按＝点击并弹键盘、双指捏合改字号；普通 shell 则是 termlib 原生的回滚滚动与长按选区）。
-通知只有一种：agent 这轮跑完（或退出）时「完成」一条，点开直达会话；按项目静音。
-agent 的提问在消息流里是**原生表单**：单选、复选、「其它」自填，提交由 daemon 翻译成对话框按键；回复按 Markdown 渲染。
-终端是首页右上角的常驻多标签面板，不再是新建时的一个「agent」选项。
-其余：diff 卡片 + 一键回滚、任务收件箱、系统分享 → 上传进项目 `_inbox/`、前台服务保活、
-折叠屏/大屏展开后底栏收成左侧导航 rail（内容仍单栏）。
-
-## 日常动线
-
-1. **手机答一句**：「完成」通知到达 → 点开会话 → 表单原生点选提交，或 composer 说下一步。
-2. **无缝接力**：终端 `aaa` 开的会话 = Mac App 里的同一个 = 手机上的同一个 PTY。
-3. **开新活**：`aaa new 任务名` 或菜单里 New \<agent\>；只建目录 + 开会话，不碰 git。
-4. **项目治理**：换 agent / 批量删除（purge 语义与旧 CLI 的 d 键一致）。
-
-## 已知限制
-
-- 活会话不跨 daemon 重启（exited 回放会恢复）；重启 daemon 前先收尾要紧会话。
-- Android 深度 Doze 下 events WS 可能被限流，「完成」通知可能迟到（没有服务端推送兜底）。
-- `refs/aaa-ckpt` 只增不减，尚无 GC。
-
-## 开发
-
-```bash
-cd daemon  && cargo test           # daemon 单元 + 集成测试
-bash -n cli/aaa                    # CLI 是脚本：语法检查 + 对着活 daemon 跑 aaa ls / aaa status
-cd mac     && cargo test           # 47 tests
-cd android && ./gradlew test        # 178 tests
-```
-
-契约变更流程：先改 `PROTOCOL.md`，再改三端。事件帧向前兼容（未知帧忽略）。
+契约变更先改 `PROTOCOL.md`，再改三端。
