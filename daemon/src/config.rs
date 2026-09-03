@@ -47,9 +47,9 @@ pub struct Config {
     pub project_root: PathBuf,
     #[serde(default = "default_true")]
     pub namer: bool,
-    /// Name each claude session's Remote Control session after its project
-    /// (phone session list reads as project names). See agents::with_remote_control_name.
-    #[serde(default = "default_true")]
+    /// 已废弃（2026-09-03）：Claude Code Remote Control 与本应用功能重叠，daemon 起的会话
+    /// 一律关掉它（hooks 设置片段里 `remoteControlAtStartup=false`）。旧配置里留着无害。
+    #[serde(default)]
     pub remote_control_name: bool,
     /// Press Enter on Claude Code's「Do you trust the files in this folder?」
     /// for the user — they already picked the folder in AAA. See trust.rs.
@@ -88,7 +88,7 @@ impl Config {
             token: generate_token(),
             project_root: default_project_root(),
             namer: true,
-            remote_control_name: true,
+            remote_control_name: false,
             auto_trust: true,
             checkpoint: CheckpointConfig::default(),
         }
@@ -153,7 +153,7 @@ mod tests {
         assert!(cfg.checkpoint.enabled);
         assert!(!cfg.checkpoint.auto_init_git, "不替用户 git init");
         assert_eq!(cfg.checkpoint.interval_minutes, 10);
-        assert!(cfg.remote_control_name);
+        assert!(!cfg.remote_control_name, "旧字段读进来也不再开 Remote Control");
     }
 
     #[test]

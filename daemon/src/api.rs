@@ -616,12 +616,6 @@ async fn sessions_create(
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| canon_str.clone());
-    // Remote Control 会话按项目命名（仅 claude 认此旗标；配置可关）。
-    let cmd = if app.cfg.remote_control_name {
-        agents::with_remote_control_name(cmd, agent, &project_name)
-    } else {
-        cmd
-    };
     // hooks 设置片段（事件源，见 hooks.rs）；写不出来只是退回屏幕启发式，不阻止开会话
     let cmd = match crate::hooks::ensure_settings(&app) {
         Ok(p) => crate::hooks::with_settings(cmd, agent, &p),

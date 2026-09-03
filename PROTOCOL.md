@@ -37,7 +37,6 @@ port = 2730
 token = "aaa_tk_<32hex>"     # 首次运行生成
 project_root = "/Volumes/SSD/project"
 namer = true                  # haiku 会话命名开关（对应 AAA_NAMER）
-remote_control_name = true    # claude 会话给 Remote Control 起项目名（手机官方 App 的会话列表更可读；仅 claude 认此旗标）
 [checkpoint]                  # 见「git checkpoint」
 ```
 
@@ -215,6 +214,7 @@ daemon 起 claude 会话时追加 `--settings ~/.local/state/aaa-daemon/claude-h
 会话对象新增字段（老客户端忽略）：`hooked`、`error`（string|null）、`compacting`、`user_killed`。
 
 Claude 以 `--dangerously-skip-permissions` 运行，`PermissionRequest` 不会发生，所以没有权限卡片。
+片段里同时写 `remoteControlAtStartup=false`：Claude Code 自带的 Remote Control 与本应用功能重叠，daemon 起的会话一律不开（原 `remote_control_name` 配置作废）。
 
 ## SSD 守卫（硬性约束）
 

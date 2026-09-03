@@ -71,7 +71,8 @@ pub fn settings_json(port: u16, token: &str) -> Value {
         }
         hooks.insert(ev.to_string(), json!([entry]));
     }
-    json!({ "hooks": Value::Object(hooks) })
+    // Remote Control 与本应用重叠：daemon 起的会话一律关掉（覆盖用户 settings 里的开关）
+    json!({ "hooks": Value::Object(hooks), "remoteControlAtStartup": false })
 }
 
 /// Write (or refresh) the settings file; returns its path. Token is inside, so
@@ -289,6 +290,7 @@ mod tests {
             assert_eq!(h["async"], true);
         }
         assert_eq!(hooks["PreToolUse"][0]["matcher"], "AskUserQuestion");
+        assert_eq!(v["remoteControlAtStartup"], false);
         assert!(hooks["Stop"][0].get("matcher").is_none());
     }
 
