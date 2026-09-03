@@ -1,5 +1,6 @@
 //! UI 根视图：侧栏（唯一的会话切换入口）+ 页面区 + 状态栏 + 模态框。
 
+mod detail_panel;
 mod kit;
 mod messages_view;
 mod mini_input;
@@ -216,6 +217,10 @@ pub enum Modal {
         old_root: String,
         new_root: String,
     },
+    /// 详情面板「回滚到会话开始」：工作区回到 start 检查点（存活会话先被终止）
+    ConfirmRollback {
+        id: String,
+    },
 }
 
 pub struct RootView {
@@ -266,6 +271,20 @@ pub struct RootView {
     sidebar_drag: Option<(f32, f32)>,
     /// 当前主题（与 theme::current 同步）：设置页切换，随 ui.toml 落盘
     pub theme: ThemeKind,
+
+    // 详情面板（会话页右侧，⌘I）
+    /// 面板展开与否，随 ui.toml 落盘
+    pub detail_visible: bool,
+    /// 静音通知的项目路径，随 ui.toml 落盘
+    pub muted_projects: Vec<String>,
+    /// 套餐用量（GET /usage + usage 帧）；None = 没有套餐信息，侧栏不画
+    pub plan: Option<PlanUsage>,
+    /// 每会话的产物 / 改动状态（含各自的拉取节流器）
+    detail: HashMap<String, detail_panel::SessionDetail>,
+    /// 项目路径 → 收件箱条目
+    inbox: HashMap<String, Vec<InboxItem>>,
+    /// 收件箱新增输入框（回车提交，根节点接住）
+    pub inbox_input: Entity<MiniInput>,
 
     // 输入框
     /// 侧栏顶部的新建项目输入框：内容即文件夹名，回车 / ＋ 创建
@@ -320,6 +339,7 @@ impl RootView {
         let port_input = cx.new(|cx| MiniInput::new(cx, "2730"));
         let token_input = cx.new(|cx| MiniInput::new(cx, "aaa_tk_…"));
         let root_input = cx.new(|cx| MiniInput::new(cx, "~/project"));
+        let inbox_input = cx.new(|cx| MiniInput::new(cx, "加一条，Claude 空下来时自动喂给它"));
         if let Some(ep) = &endpoint {
             host_input.update(cx, |i, cx| i.set_text(ep.host.clone(), cx));
             port_input.update(cx, |i, cx| i.set_text(ep.port.to_string(), cx));
@@ -351,6 +371,12 @@ impl RootView {
             sidebar_w: ui_state.sidebar_w,
             sidebar_drag: None,
             theme: theme_kind,
+            detail_visible: ui_state.detail_visible,
+            muted_projects: ui_state.muted_projects,
+            plan: None,
+            detail: HashMap::new(),
+            inbox: HashMap::new(),
+            inbox_input,
             new_input,
             creating: false,
             name_input,
@@ -434,6 +460,7 @@ impl RootView {
                 self.ports_cache.remove(&id);
                 self.user_killed.remove(&id);
                 self.deleted_terminals.remove(&id);
+                self.forget_detail(&id);
                 self.page = page_after_close(&self.page, &id, &self.open_order);
                 self.sessions_changed(cx);
                 cx.notify();
@@ -448,7 +475,14 @@ impl RootView {
                 if let Some(v) = self.msg_views.get(&id) {
                     v.update(cx, |v, cx| v.fetch_if_behind(last_seq, cx));
                 }
+                // 详情面板正看着它：产物 / 改动按节流重拉
+                self.on_detail_messages_changed(&id, cx);
             }
+            DaemonEvent::Usage { plan } => {
+                self.plan = plan;
+                cx.notify();
+            }
+            DaemonEvent::InboxChanged { path } => self.on_inbox_changed(&path, cx),
             DaemonEvent::Unknown => {}
         }
     }
@@ -514,16 +548,18 @@ impl RootView {
         // 眼皮底下跑完的东西再弹一条只是噪音
         let watching =
             self.page == Page::Session(new.id.clone()) && cx.active_window().is_some();
+        // 详情面板里静音了这个项目：一条都不弹
+        let muted = is_muted(&self.muted_projects, &new.project_path);
         match new.state {
             SessionState::Waiting => {
-                if !watching {
+                if !watching && !muted {
                     crate::notify::send(&new.display_title(), "完成 · 等你下一步");
                 }
             }
             SessionState::Exited => {
                 // 自己在 app 里 kill 的不弹；标记无论如何都要消耗掉
                 let killed_here = self.user_killed.remove(&new.id);
-                if !watching && !killed_here {
+                if !watching && !killed_here && !muted {
                     let body = match new.exit_code {
                         Some(code) => format!("已退出 (exit {code})"),
                         None => "已退出".to_string(),
@@ -660,6 +696,7 @@ impl RootView {
             cx,
         );
         self.fetch_projects(cx);
+        self.fetch_usage(cx);
         self.spawn_fetch(
             self.net.pair(),
             |r, p: PairResponse, cx| {
@@ -701,8 +738,10 @@ impl RootView {
         }
         self.fetch_ports(id.clone(), cx);
         self.page = Page::Session(id.clone());
-        self.pending_focus = Some(id);
+        self.pending_focus = Some(id.clone());
         self.reassert_visible_size(cx);
+        // 详情面板开着就把这个会话的产物 / 改动 / 收件箱补齐
+        self.refresh_detail(&id, cx);
         cx.notify();
     }
 
@@ -850,6 +889,14 @@ impl RootView {
             cx.stop_propagation();
             return;
         }
+        // ⌘I：会话页右侧详情面板开 / 关
+        if ks.key == "i" && m.platform {
+            if matches!(self.modal, Modal::None) {
+                self.toggle_detail(cx);
+            }
+            cx.stop_propagation();
+            return;
+        }
         // 新建项目输入框里回车 = 「创建并进入」。MiniInput 不消费 enter，
         // 这里在根上接住（IME 组字中的确认回车走 input handler，到不了这）。
         if ks.key == "enter"
@@ -861,6 +908,18 @@ impl RootView {
                 return;
             }
             self.create_project(cx);
+            cx.stop_propagation();
+            return;
+        }
+        // 详情面板收件箱输入框里回车 = 加一条
+        if ks.key == "enter"
+            && matches!(self.modal, Modal::None)
+            && self.inbox_input.read(cx).focus_handle.is_focused(window)
+        {
+            if self.inbox_input.read(cx).composing() {
+                return;
+            }
+            self.inbox_add(cx);
             cx.stop_propagation();
         }
     }
@@ -1143,6 +1202,8 @@ impl RootView {
                             .child("⚙"),
                     ),
             )
+            // 套餐用量：最底下两行小字（没有套餐信息就整块不画）
+            .when_some(self.render_plan_usage(), |el, block| el.child(block))
     }
 
     /// 侧栏右边缘的拖拽把手：兼作原来的分隔线，所以侧栏本身不再画 border_r。
@@ -1190,6 +1251,8 @@ impl RootView {
         UiState {
             sidebar_w: self.sidebar_w,
             theme: self.theme.as_str().to_string(),
+            detail_visible: self.detail_visible,
+            muted_projects: self.muted_projects.clone(),
         }
     }
 
@@ -1215,6 +1278,7 @@ impl RootView {
             &self.port_input,
             &self.token_input,
             &self.root_input,
+            &self.inbox_input,
         ] {
             i.update(cx, |_, cx| cx.notify());
         }
@@ -1333,8 +1397,18 @@ impl RootView {
                     let sid_rename = sid.clone();
                     let sid_kill = sid.clone();
                     let sid_del = sid.clone();
+                    // ⓘ 详情面板开关（⌘I）
+                    let detail_on = self.detail_visible;
                     bar = bar
                         .child(div().ml_auto())
+                        .child(
+                            act(
+                                "detail-toggle",
+                                "ⓘ 详情",
+                                if detail_on { theme::accent() } else { theme::faint() },
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_detail(cx))),
+                        )
                         .child(act("sess-rename", "重命名", theme::dim()).on_click(cx.listener(
                             move |this, _, window, cx| {
                                 this.open_rename_modal(sid_rename.clone(), window, cx);
@@ -1504,7 +1578,9 @@ impl Render for RootView {
             .on_key_down(cx.listener(Self::on_root_key))
             .child(self.render_sidebar(cx))
             .child(self.render_sidebar_resizer(cx))
-            .child(main);
+            .child(main)
+            // 会话页右侧的详情面板（⌘I；只在会话页且展开时存在）
+            .when_some(self.render_detail_panel(cx), |el, panel| el.child(panel));
 
         // 拖动中把 move/up 挂到根上：4px 的把手留不住指针，只有根覆盖整窗。
         // 不拖时不挂，免得每次鼠标移动都空跑一遍监听。

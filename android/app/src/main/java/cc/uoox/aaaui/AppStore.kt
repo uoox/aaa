@@ -54,6 +54,9 @@ class AppStore private constructor(context: Context) {
     val projects: StateFlow<List<Project>> = _projects.asStateFlow()
     private val _health = MutableStateFlow<Health?>(null)
     val health: StateFlow<Health?> = _health.asStateFlow()
+    /** 套餐用量（5h / 7d / 按模型）；null = 没数据，首页不显示 */
+    private val _planUsage = MutableStateFlow<PlanUsage?>(null)
+    val planUsage: StateFlow<PlanUsage?> = _planUsage.asStateFlow()
 
     /** Session-state transition notifications (running → waiting / exited). */
     private val _notifyEvents = MutableSharedFlow<NotifyEvent>(extraBufferCapacity = 32)
@@ -122,6 +125,7 @@ class AppStore private constructor(context: Context) {
             backoffMs = 1000L
             scope.launch { runCatching { _health.value = api.health() } }
             scope.launch { refreshProjects() }
+            scope.launch { refreshUsage() }
             runEventsUntilClosed(api) // suspends while WS is healthy
             if (settings.current().server == null) continue
             _connState.value = ConnState.Connecting(host)
@@ -199,6 +203,7 @@ class AppStore private constructor(context: Context) {
                 _health.value = (_health.value ?: Health()).copy(ssd_mounted = frame.ssdMounted)
             }
             is EventFrame.MessagesChanged, is EventFrame.InboxChanged -> _frames.tryEmit(frame)
+            is EventFrame.UsageUpdate -> _planUsage.value = frame.plan
             is EventFrame.Unknown -> { }
         }
     }
@@ -270,6 +275,12 @@ class AppStore private constructor(context: Context) {
     suspend fun refreshProjects() {
         val api = client ?: return
         runCatching { api.projects() }.onSuccess { _projects.value = it }
+    }
+
+    /** 404（旧 daemon）或失败都不动现值；成功才覆盖，包括覆盖成 null */
+    suspend fun refreshUsage() {
+        val api = client ?: return
+        runCatching { api.usage() }.onSuccess { _planUsage.value = it }
     }
 
     suspend fun refreshHealth() {

@@ -49,8 +49,29 @@ pub const EVENTS: &[&str] = &[
     "SessionEnd",
 ];
 
+pub const STATUSLINE_EVENT: &str = "statusline";
+
+/// statusLine 命令：把 Claude Code 推来的状态 JSON 原样转给 daemon，自己不打印任何字——
+/// 终端里不再占一行（claude-hud 那种状态栏就是这份 JSON 画出来的）。
+pub fn statusline_script(port: u16, token: &str) -> String {
+    format!(
+        "#!/bin/sh\n# AAA: forward Claude Code status JSON to the daemon; print nothing.\n\
+         curl -s -m 2 -X POST -H 'Authorization: Bearer {token}' -H \"X-AAA-Session: ${{{env}:-}}\" \\\n  -H 'Content-Type: application/json' --data-binary @- \\\n  http://127.0.0.1:{port}/api/v1/hooks/{ev} >/dev/null 2>&1\nexit 0\n",
+        env = SESSION_ENV,
+        ev = STATUSLINE_EVENT,
+    )
+}
+
+pub fn statusline_path(paths: &crate::paths::Paths) -> PathBuf {
+    paths.state_dir().join("aaa-statusline.sh")
+}
+
 /// Settings fragment for `claude --settings <file>`.
 pub fn settings_json(port: u16, token: &str) -> Value {
+    settings_json_with(port, token, &statusline_path(&crate::paths::Paths::from_env()))
+}
+
+pub fn settings_json_with(port: u16, token: &str, statusline: &Path) -> Value {
     let mut hooks = serde_json::Map::new();
     for ev in EVENTS {
         let mut entry = json!({
@@ -72,7 +93,11 @@ pub fn settings_json(port: u16, token: &str) -> Value {
         hooks.insert(ev.to_string(), json!([entry]));
     }
     // Remote Control 与本应用重叠：daemon 起的会话一律关掉（覆盖用户 settings 里的开关）
-    json!({ "hooks": Value::Object(hooks), "remoteControlAtStartup": false })
+    json!({
+        "hooks": Value::Object(hooks),
+        "remoteControlAtStartup": false,
+        "statusLine": { "type": "command", "command": statusline.to_string_lossy(), "padding": 0 }
+    })
 }
 
 /// Write (or refresh) the settings file; returns its path. Token is inside, so
@@ -83,17 +108,22 @@ pub fn ensure_settings(app: &App) -> std::io::Result<PathBuf> {
         p => p,
     };
     let path = settings_path(&app.paths);
-    let body = serde_json::to_vec_pretty(&settings_json(port, &app.cfg.token))?;
-    if std::fs::read(&path).map(|cur| cur == body).unwrap_or(false) {
+    let script = statusline_path(&app.paths);
+    let body = serde_json::to_vec_pretty(&settings_json_with(port, &app.cfg.token, &script))?;
+    let script_body = statusline_script(port, &app.cfg.token).into_bytes();
+    let same = |p: &Path, want: &[u8]| std::fs::read(p).map(|cur| cur == want).unwrap_or(false);
+    if same(&path, &body) && same(&script, &script_body) {
         return Ok(path);
     }
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
+    crate::paths::write_atomic(&script, &script_body)?;
     crate::paths::write_atomic(&path, &body)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700));
         let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
     }
     Ok(path)
@@ -121,6 +151,8 @@ pub struct Applied {
     pub dirty: bool,
     /// (project_path, claude session id) learned for the first time → registry
     pub learned_id: Option<(String, String)>,
+    /// statusline 带来的 plan 配额（rate_limits），有就广播
+    pub plan: Option<Value>,
 }
 
 /// Fold one hook event into the session. Pure with respect to I/O: the caller
@@ -166,6 +198,14 @@ pub fn apply(sess: &Session, event: &str, body: &Value, now: Instant) -> Applied
         }
     }
     match event {
+        STATUSLINE_EVENT => {
+            let usage = session_usage(body);
+            if meta.usage != Some(usage.clone()) {
+                meta.usage = Some(usage);
+                out.dirty = true;
+            }
+            out.plan = plan_usage(body);
+        }
         "UserPromptSubmit" => {
             if meta.state != State::Running {
                 meta.state = State::Running;
@@ -235,6 +275,53 @@ pub fn apply(sess: &Session, event: &str, body: &Value, now: Instant) -> Applied
     out
 }
 
+/// 本会话用量：statusLine JSON 里与这一个会话有关的部分，压成客户端直接能画的形状。
+pub fn session_usage(body: &Value) -> Value {
+    let cw = body.get("context_window");
+    let pct = cw
+        .and_then(|c| c.get("used_percentage"))
+        .and_then(Value::as_f64)
+        .or_else(|| {
+            // 老版本没有百分比：用 current_usage 各项之和 / 窗口大小
+            let size = cw?.get("context_window_size")?.as_f64()?;
+            let cu = cw?.get("current_usage")?;
+            let sum: f64 = ["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"]
+                .iter()
+                .filter_map(|k| cu.get(*k).and_then(Value::as_f64))
+                .sum();
+            (size > 0.0).then(|| (sum / size * 100.0).round())
+        });
+    let cost = body.get("cost");
+    let g = |v: Option<&Value>, k: &str| v.and_then(|c| c.get(k)).cloned().unwrap_or(Value::Null);
+    json!({
+        "model": g(body.get("model"), "display_name"),
+        "model_id": g(body.get("model"), "id"),
+        "context_pct": pct,
+        "context_window_size": g(cw, "context_window_size"),
+        "input_tokens": g(cw, "total_input_tokens"),
+        "output_tokens": g(cw, "total_output_tokens"),
+        "cost_usd": g(cost, "total_cost_usd"),
+        "duration_ms": g(cost, "total_duration_ms"),
+        "lines_added": g(cost, "total_lines_added"),
+        "lines_removed": g(cost, "total_lines_removed"),
+        "effort": body.get("effort").and_then(|e| e.get("level").cloned().or_else(|| e.as_str().map(|s| json!(s)))).unwrap_or(Value::Null),
+    })
+}
+
+/// 账号级 plan 配额（与会话无关）：`rate_limits` 原样透传加时间戳；没有就 None。
+pub fn plan_usage(body: &Value) -> Option<Value> {
+    let rl = body.get("rate_limits")?;
+    if rl.is_null() {
+        return None;
+    }
+    Some(json!({
+        "five_hour": rl.get("five_hour").cloned().unwrap_or(Value::Null),
+        "seven_day": rl.get("seven_day").cloned().unwrap_or(Value::Null),
+        "model_scoped": rl.get("model_scoped").cloned().unwrap_or(Value::Null),
+        "updated_at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    }))
+}
+
 /// Resolve the session a hook belongs to: the header first; else the single
 /// live claude session whose cwd matches (parallel sessions in one directory
 /// are ambiguous → None).
@@ -292,6 +379,42 @@ mod tests {
         assert_eq!(hooks["PreToolUse"][0]["matcher"], "AskUserQuestion");
         assert_eq!(v["remoteControlAtStartup"], false);
         assert!(hooks["Stop"][0].get("matcher").is_none());
+    }
+
+    #[test]
+    fn statusline_is_forwarded_and_summarised() {
+        let v = settings_json_with(2730, "tk", Path::new("/s/aaa-statusline.sh"));
+        assert_eq!(v["statusLine"]["type"], "command");
+        assert_eq!(v["statusLine"]["command"], "/s/aaa-statusline.sh");
+        let sh = statusline_script(2730, "tk");
+        assert!(sh.starts_with("#!/bin/sh\n"));
+        assert!(sh.contains("Bearer tk") && sh.contains("X-AAA-Session: ${AAA_SESSION:-}") && sh.contains("/api/v1/hooks/statusline"));
+        let body = json!({
+            "model": {"id": "claude-fable-5-1", "display_name": "Fable 5.1"},
+            "context_window": {"context_window_size": 200000, "total_input_tokens": 1200, "total_output_tokens": 300,
+                "current_usage": {"input_tokens": 20000, "cache_creation_input_tokens": 10000, "cache_read_input_tokens": 30000}},
+            "cost": {"total_cost_usd": 1.25, "total_duration_ms": 5000, "total_lines_added": 10, "total_lines_removed": 2},
+            "rate_limits": {"five_hour": {"used_percentage": 32, "resets_at": 1700000000}, "seven_day": {"used_percentage": 61, "resets_at": 1700400000}},
+            "effort": {"level": "high"}
+        });
+        let u = session_usage(&body);
+        assert_eq!(u["model"], "Fable 5.1");
+        assert_eq!(u["context_pct"], 30.0, "60k of 200k");
+        assert_eq!(u["cost_usd"], 1.25);
+        assert_eq!(u["effort"], "high");
+        let with_pct = json!({"context_window": {"used_percentage": 42.5}});
+        assert_eq!(session_usage(&with_pct)["context_pct"], 42.5, "native percentage wins");
+        let p = plan_usage(&body).unwrap();
+        assert_eq!(p["five_hour"]["used_percentage"], 32);
+        assert_eq!(p["seven_day"]["used_percentage"], 61);
+        assert!(plan_usage(&json!({"model": {}})).is_none());
+        // through apply(): usage lands on the session, plan comes back out
+        let sess = Session::for_test("claude", "/p");
+        let a = apply(&sess, STATUSLINE_EVENT, &body, Instant::now());
+        assert!(a.dirty && a.plan.is_some());
+        assert_eq!(sess.meta.lock().unwrap().usage.as_ref().unwrap()["model"], "Fable 5.1");
+        let a = apply(&sess, STATUSLINE_EVENT, &body, Instant::now());
+        assert!(!a.dirty, "same usage twice is not a change");
     }
 
     #[test]

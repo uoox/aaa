@@ -231,6 +231,8 @@ fun ProjectsHome(store: AppStore, nav: NavHostController) {
     val sessions by store.sessions.collectAsState()
     val conn by store.connState.collectAsState()
     val health by store.health.collectAsState()
+    val plan by store.planUsage.collectAsState()
+    var planDialog by remember { mutableStateOf(false) }
     var query by rememberSaveable { mutableStateOf("") }
     var refreshing by remember { mutableStateOf(false) }
     // 正在 POST /sessions 的项目路径：挡双击（daemon 虽幂等，但两次并发到达仍可能各开一个）
@@ -329,6 +331,15 @@ fun ProjectsHome(store: AppStore, nav: NavHostController) {
                 Text("⚙", color = Tok.Dim, fontSize = 20.sp)
             }
         }
+        // 套餐用量一行：5h / 7d / 按模型，最高的那个 ≥70 琥珀、≥90 红；点开看重置时间。没数据不占行
+        val planSegs = planLineSegments(plan)
+        if (planSegs.isNotEmpty()) {
+            Text(
+                segmentsAnnotated(planSegs, Tok.Faint),
+                fontSize = 11.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.fillMaxWidth().clickable { planDialog = true }.padding(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 6.dp),
+            )
+        }
         // 与 mac 侧栏同一件东西：边输入边过滤列表，回车或右边 ＋ 就按这个名字新建项目
         OutlinedTextField(
             query, { query = it },
@@ -406,6 +417,42 @@ fun ProjectsHome(store: AppStore, nav: NavHostController) {
         ProjectActionsSheet(store, nav, p, onDismiss = { actionsFor = null }, onPurged = { purgeReport = it })
     }
     purgeReport?.let { results -> PurgeReportDialog(results) { purgeReport = null } }
+    if (planDialog) plan?.let { PlanUsageDialog(it) { planDialog = false } }
+}
+
+/** 每个窗口一行：名称 + 百分比（按级别着色）+ 重置时间 */
+@Composable
+fun PlanUsageDialog(plan: PlanUsage, onDismiss: () -> Unit) {
+    data class Line(val name: String, val pct: Double?, val resetsAt: kotlinx.serialization.json.JsonElement?)
+    val lines = buildList {
+        plan.five_hour?.let { add(Line("5 小时", it.used_percentage, it.resets_at)) }
+        plan.seven_day?.let { add(Line("7 天", it.used_percentage, it.resets_at)) }
+        plan.model_scoped.orEmpty().forEach { add(Line(it.display_name.ifBlank { "模型" }, it.utilization, it.resets_at)) }
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Tok.Raised,
+        title = { Text("套餐用量", color = Tok.Ink) },
+        text = {
+            Column {
+                lines.forEach { l ->
+                    Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text(l.name, color = Tok.Ink, fontSize = 14.sp, modifier = Modifier.weight(1f))
+                        Text(
+                            l.pct?.let { pctText(it) } ?: "—",
+                            color = pctColor(pctColorLevel(l.pct), Tok.Ink), fontSize = 14.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold,
+                        )
+                        resetLabel(parseResetsAt(l.resetsAt))?.let {
+                            Spacer(Modifier.width(12.dp))
+                            Text(it, color = Tok.Faint, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                        }
+                    }
+                }
+                if (lines.isEmpty()) Text("暂无数据", color = Tok.Faint)
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭", color = Tok.Dim) } },
+    )
 }
 
 /** 一行：色点 + 项目名 + 时间；第二行一句摘要。目录大小等细节在长按单里。 */

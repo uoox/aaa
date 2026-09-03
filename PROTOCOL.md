@@ -84,6 +84,11 @@ daemon 在启动时用 `zsh -lic` 问一次「终端里应有的 PATH」（带�
   "error": null,                  // v1.3：上一轮 StopFailure 的错误类型，下一次提交清空
   "compacting": false,            // v1.3：PreCompact → PostCompact 之间
   "user_killed": false,           // v1.3：用户主动结束的，客户端不弹「退出」通知
+  "usage": {                      // v1.4：statusLine 转来的本会话用量；没收到过为 null
+    "model": "Fable 5.1", "model_id": "claude-fable-5-1", "effort": "medium",
+    "context_pct": 4.0, "context_window_size": 1000000, "input_tokens": 39759, "output_tokens": 4,
+    "cost_usd": 0.28, "duration_ms": 15749, "lines_added": 0, "lines_removed": 0
+  }
   "preview": "…最近 4 行纯文本…",
   "rows": 40, "cols": 120,
   "pid": 12345, "exit_code": null,
@@ -120,7 +125,9 @@ CLI 的 `ls` / 交互菜单仍按「执行中 / 待回复 / 已完成」三组�
 | DELETE | `/sessions/:id` | 删除记录与回放（活着先 kill） |
 | POST | `/sessions/:id/rename` | `{title}` |
 | GET | `/sessions/:id/ports` | 进程树监听端口 `[{port,cmd}]`（mac「Web 预览」入口用；其它客户端未接） |
-| POST | `/hooks/:event` | Claude Code hooks 回调（见「Claude Code hooks」）；头 `X-AAA-Session`；永远 200 `{}` |
+| POST | `/hooks/:event` | Claude Code hooks 回调（见「Claude Code hooks」）；头 `X-AAA-Session`；永远 200 `{}`。`:event=statusline` 是 statusLine 命令转来的状态 JSON |
+| GET | `/usage` | `{plan}`：账号 plan 配额（最近一次 statusLine 的 `rate_limits`）：`{five_hour:{used_percentage,resets_at}, seven_day:{…}, model_scoped:[{display_name,utilization,resets_at}]|null, updated_at}`；还没收到过时 `plan=null` |
+| GET | `/sessions/:id/artifacts` | `{artifacts:[{url,title,description,file_path,ts}]}`：会话里用 Artifact 工具发布过的链接（报告 / 原型 / 图），按 url 去重，来自 transcript |
 | GET | `/sessions/:id/screen` | daemon 侧 vt100 的屏幕文本 `{text, alternate_screen}`。非备用屏时 text 前带最近 500 行回滚；备用屏（Claude Code）只有可见画面。客户端「复制屏幕内容」「打开链接」用它。 |
 | GET | `/mac/permissions` | 见「macOS 权限」 |
 | POST | `/mac/permissions/request` | 见「macOS 权限」 |
@@ -148,9 +155,10 @@ server → client JSON 文本帧：
 {"t":"session_removed","id":"s_…"}
 {"t":"projects_changed"}
 {"t":"health","ssd_mounted":true}
+{"t":"usage","plan":{…}}                        // v1.4：plan 配额变化，形状同 GET /usage 的 plan
 ```
 
-通知策略（客户端行为，2026-09-02 用户拍板）：**只有一种通知——「完成」**。`running→waiting` 与 `running→exited`（非本机用户手动 kill）各弹一条，标题带项目名，正文是会话标题。不识别「里面要回什么」、不按问题去重、没有高低优先级、没有空转告警；daemon 侧不推送（ntfy 已移除）。按项目静音是客户端本地配置（目前只有 Android 实现）。用户正盯着的会话（窗口前台且当前页就是它）不弹。
+通知策略（客户端行为，2026-09-02 用户拍板）：**只有一种通知——「完成」**。`running→waiting` 与 `running→exited`（非本机用户手动 kill）各弹一条，标题带项目名，正文是会话标题。不识别「里面要回什么」、不按问题去重、没有高低优先级、没有空转告警；daemon 侧不推送（ntfy 已移除）。按项目静音是客户端本地配置（两端各存各的）。用户正盯着的会话（窗口前台且当前页就是它）不弹。
 
 ## macOS 权限（一键授权）
 

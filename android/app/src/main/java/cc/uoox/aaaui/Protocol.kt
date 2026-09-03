@@ -2,6 +2,7 @@ package cc.uoox.aaaui
 
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -37,7 +38,46 @@ import java.net.URLDecoder
     val compacting: Boolean = false,
     /** 用户自己结束的：退出不弹通知 */
     val user_killed: Boolean = false,
+    /** v1.4：Claude Code statusline 喂来的用量（模型 / 上下文占比 / 花费）；没有就 null */
+    val usage: SessionUsage? = null,
 )
+
+@Serializable data class SessionUsage(
+    val model: String? = null,
+    val model_id: String? = null,
+    /** 0-100 */
+    val context_pct: Double? = null,
+    val context_window_size: Long? = null,
+    val input_tokens: Long? = null,
+    val output_tokens: Long? = null,
+    val cost_usd: Double? = null,
+    val duration_ms: Long? = null,
+    val lines_added: Long? = null,
+    val lines_removed: Long? = null,
+    val effort: String? = null,
+)
+
+// v1.4 套餐用量（GET /usage 与 /events 的 usage 帧共用同一个 plan 对象）
+/** resets_at：daemon 那边可能给 unix 秒数也可能给 ISO-8601 字串，留原样由 [parseResetsAt] 解 */
+@Serializable data class PlanWindow(val used_percentage: Double? = null, val resets_at: JsonElement? = null)
+@Serializable data class ModelScopedUsage(val display_name: String = "", val utilization: Double? = null, val resets_at: JsonElement? = null)
+@Serializable data class PlanUsage(
+    val five_hour: PlanWindow? = null,
+    val seven_day: PlanWindow? = null,
+    val model_scoped: List<ModelScopedUsage>? = null,
+    val updated_at: JsonElement? = null,
+)
+@Serializable data class UsageResponse(val plan: PlanUsage? = null)
+
+// v1.4 产物（会话里发布的 Artifact 链接）
+@Serializable data class ArtifactInfo(
+    val url: String,
+    val title: String = "",
+    val description: String = "",
+    val file_path: String = "",
+    val ts: String = "",
+)
+@Serializable data class ArtifactsResponse(val artifacts: List<ArtifactInfo> = emptyList())
 
 @Serializable data class Health(
     val version: String = "", val ssd_mounted: Boolean = false, val project_root: String = "", val uptime_s: Long = 0,
@@ -143,6 +183,8 @@ sealed class EventFrame {
     data class HealthUpdate(val ssdMounted: Boolean) : EventFrame()
     data class MessagesChanged(val id: String, val lastSeq: Long) : EventFrame()
     data class InboxChanged(val path: String) : EventFrame()
+    /** 套餐用量变了：plan 为 null 表示 daemon 暂时拿不到 */
+    data class UsageUpdate(val plan: PlanUsage?) : EventFrame()
     data class Unknown(val type: String) : EventFrame()
 
     companion object {
@@ -158,6 +200,7 @@ sealed class EventFrame {
                     "health" -> HealthUpdate(obj["ssd_mounted"]?.jsonPrimitive?.booleanOrNull ?: true)
                     "messages_changed" -> MessagesChanged(obj["id"]!!.jsonPrimitive.content, obj["last_seq"]?.jsonPrimitive?.longOrNull ?: 0)
                     "inbox_changed" -> InboxChanged(obj["path"]?.jsonPrimitive?.contentOrNull ?: "")
+                    "usage" -> UsageUpdate(obj["plan"]?.takeIf { it !is kotlinx.serialization.json.JsonNull }?.let { ProtocolJson.instance.decodeFromJsonElement(PlanUsage.serializer(), it) })
                     else -> Unknown(t)
                 }
             } catch (_: Exception) { Unknown(t) }

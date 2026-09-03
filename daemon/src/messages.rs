@@ -64,6 +64,17 @@ pub struct Msg {
     pub question: Option<QuestionSpec>,
 }
 
+/// 会话里发布过的 Artifact（Claude Code 的 Artifact 工具：报告、原型、图）。按 url 去重，
+/// 重复发布同一 url 只更新时间与描述。
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Artifact {
+    pub url: String,
+    pub title: String,
+    pub description: String,
+    pub file_path: String,
+    pub ts: String,
+}
+
 pub struct MsgStore {
     pub source: &'static str, // claude | none
     pub supported: bool,
@@ -74,6 +85,9 @@ pub struct MsgStore {
     pub msgs: VecDeque<Msg>,
     /// tool_use id -> tool name (to label tool_results)
     tool_names: HashMap<String, String>,
+    /// Artifact 工具调用：tool_use id -> (title, description, file_path)，等 tool_result 里的 url
+    pending_artifacts: HashMap<String, (String, String, String)>,
+    pub artifacts: Vec<Artifact>,
     pub discover_ticks: u32,
     /// 当前 file 来自 resume-id 兜底（旧 transcript）。resume 后 agent 会写
     /// **新**文件；兜底命中的旧文件永不增长，必须保留升级到新文件的机会。
@@ -101,6 +115,8 @@ impl MsgStore {
             discover_ticks: 0,
             via_fallback: false,
             authoritative: false,
+            pending_artifacts: HashMap::new(),
+            artifacts: Vec::new(),
             dirty: false,
         }
     }
@@ -337,6 +353,15 @@ pub fn parse_claude_line(store: &mut MsgStore, v: &Value) {
                                 .and_then(|id| store.tool_names.get(id).cloned())
                                 .unwrap_or_default();
                             let status = if is_err { "err" } else { "ok" };
+                            if let Some(pending) = item
+                                .get("tool_use_id")
+                                .and_then(|i| i.as_str())
+                                .and_then(|id| store.pending_artifacts.remove(id))
+                            {
+                                if !is_err {
+                                    record_artifact(store, ts, pending, &text);
+                                }
+                            }
                             if name == ASK_TOOL {
                                 // the user's reply to the form: shown on the
                                 // user's side, closes the pending question
@@ -405,6 +430,11 @@ pub fn parse_claude_line(store: &mut MsgStore, v: &Value) {
                             .to_string();
                         if let Some(id) = item.get("id").and_then(|i| i.as_str()) {
                             store.tool_names.insert(id.to_string(), name.clone());
+                            if name == ARTIFACT_TOOL {
+                                let inp = item.get("input");
+                                let g = |k: &str| inp.and_then(|i| i.get(k)).and_then(|x| x.as_str()).unwrap_or("").to_string();
+                                store.pending_artifacts.insert(id.to_string(), (g("title"), g("description"), g("file_path")));
+                            }
                         }
                         if name == ASK_TOOL {
                             if let Some(spec) = parse_question_spec(item.get("input")) {
@@ -442,6 +472,41 @@ pub fn parse_claude_line(store: &mut MsgStore, v: &Value) {
         }
         _ => {}
     }
+}
+
+pub const ARTIFACT_TOOL: &str = "Artifact";
+
+/// 「Published <path> at https://claude.ai/code/artifact/<id>」→ 一条产物记录。
+/// 只认 claude.ai 的 artifact 链接；没有 url 的结果（list / read 等动作）忽略。
+fn record_artifact(store: &mut MsgStore, ts: &str, pending: (String, String, String), result: &str) {
+    let Some(url) = artifact_url(result) else { return };
+    let (title, description, file_path) = pending;
+    let title = if !title.is_empty() {
+        title
+    } else if !file_path.is_empty() {
+        std::path::Path::new(&file_path)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| file_path.clone())
+    } else {
+        url.clone()
+    };
+    let art = Artifact { url: url.clone(), title, description, file_path, ts: ts.to_string() };
+    if let Some(existing) = store.artifacts.iter_mut().find(|a| a.url == url) {
+        *existing = art;
+    } else {
+        store.artifacts.push(art);
+    }
+}
+
+pub fn artifact_url(text: &str) -> Option<String> {
+    let start = text.find("https://claude.ai/code/artifact/")?;
+    let rest = &text[start..];
+    let end = rest
+        .find(|c: char| c.is_whitespace() || matches!(c, ')' | ']' | '>' | '"' | '\'' | ','))
+        .unwrap_or(rest.len());
+    let url = &rest[..end];
+    if url.len() > "https://claude.ai/code/artifact/".len() { Some(url.to_string()) } else { None }
 }
 
 fn parse_line(store: &mut MsgStore, line: &str) {
@@ -857,5 +922,42 @@ mod tests {
         poll_file(&mut store);
         assert_eq!(store.last_seq(), 3);
         assert_eq!(store.msgs[2].text, "second");
+    }
+
+    #[test]
+    fn artifact_tool_calls_become_artifact_records() {
+        let mut store = MsgStore::for_agent("claude");
+        let use_line = serde_json::json!({"type":"assistant","timestamp":"2026-09-03T10:00:00Z","message":{"content":[
+            {"type":"tool_use","id":"tu1","name":"Artifact","input":{"file_path":"/p/报告.html","description":"季度报告","favicon":"📊"}}]}});
+        parse_claude_line(&mut store, &use_line);
+        assert!(store.artifacts.is_empty(), "url comes with the result");
+        let res_line = serde_json::json!({"type":"user","timestamp":"2026-09-03T10:00:05Z","message":{"content":[
+            {"type":"tool_result","tool_use_id":"tu1","content":"Published /p/报告.html at https://claude.ai/code/artifact/abc-123\n\nLive subscription: skipped"}]}});
+        parse_claude_line(&mut store, &res_line);
+        assert_eq!(store.artifacts.len(), 1);
+        let a = &store.artifacts[0];
+        assert_eq!(a.url, "https://claude.ai/code/artifact/abc-123");
+        assert_eq!(a.title, "报告", "no title → file stem");
+        assert_eq!(a.description, "季度报告");
+        // republish of the same url replaces, does not duplicate
+        let use2 = serde_json::json!({"type":"assistant","timestamp":"2026-09-03T11:00:00Z","message":{"content":[
+            {"type":"tool_use","id":"tu2","name":"Artifact","input":{"file_path":"/p/报告.html","title":"Q3 报告"}}]}});
+        let res2 = serde_json::json!({"type":"user","timestamp":"2026-09-03T11:00:01Z","message":{"content":[
+            {"type":"tool_result","tool_use_id":"tu2","content":[{"type":"text","text":"Published /p/报告.html at https://claude.ai/code/artifact/abc-123 (redeployed)"}]}]}});
+        parse_claude_line(&mut store, &use2);
+        parse_claude_line(&mut store, &res2);
+        assert_eq!(store.artifacts.len(), 1);
+        assert_eq!(store.artifacts[0].title, "Q3 报告");
+        assert_eq!(store.artifacts[0].ts, "2026-09-03T11:00:01Z");
+        // errors and non-publish actions record nothing
+        let use3 = serde_json::json!({"type":"assistant","timestamp":"t","message":{"content":[
+            {"type":"tool_use","id":"tu3","name":"Artifact","input":{"action":"list"}}]}});
+        let res3 = serde_json::json!({"type":"user","timestamp":"t","message":{"content":[
+            {"type":"tool_result","tool_use_id":"tu3","content":"3 artifacts: ..."}]}});
+        parse_claude_line(&mut store, &use3);
+        parse_claude_line(&mut store, &res3);
+        assert_eq!(store.artifacts.len(), 1);
+        assert_eq!(artifact_url("see https://claude.ai/code/artifact/x-1, ok"), Some("https://claude.ai/code/artifact/x-1".into()));
+        assert_eq!(artifact_url("https://claude.ai/code/artifact/"), None);
     }
 }

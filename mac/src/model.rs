@@ -73,6 +73,166 @@ pub struct Session {
     /// 用户自己结束的：退出不弹通知
     #[serde(default)]
     pub user_killed: bool,
+    /// v1.4：Claude Code hooks 报的用量（模型 / 上下文占用 / 费用 / 改动行数）；
+    /// 没到之前为 None，详情面板显示空态
+    #[serde(default)]
+    pub usage: Option<SessionUsage>,
+}
+
+/// 会话用量（Session JSON 的 `usage`）。字段全部可缺省：daemon 拿到多少给多少。
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct SessionUsage {
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub model_id: Option<String>,
+    /// 0–100
+    #[serde(default)]
+    pub context_pct: Option<f64>,
+    #[serde(default)]
+    pub context_window_size: Option<u64>,
+    #[serde(default)]
+    pub input_tokens: Option<u64>,
+    #[serde(default)]
+    pub output_tokens: Option<u64>,
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+    #[serde(default)]
+    pub lines_added: Option<u64>,
+    #[serde(default)]
+    pub lines_removed: Option<u64>,
+    #[serde(default)]
+    pub effort: Option<String>,
+}
+
+// ── 套餐用量（GET /usage、`usage` 帧） ──────────────────────────────────────
+
+/// 重置时刻：daemon 可能给 unix 秒（或毫秒）数字，也可能给 ISO 串，两种都收
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum ResetsAt {
+    Epoch(f64),
+    Text(String),
+}
+
+impl ResetsAt {
+    /// 统一成 UTC 时刻；解析不了就 None（不猜）
+    pub fn to_utc(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        match self {
+            // 1e12 以上的数字只可能是毫秒（秒级要到公元 33658 年才有这么大）
+            ResetsAt::Epoch(n) => {
+                let secs = if *n > 1e12 { *n / 1000.0 } else { *n };
+                chrono::DateTime::from_timestamp(secs as i64, 0)
+            }
+            ResetsAt::Text(s) => chrono::DateTime::parse_from_rfc3339(s.trim())
+                .ok()
+                .map(|d| d.with_timezone(&chrono::Utc)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+pub struct PlanWindow {
+    /// 0–100
+    #[serde(default)]
+    pub used_percentage: Option<f64>,
+    #[serde(default)]
+    pub resets_at: Option<ResetsAt>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+pub struct ModelWindow {
+    #[serde(default)]
+    pub display_name: String,
+    /// 0–100
+    #[serde(default)]
+    pub utilization: Option<f64>,
+    #[serde(default)]
+    pub resets_at: Option<ResetsAt>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+pub struct PlanUsage {
+    #[serde(default)]
+    pub five_hour: Option<PlanWindow>,
+    #[serde(default)]
+    pub seven_day: Option<PlanWindow>,
+    #[serde(default)]
+    pub model_scoped: Option<Vec<ModelWindow>>,
+}
+
+/// `GET /usage` → `{"plan": null | {…}}`
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct UsageResponse {
+    #[serde(default)]
+    pub plan: Option<PlanUsage>,
+}
+
+// ── 产物 / 改动 / 收件箱 ────────────────────────────────────────────────────
+
+/// `GET /sessions/:id/artifacts` 的一项：会话发布过的 Artifact 页面
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+pub struct Artifact {
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub file_path: String,
+    /// ISO 时间
+    #[serde(default)]
+    pub ts: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ArtifactsResponse {
+    #[serde(default)]
+    pub artifacts: Vec<Artifact>,
+}
+
+/// `GET /sessions/:id/diff` 里的一个文件
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+pub struct DiffFile {
+    #[serde(default)]
+    pub path: String,
+    /// added | modified | deleted
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub additions: u64,
+    #[serde(default)]
+    pub deletions: u64,
+    /// ≤64KB，超出时 truncated=true
+    #[serde(default)]
+    pub patch: String,
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct DiffResponse {
+    /// false = 项目没有 .git / checkpoint 关着
+    #[serde(default)]
+    pub supported: bool,
+    #[serde(default)]
+    pub base: String,
+    #[serde(default)]
+    pub files: Vec<DiffFile>,
+}
+
+/// 任务收件箱一项（按项目路径归属）
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+pub struct InboxItem {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub created_at: String,
 }
 
 impl Session {
@@ -345,7 +505,17 @@ pub enum DaemonEvent {
         #[serde(default)]
         last_seq: u64,
     },
-    /// 未知帧向前兼容（inbox_changed 本期忽略；已移除的 session_stalled 也落到这里）
+    /// v1.4：套餐用量刷新（plan 为 null = 拿不到套餐信息，侧栏隐藏该块）
+    Usage {
+        #[serde(default)]
+        plan: Option<PlanUsage>,
+    },
+    /// 收件箱变了（按项目路径）：详情面板正显示该项目就重拉
+    InboxChanged {
+        #[serde(default)]
+        path: String,
+    },
+    /// 未知帧向前兼容（已移除的 session_stalled 也落到这里）
     #[serde(other)]
     Unknown,
 }
@@ -430,6 +600,12 @@ pub struct UiState {
     /// "dark" | "light" | "claude"（认不出的按 dark）
     #[serde(default = "default_theme")]
     pub theme: String,
+    /// 会话页右侧详情面板是否展开（⌘I 切换；默认展开）
+    #[serde(default = "default_true")]
+    pub detail_visible: bool,
+    /// 静音通知的项目路径（详情面板「通知」段的开关）
+    #[serde(default)]
+    pub muted_projects: Vec<String>,
 }
 
 impl Default for UiState {
@@ -437,7 +613,30 @@ impl Default for UiState {
         UiState {
             sidebar_w: SIDEBAR_W_DEFAULT,
             theme: default_theme(),
+            detail_visible: true,
+            muted_projects: Vec::new(),
         }
+    }
+}
+
+/// 项目是否被静音：路径按去尾斜杠后精确匹配（同一目录写法不同不该算两个项目）
+pub fn is_muted(muted: &[String], project_path: &str) -> bool {
+    let p = project_path.trim_end_matches('/');
+    !p.is_empty() && muted.iter().any(|m| m.trim_end_matches('/') == p)
+}
+
+/// 切换静音；返回切换后是否静音
+pub fn toggle_muted(muted: &mut Vec<String>, project_path: &str) -> bool {
+    let p = project_path.trim_end_matches('/');
+    if p.is_empty() {
+        return false;
+    }
+    if is_muted(muted, p) {
+        muted.retain(|m| m.trim_end_matches('/') != p);
+        false
+    } else {
+        muted.push(p.to_string());
+        true
     }
 }
 
@@ -649,7 +848,103 @@ mod tests {
         );
         let e: DaemonEvent =
             serde_json::from_str(r#"{"t":"inbox_changed","path":"/p/x"}"#).unwrap();
-        assert!(matches!(e, DaemonEvent::Unknown));
+        assert!(matches!(e, DaemonEvent::InboxChanged { ref path } if path == "/p/x"));
+        // usage 帧：plan 可为 null
+        let e: DaemonEvent = serde_json::from_str(r#"{"t":"usage","plan":null}"#).unwrap();
+        assert!(matches!(e, DaemonEvent::Usage { plan: None }));
+        let e: DaemonEvent = serde_json::from_str(
+            r#"{"t":"usage","plan":{"five_hour":{"used_percentage":32,"resets_at":1757000000},
+                "seven_day":null,"model_scoped":[{"display_name":"Fable","utilization":40.5,"resets_at":"2026-09-04T06:00:00Z"}],
+                "updated_at":"2026-09-03T10:00:00Z"}}"#,
+        )
+        .unwrap();
+        match e {
+            DaemonEvent::Usage { plan: Some(p) } => {
+                assert_eq!(p.five_hour.as_ref().unwrap().used_percentage, Some(32.0));
+                assert!(p.seven_day.is_none());
+                let m = &p.model_scoped.unwrap()[0];
+                assert_eq!(m.display_name, "Fable");
+                assert_eq!(m.utilization, Some(40.5));
+                assert!(matches!(m.resets_at, Some(ResetsAt::Text(_))));
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn session_usage_parses_and_is_optional() {
+        let s: Session = serde_json::from_str(r#"{"id":"s_1","usage":null}"#).unwrap();
+        assert!(s.usage.is_none());
+        let s: Session = serde_json::from_str(
+            r#"{"id":"s_1","usage":{"model":"Fable 5.1","model_id":"claude-fable-5-1","context_pct":30.5,
+                "context_window_size":200000,"input_tokens":1000,"output_tokens":200,"cost_usd":1.25,
+                "duration_ms":65000,"lines_added":10,"lines_removed":2,"effort":"high"}}"#,
+        )
+        .unwrap();
+        let u = s.usage.unwrap();
+        assert_eq!(u.model.as_deref(), Some("Fable 5.1"));
+        assert_eq!(u.context_pct, Some(30.5));
+        assert_eq!(u.cost_usd, Some(1.25));
+        assert_eq!(u.lines_added, Some(10));
+        assert_eq!(u.effort.as_deref(), Some("high"));
+        // 字段不全也能解
+        let s: Session = serde_json::from_str(r#"{"id":"s_1","usage":{"model":"x"}}"#).unwrap();
+        assert_eq!(s.usage.unwrap().context_pct, None);
+    }
+
+    #[test]
+    fn resets_at_epoch_seconds_millis_and_iso() {
+        let t = ResetsAt::Epoch(1_757_000_000.0).to_utc().unwrap();
+        assert_eq!(t.timestamp(), 1_757_000_000);
+        // 毫秒也认
+        let t = ResetsAt::Epoch(1_757_000_000_000.0).to_utc().unwrap();
+        assert_eq!(t.timestamp(), 1_757_000_000);
+        let t = ResetsAt::Text("2026-09-04T06:00:00Z".into()).to_utc().unwrap();
+        assert_eq!(t.to_rfc3339(), "2026-09-04T06:00:00+00:00");
+        assert!(ResetsAt::Text("tomorrow".into()).to_utc().is_none());
+        // usage 响应：plan 为 null
+        let r: UsageResponse = serde_json::from_str(r#"{"plan":null}"#).unwrap();
+        assert!(r.plan.is_none());
+    }
+
+    #[test]
+    fn artifacts_diff_inbox_parse() {
+        let a: ArtifactsResponse = serde_json::from_str(
+            r#"{"artifacts":[{"url":"https://claude.ai/a/1","title":"报告","description":"desc","file_path":"/x.html","ts":"2026-09-03T10:00:00Z"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(a.artifacts[0].title, "报告");
+        let d: DiffResponse = serde_json::from_str(
+            r#"{"supported":true,"base":"refs/aaa-ckpt/s_1/0-start","files":[{"path":"a.rs","status":"modified","additions":3,"deletions":1,"patch":"@@ -1 +1 @@\n-a\n+b\n","truncated":false}]}"#,
+        )
+        .unwrap();
+        assert!(d.supported);
+        assert_eq!(d.files[0].additions, 3);
+        let d: DiffResponse = serde_json::from_str(r#"{"supported":false}"#).unwrap();
+        assert!(!d.supported && d.files.is_empty());
+        let i: Vec<InboxItem> =
+            serde_json::from_str(r#"[{"id":"i1","text":"修 bug","created_at":"2026-09-03T10:00:00Z"}]"#)
+                .unwrap();
+        assert_eq!(i[0].text, "修 bug");
+    }
+
+    #[test]
+    fn mute_lookup_and_toggle() {
+        let mut muted: Vec<String> = vec!["/p/a/".into()];
+        // 尾斜杠不影响匹配
+        assert!(is_muted(&muted, "/p/a"));
+        assert!(is_muted(&muted, "/p/a/"));
+        assert!(!is_muted(&muted, "/p/ab"));
+        assert!(!is_muted(&muted, ""));
+        // 切换：开 → 关 → 开
+        assert!(!toggle_muted(&mut muted, "/p/a"));
+        assert!(muted.is_empty());
+        assert!(toggle_muted(&mut muted, "/p/b/"));
+        assert_eq!(muted, vec!["/p/b".to_string()]);
+        assert!(is_muted(&muted, "/p/b"));
+        // 空路径不记
+        assert!(!toggle_muted(&mut muted, ""));
+        assert_eq!(muted.len(), 1);
     }
 
     #[test]
@@ -722,15 +1017,21 @@ mod tests {
         let s = UiState {
             sidebar_w: 320.0,
             theme: "claude".into(),
+            detail_visible: false,
+            muted_projects: vec!["/p/a".into()],
         };
         let text = toml::to_string(&s).unwrap();
         let back: UiState = toml::from_str(&text).unwrap();
         assert_eq!(back.sidebar_w, 320.0);
         assert_eq!(back.theme, "claude");
-        // 缺字段（旧版本写的文件）用默认值补齐，不报错
+        assert!(!back.detail_visible);
+        assert_eq!(back.muted_projects, vec!["/p/a".to_string()]);
+        // 缺字段（旧版本写的文件）用默认值补齐，不报错；详情面板默认展开
         let empty: UiState = toml::from_str("").unwrap();
         assert_eq!(empty.sidebar_w, SIDEBAR_W_DEFAULT);
         assert_eq!(empty.theme, THEME_DEFAULT);
+        assert!(empty.detail_visible);
+        assert!(empty.muted_projects.is_empty());
         // 只有旧字段的文件：主题回落默认，不报错
         let old: UiState = toml::from_str("sidebar_w = 250.0\n").unwrap();
         assert_eq!(old.theme, "dark");

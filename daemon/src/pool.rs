@@ -104,6 +104,9 @@ pub struct Meta {
     /// asking 又压回 false
     #[serde(skip)]
     pub asking_hint_inst: Option<Instant>,
+    /// statusLine 转来的本会话用量（模型 / 上下文占比 / 费用），持久化以便退出后还能看
+    #[serde(default)]
+    pub usage: Option<serde_json::Value>,
 }
 
 fn default_true() -> bool {
@@ -185,6 +188,7 @@ impl Session {
                 error: None,
                 compacting: false,
                 asking_hint_inst: None,
+                usage: None,
             }),
             parser: Mutex::new(None),
             out_tx: tx,
@@ -226,6 +230,7 @@ impl Session {
             "error": meta.error,
             "compacting": meta.compacting,
             "user_killed": meta.user_killed,
+            "usage": meta.usage,
         })
     }
 
@@ -606,6 +611,7 @@ impl SessionPool {
             error: None,
             compacting: false,
             asking_hint_inst: None,
+            usage: None,
         };
         // Backpressure: send never blocks; a client that can't keep up drops
         // to Lagged and gets a fresh full redraw (api::attach_loop), so a slow

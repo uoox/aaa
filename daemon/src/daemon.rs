@@ -121,6 +121,7 @@ fn run() {
         store_lock: std::sync::Mutex::new(()),
         bound_port: std::sync::atomic::AtomicU16::new(0),
         inbox: std::sync::Mutex::new(inbox),
+        plan_usage: std::sync::Mutex::new(None),
         root_state: std::sync::atomic::AtomicU8::new(root_state.as_u8()),
         restarting: std::sync::atomic::AtomicBool::new(false),
         exe_mtime_at_start: crate::api::exe_mtime(),

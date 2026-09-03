@@ -40,6 +40,8 @@ pub struct App {
     pub bound_port: std::sync::atomic::AtomicU16,
     /// v1.1 task inbox
     pub inbox: std::sync::Mutex<crate::inbox::Inbox>,
+    /// v1.3 账号 plan 配额（最近一次 statusLine 转来的 rate_limits）
+    pub plan_usage: std::sync::Mutex<Option<Value>>,
     /// Last known readability of the project root, refreshed by the health
     /// watcher. Requests read this instead of probing: `is_dir()` lies under a
     /// TCC denial (stat passes, `opendir` does not), and an honest probe costs
@@ -677,6 +679,20 @@ async fn hook_event(
     if applied.dirty {
         sess.mark_dirty();
     }
+    if let Some(plan) = applied.plan {
+        let changed = {
+            let mut cur = app.plan_usage.lock().unwrap();
+            // 只比配额本身，不比 updated_at，免得每次 statusline 都广播
+            let same = cur.as_ref().is_some_and(|c| {
+                c["five_hour"] == plan["five_hour"] && c["seven_day"] == plan["seven_day"] && c["model_scoped"] == plan["model_scoped"]
+            });
+            *cur = Some(plan.clone());
+            !same
+        };
+        if changed {
+            app.hub.usage(&plan);
+        }
+    }
     if let Some((dir, id)) = applied.learned_id {
         // 注册表第三列：迁移后 resume 的兜底，现在从事件里直接拿到
         let root = app.cfg.project_root.clone();
@@ -692,6 +708,22 @@ async fn hook_event(
         let _ = tokio::task::spawn_blocking(move || crate::feed::on_waiting(&app2, sess)).await;
     }
     Json(json!({}))
+}
+
+/// 账号 plan 配额（statusLine 的 rate_limits）：还没有任何会话转来时 `plan` 为 null
+async fn usage_get(State(app): State<SharedApp>) -> Json<Value> {
+    let plan = app.plan_usage.lock().unwrap().clone();
+    Json(json!({ "plan": plan }))
+}
+
+/// 会话里发布过的 Artifact（报告 / 原型 / 图的链接），来自 transcript 的 Artifact 工具调用
+async fn session_artifacts(
+    State(app): State<SharedApp>,
+    UrlPath(id): UrlPath<String>,
+) -> ApiResult<Json<Value>> {
+    let sess = get_session(&app, &id)?;
+    let list = sess.msgs.lock().unwrap().artifacts.clone();
+    Ok(Json(json!({ "artifacts": list })))
 }
 
 fn get_session(app: &App, id: &str) -> ApiResult<Arc<crate::pool::Session>> {
@@ -1471,6 +1503,8 @@ pub fn router(app: SharedApp) -> Router {
                 .layer(axum::extract::DefaultBodyLimit::max(UPLOAD_LIMIT)),
         )
         .route("/api/v1/hooks/{event}", post(hook_event))
+        .route("/api/v1/usage", get(usage_get))
+        .route("/api/v1/sessions/{id}/artifacts", get(session_artifacts))
         .route("/api/v1/sessions/{id}/attach", get(ws_attach))
         .route("/api/v1/events", get(ws_events))
         .route("/api/v1/mac/permissions", get(mac_permissions))

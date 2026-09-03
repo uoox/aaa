@@ -234,6 +234,7 @@ fn build_app(root: &Path, home: &Path) -> aaa_daemon::api::SharedApp {
         store_lock: std::sync::Mutex::new(()),
         bound_port: std::sync::atomic::AtomicU16::new(0),
         inbox: std::sync::Mutex::new(inbox),
+        plan_usage: std::sync::Mutex::new(None),
         root_state: std::sync::atomic::AtomicU8::new(aaa_daemon::rootcheck::RootState::Ok.as_u8()),
         restarting: std::sync::atomic::AtomicBool::new(false),
         exe_mtime_at_start: None,
@@ -274,6 +275,7 @@ fn synthetic_session(app: &aaa_daemon::api::SharedApp, proj: &Path, start_ref: O
         error: None,
         compacting: false,
         asking_hint_inst: None,
+        usage: None,
     };
     let (tx, _) = tokio::sync::broadcast::channel(8);
     let id = "s_router01".to_string();

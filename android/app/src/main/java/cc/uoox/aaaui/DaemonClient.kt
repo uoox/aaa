@@ -154,6 +154,14 @@ class DaemonClient(
 
     suspend fun inboxDelete(id: String) { delete("/inbox/$id") }
 
+    // ---------- v1.4 ----------
+
+    /** 套餐用量；plan 为 null = daemon 暂时没有数据 */
+    suspend fun usage(): PlanUsage? = json.decodeFromString(UsageResponse.serializer(), get("/usage")).plan
+
+    suspend fun artifacts(id: String): List<ArtifactInfo> =
+        json.decodeFromString(ArtifactsResponse.serializer(), get("/sessions/$id/artifacts")).artifacts
+
     suspend fun upload(projectPath: String, name: String, bytes: ByteArray): UploadResult {
         val req = builder("/projects/upload?path=" + urlEncode(projectPath) + "&name=" + urlEncode(name))
             .post(bytes.toRequestBody(OCTET_MEDIA)).build()

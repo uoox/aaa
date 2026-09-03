@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -124,6 +125,7 @@ fun SessionScreen(
 
     var composer by rememberSaveable { mutableStateOf(prefill) }
     var showMenu by remember { mutableStateOf(false) }
+    var showArtifacts by remember { mutableStateOf(false) }
     val ctrlStickyState = remember { mutableStateOf(false) }
     var ctrlSticky by ctrlStickyState
     // 终端视图的键位条 + 输入框：默认收起，右下角 ⌨ 放出来；不持久化，每次进来都是收起的
@@ -228,6 +230,14 @@ fun SessionScreen(
                     listOfNotNull(s?.project_name, s?.resume_id?.let { "resume ${it.take(6)}" }).joinToString(" · "),
                     color = Tok.Faint, fontSize = 10.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )
+                // 用量小字：模型 · 上下文占比 · 花费；上下文 ≥70 琥珀、≥90 红。没有用量就一行都不占
+                val usageSegs = usageSubtitleSegments(s?.usage)
+                if (usageSegs.isNotEmpty()) {
+                    Text(
+                        segmentsAnnotated(usageSegs, Tok.Dim),
+                        fontSize = 10.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
             // 视图切换：显示当前视图名，点一下换另一种
             if (messagesSupported != false) {
@@ -365,7 +375,89 @@ fun SessionScreen(
     }
 
     if (showMenu && s != null) {
-        SessionMenuSheet(store, nav, s, attachment, showMessagesMode = showMessages, onDismiss = { showMenu = false })
+        SessionMenuSheet(store, nav, s, attachment, showMessagesMode = showMessages, onDismiss = { showMenu = false }, onArtifacts = { showMenu = false; showArtifacts = true })
+    }
+    if (showArtifacts) {
+        ArtifactsSheet(store, sessionId, onDismiss = { showArtifacts = false })
+    }
+}
+
+// ---------- 产物（会话里发布的 Artifact） ----------
+
+/**
+ * 打开时拉一次 `/sessions/{id}/artifacts`；开着期间这个会话的 messages_changed 再拉，
+ * 但至少隔 2 秒——一轮回复能刷十几次消息，产物却不会那么频繁地变。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ArtifactsSheet(store: AppStore, sessionId: String, onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    var items by remember { mutableStateOf<List<ArtifactInfo>?>(null) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var lastFetch by remember { mutableStateOf(0L) }
+
+    suspend fun fetch() {
+        lastFetch = System.currentTimeMillis()
+        try {
+            items = sortArtifacts(store.client?.artifacts(sessionId).orEmpty())
+            error = null
+        } catch (e: DaemonHttpException) {
+            if (e.code == 404) { items = emptyList(); error = null } else error = e.message
+        } catch (e: Exception) { error = e.message }
+    }
+    LaunchedEffect(sessionId) { fetch() }
+    LaunchedEffect(sessionId) {
+        store.frames.collectLatest { f ->
+            if (f is EventFrame.MessagesChanged && f.id == sessionId) {
+                val wait = 2_000L - (System.currentTimeMillis() - lastFetch)
+                if (wait > 0) kotlinx.coroutines.delay(wait) // collectLatest：更新的帧来了就重新等
+                fetch()
+            }
+        }
+    }
+
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = Tok.Surface) {
+        Column(Modifier.fillMaxWidth().padding(bottom = 20.dp)) {
+            Row(Modifier.padding(horizontal = 18.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("产物", color = Tok.Ink, fontSize = 16.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                items?.takeIf { it.isNotEmpty() }?.let { Text("${it.size}", color = Tok.Faint, fontSize = 12.sp, fontFamily = FontFamily.Monospace) }
+            }
+            val list = items
+            when {
+                list == null && error == null -> Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp, color = Tok.Accent)
+                }
+                list.isNullOrEmpty() -> Text(
+                    error?.let { "获取失败：$it" } ?: "这个会话还没有发布产物",
+                    color = if (error != null) Tok.Red else Tok.Faint, fontSize = 13.sp,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 24.dp),
+                )
+                else -> LazyColumn(Modifier.fillMaxWidth().heightIn(max = 480.dp)) {
+                    items(list, key = { it.url + it.ts }) { a -> ArtifactRow(a) { openUrl(context, a.url) } }
+                }
+            }
+            TextButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) { Text("关闭", color = Tok.Dim) }
+        }
+    }
+}
+
+@Composable
+private fun ArtifactRow(a: ArtifactInfo, onClick: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 18.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                a.title.ifBlank { a.url.substringAfterLast('/').ifBlank { a.url } },
+                color = Tok.Ink, fontSize = 14.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            )
+            if (a.description.isNotBlank()) {
+                Text(a.description, color = Tok.Dim, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            }
+        }
+        Spacer(Modifier.width(10.dp))
+        Text(artifactTimeLabel(a.ts), color = Tok.Faint, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
     }
 }
 
@@ -814,6 +906,7 @@ fun SessionMenuSheet(
     attachment: TerminalAttachment?,
     showMessagesMode: Boolean,
     onDismiss: () -> Unit,
+    onArtifacts: () -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -872,6 +965,7 @@ fun SessionMenuSheet(
                 }
             }
             SheetItem("±", "本次改动", "diff · 回滚") { onDismiss(); nav.navigate("diff/${s.id}") }
+            SheetItem("📦", "产物", "会话里发布的 Artifact", onClick = onArtifacts)
             SheetItem("📥", "任务收件箱", s.project_name) { onDismiss(); nav.navigate("inbox/${Uri.encode(s.project_path)}") }
             SheetItem("🔁", "重启 agent", "resume 同一会话") {
                 scope.launch {

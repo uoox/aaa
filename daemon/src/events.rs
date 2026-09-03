@@ -54,6 +54,11 @@ impl EventHub {
         self.send(&serde_json::json!({"t": "messages_changed", "id": id, "last_seq": last_seq}));
     }
 
+    /// v1.3 plan 配额（statusLine 的 rate_limits），任一会话转来新值就广播
+    pub fn usage(&self, plan: &serde_json::Value) {
+        self.send(&serde_json::json!({"t": "usage", "plan": plan}));
+    }
+
     pub fn inbox_changed(&self, path: &str) {
         self.send(&serde_json::json!({"t": "inbox_changed", "path": path}));
     }

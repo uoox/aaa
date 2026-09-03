@@ -30,6 +30,10 @@ import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalView
@@ -379,3 +383,17 @@ fun relativeTime(iso: String): String {
 fun clockTime(iso: String): String = try {
     Instant.parse(iso).atZone(ZoneId.systemDefault()).format(DateTimeFormatter.ofPattern("HH:mm"))
 } catch (_: Exception) { "" }
+
+/** 用量段落拼成一行：百分比段按级别着色，其它段用 [base]；分隔符是 ` · ` */
+fun segmentsAnnotated(segs: List<UsageSegment>, base: Color): AnnotatedString = buildAnnotatedString {
+    segs.forEachIndexed { i, seg ->
+        if (i > 0) withStyle(SpanStyle(color = base)) { append(" · ") }
+        withStyle(SpanStyle(color = pctColor(seg.level, base))) { append(seg.text) }
+    }
+}
+
+fun pctColor(level: PctLevel, base: Color): Color = when (level) {
+    PctLevel.CRIT -> Tok.Red
+    PctLevel.WARN -> Tok.Amber
+    PctLevel.NORMAL -> base
+}

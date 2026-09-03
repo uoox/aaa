@@ -158,9 +158,6 @@ impl Net {
     pub fn health(&self) -> impl Future<Output = Result<Health>> + use<> {
         self.get_json("/health")
     }
-    pub fn agents(&self) -> impl Future<Output = Result<Vec<AgentInfo>>> + use<> {
-        self.get_json("/agents")
-    }
     pub fn projects(&self) -> impl Future<Output = Result<Vec<Project>>> + use<> {
         self.get_json("/projects")
     }
@@ -337,6 +334,45 @@ impl Net {
         after: u64,
     ) -> impl Future<Output = Result<MessagesResponse>> + use<> {
         self.get_json(&format!("/sessions/{id}/messages?after={after}&limit=500"))
+    }
+
+    /// v1.4 套餐用量（`plan` 为 null = 没有套餐信息）
+    pub fn usage(&self) -> impl Future<Output = Result<UsageResponse>> + use<> {
+        self.get_json("/usage")
+    }
+    /// 会话发布过的 Artifact 页面
+    pub fn artifacts(&self, id: &str) -> impl Future<Output = Result<ArtifactsResponse>> + use<> {
+        self.get_json(&format!("/sessions/{id}/artifacts"))
+    }
+    /// start 检查点 vs 当前工作区
+    pub fn diff(&self, id: &str) -> impl Future<Output = Result<DiffResponse>> + use<> {
+        self.get_json(&format!("/sessions/{id}/diff"))
+    }
+    /// 回滚到会话开始的检查点；`force` = 会话还活着也回滚（daemon 先 kill），
+    /// 否则存活会话被 409 拒绝
+    pub fn rollback(
+        &self,
+        id: &str,
+        force: bool,
+    ) -> impl Future<Output = Result<serde_json::Value>> + use<> {
+        self.post_json(
+            &format!("/sessions/{id}/rollback"),
+            serde_json::json!({ "confirm": true, "force": force }),
+        )
+    }
+    /// 项目收件箱
+    pub fn inbox(&self, project_path: &str) -> impl Future<Output = Result<Vec<InboxItem>>> + use<> {
+        self.get_json(&format!("/inbox?path={}", percent_encode(project_path)))
+    }
+    pub fn inbox_add(
+        &self,
+        project_path: &str,
+        text: &str,
+    ) -> impl Future<Output = Result<serde_json::Value>> + use<> {
+        self.post_json("/inbox", serde_json::json!({ "path": project_path, "text": text }))
+    }
+    pub fn inbox_delete(&self, id: &str) -> impl Future<Output = Result<serde_json::Value>> + use<> {
+        self.request_delete(format!("/inbox/{}", percent_encode(id)))
     }
 
     // ── /events WS：断线指数退避重连 ─────────────────────────────────────
@@ -741,6 +777,36 @@ mod tests {
         assert!(v["answers"][0].get("other").is_none(), "other 为空时不发字段");
         assert_eq!(v["answers"][1]["selected"], serde_json::json!([]));
         assert_eq!(v["answers"][1]["other"], "Zed");
+    }
+
+    #[test]
+    fn rest_rollback_body_and_inbox_paths() {
+        // 回滚：confirm 恒为 true，force 由调用方决定（会话存活时为 true）
+        let (port, req_rx) = one_shot_server("HTTP/1.1 200 OK", "{}");
+        let net = test_net(port);
+        futures::executor::block_on(net.rollback("s_1", true)).unwrap();
+        let req = req_rx.recv().unwrap();
+        assert!(req.starts_with("POST /api/v1/sessions/s_1/rollback HTTP/1.1"), "req: {req}");
+        let body_start = req.find("\r\n\r\n").unwrap() + 4;
+        let v: serde_json::Value = serde_json::from_str(&req[body_start..]).unwrap();
+        assert_eq!(v["confirm"], true);
+        assert_eq!(v["force"], true);
+        // 收件箱 GET：路径进查询串要编码
+        let (port, req_rx) = one_shot_server("HTTP/1.1 200 OK", r#"[{"id":"i1","text":"t"}]"#);
+        let net = test_net(port);
+        let items = futures::executor::block_on(net.inbox("/Volumes/SSD/project/x y")).unwrap();
+        assert_eq!(items[0].id, "i1");
+        let req = req_rx.recv().unwrap();
+        assert!(
+            req.starts_with("GET /api/v1/inbox?path=%2FVolumes%2FSSD%2Fproject%2Fx%20y HTTP/1.1"),
+            "req: {req}"
+        );
+        // 删除条目：DELETE /inbox/:id
+        let (port, req_rx) = one_shot_server("HTTP/1.1 200 OK", "");
+        let net = test_net(port);
+        futures::executor::block_on(net.inbox_delete("i1")).unwrap();
+        let req = req_rx.recv().unwrap();
+        assert!(req.starts_with("DELETE /api/v1/inbox/i1 HTTP/1.1"), "req: {req}");
     }
 
     #[test]
