@@ -574,8 +574,8 @@ fun ProjectActionsSheet(
                 }
             }
             if (primary != null && primary.state == "exited") {
-                // 点行 = resume 新会话；上一条已退出的会话仍留着 transcript / diff / 回滚入口
-                SheetItem("↺", "上次会话回放", "消息流 · diff · 回滚") { onDismiss(); openSession(primary.id, "") }
+                // 点行 = resume 新会话；上一条已退出的会话仍留着 transcript 回放入口
+                SheetItem("↺", "上次会话回放", "消息流 · 终端回放") { onDismiss(); openSession(primary.id, "") }
             }
             SheetItem("＞", "在此目录开终端", "zsh") {
                 scope.launch {

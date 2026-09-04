@@ -194,36 +194,6 @@ pub struct ArtifactsResponse {
     pub artifacts: Vec<Artifact>,
 }
 
-/// `GET /sessions/:id/diff` 里的一个文件
-#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
-pub struct DiffFile {
-    #[serde(default)]
-    pub path: String,
-    /// added | modified | deleted
-    #[serde(default)]
-    pub status: String,
-    #[serde(default)]
-    pub additions: u64,
-    #[serde(default)]
-    pub deletions: u64,
-    /// ≤64KB，超出时 truncated=true
-    #[serde(default)]
-    pub patch: String,
-    #[serde(default)]
-    pub truncated: bool,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct DiffResponse {
-    /// false = 项目没有 .git / checkpoint 关着
-    #[serde(default)]
-    pub supported: bool,
-    #[serde(default)]
-    pub base: String,
-    #[serde(default)]
-    pub files: Vec<DiffFile>,
-}
-
 /// 任务收件箱一项（按项目路径归属）
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
 pub struct InboxItem {
@@ -303,52 +273,8 @@ pub struct Health {
     pub update_pending: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct AgentInfo {
-    pub id: String,
-    #[serde(default)]
-    pub label: String,
-    #[serde(default)]
-    pub cmd: Option<String>,
-    #[serde(default)]
-    pub resume_cmd: Option<String>,
-    #[serde(default = "default_true")]
-    pub available: bool,
-    /// daemon 标记：这是终端而不是 agent（目前只有 shell）。新建项目的 agent
-    /// 选择里不出现；旧 daemon 不带此字段时按 id 兜底判断，见 `pickable_agents`。
-    #[serde(default)]
-    pub terminal: bool,
-}
-
 fn default_true() -> bool {
     true
-}
-
-/// agent 表兜底（daemon /agents 不可达时也得知道有 claude），与 PROTOCOL.md
-/// 「Agent 表」一致：2026-09-03 起只剩 Claude Code，外加不是 agent 的 shell。
-pub fn builtin_agents() -> Vec<AgentInfo> {
-    let mk = |id: &str, label: &str, cmd: &str| AgentInfo {
-        id: id.into(),
-        label: label.into(),
-        cmd: Some(cmd.into()),
-        resume_cmd: None,
-        available: true,
-        terminal: id == "shell",
-    };
-    vec![
-        mk("claude", "Claude", "claude --dangerously-skip-permissions"),
-        mk("shell", "终端", "exec zsh -l"),
-    ]
-}
-
-/// 真正的 agent（剔掉终端：`terminal:true`，旧 daemon 靠 id）。只支持 Claude 之后
-/// 这里只会剩 claude 一项——新建项目不再选 agent，留着它是为了读 `available`
-/// （daemon 的 PATH 里找不到 claude 时提示一句）。
-pub fn pickable_agents(agents: Vec<AgentInfo>) -> Vec<AgentInfo> {
-    agents
-        .into_iter()
-        .filter(|a| !a.terminal && a.id != "shell")
-        .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -722,26 +648,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_flag_and_picker() {
-        // daemon 打了 terminal:true → 不是 agent
-        let a: AgentInfo =
-            serde_json::from_str(r#"{"id":"shell","label":"终端","terminal":true}"#).unwrap();
-        assert!(a.terminal);
-        // 旧 daemon 没这字段 → false，但 id 兜底仍能把 shell 挑出去
-        let b: AgentInfo = serde_json::from_str(r#"{"id":"shell","label":"终端"}"#).unwrap();
-        assert!(!b.terminal);
-        let c: AgentInfo = serde_json::from_str(r#"{"id":"claude"}"#).unwrap();
-        assert!(!c.terminal);
-        let picked = pickable_agents(vec![a, b, c]);
-        assert_eq!(picked.len(), 1);
-        assert_eq!(picked[0].id, "claude");
-        // 内置兜底表：shell 带 terminal 标记，挑选后不见
-        assert!(builtin_agents().iter().any(|a| a.id == "shell" && a.terminal));
-        assert!(pickable_agents(builtin_agents()).iter().all(|a| a.id != "shell"));
-        // 只支持 Claude：兜底表挑完只剩 claude 一项
-        assert_eq!(pickable_agents(builtin_agents()).len(), 1);
-        assert_eq!(pickable_agents(builtin_agents())[0].id, "claude");
-        // 会话侧：agent=shell 就是终端
+    fn shell_agent_is_terminal() {
         let s: Session = serde_json::from_str(r#"{"id":"s_1","agent":"shell"}"#).unwrap();
         assert!(s.is_terminal());
         let s: Session = serde_json::from_str(r#"{"id":"s_2","agent":"claude"}"#).unwrap();
@@ -908,20 +815,12 @@ mod tests {
     }
 
     #[test]
-    fn artifacts_diff_inbox_parse() {
+    fn artifacts_inbox_parse() {
         let a: ArtifactsResponse = serde_json::from_str(
             r#"{"artifacts":[{"url":"https://claude.ai/a/1","title":"报告","description":"desc","file_path":"/x.html","ts":"2026-09-03T10:00:00Z"}]}"#,
         )
         .unwrap();
         assert_eq!(a.artifacts[0].title, "报告");
-        let d: DiffResponse = serde_json::from_str(
-            r#"{"supported":true,"base":"refs/aaa-ckpt/s_1/0-start","files":[{"path":"a.rs","status":"modified","additions":3,"deletions":1,"patch":"@@ -1 +1 @@\n-a\n+b\n","truncated":false}]}"#,
-        )
-        .unwrap();
-        assert!(d.supported);
-        assert_eq!(d.files[0].additions, 3);
-        let d: DiffResponse = serde_json::from_str(r#"{"supported":false}"#).unwrap();
-        assert!(!d.supported && d.files.is_empty());
         let i: Vec<InboxItem> =
             serde_json::from_str(r#"[{"id":"i1","text":"修 bug","created_at":"2026-09-03T10:00:00Z"}]"#)
                 .unwrap();

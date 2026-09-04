@@ -80,20 +80,6 @@ class ProtocolTest {
         assertTrue(resp.messages.isEmpty())
     }
 
-    @Test fun diffResponseParses() {
-        val resp = json.decodeFromString<DiffResponse>(
-            """{"supported":true,"base":"refs/aaa-ckpt/s_1/0-start","files":[
-                {"path":"src/main.rs","status":"modified","additions":10,"deletions":2,"patch":"@@ -1 +1 @@\n-a\n+b","truncated":false},
-                {"path":"new.txt","status":"added","additions":5,"deletions":0,"patch":"","truncated":true}
-            ]}""",
-        )
-        assertTrue(resp.supported)
-        assertEquals(2, resp.files.size)
-        assertEquals("modified", resp.files[0].status)
-        assertEquals(10, resp.files[0].additions)
-        assertTrue(resp.files[1].truncated)
-    }
-
     @Test fun inboxItemsParse() {
         val items = json.decodeFromString<List<InboxItem>>(
             """[{"id":"i_1","text":"跑一遍测试","created_at":"2026-08-30T10:00:00Z"},{"id":"i_2","text":"更新文档","created_at":"2026-08-30T11:00:00Z"}]""",

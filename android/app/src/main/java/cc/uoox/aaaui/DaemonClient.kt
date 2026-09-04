@@ -139,12 +139,6 @@ class DaemonClient(
         post("/sessions/$sessionId/answer", body.toString())
     }
 
-    suspend fun diff(id: String): DiffResponse = json.decodeFromString(get("/sessions/$id/diff"))
-
-    suspend fun rollback(id: String, force: Boolean) {
-        post("/sessions/$id/rollback", buildJsonObject { put("confirm", true); put("force", force) }.toString())
-    }
-
     suspend fun inbox(path: String): List<InboxItem> =
         json.decodeFromString(ListSerializer(InboxItem.serializer()), get("/inbox?path=" + urlEncode(path)))
 

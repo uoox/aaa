@@ -40,7 +40,8 @@ pub struct App {
     pub bound_port: std::sync::atomic::AtomicU16,
     /// v1.1 task inbox
     pub inbox: std::sync::Mutex<crate::inbox::Inbox>,
-    /// v1.3 账号 plan 配额（最近一次 statusLine 转来的 rate_limits）
+    /// v1.3 账号 plan 配额：5h / 7d 来自最近一次 statusLine 的 rate_limits，
+    /// 按模型窗口（Fable）来自 quota.rs 对 claude.ai usage 接口的轮询
     pub plan_usage: std::sync::Mutex<Option<Value>>,
     /// Last known readability of the project root, refreshed by the health
     /// watcher. Requests read this instead of probing: `is_dir()` lies under a
@@ -81,6 +82,26 @@ impl App {
 }
 
 pub type SharedApp = Arc<App>;
+
+impl App {
+    /// 换上新的 plan 配额；三个窗口有变化才广播 `usage` 帧。
+    /// `carry_scoped`：新值缺 `model_scoped` 时沿用旧值（statusLine 来源用）。
+    pub fn set_plan_usage(&self, mut plan: Value, carry_scoped: bool) {
+        let changed = {
+            let mut cur = self.plan_usage.lock().unwrap();
+            if carry_scoped {
+                crate::quota::carry_model_scoped(&mut plan, cur.as_ref());
+            }
+            // 只比配额本身，不比 updated_at，免得每次 statusline 都广播
+            let same = cur.as_ref().is_some_and(|c| crate::quota::same_windows(c, &plan));
+            *cur = Some(plan.clone());
+            !same
+        };
+        if changed {
+            self.hub.usage(&plan);
+        }
+    }
+}
 
 // ---------- errors ----------
 
@@ -637,25 +658,6 @@ async fn sessions_create(
     };
     let sess = app.pool.spawn(spec).map_err(ApiError::internal)?;
 
-    // v1.1: start checkpoint for agent sessions (async; never blocks the API)
-    if agent.id != "shell" && app.cfg.checkpoint.enabled {
-        let auto_init = app.cfg.checkpoint.auto_init_git;
-        let max_mb = app.cfg.checkpoint.auto_init_max_mb;
-        let sess2 = Arc::clone(&sess);
-        let dir = canon_str;
-        tokio::task::spawn_blocking(move || {
-            let dirp = Path::new(&dir);
-            if crate::checkpoint::ensure_repo(dirp, auto_init, max_mb).is_ok() {
-                let mut st = sess2.ckpt.lock().unwrap();
-                if let Ok(Some(r)) =
-                    crate::checkpoint::make_checkpoint(dirp, &sess2.id, &mut st, "start")
-                {
-                    sess2.meta.lock().unwrap().ckpt_start_ref = Some(r);
-                    sess2.mark_dirty();
-                }
-            }
-        });
-    }
     Ok(Json(sess.to_json()))
 }
 
@@ -680,18 +682,8 @@ async fn hook_event(
         sess.mark_dirty();
     }
     if let Some(plan) = applied.plan {
-        let changed = {
-            let mut cur = app.plan_usage.lock().unwrap();
-            // 只比配额本身，不比 updated_at，免得每次 statusline 都广播
-            let same = cur.as_ref().is_some_and(|c| {
-                c["five_hour"] == plan["five_hour"] && c["seven_day"] == plan["seven_day"] && c["model_scoped"] == plan["model_scoped"]
-            });
-            *cur = Some(plan.clone());
-            !same
-        };
-        if changed {
-            app.hub.usage(&plan);
-        }
+        // statusLine 从不带按模型窗口；那是 quota.rs 轮询来的，别让它被清掉
+        app.set_plan_usage(plan, true);
     }
     if let Some((dir, id)) = applied.learned_id {
         // 注册表第三列：迁移后 resume 的兜底，现在从事件里直接拿到
@@ -1129,7 +1121,7 @@ async fn config_put(
     })))
 }
 
-// ---------- v1.1: messages / checkpoint / inbox / upload ----------
+// ---------- v1.1: messages / inbox / upload ----------
 
 #[derive(Deserialize)]
 struct MsgQuery {
@@ -1151,85 +1143,6 @@ async fn session_messages(
         "source": store.source,
         "last_seq": store.last_seq(),
         "messages": store.slice(q.after, limit),
-    })))
-}
-
-async fn session_diff(
-    State(app): State<SharedApp>,
-    UrlPath(id): UrlPath<String>,
-) -> ApiResult<Json<Value>> {
-    let sess = get_session(&app, &id)?;
-    let (agent, project_path, start_ref) = {
-        let meta = sess.meta.lock().unwrap();
-        (meta.agent.clone(), meta.project_path.clone(), meta.ckpt_start_ref.clone())
-    };
-    let unsupported = Json(json!({"supported": false, "base": Value::Null, "files": []}));
-    let Some(start_ref) = start_ref else { return Ok(unsupported) };
-    if agent == "shell"
-        || !app.cfg.checkpoint.enabled
-        || !Path::new(&project_path).is_dir()
-        || !crate::checkpoint::has_repo(Path::new(&project_path))
-    {
-        return Ok(unsupported);
-    }
-    let base = start_ref.clone();
-    let files = blocking(move || crate::checkpoint::diff(Path::new(&project_path), &start_ref))
-        .await?
-        .map_err(ApiError::internal)?;
-    Ok(Json(json!({"supported": true, "base": base, "files": files})))
-}
-
-#[derive(Deserialize)]
-struct RollbackBody {
-    #[serde(default)]
-    confirm: bool,
-    #[serde(default)]
-    force: bool,
-}
-
-async fn session_rollback(
-    State(app): State<SharedApp>,
-    UrlPath(id): UrlPath<String>,
-    Json(body): Json<RollbackBody>,
-) -> ApiResult<Json<Value>> {
-    let sess = get_session(&app, &id)?;
-    if !body.confirm {
-        return Err(ApiError::conflict("rollback requires confirm:true"));
-    }
-    let (project_path, start_ref) = {
-        let meta = sess.meta.lock().unwrap();
-        (meta.project_path.clone(), meta.ckpt_start_ref.clone())
-    };
-    let Some(start_ref) = start_ref else {
-        return Err(ApiError::conflict("session has no start checkpoint"));
-    };
-    if !Path::new(&project_path).is_dir() {
-        return if app.cfg.project_root.is_dir() {
-            Err(ApiError::not_found(format!("project dir missing: {project_path}")))
-        } else {
-            Err(ApiError::ssd_unmounted())
-        };
-    }
-    if sess.state() != SState::Exited {
-        if !body.force {
-            return Err(ApiError::conflict(
-                "session is still alive; pass force:true to kill it first",
-            ));
-        }
-        if !kill_and_wait(&sess, 40, 150).await {
-            return Err(ApiError::internal("could not stop the session"));
-        }
-    }
-    let base = start_ref.clone();
-    let (restored, deleted) =
-        blocking(move || crate::checkpoint::rollback(Path::new(&project_path), &start_ref))
-            .await?
-            .map_err(ApiError::internal)?;
-    Ok(Json(json!({
-        "ok": true,
-        "base": base,
-        "restored_files": restored,
-        "deleted_files": deleted,
     })))
 }
 
@@ -1493,8 +1406,6 @@ pub fn router(app: SharedApp) -> Router {
         .route("/api/v1/sessions/{id}/ports", get(session_ports))
         .route("/api/v1/sessions/{id}/screen", get(session_screen))
         .route("/api/v1/sessions/{id}/messages", get(session_messages))
-        .route("/api/v1/sessions/{id}/diff", get(session_diff))
-        .route("/api/v1/sessions/{id}/rollback", post(session_rollback))
         .route("/api/v1/inbox", get(inbox_list).post(inbox_add))
         .route("/api/v1/inbox/{id}", delete(inbox_delete))
         .route(

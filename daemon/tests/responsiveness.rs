@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 const TOKEN: &str = "aaa_tk_lock_test";
 
 fn build_app(root: &Path, home: &Path) -> aaa_daemon::api::SharedApp {
-    use aaa_daemon::config::{CheckpointConfig, Config};
+    use aaa_daemon::config::Config;
     let cfg = Config {
         port: 0,
         token: TOKEN.to_string(),
@@ -21,14 +21,12 @@ fn build_app(root: &Path, home: &Path) -> aaa_daemon::api::SharedApp {
         namer: true, // naming enabled, as in production
         remote_control_name: true,
         auto_trust: true,
-        checkpoint: CheckpointConfig::default(),
     };
     let paths = aaa_daemon::paths::Paths::new(home);
     let hub = aaa_daemon::events::EventHub::new();
     let pool = aaa_daemon::pool::SessionPool::new(aaa_daemon::pool::PoolCtx {
         hub: hub.clone(),
         sessions_dir: paths.sessions_dir(),
-        ckpt_cfg: cfg.checkpoint.clone(),
     });
     let inbox = aaa_daemon::inbox::Inbox::load(&paths.state_dir());
     Arc::new(aaa_daemon::api::App {

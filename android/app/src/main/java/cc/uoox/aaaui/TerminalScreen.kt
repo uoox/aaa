@@ -90,6 +90,20 @@ private fun TerminalPane(store: AppStore, context: Context, conn: ConnState, ses
         if (!text.isNullOrEmpty()) scope.launch { runCatching { store.client?.input(sessionId, text, false) } }
     }
     Column(modifier) {
+        // 快捷键条在终端上方（回车排最前，条会横向滚）
+        Row(Modifier.fillMaxWidth().background(Tok.Surface).horizontalScroll(rememberScrollState()).padding(8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            fun key(code: Int) = {
+                vtermKeyFor(code)?.let { k -> attachment?.emulator?.dispatchKey(if (ctrlSticky) VTERM_MOD_CTRL else 0, k); ctrlSticky = false }
+                Unit
+            }
+            fun lit(s: String) = { attachment?.write(s); Unit }
+            KeyChip("键盘") { inputRef.value?.showKeyboard() }
+            KeyChip("⏎", onClick = key(KeyEvent.KEYCODE_ENTER))
+            KeyChip("选择", active = selectMode.value) { selectMode.value = !selectMode.value }
+            KeyChip("Esc", onClick = key(KeyEvent.KEYCODE_ESCAPE)); KeyChip("Tab", onClick = key(KeyEvent.KEYCODE_TAB)); KeyChip("Ctrl", active = ctrlSticky) { ctrlSticky = !ctrlSticky }
+            KeyChip("↑", onClick = key(KeyEvent.KEYCODE_DPAD_UP)); KeyChip("↓", onClick = key(KeyEvent.KEYCODE_DPAD_DOWN)); KeyChip("←", onClick = key(KeyEvent.KEYCODE_DPAD_LEFT)); KeyChip("→", onClick = key(KeyEvent.KEYCODE_DPAD_RIGHT))
+            KeyChip("Home", onClick = key(KeyEvent.KEYCODE_MOVE_HOME)); KeyChip("End", onClick = key(KeyEvent.KEYCODE_MOVE_END)); KeyChip("-", onClick = lit("-")); KeyChip("/", onClick = lit("/")); KeyChip("|", onClick = lit("|")); KeyChip("~", onClick = lit("~")); KeyChip("粘贴") { pasteViaDaemon() }
+        }
         Box(Modifier.weight(1f).fillMaxWidth()) {
             TerminalHost(
                 attachment, fontSize, ctrlStickyState,
@@ -103,18 +117,6 @@ private fun TerminalPane(store: AppStore, context: Context, conn: ConnState, ses
                 selectMode = selectMode,
                 inputRef = inputRef,
             )
-        }
-        Row(Modifier.fillMaxWidth().background(Tok.Surface).horizontalScroll(rememberScrollState()).padding(8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            fun key(code: Int) = {
-                vtermKeyFor(code)?.let { k -> attachment?.emulator?.dispatchKey(if (ctrlSticky) VTERM_MOD_CTRL else 0, k); ctrlSticky = false }
-                Unit
-            }
-            fun lit(s: String) = { attachment?.write(s); Unit }
-            KeyChip("键盘") { inputRef.value?.showKeyboard() }
-            KeyChip("选择", active = selectMode.value) { selectMode.value = !selectMode.value }
-            KeyChip("Esc", onClick = key(KeyEvent.KEYCODE_ESCAPE)); KeyChip("Tab", onClick = key(KeyEvent.KEYCODE_TAB)); KeyChip("Ctrl", active = ctrlSticky) { ctrlSticky = !ctrlSticky }
-            KeyChip("↑", onClick = key(KeyEvent.KEYCODE_DPAD_UP)); KeyChip("↓", onClick = key(KeyEvent.KEYCODE_DPAD_DOWN)); KeyChip("←", onClick = key(KeyEvent.KEYCODE_DPAD_LEFT)); KeyChip("→", onClick = key(KeyEvent.KEYCODE_DPAD_RIGHT))
-            KeyChip("Home", onClick = key(KeyEvent.KEYCODE_MOVE_HOME)); KeyChip("End", onClick = key(KeyEvent.KEYCODE_MOVE_END)); KeyChip("⏎", onClick = key(KeyEvent.KEYCODE_ENTER)); KeyChip("-", onClick = lit("-")); KeyChip("/", onClick = lit("/")); KeyChip("|", onClick = lit("|")); KeyChip("~", onClick = lit("~")); KeyChip("粘贴") { pasteViaDaemon() }
         }
     }
 }

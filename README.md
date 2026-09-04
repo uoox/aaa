@@ -15,7 +15,7 @@ daemon 常驻在一台机器上，持有 Claude Code 会话的 PTY，通过 Clau
 
 | 目录 | 内容 |
 |---|---|
-| `daemon/` | Rust 常驻服务：PTY 池、服务端终端、hooks 事件源、REST/WS API、消息流解析、表单作答、checkpoint |
+| `daemon/` | Rust 常驻服务：PTY 池、服务端终端、hooks 事件源、REST/WS API、消息流解析、表单作答、plan 配额 |
 | `mac/` | macOS 原生客户端（gpui） |
 | `android/` | Android 原生客户端（Kotlin/Compose，终端用 ConnectBot termlib） |
 | `cli/` | `aaa` 终端客户端，一个 bash 脚本 |
@@ -41,9 +41,9 @@ macOS arm64 下载预编译包；其它平台用本机 Rust 从源码编。脚�
 
 ## 用法
 
-- **Mac App**：左栏是会话，顶部输入框输文件夹名回车即新建项目，左下角是 plan 配额。⌘N 新建、⌃Tab 切会话、⌘E 消息流与终端互切、⌘I 右侧详情栏（会话用量、发布过的产物链接、改动与回滚、收件箱、静音）、⌘W 关闭。消息流里过程步骤折叠成一行，📎 上传文件后以 `@路径` 引用。
-- **Android**：Claude 跑完一轮收到「完成」通知，点开直达会话；提问以原生表单作答；系统分享或 📎 把文件传进项目；首页顶部是 plan 配额，会话菜单里有「产物」。
-- **终端里不再需要状态栏插件**：daemon 接管了 Claude Code 的 statusLine，模型、上下文、费用、配额都进了客户端，shell 里一行不占。
+- **Mac App**：左栏是会话，顶部输入框输文件夹名回车即新建项目，左下角是 plan 配额。⌘N 新建、⌃Tab 切会话、⌘E 消息流与终端互切、⌘I 右侧详情栏（会话用量、发布过的产物链接、收件箱、静音）、⌘W 关闭。消息流里过程步骤折叠成一行，📎 上传文件后以 `@路径` 引用。
+- **Android**：Claude 跑完一轮收到「完成」通知，点开直达会话；提问以原生表单作答；系统分享或 📎 把文件传进项目；首页顶部是 plan 配额（5h、7d 与 Fable 周窗口），会话菜单里有「产物」。终端视图的快捷键条在画面上方，回车在最前。
+- **终端里不再需要状态栏插件**：daemon 接管了 Claude Code 的 statusLine，模型、上下文、费用、配额都进了客户端，shell 里一行不占。按模型的周配额（Fable 还剩多少）statusLine 给不了，daemon 每分钟用 Claude Code 的登录态问一次 claude.ai 的 usage 接口，三端一起显示。
 - **终端**：
 
 ```

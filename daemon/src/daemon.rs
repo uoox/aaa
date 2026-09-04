@@ -107,7 +107,6 @@ fn run() {
     let pool = SessionPool::new(PoolCtx {
         hub: hub.clone(),
         sessions_dir: paths.sessions_dir(),
-        ckpt_cfg: cfg.checkpoint.clone(),
     });
     pool.restore_persisted();
     let inbox = crate::inbox::Inbox::load(&paths.state_dir());
@@ -155,6 +154,54 @@ fn run() {
                             crate::feed::on_waiting(&app2, sess);
                         })
                         .await;
+                    }
+                }
+            });
+        }
+        // plan 配额轮询（quota.rs）：statusLine 给不了按模型的窗口，从 claude.ai 的
+        // usage 接口拿；没登录 / 令牌过期就跳过这一轮，沿用旧值
+        {
+            let app = Arc::clone(&app);
+            tokio::spawn(async move {
+                let mut iv = tokio::time::interval(crate::quota::POLL_INTERVAL);
+                let mut last_err: Option<String> = None;
+                let mut ticks: u64 = 0;
+                loop {
+                    iv.tick().await;
+                    // 没有活着的 claude 会话时数字基本不动（别的设备在用除外），
+                    // 降到每 5 分钟问一次
+                    let any_live = app.pool.all().iter().any(|s| {
+                        s.live.lock().unwrap().is_some() && s.meta.lock().unwrap().agent != "shell"
+                    });
+                    ticks += 1;
+                    if !any_live && ticks % crate::quota::IDLE_POLL_EVERY != 1 {
+                        continue;
+                    }
+                    let home = app.paths.home.clone();
+                    let res = tokio::task::spawn_blocking(move || {
+                        let token = crate::quota::access_token(&home)?;
+                        Some(crate::quota::fetch(&token).map(|body| crate::quota::parse_usage(&body)))
+                    })
+                    .await;
+                    match res {
+                        Ok(Some(Ok(Some(mut plan)))) => {
+                            plan["updated_at"] = serde_json::Value::String(
+                                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                            );
+                            app.set_plan_usage(plan, false);
+                            if last_err.take().is_some() {
+                                println!("quota: usage poll recovered");
+                            }
+                        }
+                        Ok(Some(Ok(None))) => {}
+                        Ok(Some(Err(e))) => {
+                            // 同一个错只报一次，网断了不刷屏
+                            if last_err.as_deref() != Some(e.as_str()) {
+                                eprintln!("quota: usage poll failed: {e}");
+                                last_err = Some(e);
+                            }
+                        }
+                        Ok(None) | Err(_) => {}
                     }
                 }
             });
@@ -213,53 +260,6 @@ fn run() {
                         }
                     })
                     .await;
-                }
-            });
-        }
-        // v1.1 auto checkpoints (60s scan; per-session interval from config)
-        {
-            let app = Arc::clone(&app);
-            tokio::spawn(async move {
-                let mut iv = tokio::time::interval(Duration::from_secs(60));
-                loop {
-                    iv.tick().await;
-                    if !app.cfg.checkpoint.enabled {
-                        continue;
-                    }
-                    let interval = app.cfg.checkpoint.interval_minutes;
-                    for sess in app.pool.all() {
-                        let (agent, project_path, has_start, alive) = {
-                            let meta = sess.meta.lock().unwrap();
-                            let alive = sess.live.lock().unwrap().is_some();
-                            (
-                                meta.agent.clone(),
-                                meta.project_path.clone(),
-                                meta.ckpt_start_ref.is_some(),
-                                alive,
-                            )
-                        };
-                        if agent == "shell" || !has_start || !alive {
-                            continue;
-                        }
-                        let due = {
-                            let st = sess.ckpt.lock().unwrap();
-                            crate::checkpoint::auto_due(st.last_at, interval, Instant::now())
-                        };
-                        if !due {
-                            continue;
-                        }
-                        let sess2 = Arc::clone(&sess);
-                        let _ = tokio::task::spawn_blocking(move || {
-                            let mut st = sess2.ckpt.lock().unwrap();
-                            let _ = crate::checkpoint::make_checkpoint(
-                                std::path::Path::new(&project_path),
-                                &sess2.id,
-                                &mut st,
-                                "auto",
-                            );
-                        })
-                        .await;
-                    }
                 }
             });
         }

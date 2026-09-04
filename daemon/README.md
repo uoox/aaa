@@ -14,7 +14,7 @@ aaa perms all                  # 一次申请全部 macOS 权限，授权归到 
 ```
 
 config.toml：`port`（默认 2730）、`token`、`project_root`（默认 `~/project`）、`namer`（haiku 会话命名）、
-`auto_trust`（默认 true，新项目的 Claude Code 信任对话框自动回车）、`[checkpoint]`。
+`auto_trust`（默认 true，新项目的 Claude Code 信任对话框自动回车）。
 
 升级二进制先 `rm` 再 `cp`：直接覆盖运行中的二进制会写坏签名，之后每次执行都被 macOS `SIGKILL`。
 换了二进制路径要重新 `service uninstall && service install`，plist 记的是绝对路径。
@@ -44,3 +44,11 @@ cargo test
 ```
 
 活会话不跨 daemon 重启（已退出会话的回放会恢复）。
+
+## plan 配额
+
+5h / 7d 窗口来自 Claude Code statusLine 转来的 `rate_limits`；按模型的周窗口（Fable）statusLine 没有，
+`quota.rs` 每分钟 `GET https://api.anthropic.com/api/oauth/usage` 取 `limits[]` 里的 `weekly_scoped`。
+令牌读 Claude Code 自己的：macOS 钥匙串 `Claude Code-credentials`（`security find-generic-password`），
+其它平台 `~/.claude/.credentials.json`（`CLAUDE_CONFIG_DIR` 优先）。只读不刷新，过期就等 Claude Code 下次自己续；
+拉不到只在日志里报一次，客户端沿用旧值。

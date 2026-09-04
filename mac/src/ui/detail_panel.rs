@@ -9,27 +9,22 @@
 //! 间隔外立刻拉；间隔内只挂一个定时器，到点再拉一次（不丢最后一次变化）；
 //! 定时器已挂着时再来的帧直接忽略。
 
-use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Datelike, TimeZone, Weekday};
 use gpui::{Context, SharedString, div, prelude::*, px, relative};
 
 use super::kit::*;
-use super::{Modal, Page, RootView};
+use super::{Page, RootView};
 use crate::model::{
-    Artifact, DiffFile, DiffResponse, InboxItem, PlanUsage, Session, SessionState, SessionUsage,
-    is_muted, toggle_muted,
+    Artifact, InboxItem, PlanUsage, Session, SessionUsage, is_muted, toggle_muted,
 };
 use crate::theme;
 
 /// 面板宽度
 pub(super) const DETAIL_W: f32 = 300.0;
-/// 产物 / 改动的最小重拉间隔
+/// 产物的最小重拉间隔
 const ARTIFACTS_MIN: Duration = Duration::from_secs(2);
-const DIFF_MIN: Duration = Duration::from_secs(5);
-/// 单个 patch 最多渲染这么多行（64KB 的 patch 全画会拖慢整帧）
-const PATCH_MAX_LINES: usize = 400;
 
 // ── 纯函数 ──────────────────────────────────────────────────────────────────
 
@@ -82,11 +77,6 @@ impl Throttle {
     pub(super) fn fire(&mut self, now: Instant) {
         self.scheduled = false;
         self.last = Some(now);
-    }
-
-    /// 从来没拉过
-    pub(super) fn never(&self) -> bool {
-        self.last.is_none() && !self.scheduled
     }
 }
 
@@ -183,42 +173,6 @@ pub(super) fn fmt_cost(usd: f64) -> String {
     }
 }
 
-/// patch 行的种类（决定颜色）
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum PatchLine {
-    Header,
-    Add,
-    Del,
-    Context,
-}
-
-/// 头部行要先于 +/- 判断：`--- a/x` / `+++ b/x` 以 -/+ 开头但不是改动
-pub(super) fn classify_patch_line(line: &str) -> PatchLine {
-    const HEADERS: [&str; 10] = [
-        "diff ", "index ", "--- ", "+++ ", "@@", "new file", "deleted file", "similarity",
-        "rename ", "Binary ",
-    ];
-    if HEADERS.iter().any(|h| line.starts_with(h)) {
-        PatchLine::Header
-    } else if line.starts_with('+') {
-        PatchLine::Add
-    } else if line.starts_with('-') {
-        PatchLine::Del
-    } else {
-        PatchLine::Context
-    }
-}
-
-/// 文件状态 → 颜色：added 绿 / modified 琥珀 / deleted 红，认不出的用 dim
-pub(super) fn status_color(status: &str) -> u32 {
-    match status {
-        "added" => theme::green(),
-        "modified" => theme::amber(),
-        "deleted" => theme::red(),
-        _ => theme::dim(),
-    }
-}
-
 /// 产物按时间倒序（ISO 串字典序即时间序；同刻按 url 稳住）
 pub(super) fn sort_artifacts_newest_first(v: &mut [Artifact]) {
     v.sort_by(|a, b| b.ts.cmp(&a.ts).then_with(|| a.url.cmp(&b.url)));
@@ -271,19 +225,11 @@ where
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum DetailKind {
     Artifacts,
-    Diff,
 }
 
 pub(super) struct SessionDetail {
     pub artifacts: Vec<Artifact>,
     pub artifacts_fetch: Throttle,
-    /// None = 还没回；Some(supported:false) = 未启用 checkpoint（或旧 daemon 无端点）
-    pub diff: Option<DiffResponse>,
-    pub diff_error: Option<String>,
-    pub diff_fetch: Throttle,
-    /// 展开了 patch 的文件路径
-    pub expanded: HashSet<String>,
-    pub rolling_back: bool,
 }
 
 impl Default for SessionDetail {
@@ -291,11 +237,6 @@ impl Default for SessionDetail {
         SessionDetail {
             artifacts: Vec::new(),
             artifacts_fetch: Throttle::new(ARTIFACTS_MIN),
-            diff: None,
-            diff_error: None,
-            diff_fetch: Throttle::new(DIFF_MIN),
-            expanded: HashSet::new(),
-            rolling_back: false,
         }
     }
 }
@@ -320,13 +261,12 @@ impl RootView {
         self.detail_visible && self.page == Page::Session(id.to_string())
     }
 
-    /// 进入会话页 / 打开面板：产物、改动、收件箱都（按节流）拉一遍
+    /// 进入会话页 / 打开面板：产物、收件箱都（按节流）拉一遍
     pub(super) fn refresh_detail(&mut self, id: &str, cx: &mut Context<Self>) {
         if !self.detail_showing(id) || self.session(id).is_none_or(Session::is_terminal) {
             return;
         }
         self.request_detail_fetch(id, DetailKind::Artifacts, cx);
-        self.request_detail_fetch(id, DetailKind::Diff, cx);
         if let Some(path) = self.session(id).map(|s| s.project_path.clone())
             && !path.is_empty()
             && !self.inbox.contains_key(&path)
@@ -341,7 +281,6 @@ impl RootView {
             return;
         }
         self.request_detail_fetch(id, DetailKind::Artifacts, cx);
-        self.request_detail_fetch(id, DetailKind::Diff, cx);
     }
 
     /// 会话没了：面板状态一起丢
@@ -354,7 +293,6 @@ impl RootView {
         let d = self.detail.entry(id.to_string()).or_default();
         let t = match kind {
             DetailKind::Artifacts => &mut d.artifacts_fetch,
-            DetailKind::Diff => &mut d.diff_fetch,
         };
         match t.request(now) {
             Decision::Now => self.fetch_detail_now(id, kind, cx),
@@ -367,7 +305,6 @@ impl RootView {
                         if let Some(d) = r.detail.get_mut(&id) {
                             match kind {
                                 DetailKind::Artifacts => d.artifacts_fetch.fire(Instant::now()),
-                                DetailKind::Diff => d.diff_fetch.fire(Instant::now()),
                             }
                             r.fetch_detail_now(&id, kind, cx);
                         }
@@ -395,33 +332,6 @@ impl RootView {
                     false,
                     cx,
                 );
-            }
-            DetailKind::Diff => {
-                let fut = self.net.diff(id);
-                let sid_err = sid.clone();
-                cx.spawn(async move |this, cx| {
-                    let res = fut.await;
-                    let _ = this.update(cx, |r, cx| {
-                        let d = r.detail.entry(sid_err).or_default();
-                        match res {
-                            Ok(resp) => {
-                                d.diff = Some(resp);
-                                d.diff_error = None;
-                            }
-                            Err(e) => {
-                                // v1 daemon 无此端点 → 按未启用显示；其余错误留一句
-                                if crate::net::http_status(&e) == Some(404) {
-                                    d.diff = Some(DiffResponse::default());
-                                    d.diff_error = None;
-                                } else {
-                                    d.diff_error = Some(e.to_string());
-                                }
-                            }
-                        }
-                        cx.notify();
-                    });
-                })
-                .detach();
             }
         }
     }
@@ -520,54 +430,6 @@ impl RootView {
         }
     }
 
-    fn toggle_diff_file(&mut self, id: &str, path: String, cx: &mut Context<Self>) {
-        let d = self.detail.entry(id.to_string()).or_default();
-        if !d.expanded.remove(&path) {
-            d.expanded.insert(path);
-        }
-        cx.notify();
-    }
-
-    /// 「回滚到会话开始」：一律二次确认（PROTOCOL 要求）
-    fn request_rollback(&mut self, id: String, cx: &mut Context<Self>) {
-        self.modal = Modal::ConfirmRollback { id };
-        cx.notify();
-    }
-
-    /// 确认后执行：会话还活着就 force（daemon 先 kill）；成功重拉 diff，失败 toast
-    pub(super) fn do_rollback(&mut self, id: String, cx: &mut Context<Self>) {
-        self.modal = Modal::None;
-        let alive = self
-            .session(&id)
-            .is_some_and(|s| s.state != SessionState::Exited);
-        if alive {
-            // 自己主动终止的：随后的 exited 不弹通知
-            self.user_killed.insert(id.clone());
-        }
-        self.detail.entry(id.clone()).or_default().rolling_back = true;
-        let fut = self.net.rollback(&id, alive);
-        cx.spawn(async move |this, cx| {
-            let res = fut.await;
-            let _ = this.update(cx, |r, cx| {
-                if let Some(d) = r.detail.get_mut(&id) {
-                    d.rolling_back = false;
-                }
-                match res {
-                    Ok(_) => {
-                        if let Some(d) = r.detail.get_mut(&id) {
-                            d.diff_fetch.fire(Instant::now());
-                        }
-                        r.fetch_detail_now(&id, DetailKind::Diff, cx);
-                    }
-                    Err(e) => r.set_error(format!("回滚失败: {e}"), cx),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
     // ── 渲染 ────────────────────────────────────────────────────────────
 
     /// 段标题：与设置页同款的 Menlo 小字
@@ -657,7 +519,6 @@ impl RootView {
             .overflow_y_scroll()
             .child(Self::section("会话", Self::render_usage_section(s.usage.as_ref())))
             .child(Self::section("产物", self.render_artifacts_section(d, &now, cx)))
-            .child(Self::section("改动", self.render_diff_section(s, d, cx)))
             .child(Self::section("收件箱", self.render_inbox_section(s, cx)))
             .child(Self::section("通知", self.render_notify_section(s, cx)));
 
@@ -847,173 +708,6 @@ impl RootView {
         col
     }
 
-    fn render_patch(ix: usize, f: &DiffFile) -> gpui::Stateful<gpui::Div> {
-        let lines: Vec<&str> = f.patch.lines().collect();
-        let total = lines.len();
-        let mut body = div()
-            .flex()
-            .flex_col()
-            .font_family("Menlo")
-            .text_size(px(11.))
-            .whitespace_nowrap();
-        for line in lines.iter().take(PATCH_MAX_LINES) {
-            let kind = classify_patch_line(line);
-            let (color, bg) = match kind {
-                PatchLine::Header => (theme::faint(), None),
-                PatchLine::Add => (theme::green(), Some(ca(theme::green(), 0.10))),
-                PatchLine::Del => (theme::red(), Some(ca(theme::red(), 0.10))),
-                PatchLine::Context => (theme::term_fg(), None),
-            };
-            // 空行也得占一行高度
-            let text = if line.is_empty() { " ".to_string() } else { (*line).to_string() };
-            body = body.child(
-                div()
-                    .px(px(4.))
-                    .text_color(c(color))
-                    .when_some(bg, |el, bg| el.bg(bg))
-                    .child(SharedString::from(text)),
-            );
-        }
-        if total > PATCH_MAX_LINES || f.truncated {
-            let note = if total > PATCH_MAX_LINES {
-                format!("… 共 {total} 行，只显示前 {PATCH_MAX_LINES} 行")
-            } else {
-                "… patch 超过 64KB，daemon 已截断".to_string()
-            };
-            body = body.child(
-                div()
-                    .px(px(4.))
-                    .pt(px(4.))
-                    .text_color(c(theme::faint()))
-                    .child(SharedString::from(note)),
-            );
-        }
-        div()
-            .id(("patch", ix))
-            .w_full()
-            .mt(px(4.))
-            .mb(px(6.))
-            .py(px(6.))
-            .rounded(px(4.))
-            .bg(c(theme::term_bg()))
-            .overflow_x_scroll()
-            .child(body)
-    }
-
-    fn render_diff_section(&self, s: &Session, d: Option<&SessionDetail>, cx: &mut Context<Self>) -> gpui::Div {
-        let sid = s.id.clone();
-        let Some(d) = d else {
-            return Self::empty_hint("加载中…");
-        };
-        if let Some(err) = &d.diff_error
-            && d.diff.is_none()
-        {
-            return div()
-                .text_size(px(11.5))
-                .text_color(c(theme::amber()))
-                .child(SharedString::from(format!("改动读取失败：{err}")));
-        }
-        let Some(diff) = &d.diff else {
-            return Self::empty_hint("加载中…");
-        };
-        if !diff.supported {
-            return Self::empty_hint("未启用 checkpoint");
-        }
-
-        let mut col = div().flex().flex_col().gap(px(1.));
-        // 基线：start 检查点的 ref（refs/aaa-ckpt/<sid>/0-start），只留最后一段
-        if let Some(base) = diff.base.rsplit('/').next().filter(|b| !b.is_empty()) {
-            col = col.child(
-                div()
-                    .pb(px(4.))
-                    .font_family("Menlo")
-                    .text_size(px(10.))
-                    .text_color(c(theme::faint()))
-                    .child(SharedString::from(format!("基线 {base} · {} 个文件", diff.files.len()))),
-            );
-        }
-        if diff.files.is_empty() {
-            col = col.child(Self::empty_hint("工作区与会话开始时一致"));
-        }
-        for (ix, f) in diff.files.iter().enumerate() {
-            let open = d.expanded.contains(&f.path);
-            let path_click = f.path.clone();
-            let sid_click = sid.clone();
-            col = col.child(
-                div()
-                    .id(("dfile", ix))
-                    .flex()
-                    .items_center()
-                    .gap(px(7.))
-                    .px(px(8.))
-                    .py(px(4.))
-                    .mx(px(-8.))
-                    .rounded(px(5.))
-                    .cursor_pointer()
-                    .when(open, |el| el.bg(c(theme::surface_raised())))
-                    .hover(|st| st.bg(c(theme::surface_raised())))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.toggle_diff_file(&sid_click, path_click.clone(), cx);
-                    }))
-                    .child(dot(status_color(&f.status)))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis_start()
-                            .font_family("Menlo")
-                            .text_size(px(11.))
-                            .text_color(c(theme::ink()))
-                            .child(SharedString::from(f.path.clone())),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .flex()
-                            .gap(px(4.))
-                            .font_family("Menlo")
-                            .text_size(px(10.))
-                            .child(
-                                div()
-                                    .text_color(c(theme::green()))
-                                    .child(SharedString::from(format!("+{}", f.additions))),
-                            )
-                            .child(
-                                div()
-                                    .text_color(c(theme::red()))
-                                    .child(SharedString::from(format!("−{}", f.deletions))),
-                            ),
-                    ),
-            );
-            if open {
-                col = col.child(Self::render_patch(ix, f));
-            }
-        }
-
-        let label = if d.rolling_back { "回滚中…" } else { "回滚到会话开始" };
-        let sid_rb = sid.clone();
-        col.child(
-            div().pt(px(10.)).child(
-                btn_danger("rollback", label)
-                    .w_full()
-                    .flex()
-                    .justify_center()
-                    .when(d.rolling_back, |el| el.opacity(0.6))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        let busy = this
-                            .detail
-                            .get(&sid_rb)
-                            .is_some_and(|d| d.rolling_back);
-                        if !busy {
-                            this.request_rollback(sid_rb.clone(), cx);
-                        }
-                    })),
-            ),
-        )
-    }
-
     fn render_inbox_section(&self, s: &Session, cx: &mut Context<Self>) -> gpui::Div {
         let path = s.project_path.clone();
         let items: &[InboxItem] = self.inbox.get(&path).map(|v| v.as_slice()).unwrap_or(&[]);
@@ -1104,68 +798,6 @@ impl RootView {
             .child(knob)
     }
 
-    /// 回滚确认框（modals.rs 的 render_modal 派发到这里）
-    pub(super) fn render_confirm_rollback(&self, id: String, cx: &mut Context<Self>) -> gpui::Div {
-        let alive = self
-            .session(&id)
-            .is_some_and(|s| s.state != SessionState::Exited);
-        let title = self
-            .session(&id)
-            .map(|s| s.display_title())
-            .unwrap_or_else(|| id.clone());
-        let mut body = div()
-            .w(px(420.))
-            .max_h(px(600.))
-            .p(px(18.))
-            .rounded(px(12.))
-            .bg(c(theme::surface_raised()))
-            .border_1()
-            .border_color(c(theme::edge_light()))
-            .shadow_lg()
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .font_weight(gpui::FontWeight::BOLD)
-                    .text_size(px(15.))
-                    .pb(px(8.))
-                    .child(SharedString::from(format!("回滚「{title}」？"))),
-            )
-            .child(
-                div()
-                    .text_size(px(12.5))
-                    .text_color(c(theme::dim()))
-                    .child("工作区会恢复到这个会话开始时的检查点：会话期间的修改被撤掉、新增的文件被删除（.git 与忽略的文件不动）。不可恢复。"),
-            );
-        if alive {
-            body = body.child(
-                div()
-                    .pt(px(6.))
-                    .text_size(px(12.5))
-                    .text_color(c(theme::amber()))
-                    .child("会话还活着：会先终止它，再回滚。"),
-            );
-        }
-        body.child(
-            div()
-                .flex()
-                .justify_end()
-                .gap(px(8.))
-                .pt(px(14.))
-                .child(
-                    btn_secondary("rb-cancel", "取消").on_click(cx.listener(|this, _, _, cx| {
-                        this.modal = Modal::None;
-                        cx.notify();
-                    })),
-                )
-                .child(
-                    btn_danger("rb-ok", if alive { "终止并回滚" } else { "回滚" }).on_click(
-                        cx.listener(move |this, _, _, cx| this.do_rollback(id.clone(), cx)),
-                    ),
-                ),
-        )
-    }
-
     /// 侧栏最底部的套餐用量块；plan 为 null / 没有任何窗口有数就整块不画
     pub(super) fn render_plan_usage(&self) -> Option<gpui::Div> {
         let plan = self.plan.as_ref()?;
@@ -1227,10 +859,8 @@ mod tests {
     fn throttle_now_defer_skip_fire() {
         let t0 = Instant::now();
         let mut t = Throttle::new(Duration::from_secs(2));
-        assert!(t.never());
         // 第一次立刻拉
         assert_eq!(t.request(t0), Decision::Now);
-        assert!(!t.never());
         // 500ms 后又来：间隔内，1.5s 后补拉
         assert_eq!(
             t.request(t0 + Duration::from_millis(500)),
@@ -1326,26 +956,6 @@ mod tests {
     }
 
     #[test]
-    fn patch_line_classification() {
-        use PatchLine::*;
-        assert_eq!(classify_patch_line("diff --git a/x b/x"), Header);
-        assert_eq!(classify_patch_line("index 1234..5678 100644"), Header);
-        assert_eq!(classify_patch_line("--- a/x"), Header, "--- 不是删除行");
-        assert_eq!(classify_patch_line("+++ b/x"), Header, "+++ 不是新增行");
-        assert_eq!(classify_patch_line("@@ -1,3 +1,4 @@ fn main"), Header);
-        assert_eq!(classify_patch_line("new file mode 100644"), Header);
-        assert_eq!(classify_patch_line("deleted file mode 100644"), Header);
-        assert_eq!(classify_patch_line("Binary files differ"), Header);
-        assert_eq!(classify_patch_line("+let x = 1;"), Add);
-        assert_eq!(classify_patch_line("-let x = 0;"), Del);
-        assert_eq!(classify_patch_line(" let y = 2;"), Context);
-        assert_eq!(classify_patch_line(""), Context);
-        // 内容恰好以 "--" 开头的删除行仍是删除（只有 "--- " 才是头）
-        assert_eq!(classify_patch_line("--x"), Del);
-        assert_eq!(classify_patch_line("++x"), Add);
-    }
-
-    #[test]
     fn artifacts_sorted_newest_first() {
         let mk = |ts: &str, url: &str| Artifact {
             ts: ts.into(),
@@ -1419,13 +1029,5 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(plan_parts(&only7), vec![("7d".to_string(), 95.0)]);
-    }
-
-    #[test]
-    fn diff_status_colours() {
-        assert_eq!(status_color("added"), theme::green());
-        assert_eq!(status_color("modified"), theme::amber());
-        assert_eq!(status_color("deleted"), theme::red());
-        assert_eq!(status_color("renamed"), theme::dim());
     }
 }

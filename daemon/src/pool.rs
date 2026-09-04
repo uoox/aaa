@@ -60,9 +60,6 @@ pub struct Meta {
     /// v1.1: inbox auto-feed enabled for this session (POST /sessions)
     #[serde(default = "default_true")]
     pub feed_inbox: bool,
-    /// v1.1: start-checkpoint ref (persisted so diff/rollback survive restarts)
-    #[serde(default)]
-    pub ckpt_start_ref: Option<String>,
     // -- volatile --
     #[serde(skip)]
     pub last_output_inst: Option<Instant>,
@@ -131,14 +128,11 @@ pub struct Session {
     pub dirty: AtomicBool,
     /// v1.1: structured message stream (agent store tail)
     pub msgs: Mutex<crate::messages::MsgStore>,
-    /// v1.1: git checkpoint runtime state
-    pub ckpt: Mutex<crate::checkpoint::CkptState>,
 }
 
 pub struct PoolCtx {
     pub hub: EventHub,
     pub sessions_dir: PathBuf,
-    pub ckpt_cfg: crate::config::CheckpointConfig,
 }
 
 pub struct SessionPool {
@@ -174,7 +168,6 @@ impl Session {
                 last_output_at: now,
                 preview: String::new(),
                 feed_inbox: true,
-                ckpt_start_ref: None,
                 last_output_inst: None,
                 needs_name: false,
                 inbox_fed: false,
@@ -195,7 +188,6 @@ impl Session {
             live: Mutex::new(None),
             dirty: AtomicBool::new(false),
             msgs: Mutex::new(crate::messages::MsgStore::for_agent(agent)),
-            ckpt: Mutex::new(crate::checkpoint::CkptState::default()),
         }
     }
 
@@ -506,10 +498,6 @@ impl SessionPool {
         for (id, meta) in restored {
             let (tx, _) = broadcast::channel(64);
             let msgs = crate::messages::MsgStore::for_agent(&meta.agent);
-            let ckpt = crate::checkpoint::CkptState {
-                start_ref: meta.ckpt_start_ref.clone(),
-                ..Default::default()
-            };
             let sess = Arc::new(Session {
                 id: id.clone(),
                 meta: Mutex::new(meta),
@@ -518,7 +506,6 @@ impl SessionPool {
                 live: Mutex::new(None),
                 dirty: AtomicBool::new(false),
                 msgs: Mutex::new(msgs),
-                ckpt: Mutex::new(ckpt),
             });
             self.map.lock().unwrap().insert(id, sess);
         }
@@ -597,7 +584,6 @@ impl SessionPool {
             last_output_at: now,
             preview: String::new(),
             feed_inbox: spec.feed_inbox,
-            ckpt_start_ref: None,
             last_output_inst: Some(Instant::now()),
             needs_name: true,
             inbox_fed: false,
@@ -630,7 +616,6 @@ impl SessionPool {
             live: Mutex::new(Some(Live { master: pair.master, writer, killer, pid })),
             dirty: AtomicBool::new(true),
             msgs: Mutex::new(msgs),
-            ckpt: Mutex::new(crate::checkpoint::CkptState::default()),
         });
         self.map
             .lock()
@@ -680,26 +665,6 @@ impl SessionPool {
                 meta.needs_name = true;
             }
             *rsess.live.lock().unwrap() = None;
-            // v1.1: end checkpoint (agent sessions with a start checkpoint)
-            {
-                let (agent, project_path, has_start) = {
-                    let meta = rsess.meta.lock().unwrap();
-                    (
-                        meta.agent.clone(),
-                        meta.project_path.clone(),
-                        meta.ckpt_start_ref.is_some(),
-                    )
-                };
-                if rctx.ckpt_cfg.enabled && agent != "shell" && has_start {
-                    let mut state = rsess.ckpt.lock().unwrap();
-                    let _ = crate::checkpoint::make_checkpoint(
-                        std::path::Path::new(&project_path),
-                        &rsess.id,
-                        &mut state,
-                        "end",
-                    );
-                }
-            }
             rsess.persist(&rctx);
             rsess.mark_dirty();
         });
@@ -858,7 +823,6 @@ mod tests {
         let pool = SessionPool::new(PoolCtx {
             hub: EventHub::new(),
             sessions_dir: sessions_dir.clone(),
-            ckpt_cfg: crate::config::CheckpointConfig::default(),
         });
         pool.restore_persisted_capped(3);
         assert_eq!(pool.all().len(), 3, "only the newest `cap` sessions restored");

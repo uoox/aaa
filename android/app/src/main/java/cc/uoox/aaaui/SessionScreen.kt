@@ -78,13 +78,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -258,6 +255,50 @@ fun SessionScreen(
             Text("连接中…", color = Tok.Amber, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 16.dp))
         }
 
+        // 快捷键条（仅终端视图，且要先用 ⌨ 放出来）：放在终端上方，软键盘弹起时不会被顶到看不见
+        if (!showMessages && keysOpen) {
+            Row(
+                Modifier.fillMaxWidth().background(Tok.Surface).horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 8.dp, vertical = 5.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                // 键码交给 libvterm 的 dispatchKey，它按当前 keypad / cursor 模式给出正确的
+                // 转义序列；字面符号直接写进 PTY。粘性 Ctrl 用一次就松开。
+                fun key(code: Int) = {
+                    vtermKeyFor(code)?.let { k ->
+                        attachment?.emulator?.dispatchKey(if (ctrlSticky) VTERM_MOD_CTRL else 0, k)
+                        ctrlSticky = false
+                    }
+                    Unit
+                }
+                fun lit(ch: String) = { attachment?.write(ch); Unit }
+                KeyChip("⌨", active = true) { keysOpen = false }
+                KeyChip("键盘") { inputRef.value?.showKeyboard() }
+                // 回车放最前面：条会横向滚，排后面在手机上根本看不见
+                KeyChip("⏎", onClick = key(KeyEvent.KEYCODE_ENTER))
+                KeyChip("选择", active = selectMode.value) { selectMode.value = !selectMode.value }
+                KeyChip("Esc", onClick = key(KeyEvent.KEYCODE_ESCAPE))
+                KeyChip("Tab", onClick = key(KeyEvent.KEYCODE_TAB))
+                KeyChip("Ctrl", active = ctrlSticky) { ctrlSticky = !ctrlSticky }
+                KeyChip("↑", onClick = key(KeyEvent.KEYCODE_DPAD_UP))
+                KeyChip("↓", onClick = key(KeyEvent.KEYCODE_DPAD_DOWN))
+                KeyChip("←", onClick = key(KeyEvent.KEYCODE_DPAD_LEFT))
+                KeyChip("→", onClick = key(KeyEvent.KEYCODE_DPAD_RIGHT))
+                // Claude Code 的输入框里换行：`\` + Return（官方的「quick escape」，任何终端都认）。
+                // 不用 Shift/Alt+Enter 的转义序列——那要终端和 TUI 两头都配好才不会被当成 Esc。
+                KeyChip("换行", onClick = lit("\\\r"))
+                KeyChip("Home", onClick = key(KeyEvent.KEYCODE_MOVE_HOME))
+                KeyChip("End", onClick = key(KeyEvent.KEYCODE_MOVE_END))
+                // 手机键盘上最难摸到的几个：flag 的 -、路径与 slash 命令的 /、管道、家目录
+                KeyChip("-", onClick = lit("-"))
+                KeyChip("/", onClick = lit("/"))
+                KeyChip("|", onClick = lit("|"))
+                KeyChip("~", onClick = lit("~"))
+                // 长按选区工具条里也有粘贴，但那要先长按选中；这里给一个直达入口
+                KeyChip("粘贴") { pasteViaDaemon() }
+            }
+        }
+
         // 主体
         Box(Modifier.weight(1f).fillMaxWidth()) {
             if (showMessages) {
@@ -294,49 +335,6 @@ fun SessionScreen(
             }
         }
 
-        // 快捷键条（仅终端视图，且要先用 ⌨ 放出来）
-        if (!showMessages && keysOpen) {
-            Row(
-                Modifier.fillMaxWidth().background(Tok.Surface).horizontalScroll(rememberScrollState())
-                    .padding(horizontal = 8.dp, vertical = 5.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                // 键码交给 libvterm 的 dispatchKey，它按当前 keypad / cursor 模式给出正确的
-                // 转义序列；字面符号直接写进 PTY。粘性 Ctrl 用一次就松开。
-                fun key(code: Int) = {
-                    vtermKeyFor(code)?.let { k ->
-                        attachment?.emulator?.dispatchKey(if (ctrlSticky) VTERM_MOD_CTRL else 0, k)
-                        ctrlSticky = false
-                    }
-                    Unit
-                }
-                fun lit(ch: String) = { attachment?.write(ch); Unit }
-                KeyChip("⌨", active = true) { keysOpen = false }
-                KeyChip("键盘") { inputRef.value?.showKeyboard() }
-                KeyChip("选择", active = selectMode.value) { selectMode.value = !selectMode.value }
-                KeyChip("Esc", onClick = key(KeyEvent.KEYCODE_ESCAPE))
-                KeyChip("Tab", onClick = key(KeyEvent.KEYCODE_TAB))
-                KeyChip("Ctrl", active = ctrlSticky) { ctrlSticky = !ctrlSticky }
-                KeyChip("↑", onClick = key(KeyEvent.KEYCODE_DPAD_UP))
-                KeyChip("↓", onClick = key(KeyEvent.KEYCODE_DPAD_DOWN))
-                KeyChip("←", onClick = key(KeyEvent.KEYCODE_DPAD_LEFT))
-                KeyChip("→", onClick = key(KeyEvent.KEYCODE_DPAD_RIGHT))
-                KeyChip("⏎", onClick = key(KeyEvent.KEYCODE_ENTER))
-                // Claude Code 的输入框里换行：`\` + Return（官方的「quick escape」，任何终端都认）。
-                // 不用 Shift/Alt+Enter 的转义序列——那要终端和 TUI 两头都配好才不会被当成 Esc。
-                KeyChip("换行", onClick = lit("\\\r"))
-                KeyChip("Home", onClick = key(KeyEvent.KEYCODE_MOVE_HOME))
-                KeyChip("End", onClick = key(KeyEvent.KEYCODE_MOVE_END))
-                // 手机键盘上最难摸到的几个：flag 的 -、路径与 slash 命令的 /、管道、家目录
-                KeyChip("-", onClick = lit("-"))
-                KeyChip("/", onClick = lit("/"))
-                KeyChip("|", onClick = lit("|"))
-                KeyChip("~", onClick = lit("~"))
-                // 长按选区工具条里也有粘贴，但那要先长按选中；这里给一个直达入口
-                KeyChip("粘贴") { pasteViaDaemon() }
-            }
-        }
-
         // composer：消息流视图始终在；终端视图下跟键位条一起收放
         if (showMessages || keysOpen) {
             Row(
@@ -368,7 +366,8 @@ fun SessionScreen(
             }
         }
     }
-    // 终端视图下键位条收起时：右下角一枚 ⌨ 把它放出来（悬浮在终端上，不占一行）
+    // 终端视图下键位条收起时：右下角一枚 ⌨ 把它放出来（悬浮在终端上，不占一行；
+    // 条本身在顶部，按钮留在右下角是为了不盖住画面第一行的输出）
     if (!showMessages && !keysOpen) {
         Box(Modifier.align(Alignment.BottomEnd).padding(end = 14.dp, bottom = 14.dp)) { KeyChip("⌨") { keysOpen = true } }
     }
@@ -964,7 +963,6 @@ fun SessionMenuSheet(
                     if (urls.isEmpty()) toast("回放里没有链接") else urlsDialog = urls
                 }
             }
-            SheetItem("±", "本次改动", "diff · 回滚") { onDismiss(); nav.navigate("diff/${s.id}") }
             SheetItem("📦", "产物", "会话里发布的 Artifact", onClick = onArtifacts)
             SheetItem("📥", "任务收件箱", s.project_name) { onDismiss(); nav.navigate("inbox/${Uri.encode(s.project_path)}") }
             SheetItem("🔁", "重启 agent", "resume 同一会话") {
@@ -1103,135 +1101,6 @@ fun ConfirmDialog(title: String, body: String, confirmLabel: String, onConfirm: 
         confirmButton = { TextButton(onClick = onConfirm) { Text(confirmLabel, color = Tok.Red) } },
         dismissButton = { TextButton(onClick = onCancel) { Text("取消", color = Tok.Dim) } },
     )
-}
-
-// ---------- v1.1 diff 屏 ----------
-
-@Composable
-fun DiffScreen(store: AppStore, nav: NavHostController, sessionId: String) {
-    val scope = rememberCoroutineScope()
-    val context = LocalContext.current
-    val sessions by store.sessions.collectAsState()
-    val session = sessions.find { it.id == sessionId }
-    var diff by remember { mutableStateOf<DiffResponse?>(null) }
-    var error by remember { mutableStateOf<String?>(null) }
-    var expandedPath by remember { mutableStateOf<String?>(null) }
-    var rollbackDialog by remember { mutableStateOf(false) }
-
-    LaunchedEffect(sessionId) {
-        try { diff = store.client?.diff(sessionId) }
-        catch (e: DaemonHttpException) { error = if (e.code == 404) "daemon 版本不支持 diff（需 v1.1）" else e.message }
-        catch (e: Exception) { error = e.message }
-    }
-
-    Column(Modifier.fillMaxSize().background(Tok.Bg)) {
-        Row(Modifier.fillMaxWidth().padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("‹", color = Tok.Dim, fontSize = 26.sp, modifier = Modifier.clickable { nav.popBackStack() }.padding(horizontal = 8.dp))
-            Column(Modifier.weight(1f)) {
-                Text("本次改动", color = Tok.Ink, fontSize = 17.sp, fontWeight = FontWeight.Bold)
-                diff?.base?.takeIf { it.isNotBlank() }?.let {
-                    Text("基线 $it", color = Tok.Faint, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
-                }
-            }
-        }
-        when {
-            error != null -> Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) { Text(error!!, color = Tok.Red, fontSize = 13.sp) }
-            diff == null -> Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) { Text("加载中…", color = Tok.Faint) }
-            diff?.supported == false -> Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) { Text("此会话不支持 diff（无 checkpoint）", color = Tok.Faint) }
-            diff!!.files.isEmpty() -> Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) { Text("会话开始以来无改动", color = Tok.Faint) }
-            else -> LazyColumn(Modifier.weight(1f).fillMaxWidth()) {
-                items(diff!!.files, key = { it.path }) { f ->
-                    val statusColor = when (f.status) { "added" -> Tok.Green; "deleted" -> Tok.Red; else -> Tok.Amber }
-                    Card(
-                        onClick = { expandedPath = if (expandedPath == f.path) null else f.path },
-                        colors = CardDefaults.cardColors(containerColor = Tok.Surface),
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
-                    ) {
-                        Column(Modifier.padding(12.dp)) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(
-                                    when (f.status) { "added" -> "A"; "deleted" -> "D"; else -> "M" },
-                                    color = statusColor, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold,
-                                )
-                                Spacer(Modifier.width(8.dp))
-                                Text(f.path, color = Tok.Ink, fontSize = 13.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                                Text("+${f.additions}", color = Tok.Green, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
-                                Spacer(Modifier.width(6.dp))
-                                Text("−${f.deletions}", color = Tok.Red, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
-                            }
-                            if (expandedPath == f.path && f.patch.isNotBlank()) {
-                                PatchView(f.patch, f.truncated)
-                            }
-                        }
-                    }
-                }
-                item { Spacer(Modifier.height(70.dp)) }
-            }
-        }
-        if (diff?.supported == true) {
-            Button(
-                onClick = { rollbackDialog = true },
-                colors = androidx.compose.material3.ButtonDefaults.buttonColors(containerColor = Tok.Red.copy(alpha = 0.85f)),
-                modifier = Modifier.fillMaxWidth().padding(14.dp).navigationBarsPadding(),
-            ) { Text("回滚到会话开始", color = Color.White) }
-        }
-    }
-
-    if (rollbackDialog) {
-        val alive = session != null && session.state != "exited"
-        ConfirmDialog(
-            "回滚到会话开始？",
-            buildString {
-                append("工作区将恢复到本会话 start 检查点，start 之后新增的文件会被删除（.git 与忽略文件不动）。不可撤销。")
-                if (alive) append("\n\n会话仍在运行：将先结束进程再回滚。")
-            },
-            "回滚",
-            onConfirm = {
-                rollbackDialog = false
-                scope.launch {
-                    try {
-                        store.client?.rollback(sessionId, force = alive)
-                        Toast.makeText(context, "已回滚", Toast.LENGTH_SHORT).show()
-                        diff = store.client?.diff(sessionId)
-                    } catch (e: Exception) {
-                        Toast.makeText(context, "回滚失败：${e.message}", Toast.LENGTH_LONG).show()
-                    }
-                }
-            },
-            onCancel = { rollbackDialog = false },
-        )
-    }
-}
-
-@Composable
-private fun PatchView(patch: String, truncated: Boolean) {
-    // One Text over an AnnotatedString instead of one Text per line: a 64KB
-    // patch is ~2k lines, and 2k composables in a non-lazy Column froze the
-    // expand animation. Built once per patch, not per recomposition.
-    val colored = remember(patch, Tok.current) {
-        buildAnnotatedString {
-            patch.lineSequence().forEachIndexed { i, line ->
-                val color = when {
-                    line.startsWith("+++") || line.startsWith("---") -> Tok.Dim
-                    line.startsWith("@@") -> Tok.Accent
-                    line.startsWith("+") -> Tok.Green
-                    line.startsWith("-") -> Tok.Red
-                    else -> Tok.Dim
-                }
-                if (i > 0) append('\n')
-                withStyle(SpanStyle(color = color)) { append(line) }
-            }
-        }
-    }
-    Column(
-        Modifier.fillMaxWidth().padding(top = 8.dp)
-            .background(Tok.Inset, RoundedCornerShape(8.dp))
-            .horizontalScroll(rememberScrollState())
-            .padding(8.dp),
-    ) {
-        Text(colored, fontSize = 11.sp, fontFamily = FontFamily.Monospace, softWrap = false)
-        if (truncated) Text("… patch 过大已截断（64KB）", color = Tok.Faint, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp))
-    }
 }
 
 // ---------- helpers ----------

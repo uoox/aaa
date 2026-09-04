@@ -126,17 +126,6 @@ import java.net.URLDecoder
     val messages: List<ChatMessage> = emptyList(),
 )
 
-// v1.1 diff
-@Serializable data class DiffFile(
-    val path: String,
-    val status: String = "modified",
-    val additions: Int = 0,
-    val deletions: Int = 0,
-    val patch: String = "",
-    val truncated: Boolean = false,
-)
-@Serializable data class DiffResponse(val supported: Boolean = false, val base: String = "", val files: List<DiffFile> = emptyList())
-
 // v1.1 inbox
 @Serializable data class InboxItem(val id: String, val text: String, val created_at: String = "")
 

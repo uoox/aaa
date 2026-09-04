@@ -37,10 +37,9 @@ port = 2730
 token = "aaa_tk_<32hex>"     # 首次运行生成
 project_root = "/Volumes/SSD/project"
 namer = true                  # haiku 会话命名开关（对应 AAA_NAMER）
-[checkpoint]                  # 见「git checkpoint」
 ```
 
-历史上的 `[ntfy]` / `[watchdog]` 段已废弃（2026-09-02），旧文件里留着也能解析，只是被忽略。
+历史上的 `[ntfy]` / `[watchdog]`（2026-09-02）与 `[checkpoint]`（2026-09-05）段已废弃，旧文件里留着也能解析，只是被忽略。
 
 ## Agent 表（2026-09-03 起只支持 Claude Code）
 
@@ -126,7 +125,7 @@ CLI 的 `ls` / 交互菜单仍按「执行中 / 待回复 / 已完成」三组�
 | POST | `/sessions/:id/rename` | `{title}` |
 | GET | `/sessions/:id/ports` | 进程树监听端口 `[{port,cmd}]`（mac「Web 预览」入口用；其它客户端未接） |
 | POST | `/hooks/:event` | Claude Code hooks 回调（见「Claude Code hooks」）；头 `X-AAA-Session`；永远 200 `{}`。`:event=statusline` 是 statusLine 命令转来的状态 JSON |
-| GET | `/usage` | `{plan}`：账号 plan 配额（最近一次 statusLine 的 `rate_limits`）：`{five_hour:{used_percentage,resets_at}, seven_day:{…}, model_scoped:[{display_name,utilization,resets_at}]|null, updated_at}`；还没收到过时 `plan=null` |
+| GET | `/usage` | `{plan}`：账号 plan 配额：`{five_hour:{used_percentage,resets_at}, seven_day:{…}, model_scoped:[{display_name,utilization,resets_at}]|null, updated_at}`。5h / 7d 来自最近一次 statusLine 的 `rate_limits`，也来自 daemon 每分钟对 claude.ai usage 接口的轮询；`model_scoped`（按模型的周窗口，如 Fable）**只**来自轮询——statusLine 从不带它。轮询用 Claude Code 自己登录的 OAuth 令牌（macOS 钥匙串 `Claude Code-credentials` / `~/.claude/.credentials.json`），只读不刷新；没登录或令牌过期时沿用旧值。两个来源都还没给过时 `plan=null` |
 | GET | `/sessions/:id/artifacts` | `{artifacts:[{url,title,description,file_path,ts}]}`：会话里用 Artifact 工具发布过的链接（报告 / 原型 / 图），按 url 去重，来自 transcript |
 | GET | `/sessions/:id/screen` | daemon 侧 vt100 的屏幕文本 `{text, alternate_screen}`。非备用屏时 text 前带最近 500 行回滚；备用屏（Claude Code）只有可见画面。客户端「复制屏幕内容」「打开链接」用它。 |
 | GET | `/mac/permissions` | 见「macOS 权限」 |
@@ -234,7 +233,7 @@ Claude 以 `--dangerously-skip-permissions` 运行，`PermissionRequest` 不会�
 - `root_state` 区分 `unmounted`（挂上就好）与 `denied`（要给 daemon 完全磁盘访问权限），两者修法完全不同，503 的 `message` 直接带上修法（手机端看不到 Mac 的日志）。
 - 状态由 5s 健康轮询维护；请求只读缓存值，不逐次探测。
 
-## v1.1 扩展（2026-08-30 用户拍板：消息流 / checkpoint+diff / 收件箱 / 上传 / 通知细化）
+## v1.1 扩展（2026-08-30 用户拍板：消息流 / 收件箱 / 上传 / 通知细化；checkpoint+diff 已于 2026-09-05 移除）
 
 ### 消息流（手机主视图，终端保留可切换）
 
@@ -245,13 +244,6 @@ Claude 以 `--dangerously-skip-permissions` 运行，`PermissionRequest` 不会�
 - daemon 在会话 spawn/resume 后定位该会话的 Claude transcript（resume 已知文件；新会话按 cwd 匹配 + mtime ≥ 启动时刻轮询发现）并增量 tail 解析（jsonl：user/assistant/tool_use/tool_result/thinking，过滤 isSidechain 与注入块）。shell（终端）返回 `supported:false`。resume 场景：旧 id 的 transcript 只是延迟兜底（~30s），发现会话自己写的新文件后自动升级；同目录并发会话不共享同一存储文件（已被认领的候选跳过）。
 - `/events` 新帧：`{"t":"messages_changed","id":"s_…","last_seq":N}`（≥500ms 节流）。客户端收到后增量拉取。
 - `/events` 心跳：服务端每 20s 发一个 WS Ping；客户端应以「45s 无任何帧」为读超时并重连（overlay 网络半开连接检测）。
-
-### git checkpoint + diff + 回滚（后悔药）
-
-- config：`[checkpoint] enabled=true, auto_init_git=false, interval_minutes=10, auto_init_max_mb=512`。agent 会话（≠shell）创建时打 `start` 检查点、退出时打 `end`、运行中每 interval 分钟有变更则打 `auto`。**已有 .git 的项目才有检查点**：项目常常只是一个任务目录（笔记、抓取、一堆 yml），替用户 `git init` 不是 daemon 该做的事，所以 `auto_init_git` 默认 **false**。显式开成 true 时，仍受 `auto_init_max_mb`（默认 512MB）护栏限制——超预算的无 .git 目录跳过 init 与检查点（避免 `.git/objects` 暴涨；0 = 关闭护栏）。已有 .git 的项目不受体积护栏限制。
-- 实现硬约束:**绝不触碰项目的 HEAD/index/工作区**：临时 `GIT_INDEX_FILE` + `git add -A` + `write-tree` + `commit-tree`，ref 收在 `refs/aaa-ckpt/<session_id>/<n>-<label>` 下（普通 git 界面不可见，`git log --all` 不污染分支）。
-- `GET /sessions/:id/diff` → `{"supported":bool,"base":"<ref>","files":[{"path","status":"added|modified|deleted","additions":N,"deletions":N,"patch":"…≤64KB","truncated":bool}]}`：start 检查点树 vs 当前工作区（含未跟踪文件，同样经临时 index）。
-- `POST /sessions/:id/rollback` body `{"confirm":true,"force":false}`：恢复工作区到 start 检查点（checkout 树 + 删除 start 后新增文件；`.git` 与忽略文件不动）。会话仍存活时必须 `force:true`（daemon 先 kill）。客户端必须二次确认。
 
 ### 回答表单（daemon 驾驭 Claude Code 对话框）
 
@@ -268,9 +260,11 @@ Claude 以 `--dangerously-skip-permissions` 运行，`PermissionRequest` 不会�
 
 - `POST /projects/upload?path=<proj>&name=<fname>`，body = 原始字节（`application/octet-stream`，≤50MB）→ `{"saved_path":"<proj>/_inbox/<ts>-<name>"}`。文件名 slugify、防覆盖。客户端上传后自行把路径发进 composer 告知 agent。
 
-### 已移除（2026-09-02）
+### 已移除
 
-Watchdog（`session_stalled` 事件 + 空转告警）、ntfy 推送、waiting 推送去重与冷却、通知渠道分级、快捷短语 chips、Claude hooks——这一整层「监测 + 推送」都拆掉了。理由：读屏猜问题误报不断，去重/冷却掩盖不了根因；用户真正要的只是「跑完了告诉我一声」，而问题本身由消息流按结构化数据原生呈现。
+**2026-09-05：git checkpoint + diff + 回滚。** `[checkpoint]` 配置、`refs/aaa-ckpt/*` 检查点、`GET /sessions/:id/diff`、`POST /sessions/:id/rollback`、会话记录里的 `ckpt_start_ref`、Mac 详情栏「改动」块与 Android「本次改动」屏全部拆掉。理由：改动审阅在 IDE / `git diff` 里做得更好，手机上看 patch 不实用，而自动打检查点在无 .git 的任务目录里根本不生效。旧 daemon 留在磁盘上的 `refs/aaa-ckpt/` 引用无害，想清理：`git for-each-ref --format="%(refname)" refs/aaa-ckpt | xargs -n1 git update-ref -d`。
+
+**2026-09-02：** Watchdog（`session_stalled` 事件 + 空转告警）、ntfy 推送、waiting 推送去重与冷却、通知渠道分级、快捷短语 chips、Claude hooks——这一整层「监测 + 推送」都拆掉了。理由：读屏猜问题误报不断，去重/冷却掩盖不了根因；用户真正要的只是「跑完了告诉我一声」，而问题本身由消息流按结构化数据原生呈现。
 
 ## aaa CLI（第三个客户端）
 

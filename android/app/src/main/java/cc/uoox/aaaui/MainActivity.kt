@@ -135,9 +135,6 @@ fun AaaApp(
                 val prefill = entry.arguments?.getString("prefill").orEmpty()
                 SessionScreen(store, nav, id, Uri.decode(prefill))
             }
-            composable("diff/{id}") { entry ->
-                DiffScreen(store, nav, entry.arguments?.getString("id").orEmpty())
-            }
             composable("inbox/{path}") { entry ->
                 InboxScreen(store, nav, Uri.decode(entry.arguments?.getString("path").orEmpty()))
             }

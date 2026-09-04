@@ -6,38 +6,6 @@ use std::path::{Path, PathBuf};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
-/// v1.1: git checkpoint settings (`[checkpoint]`, all defaulted for
-/// backward compatibility with v1.0 config files).
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CheckpointConfig {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    /// Off by default: a project here is as often a task folder (notes, a
-    /// scrape, a pile of yml) as it is code, and `git init`-ing someone's
-    /// working directory behind their back is not ours to do. Checkpoints
-    /// still run in projects that already are repos.
-    #[serde(default)]
-    pub auto_init_git: bool,
-    #[serde(default = "default_interval")]
-    pub interval_minutes: u64,
-    /// Skip `git init` (and thus checkpointing) for a repo-less project whose
-    /// contents exceed this many MB, so opening a session in a large non-code
-    /// directory does not balloon `.git/objects`. 0 disables the guard.
-    #[serde(default = "default_auto_init_max_mb")]
-    pub auto_init_max_mb: u64,
-}
-
-impl Default for CheckpointConfig {
-    fn default() -> Self {
-        CheckpointConfig {
-            enabled: true,
-            auto_init_git: false,
-            interval_minutes: 10,
-            auto_init_max_mb: 512,
-        }
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default = "default_port")]
@@ -55,8 +23,6 @@ pub struct Config {
     /// for the user — they already picked the folder in AAA. See trust.rs.
     #[serde(default = "default_true")]
     pub auto_trust: bool,
-    #[serde(default)]
-    pub checkpoint: CheckpointConfig,
 }
 
 fn default_port() -> u16 {
@@ -67,12 +33,6 @@ fn default_project_root() -> PathBuf {
 }
 fn default_true() -> bool {
     true
-}
-fn default_interval() -> u64 {
-    10
-}
-fn default_auto_init_max_mb() -> u64 {
-    512
 }
 
 pub fn generate_token() -> String {
@@ -90,7 +50,6 @@ impl Config {
             namer: true,
             remote_control_name: false,
             auto_trust: true,
-            checkpoint: CheckpointConfig::default(),
         }
     }
 }
@@ -141,8 +100,8 @@ mod tests {
     fn v1_0_config_without_new_sections_still_parses() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("config.toml");
-        // exactly what a first-generation daemon wrote (no [checkpoint]); the
-        // retired [ntfy] / [watchdog] sections must still be tolerated
+        // exactly what a first-generation daemon wrote; the retired [ntfy] /
+        // [watchdog] / [checkpoint] sections must still be tolerated
         std::fs::write(
             &p,
             "port = 2730\ntoken = \"aaa_tk_old\"\nproject_root = \"/Volumes/SSD/project\"\nnamer = true\n\n[ntfy]\nurl = \"https://ntfy.example.com\"\ntopic = \"aaa\"\n",
@@ -150,9 +109,6 @@ mod tests {
         .unwrap();
         let cfg = load_or_create(&p).unwrap();
         assert_eq!(cfg.token, "aaa_tk_old");
-        assert!(cfg.checkpoint.enabled);
-        assert!(!cfg.checkpoint.auto_init_git, "不替用户 git init");
-        assert_eq!(cfg.checkpoint.interval_minutes, 10);
         assert!(!cfg.remote_control_name, "旧字段读进来也不再开 Remote Control");
     }
 
@@ -166,8 +122,7 @@ mod tests {
         )
         .unwrap();
         let cfg = load_or_create(&p).unwrap();
-        assert!(!cfg.checkpoint.enabled);
-        assert_eq!(cfg.checkpoint.interval_minutes, 10, "missing fields default");
+        assert!(cfg.auto_trust, "missing fields default");
     }
 
     #[test]

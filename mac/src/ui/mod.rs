@@ -217,10 +217,6 @@ pub enum Modal {
         old_root: String,
         new_root: String,
     },
-    /// 详情面板「回滚到会话开始」：工作区回到 start 检查点（存活会话先被终止）
-    ConfirmRollback {
-        id: String,
-    },
 }
 
 pub struct RootView {

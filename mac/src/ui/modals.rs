@@ -211,7 +211,6 @@ impl RootView {
                 old_root,
                 new_root,
             } => self.render_confirm_config(*port, token.clone(), old_root.clone(), new_root.clone(), cx),
-            Modal::ConfirmRollback { id } => self.render_confirm_rollback(id.clone(), cx),
         };
         Some(
             div()
