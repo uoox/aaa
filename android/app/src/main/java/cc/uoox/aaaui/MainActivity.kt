@@ -93,9 +93,13 @@ fun AaaApp(
     val settings by store.settings.flow.collectAsState(initial = null)
     val loaded = settings != null
 
-    // 一个入口：会话卡片、通知深链、项目页「继续会话」都走这里，行为不会各走各的。
+    // 一个入口：会话卡片、通知深链、项目页「继续会话」、会话页 ☰ 切换都走这里，行为不会各走各的。
+    // 回退栈始终是 home → 当前会话：从一个会话切到另一个不叠页，返回键直接回首页
     val openSession: (String, String) -> Unit = { id, prefill ->
-        nav.navigate("session/$id?prefill=${Uri.encode(prefill)}") { launchSingleTop = true }
+        nav.navigate("session/$id?prefill=${Uri.encode(prefill)}") {
+            launchSingleTop = true
+            popUpTo("home")
+        }
     }
 
     // deep link from notifications
@@ -134,9 +138,6 @@ fun AaaApp(
                 val id = entry.arguments?.getString("id").orEmpty()
                 val prefill = entry.arguments?.getString("prefill").orEmpty()
                 SessionScreen(store, nav, id, Uri.decode(prefill))
-            }
-            composable("inbox/{path}") { entry ->
-                InboxScreen(store, nav, Uri.decode(entry.arguments?.getString("path").orEmpty()))
             }
         }
     }

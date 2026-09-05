@@ -55,6 +55,11 @@ pub struct Meta {
     pub resume_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub last_output_at: DateTime<Utc>,
+    /// 会话最近一次「有意义的变化」：状态翻转（running ⇄ waiting、exited）或改名。
+    /// 与 `last_output_at` 不同，它不随每个 PTY 字节跳动——客户端拿它给项目列表
+    /// 排序，几个会话同时在跑时行才不会互相换位。老元数据文件没有它：退到 created_at。
+    #[serde(default)]
+    pub updated_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub preview: String,
     /// v1.1: inbox auto-feed enabled for this session (POST /sessions)
@@ -65,8 +70,6 @@ pub struct Meta {
     pub last_output_inst: Option<Instant>,
     #[serde(skip)]
     pub needs_name: bool,
-    #[serde(skip)]
-    pub inbox_fed: bool,
     /// 可见屏幕内容的哈希 + 上次内容变化时刻。「静默」按画面算而不是按
     /// 字节流：agy 这类 TUI 每几秒全清屏重绘（内容不变），按输出算它
     /// 永远是 Running、永不通知。
@@ -108,6 +111,13 @@ pub struct Meta {
 
 fn default_true() -> bool {
     true
+}
+
+impl Meta {
+    /// 记一次「有意义的变化」（状态翻转 / 改名），供项目列表排序。
+    pub fn touch(&mut self) {
+        self.updated_at = Some(Utc::now());
+    }
 }
 
 pub struct Live {
@@ -166,11 +176,11 @@ impl Session {
                 resume_id: None,
                 created_at: now,
                 last_output_at: now,
+                updated_at: Some(now),
                 preview: String::new(),
                 feed_inbox: true,
                 last_output_inst: None,
                 needs_name: false,
-                inbox_fed: false,
                 screen_hash: 0,
                 screen_changed_inst: None,
                 asking: false,
@@ -217,6 +227,8 @@ impl Session {
             "resume_id": meta.resume_id,
             "created_at": iso(&meta.created_at),
             "last_output_at": iso(&meta.last_output_at),
+            // v1.5：状态翻转 / 改名的时刻，项目列表按它排序（老文件没有 → created_at）
+            "updated_at": iso(&meta.updated_at.unwrap_or(meta.created_at)),
             // v1.3（老客户端忽略未知字段）
             "hooked": meta.hooked,
             "error": meta.error,
@@ -582,11 +594,11 @@ impl SessionPool {
             resume_id: spec.resume_id.clone(),
             created_at: now,
             last_output_at: now,
+            updated_at: Some(now),
             preview: String::new(),
             feed_inbox: spec.feed_inbox,
             last_output_inst: Some(Instant::now()),
             needs_name: true,
-            inbox_fed: false,
             screen_hash: 0,
             screen_changed_inst: None,
             asking: false,
@@ -663,6 +675,7 @@ impl SessionPool {
                 meta.exit_code = code;
                 meta.asking = false;
                 meta.needs_name = true;
+                meta.touch();
             }
             *rsess.live.lock().unwrap() = None;
             rsess.persist(&rctx);
@@ -710,6 +723,7 @@ impl SessionPool {
                     .unwrap_or(false);
                 if meta.state == State::Running && silent && !meta.hooked {
                     meta.state = State::Waiting;
+                    meta.touch();
                     true
                 } else {
                     false

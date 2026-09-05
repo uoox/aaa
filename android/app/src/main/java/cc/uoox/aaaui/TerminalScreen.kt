@@ -43,7 +43,6 @@ fun TerminalScreen(store: AppStore, nav: NavHostController, focusId: String) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val sessions by store.sessions.collectAsState()
-    val settings by store.settings.flow.collectAsState(initial = AppSettings())
     val conn by store.connState.collectAsState()
     val tabs = terminalSessions(sessions)
     val root = store.health.value?.project_root ?: "/Volumes/SSD/project"
@@ -70,12 +69,12 @@ fun TerminalScreen(store: AppStore, nav: NavHostController, focusId: String) {
         }
         if (effectiveId.isEmpty()) Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) { Text("还没有终端", color = Tok.Faint); Button(onClick = { createTerminal() }, modifier = Modifier.padding(top = 12.dp)) { Text("开一个") } }
-        } else TerminalPane(store, context, conn, effectiveId, settings.fontSize, Modifier.weight(1f))
+        } else TerminalPane(store, context, conn, effectiveId, Modifier.weight(1f))
     }
 }
 
 @Composable
-private fun TerminalPane(store: AppStore, context: Context, conn: ConnState, sessionId: String, fontSize: Int, modifier: Modifier) {
+private fun TerminalPane(store: AppStore, context: Context, conn: ConnState, sessionId: String, modifier: Modifier) {
     val scope = rememberCoroutineScope()
     val ctrlStickyState = remember { mutableStateOf(false) }
     var ctrlSticky by ctrlStickyState
@@ -100,19 +99,15 @@ private fun TerminalPane(store: AppStore, context: Context, conn: ConnState, ses
             KeyChip("键盘") { inputRef.value?.showKeyboard() }
             KeyChip("⏎", onClick = key(KeyEvent.KEYCODE_ENTER))
             KeyChip("选择", active = selectMode.value) { selectMode.value = !selectMode.value }
-            KeyChip("Esc", onClick = key(KeyEvent.KEYCODE_ESCAPE)); KeyChip("Tab", onClick = key(KeyEvent.KEYCODE_TAB)); KeyChip("Ctrl", active = ctrlSticky) { ctrlSticky = !ctrlSticky }
+            KeyChip("Esc", onClick = key(KeyEvent.KEYCODE_ESCAPE)); KeyChip("Ctrl", active = ctrlSticky) { ctrlSticky = !ctrlSticky }
             KeyChip("↑", onClick = key(KeyEvent.KEYCODE_DPAD_UP)); KeyChip("↓", onClick = key(KeyEvent.KEYCODE_DPAD_DOWN)); KeyChip("←", onClick = key(KeyEvent.KEYCODE_DPAD_LEFT)); KeyChip("→", onClick = key(KeyEvent.KEYCODE_DPAD_RIGHT))
-            KeyChip("Home", onClick = key(KeyEvent.KEYCODE_MOVE_HOME)); KeyChip("End", onClick = key(KeyEvent.KEYCODE_MOVE_END)); KeyChip("-", onClick = lit("-")); KeyChip("/", onClick = lit("/")); KeyChip("|", onClick = lit("|")); KeyChip("~", onClick = lit("~")); KeyChip("粘贴") { pasteViaDaemon() }
+            KeyChip("Home", onClick = key(KeyEvent.KEYCODE_MOVE_HOME)); KeyChip("End", onClick = key(KeyEvent.KEYCODE_MOVE_END)); KeyChip("/", onClick = lit("/")); KeyChip("粘贴") { pasteViaDaemon() }
         }
         Box(Modifier.weight(1f).fillMaxWidth()) {
             TerminalHost(
-                attachment, fontSize, ctrlStickyState,
+                attachment, ctrlStickyState,
                 onHyperlinkClick = { openUrl(context, it) },
                 onPasteRequest = { pasteViaDaemon() },
-                onFontSize = { target ->
-                    scope.launch { store.settings.setFontSize(target) }
-                    android.widget.Toast.makeText(context, "终端字号 $target（设置里可改回）", android.widget.Toast.LENGTH_SHORT).show()
-                },
                 screenText = { store.client?.screen(sessionId)?.text },
                 selectMode = selectMode,
                 inputRef = inputRef,

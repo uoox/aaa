@@ -14,11 +14,9 @@ use std::collections::{HashMap, HashSet};
 
 use futures::StreamExt;
 use gpui::{
-    Animation, AnimationExt as _, AppContext as _, Context, Entity, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, SharedString, Task, Window, div,
-    ease_out_quint, prelude::*, px,
+    AppContext as _, Context, Entity, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, SharedString, Task, Window, div, prelude::*, px,
 };
-use std::time::{Duration, Instant};
 
 use crate::model::*;
 use crate::net::{ConnState, Net, UiEvent};
@@ -49,12 +47,9 @@ fn page_after_close(current: &Page, closed: &str, open_order: &[String]) -> Page
         .unwrap_or(Page::Home)
 }
 
-/// 侧栏两栏口径（2026-09-03 用户拍板，PROTOCOL「会话模型」）：
-/// 上栏「激活」= 存活的项目会话（running / waiting；asking 只点亮黄点，不单开一组）；
-/// 下栏「未激活」= 其余项目。**exited 会话不进侧栏**——进程没了它就只是历史，
-/// 项目回到下栏，双击即 resume。以前把 exited 摆在上栏「已完成」里，终止一个会话
-/// 后它留在上面、项目又同时回到下面，看起来像「上栏残留了一个项目」。
-/// 终端（shell）不是项目会话，两栏都不进，归终端面板管（PROTOCOL「终端」）。
+/// 存活的项目会话（running / waiting，含 asking）。**exited 会话不进侧栏**——进程没了
+/// 它就只是历史，项目行标「未激活」，点一下即 resume。终端（shell）不是项目会话，
+/// 归终端面板管（PROTOCOL「终端」）。
 fn is_active(s: &Session) -> bool {
     !s.is_terminal() && s.state != SessionState::Exited
 }
@@ -65,22 +60,129 @@ fn kill_needs_confirm(s: &Session) -> bool {
     s.state == SessionState::Running && !s.asking
 }
 
-/// 有存活会话的项目路径（决定项目待在上栏还是下栏）。终端不算：
-/// 在某个项目目录里开个 shell 不该把这个项目「激活」。
-fn alive_paths(sessions: &[Session]) -> Vec<&str> {
-    sessions
-        .iter()
-        .filter(|s| is_active(s))
-        .map(|s| s.project_path.as_str())
-        .collect()
+/// 项目行的状态字（2026-09-06 用户拍板，三端一致；不再用色点）：
+/// 执行中 = 会话在跑；已激活 = 会话活着但轮到你（waiting，或弹着问题）；
+/// 未激活 = 没有存活会话（退出了 / 只有旧对话 / 从没跑过）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RowStatus {
+    Running,
+    Active,
+    Inactive,
 }
 
-/// ⌃Tab 循环的候选：存活的非终端会话，按侧栏顺序。
-fn cyclable_ids(sessions: &[Session]) -> Vec<String> {
-    sessions
-        .iter()
-        .filter(|s| is_active(s))
-        .map(|s| s.id.clone())
+impl RowStatus {
+    fn of(session: Option<&Session>) -> RowStatus {
+        match session {
+            Some(s) if is_active(s) && s.state == SessionState::Running && !s.asking => RowStatus::Running,
+            Some(s) if is_active(s) => RowStatus::Active,
+            _ => RowStatus::Inactive,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            RowStatus::Running => "执行中",
+            RowStatus::Active => "已激活",
+            RowStatus::Inactive => "未激活",
+        }
+    }
+
+    fn color(self) -> u32 {
+        match self {
+            RowStatus::Running => theme::green(),
+            RowStatus::Active => theme::amber(),
+            RowStatus::Inactive => theme::faint(),
+        }
+    }
+}
+
+/// 侧栏一行：一个项目（2026-09-06 起单列，不再分「激活 / 未激活」两栏）。
+#[derive(Debug, Clone)]
+struct ProjectRow {
+    path: String,
+    title: String,
+    status: RowStatus,
+    /// 存活的项目会话（点行即打开）；None = 未激活，点行 resume
+    session: Option<Session>,
+    /// 注册表里的项目；只有会话、没登记的目录为 None（只能看，不能 resume / 删）
+    project: Option<Project>,
+    /// 排序键：该项目最新一条会话的 `updated_at`（老 daemon 退到 created_at），
+    /// 没有会话的用目录 mtime。都是 ISO 时间串，字典序即时间序。
+    sort_key: String,
+}
+
+fn session_updated(s: &Session) -> &str {
+    if !s.updated_at.is_empty() {
+        &s.updated_at
+    } else if !s.created_at.is_empty() {
+        &s.created_at
+    } else {
+        &s.last_output_at
+    }
+}
+
+/// 项目 × 会话 → 侧栏行，按最近更新的会话在前（同刻按名字稳住）。一个项目一行：
+/// 存活的项目会话代表它（几个同时活着取最近更新的）；退出的会话只贡献排序时间。
+/// 有存活会话但注册表里没有的目录也给一行（别处 `aaa open` 开的），否则它无处可点。
+fn project_rows(projects: &[Project], sessions: &[Session]) -> Vec<ProjectRow> {
+    let mut rows: Vec<ProjectRow> = Vec::with_capacity(projects.len());
+    let mut seen: HashSet<&str> = HashSet::new();
+    let by_path = |path: &str| -> (Option<&Session>, Option<&str>) {
+        let mut live: Option<&Session> = None;
+        let mut latest: Option<&str> = None;
+        for s in sessions.iter().filter(|s| !s.is_terminal() && s.project_path == path) {
+            let t = session_updated(s);
+            if latest.is_none_or(|l| t > l) {
+                latest = Some(t);
+            }
+            if is_active(s) && live.is_none_or(|l| t > session_updated(l)) {
+                live = Some(s);
+            }
+        }
+        (live, latest)
+    };
+    for p in projects {
+        seen.insert(p.path.as_str());
+        let (live, latest) = by_path(&p.path);
+        // 活着的会话的名字 → daemon 从 agent 存储读出的对话名 → 文件夹名
+        let title = live
+            .map(|s| s.title.clone())
+            .filter(|t| !t.is_empty())
+            .or_else(|| p.session_title.clone().filter(|t| !t.is_empty()))
+            .unwrap_or_else(|| p.name.clone());
+        rows.push(ProjectRow {
+            path: p.path.clone(),
+            title,
+            status: RowStatus::of(live),
+            session: live.cloned(),
+            project: Some(p.clone()),
+            sort_key: latest.unwrap_or(p.mtime.as_str()).to_owned(),
+        });
+    }
+    for s in sessions.iter().filter(|s| is_active(s)) {
+        if seen.contains(s.project_path.as_str()) {
+            continue;
+        }
+        seen.insert(s.project_path.as_str());
+        let (live, latest) = by_path(&s.project_path);
+        rows.push(ProjectRow {
+            path: s.project_path.clone(),
+            title: live.map(Session::display_title).unwrap_or_else(|| s.display_title()),
+            status: RowStatus::of(live),
+            session: live.cloned(),
+            project: None,
+            sort_key: latest.unwrap_or("").to_owned(),
+        });
+    }
+    rows.sort_by(|a, b| b.sort_key.cmp(&a.sort_key).then_with(|| a.title.cmp(&b.title)));
+    rows
+}
+
+/// ⌃Tab 循环的候选：存活的项目会话，按侧栏顺序。
+fn cyclable_ids(projects: &[Project], sessions: &[Session]) -> Vec<String> {
+    project_rows(projects, sessions)
+        .into_iter()
+        .filter_map(|r| r.session.map(|s| s.id))
         .collect()
 }
 
@@ -142,31 +244,6 @@ fn resolve_active_terminal(active: Option<&str>, tabs: &[String]) -> Option<Stri
         Some(a) if tabs.iter().any(|t| t == a) => Some(a.to_string()),
         _ => tabs.last().cloned(),
     }
-}
-
-/// 侧栏两栏之间搬家动画的时长。
-const MOVE_ANIM: Duration = Duration::from_millis(260);
-
-/// 下栏顺序：最近有过动静的项目在前——刚关掉的会话所属项目排第一。「动静」取该项目
-/// 最新一条会话（含已退出）的 created_at，没有会话的用目录 mtime；同刻按名字稳住。
-/// 两者都是 ISO 时间串，字典序即时间序。
-fn idle_projects_recent_first<'a>(projects: &'a [Project], sessions: &[Session]) -> Vec<&'a Project> {
-    let alive = alive_paths(sessions);
-    let mut idle: Vec<(&'a Project, String)> = projects
-        .iter()
-        .filter(|p| !alive.contains(&p.path.as_str()))
-        .map(|p| {
-            let last = sessions
-                .iter()
-                .filter(|s| s.project_path == p.path)
-                .map(|s| s.created_at.as_str())
-                .max()
-                .unwrap_or(p.mtime.as_str());
-            (p, last.to_owned())
-        })
-        .collect();
-    idle.sort_by(|(a, ta), (b, tb)| tb.cmp(ta).then_with(|| a.name.cmp(&b.name)));
-    idle.into_iter().map(|(p, _)| p).collect()
 }
 
 /// 列表排序键：按开启时间（`created_at` 升序，末尾最新）再按 id 稳住。
@@ -239,12 +316,6 @@ pub struct RootView {
     /// 会话页的打开顺序（关当前页时回落用）；终端标签不进这里
     open_order: Vec<String>,
     pending_focus: Option<String>,
-
-    /// 侧栏两栏之间的搬家动画：项目路径 → (何时搬的, 是否上移)。渲染时不到
-    /// [`MOVE_ANIM`] 的行做一段淡入 + 位移；过期即删。
-    moves: HashMap<String, (Instant, bool)>,
-    /// 上一帧的激活集合（项目路径），用来发现谁搬了家；None = 首帧还没基线
-    prev_active: Option<HashSet<String>>,
 
     // 终端面板
     /// 当前标签；None / 指向已死会话时回落到最新存活的
@@ -356,8 +427,6 @@ impl RootView {
             terminals: HashMap::new(),
             open_order: Vec::new(),
             pending_focus: None,
-            moves: HashMap::new(),
-            prev_active: None,
             active_terminal: None,
             deleted_terminals: HashSet::new(),
             msg_views: HashMap::new(),
@@ -601,43 +670,6 @@ impl RootView {
         self.sessions.sort_by(|a, b| sort_key(a).cmp(&sort_key(b)));
     }
 
-    /// 每帧比对激活集合：新激活的项目上移进上栏、会话关掉的项目下移进下栏，
-    /// 各记一个时间戳给行动画用。首帧只建基线不记动画（冷启动别满屏乱飞）。
-    fn track_moves(&mut self) {
-        let now = Instant::now();
-        let cur: HashSet<String> = alive_paths(&self.sessions).into_iter().map(str::to_owned).collect();
-        if let Some(prev) = &self.prev_active {
-            for path in cur.difference(prev) {
-                self.moves.insert(path.clone(), (now, true));
-            }
-            for path in prev.difference(&cur) {
-                self.moves.insert(path.clone(), (now, false));
-            }
-        }
-        self.prev_active = Some(cur);
-        self.moves.retain(|_, (at, _)| now.duration_since(*at) < MOVE_ANIM);
-    }
-
-    /// 某项目若刚搬过家，给它的行套上淡入 + 从来处滑入的动画；否则原样返回。
-    fn animate_move(&self, path: &str, key: &str, row: gpui::Stateful<gpui::Div>) -> gpui::AnyElement {
-        match self.moves.get(path) {
-            Some((_, up)) => {
-                let up = *up;
-                row.with_animation(
-                    SharedString::from(format!("sb-move-{key}")),
-                    Animation::new(MOVE_ANIM).with_easing(ease_out_quint()),
-                    move |el, t| {
-                        // 上移的从下面滑上来，下移的从上面滑下来
-                        let shift = (1.0 - t) * 14.0 * if up { 1.0 } else { -1.0 };
-                        el.opacity(t.max(0.15)).mt(px(shift))
-                    },
-                )
-                .into_any_element()
-            }
-            None => row.into_any_element(),
-        }
-    }
-
     // ── 数据拉取 ────────────────────────────────────────────────────────
 
     fn spawn_fetch<T: 'static>(
@@ -819,7 +851,7 @@ impl RootView {
 
     /// Ctrl-Tab / 双击下分区都会走到的「激活会话」帮手
     fn cycle_session(&mut self, cx: &mut Context<Self>) {
-        let alive = cyclable_ids(&self.sessions);
+        let alive = cyclable_ids(&self.projects, &self.sessions);
         let cur = match &self.page {
             Page::Session(id) => Some(id.as_str()),
             _ => None,
@@ -922,9 +954,8 @@ impl RootView {
 
     // ── 侧栏 ───────────────────────────────────────────────────────────
     //
-    // 结构（自上而下）：新建项目输入框 → 激活的会话（TUI/Shell 开着的） → 分隔线 →
-    // 未激活的项目（双击开启会话）。没有大标题、没有总览页——侧栏本身就是
-    // 全部导航。
+    // 结构（自上而下）：新建项目输入框 → 项目列表（一项目一行，状态字 + 标题，
+    // 最近更新的在前）。没有大标题、没有总览页——侧栏本身就是全部导航。
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let row_base = |id: gpui::ElementId| {
@@ -940,31 +971,47 @@ impl RootView {
                 .cursor_pointer()
         };
 
-        // ── 上栏：激活的会话（存活的项目会话，按开启顺序，不按状态分组）──
-        //   状态只用行首色点说话：黄 = asking（claude transcript 里有一条
-        //   AskUserQuestion 没答——结构化事实，不是读屏猜的）/ waiting（轮到你），
-        //   绿 = running。问题本身不在侧栏画：进消息流，表单原生呈现、原地作答。
-        //   exited 不在这里（项目回下栏）；终端（shell）也不在（归终端面板）。
-        let session_row = |s: &Session, ix: usize| {
-            let id = s.id.clone();
-            let id_close = s.id.clone();
-            let confirm = kill_needs_confirm(s);
-            let active = self.page == Page::Session(id.clone());
-            // 在问的会话点亮黄点，哪怕屏幕还在变
-            let dot_color = if s.asking {
-                theme::amber()
-            } else {
-                theme::state_color(s.state.as_str())
-            };
-            // 只有 Claude 一种 agent，行尾不再挂 agent 名；终端另有面板
-            row_base(("sb-sess", ix).into())
+        // ── 项目列表：单列，最近更新的会话在前（2026-09-06 用户拍板）──
+        //   状态用字说话，不用色点：执行中 / 已激活 / 未激活。问题本身不在侧栏画：
+        //   进消息流，表单原生呈现、原地作答。exited 会话不代表项目（标未激活，
+        //   点一下 resume）；终端（shell）不在这里（归终端面板）。
+        let rows = project_rows(&self.projects, &self.sessions);
+        let mut list_col = div().flex().flex_col().gap(px(1.));
+        for row in rows {
+            let active = row
+                .session
+                .as_ref()
+                .is_some_and(|s| self.page == Page::Session(s.id.clone()));
+            let status = row.status;
+            let open_session = row.session.as_ref().map(|s| s.id.clone());
+            let open_project = row.project.clone();
+            let kill = row.session.as_ref().map(|s| (s.id.clone(), kill_needs_confirm(s)));
+            let del_path = row.project.as_ref().map(|p| p.path.clone());
+            let title = row.title;
+            // 元素 id 用路径而不是序号：排序变了悬停 / 点击态跟着行走，不留在原位
+            let row_id = SharedString::from(format!("sb-proj:{}", row.path));
+            let act_id = SharedString::from(format!("sb-act:{}", row.path));
+            let mut el = row_base(row_id.into())
                 .group("sb-row")
                 .when(active, |el| el.bg(c(theme::surface_raised())))
                 .hover(|st| st.bg(c(theme::surface_raised())))
+                // 点一下：活着的会话直接进；未激活的 resume（daemon 幂等，找不到旧对话开新的）
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.open_session(id.clone(), cx);
+                    if let Some(id) = &open_session {
+                        this.open_session(id.clone(), cx);
+                    } else if let Some(p) = &open_project {
+                        this.open_project(p, cx);
+                    }
                 }))
-                .child(dot(dot_color))
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(38.))
+                        .text_size(px(10.))
+                        .font_family("Menlo")
+                        .text_color(c(status.color()))
+                        .child(status.label()),
+                )
                 .child(
                     div()
                         .flex_1()
@@ -972,120 +1019,49 @@ impl RootView {
                         .text_ellipsis()
                         .whitespace_nowrap()
                         .text_size(px(12.5))
-                        .text_color(c(theme::ink()))
-                        .child(SharedString::from(s.display_title())),
-                )
-                .child(
-                    // × = 关闭这个会话：终止进程、项目回到下栏。
-                    // 只有还在执行的才弹确认（被顺手点掉最伤）；等你的直接关。
-                    div()
-                        .id(("sb-close", ix))
-                        .flex_none()
-                        .px(px(3.))
-                        .rounded(px(4.))
-                        .text_size(px(10.))
-                        .text_color(c(theme::faint()))
-                        .hover(|st| st.text_color(c(theme::red())).bg(c(theme::edge_light())))
-                        // 非当前行悬停才现身；invisible 连命中盒一起去掉
-                        .when(!active, |el| {
-                            el.invisible().group_hover("sb-row", |st| st.visible())
-                        })
+                        .text_color(c(if status == RowStatus::Inactive {
+                            theme::dim()
+                        } else {
+                            theme::ink()
+                        }))
+                        .child(SharedString::from(title)),
+                );
+            // 行尾按钮：活着的 × = 结束会话（只有执行中的才确认，被顺手点掉最伤）；
+            // 未激活的「删」= 删项目。非当前行悬停才现身；invisible 连命中盒一起去掉
+            let button = div()
+                .id(act_id)
+                .flex_none()
+                .px(px(3.))
+                .rounded(px(4.))
+                .text_size(px(10.))
+                .text_color(c(theme::faint()))
+                .hover(|st| st.text_color(c(theme::red())).bg(c(theme::edge_light())))
+                .when(!active, |el| el.invisible().group_hover("sb-row", |st| st.visible()));
+            if let Some((id_close, confirm)) = kill {
+                el = el.child(
+                    button
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
                             this.request_kill(id_close.clone(), confirm, cx);
                         }))
                         .child("✕"),
-                )
-        };
-
-        let group_header = |label: &'static str, color: u32, n: usize| {
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .px(px(16.))
-                .pt(px(8.))
-                .pb(px(2.))
-                .child(div().w(px(5.)).h(px(5.)).flex_none().rounded_full().bg(c(color)))
-                .child(
-                    div()
-                        .text_size(px(10.))
-                        .font_family("Menlo")
-                        .text_color(c(theme::faint()))
-                        .child(SharedString::from(format!("{label} {n}"))),
-                )
-        };
-
-        // self.sessions 已按 created_at 排好（sort_sessions），这里只过滤不再排：
-        // 刚激活（新开 / resume）的会话 created_at 最新，自然落在上栏底部
-        let active: Vec<&Session> = self.sessions.iter().filter(|s| is_active(s)).collect();
-        let mut active_col = div().flex().flex_col().gap(px(1.));
-        if !active.is_empty() {
-            active_col = active_col.child(group_header("激活", theme::green(), active.len()));
-            for (ix, s) in active.iter().enumerate() {
-                let row = session_row(s, ix);
-                active_col = active_col.child(self.animate_move(&s.project_path, &s.id, row));
+                );
+            } else if let Some(del_path) = del_path {
+                el = el.child(
+                    button
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.modal = Modal::DeleteConfirm {
+                                paths: vec![del_path.clone()],
+                                report: None,
+                                busy: false,
+                            };
+                            cx.notify();
+                        }))
+                        .child("删"),
+                );
             }
-        }
-
-        // ── 下栏：未激活的项目（双击开启会话并移入上栏） ─────────────
-        //   最近活动过的在最前：刚关掉的会话所属项目排第一，从没跑过的按目录 mtime 靠后
-        let idle: Vec<&Project> = idle_projects_recent_first(&self.projects, &self.sessions);
-        let mut idle_col = div().flex().flex_col().gap(px(1.));
-        if !idle.is_empty() {
-            idle_col = idle_col.child(group_header("未激活", theme::faint(), idle.len()));
-        }
-        for (ix, p) in idle.into_iter().enumerate() {
-            let proj = p.clone();
-            let del_path = p.path.clone();
-            let title = p
-                .session_title
-                .clone()
-                .filter(|t| !t.is_empty())
-                .unwrap_or_else(|| p.name.clone());
-            let idle_path = p.path.clone();
-            idle_col = idle_col.child(self.animate_move(&idle_path, &idle_path, 
-                row_base(("sb-proj", ix).into())
-                    .group("sb-idle")
-                    .hover(|st| st.bg(c(theme::surface_raised())))
-                    .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, _, cx| {
-                        if ev.click_count() >= 2 {
-                            this.open_project(&proj, cx);
-                        }
-                    }))
-                    .child(
-                        div()
-                            .flex_1()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .whitespace_nowrap()
-                            .text_size(px(12.))
-                            .text_color(c(theme::dim()))
-                            .child(SharedString::from(title)),
-                    )
-                    .child(
-                        div()
-                            .id(("sb-del", ix))
-                            .flex_none()
-                            .px(px(3.))
-                            .rounded(px(4.))
-                            .text_size(px(10.))
-                            .text_color(c(theme::faint()))
-                            .hover(|st| st.text_color(c(theme::red())).bg(c(theme::edge_light())))
-                            .invisible()
-                            .group_hover("sb-idle", |st| st.visible())
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.modal = Modal::DeleteConfirm {
-                                    paths: vec![del_path.clone()],
-                                    report: None,
-                                    busy: false,
-                                };
-                                cx.notify();
-                            }))
-                            .child("删"),
-                    ),
-            ));
+            list_col = list_col.child(el);
         }
 
         let (conn_color, conn_text) = match self.conn {
@@ -1150,15 +1126,8 @@ impl RootView {
                     .flex_1()
                     .min_h(px(0.))
                     .overflow_y_scroll()
-                    .child(active_col)
-                    .child(
-                        div()
-                            .h(px(1.))
-                            .mx(px(10.))
-                            .my(px(7.))
-                            .bg(c(theme::edge())),
-                    )
-                    .child(idle_col),
+                    .pt(px(4.))
+                    .child(list_col),
             )
             // 终端面板入口：常驻工具，坐在 daemon 状态行上方
             .child(self.render_terminal_entry(cx))
@@ -1491,8 +1460,6 @@ impl RootView {
 
 impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // 侧栏搬家动画的基线要在渲染前更新
-        self.track_moves();
         // 挂起的焦点请求（异步流程里无 window，延到这里）
         if let Some(id) = self.pending_focus.take()
             && let Some(t) = self.terminals.get(&id)
@@ -1736,24 +1703,88 @@ mod tests {
         assert_eq!(tie_ids, ids(&["t_a", "t_b"]));
     }
 
-    #[test]
-    fn alive_paths_and_cycling_ignore_terminals() {
-        use SessionState::*;
-        let running = tsess("a", "claude", Running, "/p/a", "");
-        let mut asking = tsess("b", "claude", Waiting, "/p/b", "");
-        asking.asking = true;
-        let done = tsess("c", "codex", Waiting, "/p/c", "");
-        let exited = tsess("d", "claude", Exited, "/p/d", "");
-        let term_live = tsess("t1", "shell", Running, "/p/a", "");
-        let term_dead = tsess("t2", "shell", Exited, "/p/t", "");
-        assert!(!is_active(&term_live), "终端不进上栏");
-        assert!(!is_active(&term_dead));
+    fn proj(path: &str, name: &str, mtime: &str, title: Option<&str>) -> Project {
+        Project {
+            path: path.into(),
+            name: name.into(),
+            mtime: mtime.into(),
+            session_title: title.map(str::to_owned),
+            ..Default::default()
+        }
+    }
 
-        let all = vec![running, asking, done, exited, term_live, term_dead];
-        // 存活的项目会话才算「激活」：exited 不算，shell 也不算（/p/t 不该出现）
-        assert_eq!(alive_paths(&all), vec!["/p/a", "/p/b", "/p/c"]);
-        // ⌃Tab 只在存活的非终端会话里转
-        assert_eq!(cyclable_ids(&all), ids(&["a", "b", "c"]));
+    #[test]
+    fn rows_are_one_per_project_ordered_by_latest_update() {
+        use SessionState::*;
+        let projects = vec![
+            proj("/p/a", "a", "2026-09-01T00:00:00Z", Some("旧对话")),
+            proj("/p/b", "b", "2026-09-05T00:00:00Z", None),
+            proj("/p/c", "c", "2026-09-02T00:00:00Z", None),
+        ];
+        let mut run = tsess("a1", "claude", Running, "/p/a", "2026-09-03T00:00:00Z");
+        run.updated_at = "2026-09-04T00:00:00Z".into();
+        run.title = "改登录页".into();
+        // 早开、后来又退出的会话只贡献排序时间，不代表项目
+        let mut old = tsess("a0", "claude", Exited, "/p/a", "2026-09-02T00:00:00Z");
+        old.updated_at = "2026-09-06T00:00:00Z".into();
+        let mut ask = tsess("c1", "claude", Waiting, "/p/c", "2026-09-03T12:00:00Z");
+        ask.updated_at = "2026-09-03T12:00:00Z".into();
+        ask.asking = true;
+        let shell = tsess("t1", "shell", Running, "/p/b", "2026-09-06T12:00:00Z");
+        let rows = project_rows(&projects, &[run.clone(), old, ask, shell]);
+        let got: Vec<(&str, RowStatus, &str)> =
+            rows.iter().map(|r| (r.path.as_str(), r.status, r.title.as_str())).collect();
+        assert_eq!(
+            got,
+            vec![
+                // a：最新一条会话（退出的那条）06 更新，排第一；活着的会话代表它
+                ("/p/a", RowStatus::Running, "改登录页"),
+                // b：只有终端——终端不算，按目录 mtime 05
+                ("/p/b", RowStatus::Inactive, "b"),
+                // c：在问 = 已激活（轮到你），03
+                ("/p/c", RowStatus::Active, "c"),
+            ]
+        );
+        assert_eq!(rows[0].session.as_ref().map(|s| s.id.as_str()), Some("a1"));
+        assert!(rows[1].session.is_none(), "终端不代表项目");
+        // ⌃Tab 只在存活的项目会话里转，顺序跟侧栏
+        assert_eq!(cyclable_ids(&projects, &[run, ]), ids(&["a1"]));
+    }
+
+    #[test]
+    fn rows_fall_back_when_daemon_has_no_updated_at() {
+        use SessionState::*;
+        let projects = vec![proj("/p/a", "a", "2026-09-01T00:00:00Z", None), proj("/p/b", "b", "2026-09-01T00:00:00Z", None)];
+        // 老 daemon：updated_at 为空 → created_at；b 后开 → 在前
+        let a = tsess("a1", "claude", Waiting, "/p/a", "2026-09-02T00:00:00Z");
+        let b = tsess("b1", "claude", Waiting, "/p/b", "2026-09-03T00:00:00Z");
+        let rows = project_rows(&projects, &[a, b]);
+        assert_eq!(rows.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(), ["/p/b", "/p/a"]);
+        assert!(rows.iter().all(|r| r.status == RowStatus::Active));
+        // 没登记的目录里有活会话：也给一行，但没有 project（不能删 / resume）
+        let stray = tsess("s1", "claude", Running, "/elsewhere/x", "2026-09-09T00:00:00Z");
+        let rows = project_rows(&projects, &[stray]);
+        assert_eq!(rows[0].path, "/elsewhere/x");
+        assert!(rows[0].project.is_none());
+        assert_eq!(rows[0].status, RowStatus::Running);
+        // 未激活的标题：daemon 读出的对话名，没有才是文件夹名
+        let rows = project_rows(&[proj("/p/z", "z", "", Some("上次聊的"))], &[]);
+        assert_eq!(rows[0].title, "上次聊的");
+        assert_eq!(rows[0].status, RowStatus::Inactive);
+    }
+
+    #[test]
+    fn status_words() {
+        use SessionState::*;
+        assert_eq!(RowStatus::of(Some(&sess("a", Running, false, ""))), RowStatus::Running);
+        // 在问：哪怕屏幕还在变也是「轮到你」
+        assert_eq!(RowStatus::of(Some(&sess("a", Running, true, ""))), RowStatus::Active);
+        assert_eq!(RowStatus::of(Some(&sess("a", Waiting, false, ""))), RowStatus::Active);
+        assert_eq!(RowStatus::of(Some(&sess("a", Exited, false, ""))), RowStatus::Inactive);
+        assert_eq!(RowStatus::of(None), RowStatus::Inactive);
+        assert_eq!(RowStatus::Running.label(), "执行中");
+        assert_eq!(RowStatus::Active.label(), "已激活");
+        assert_eq!(RowStatus::Inactive.label(), "未激活");
     }
 
     #[test]

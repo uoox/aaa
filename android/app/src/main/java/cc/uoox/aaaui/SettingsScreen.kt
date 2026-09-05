@@ -181,13 +181,6 @@ fun SettingsScreen(store: AppStore, nav: NavHostController) {
                     ) { Text("终端", fontSize = 12.sp) }
                 }
             }
-            SettingRow("终端字号") {
-                TextButton(onClick = { scope.launch { store.settings.setFontSize(settings.fontSize - 1) } }) { Text("−", fontSize = 18.sp) }
-                Text("${settings.fontSize}", color = Tok.Ink, fontFamily = FontFamily.Monospace)
-                TextButton(onClick = { scope.launch { store.settings.setFontSize(settings.fontSize + 1) } }) { Text("＋", fontSize = 16.sp) }
-                // 双指缩放也会改它并记住；一次误捏之后从这里回默认
-                if (settings.fontSize != 14) TextButton(onClick = { scope.launch { store.settings.setFontSize(14) } }) { Text("重置", fontSize = 12.sp) }
-            }
         }
 
         // ---------- daemon 状态 ----------

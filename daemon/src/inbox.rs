@@ -1,5 +1,5 @@
-//! Task inbox: per-project queued instructions, auto-fed into the PTY the
-//! first time a session goes waiting. Stored daemon-side in
+//! Task inbox: per-project queued instructions, auto-fed into the PTY
+//! whenever the project's session is idle (see `feed.rs`). Stored daemon-side in
 //! `<state_dir>/inbox.json` (atomic rewrite), so entries survive restarts and
 //! can be queued even while the SSD is unmounted.
 
@@ -92,8 +92,13 @@ impl Inbox {
     }
 }
 
-/// Compose the auto-feed message: `任务清单：\n1. …\n2. …`.
+/// Compose the auto-feed message. One entry is typed as-is — it is just the
+/// message the user sent while the agent was busy. Several become a list:
+/// `任务清单：\n1. …\n2. …`.
 pub fn compose_feed(entries: &[Entry]) -> String {
+    if let [only] = entries {
+        return only.text.trim().to_string();
+    }
     let mut out = String::from("任务清单：\n");
     for (i, e) in entries.iter().enumerate() {
         out.push_str(&format!("{}. {}\n", i + 1, e.text.trim()));
@@ -139,5 +144,8 @@ mod tests {
             Entry { id: "2".into(), text: "任务乙".into(), created_at: "t".into() },
         ];
         assert_eq!(compose_feed(&entries), "任务清单：\n1. 任务甲\n2. 任务乙\n");
+        // 只有一条：就是那句话本身，不套清单
+        assert_eq!(compose_feed(&entries[..1]), "任务甲");
+        assert_eq!(compose_feed(&[]), "任务清单：\n");
     }
 }

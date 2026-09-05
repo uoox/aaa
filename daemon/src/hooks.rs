@@ -210,6 +210,7 @@ pub fn apply(sess: &Session, event: &str, body: &Value, now: Instant) -> Applied
             if meta.state != State::Running {
                 meta.state = State::Running;
                 meta.needs_name = true;
+                meta.touch();
             }
             meta.error = None;
             meta.compacting = false;
@@ -218,6 +219,7 @@ pub fn apply(sess: &Session, event: &str, body: &Value, now: Instant) -> Applied
         "Stop" => {
             if meta.state == State::Running {
                 meta.state = State::Waiting;
+                meta.touch();
                 out.entered_waiting = true;
             }
             meta.compacting = false;
@@ -231,6 +233,7 @@ pub fn apply(sess: &Session, event: &str, body: &Value, now: Instant) -> Applied
                 .to_string();
             if meta.state == State::Running {
                 meta.state = State::Waiting;
+                meta.touch();
                 out.entered_waiting = true;
             }
             meta.error = Some(kind);
@@ -245,6 +248,7 @@ pub fn apply(sess: &Session, event: &str, body: &Value, now: Instant) -> Applied
                 .unwrap_or("");
             if kind == "idle_prompt" && meta.state == State::Running {
                 meta.state = State::Waiting;
+                meta.touch();
                 out.entered_waiting = true;
                 out.dirty = true;
             }

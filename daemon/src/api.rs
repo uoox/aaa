@@ -875,6 +875,7 @@ async fn session_rename(
         meta.title = body.title;
         meta.custom_title = true;
         meta.needs_name = false;
+        meta.touch();
     }
     sess.mark_dirty();
     if sess.state() == SState::Exited {
@@ -1188,6 +1189,10 @@ async fn inbox_add(
         inbox.add(&key, body.text.trim())
     };
     app.hub.inbox_changed(&key);
+    // 会话此刻就空着：立刻喂，不等下一轮结束（feed 读 ~/.claude.json，放阻塞线程）
+    let app2 = Arc::clone(&app);
+    let key2 = key.clone();
+    let _ = tokio::task::spawn_blocking(move || crate::feed::on_added(&app2, &key2)).await;
     Ok(Json(serde_json::to_value(entry).unwrap_or(Value::Null)))
 }
 

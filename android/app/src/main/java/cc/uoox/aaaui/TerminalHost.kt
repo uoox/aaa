@@ -4,7 +4,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -48,7 +47,6 @@ import kotlinx.coroutines.launch
 import org.connectbot.terminal.Terminal
 import org.connectbot.terminal.TerminalEmulator
 import kotlin.math.abs
-import kotlin.math.roundToInt
 
 // ============================================================
 // 终端宿主：SessionScreen（agent 会话的终端视图）与 TerminalScreen（常驻终端面板）共用。
@@ -57,20 +55,20 @@ import kotlin.math.roundToInt
 // 键盘：自己的 TermInputView（termlib 自带的那个中文输入法不能组词，见 TermInput.kt），
 //       所以 Terminal 的 keyboardEnabled 关掉，点终端 → 我们弹键盘。
 // 触摸：TUI 开了鼠标上报（Claude Code：1003+1006，且在备用屏里没有回滚）时，盖一层
-//       MouseOverlay 把滑动变成滚轮事件、点按变成点击发给远端，双指捏合改字号；
+//       MouseOverlay 把滑动变成滚轮事件、点按变成点击发给远端（双指一律吞掉，不缩放）；
 //       长按进入「选择模式」——盖层撤下，termlib 原生的长按选区 / 点链接接管，
 //       点一下空处退出。没开鼠标的普通 shell 一直是 termlib 原生手势。
 // ============================================================
 
+/** 终端字号（sp）。 */
+private const val TERM_FONT_SP = 14
+
 @Composable
 internal fun TerminalHost(
     attachment: TerminalAttachment?,
-    fontSize: Int,
     ctrlSticky: MutableState<Boolean>,
     onHyperlinkClick: (String) -> Unit,
     onPasteRequest: () -> Unit,
-    /** 双指捏合落定后的新字号（10..22）；由调用方写回设置并提示。 */
-    onFontSize: (Int) -> Unit,
     /** daemon 侧的屏幕文本（鼠标模式下点到链接要靠它定位；termlib 不暴露格子内容）。 */
     screenText: suspend () -> String?,
     /** 选择模式开关：键位条的「选择」键和长按都切它；退出由点空处触发。 */
@@ -123,9 +121,10 @@ internal fun TerminalHost(
             terminalEmulator = emulator,
             modifier = Modifier.fillMaxSize(),
             typeface = Fonts.terminal(ctx),
-            initialFontSize = fontSize.sp,
-            minFontSize = 10.sp,
-            maxFontSize = 22.sp,
+            // 字号固定（2026-09-06 用户拍板：现在这个刚好，字号设置整个去掉）；min = max 让 termlib 自带的捏合也失效
+            initialFontSize = TERM_FONT_SP.sp,
+            minFontSize = TERM_FONT_SP.sp,
+            maxFontSize = TERM_FONT_SP.sp,
             backgroundColor = palette.termBg,
             foregroundColor = palette.termFg,
             selectionBackgroundColor = palette.accent,
@@ -140,7 +139,6 @@ internal fun TerminalHost(
             MouseOverlay(
                 emulator = emulator,
                 modes = modes,
-                fontSize = fontSize,
                 send = attachment::sendRaw,
                 onTap = { col, row ->
                     // 先看点的是不是链接（问 daemon 那份屏幕文本，几十毫秒），是就打开；
@@ -157,7 +155,6 @@ internal fun TerminalHost(
                     }
                 },
                 onLongPress = { selecting = true },
-                onFontSize = onFontSize,
             )
         }
         if (selecting) {
@@ -220,14 +217,11 @@ private class WheelPump(private val scope: CoroutineScope, private val send: (By
 private fun MouseOverlay(
     emulator: TerminalEmulator,
     modes: TermModes,
-    fontSize: Int,
     send: (ByteArray) -> Unit,
     onTap: (col: Int, row: Int) -> Unit,
     onLongPress: () -> Unit,
-    onFontSize: (Int) -> Unit,
 ) {
     val cur = rememberUpdatedState(modes)
-    val fs = rememberUpdatedState(fontSize)
     val scope = rememberCoroutineScope()
     val haptic = LocalHapticFeedback.current
     val pump = remember(emulator) { WheelPump(scope, send) }
@@ -250,9 +244,8 @@ private fun MouseOverlay(
                 cell(down.position).let { (c, r) -> pump.col = c; pump.row = r }
                 var acc = 0f
                 var moved = false
-                var zoomed = false
+                var multiTouch = false
                 var longPressed = false
-                var zoom = 1f
                 var total = Offset.Zero
                 var last = down.position
                 val velocity = VelocityTracker()
@@ -261,13 +254,13 @@ private fun MouseOverlay(
                     val ev = awaitPointerEvent()
                     val pressed = ev.changes.filter { it.pressed }
                     if (pressed.isEmpty()) break
+                    // 第二根手指落下：这一整套手势作废（不滚、不点、不缩放），吞掉直到全部抬起
                     if (pressed.size >= 2) {
-                        zoomed = true
-                        zoom *= ev.calculateZoom()
+                        multiTouch = true
                         ev.changes.forEach { it.consume() }
                         continue
                     }
-                    if (zoomed || longPressed) { ev.changes.forEach { it.consume() }; continue }
+                    if (multiTouch || longPressed) { ev.changes.forEach { it.consume() }; continue }
                     val ch = ev.changes.firstOrNull { it.id == down.id } ?: pressed.first()
                     velocity.addPosition(ch.uptimeMillis, ch.position)
                     val delta = ch.position - last
@@ -290,10 +283,7 @@ private fun MouseOverlay(
                     ch.consume()
                 }
                 when {
-                    zoomed -> {
-                        val target = (fs.value * zoom).roundToInt().coerceIn(10, 22)
-                        if (target != fs.value) onFontSize(target)
-                    }
+                    multiTouch -> {}
                     longPressed -> {}
                     moved -> {
                         // 惯性：按松手速度再补几行，最多 40 行，同样经 pump 节流

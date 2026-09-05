@@ -3,13 +3,16 @@ package cc.uoox.aaaui
 import android.content.Context
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
-import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.serialization.builtins.MapSerializer
+import kotlinx.serialization.builtins.serializer
+
+private val DraftMap = MapSerializer(String.serializer(), String.serializer())
 
 private val Context.dataStore by preferencesDataStore(name = "aaa_settings")
 
@@ -18,7 +21,6 @@ data class AppSettings(
     val notifyDone: Boolean = true,
     val serviceEnabled: Boolean = false,
     val defaultUi: String = "messages", // "messages" | "terminal"
-    val fontSize: Int = 14,
     val mutedProjects: Set<String> = emptySet(),
     /** 界面主题：dark | light | claude（见 Palette）。 */
     val theme: String = "dark",
@@ -33,9 +35,10 @@ class SettingsStore(private val context: Context) {
         val NOTIFY_DONE = booleanPreferencesKey("notify_done")
         val SERVICE_ENABLED = booleanPreferencesKey("service_enabled")
         val DEFAULT_UI = stringPreferencesKey("default_ui")
-        val FONT_SIZE = intPreferencesKey("font_size")
         val MUTED_PROJECTS = stringSetPreferencesKey("muted_projects")
         val THEME = stringPreferencesKey("theme")
+        /** 会话 id → 输入框草稿（JSON 对象）。切出去 / 被系统杀掉再回来，字还在。 */
+        val DRAFTS = stringPreferencesKey("drafts_json")
     }
 
     private val json = ProtocolJson.instance
@@ -46,7 +49,6 @@ class SettingsStore(private val context: Context) {
             notifyDone = p[K.NOTIFY_DONE] ?: true,
             serviceEnabled = p[K.SERVICE_ENABLED] ?: false,
             defaultUi = p[K.DEFAULT_UI] ?: "messages",
-            fontSize = p[K.FONT_SIZE] ?: 14,
             mutedProjects = p[K.MUTED_PROJECTS] ?: emptySet(),
             theme = p[K.THEME] ?: "dark",
         )
@@ -67,9 +69,19 @@ class SettingsStore(private val context: Context) {
     suspend fun setNotifyDone(v: Boolean) = context.dataStore.edit { it[K.NOTIFY_DONE] = v }
     suspend fun setServiceEnabled(v: Boolean) = context.dataStore.edit { it[K.SERVICE_ENABLED] = v }
     suspend fun setDefaultUi(v: String) = context.dataStore.edit { it[K.DEFAULT_UI] = v }
-    suspend fun setFontSize(v: Int) = context.dataStore.edit { it[K.FONT_SIZE] = v.coerceIn(8, 28) }
     /** 只存认识的名字：不认识的落回黑暗，读的那头就不用再兜底。 */
     suspend fun setTheme(v: String) = context.dataStore.edit { it[K.THEME] = Palette.forName(v).name }
+
+    /** 全部草稿；坏数据当空处理 */
+    suspend fun drafts(): Map<String, String> {
+        val raw = context.dataStore.data.first()[K.DRAFTS] ?: return emptyMap()
+        return runCatching { json.decodeFromString(DraftMap, raw) }.getOrDefault(emptyMap())
+    }
+
+    suspend fun setDrafts(drafts: Map<String, String>) = context.dataStore.edit { p ->
+        if (drafts.isEmpty()) p.remove(K.DRAFTS)
+        else p[K.DRAFTS] = json.encodeToString(DraftMap, drafts)
+    }
 
     suspend fun setProjectMuted(path: String, muted: Boolean) = context.dataStore.edit { p ->
         val cur = p[K.MUTED_PROJECTS] ?: emptySet()

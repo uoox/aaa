@@ -1,6 +1,5 @@
 package cc.uoox.aaaui
 
-import android.net.Uri
 import android.widget.Toast
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -19,18 +18,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -59,7 +52,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavHostController
-import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
 // ---------- A6 首页 = 项目列表 ----------
@@ -68,26 +60,16 @@ import kotlinx.coroutines.launch
 const val DEFAULT_AGENT = "claude"
 
 /**
- * 项目行的状态，只决定色点与摘要，**不决定分组**。一个项目只有一个 agent（建项目时
- * 定死，从不切换），项目 ↔ 会话事实上一对一，所以会话状态直接挂在项目行上，首页不再
- * 单开会话页。终端永远不代表项目。全部由客户端把 projects × sessions 两个流拼出来，
- * daemon 不用改。
+ * 项目行的状态字（2026-09-06 用户拍板，三端一致；不再用色点）：
+ * 执行中 = 会话在跑；已激活 = 会话活着但轮到你（waiting，或弹着问题）；
+ * 未激活 = 没有存活会话（退出了 / 只有旧对话 / 从没跑过）。
+ * 一个项目只有一个 agent（建项目时定死，从不切换），项目 ↔ 会话事实上一对一，所以
+ * 会话状态直接挂在项目行上，首页不再单开会话页。终端永远不代表项目。全部由客户端把
+ * projects × sessions 两个流拼出来。
  */
 enum class ProjectState(val label: String) {
-    NEEDS_REPLY("待回复"),
     RUNNING("执行中"),
-    DONE("已完成"),
-    NEVER("未开始"),
-}
-
-/**
- * 首页两栏（2026-09-03 用户拍板，三端一致）：**激活** = 有存活会话（running / waiting，
- * 在问只点亮黄点）；**未激活** = 其余（exited、只有旧对话、从没跑过）。以前按四态分组，
- * 几个会话同时在跑时行在「执行中 / 待回复 / 已完成」之间跳来跳去，点都点不准。
- * 枚举顺序就是首页分组顺序。
- */
-enum class ProjectGroup(val label: String) {
-    ACTIVE("激活"),
+    ACTIVE("已激活"),
     INACTIVE("未激活"),
 }
 
@@ -97,27 +79,29 @@ data class ProjectRow(
     /** 该项目的主会话；一个都没有时为 null。 */
     val primary: Session?,
     val state: ProjectState,
-    /** 第二行那一句话。 */
-    val summary: String,
+    /**
+     * 排序键 = 该项目最近更新的会话的 `updated_at`（状态翻转 / 改名的时刻；老 daemon
+     * 没有 → created_at），包括已退出的会话；没有会话的用目录 mtime。ISO 串，字典序即时间序。
+     */
+    val updatedIso: String,
 ) {
     /**
-     * 第一行标题，与 mac 侧栏同一口径：会话的命名（活着的会话 title，退出后 daemon 从
-     * agent 存储读出的 session_title），没有才退到文件夹名。文件夹名不是标题——它是地址。
+     * 标题，与 mac 侧栏同一口径：活着的会话的 title，退出后 daemon 从 agent 存储读出的
+     * session_title，没有才退到文件夹名。文件夹名不是标题——它是地址。
      */
     val title: String get() =
-        primary?.title?.takeIf { it.isNotBlank() }
+        primary?.takeIf { it.state != "exited" }?.title?.takeIf { it.isNotBlank() }
             ?: project.session_title?.takeIf { it.isNotBlank() }
             ?: project.name
-    /** 第二行：状态摘要。文件夹名不再单独占一行——没开过对话时它就是标题（2026-09-03 用户拍板）。 */
-    val subtitle: String get() = summary
-    /** 激活 = 主会话活着。exited 的会话只是历史，项目回到未激活栏，点一行即 resume。 */
-    val group: ProjectGroup get() = if (primary != null && primary.state != "exited") ProjectGroup.ACTIVE else ProjectGroup.INACTIVE
-    /** 行尾的相对时间：有会话按最近输出，没有按目录 mtime；都是 daemon 给的 ISO 时间串。 */
-    val timeIso: String get() = primary?.last_output_at?.takeIf { it.isNotBlank() } ?: project.mtime
+    /** 激活 = 主会话活着。exited 的会话只是历史，点一行即 resume。 */
+    val alive: Boolean get() = primary != null && primary.state != "exited"
 }
 
 /** 用户拍板口径：待回复 = asking，与 state 无关。 */
 fun Session.needsReply(): Boolean = asking
+
+/** 会话最近一次有意义的变化：updated_at（v1.5）→ created_at（老 daemon）→ 最近输出。 */
+fun Session.updatedIso(): String = updated_at.ifBlank { created_at.ifBlank { last_output_at } }
 
 /**
  * 主会话：优先活着的（非 exited），待回复 < 执行中 < 其它，同级按最近输出；
@@ -139,81 +123,31 @@ fun primarySessionFor(project: Project, sessions: List<Session>): Session? {
     return mine.maxByOrNull { it.last_output_at }
 }
 
-/**
- * 三态归类。没有会话但有 session_title（daemon 从 agent 存储里读出的对话名）说明
- * 这个项目做过事、对话还在，点进去就是 resume——归「已完成」而不是「未开始」；
- * daemon 重启后 exited 会话从列表里消失，实测 13 个项目里 12 个都处于这种状态，
- * 若一律标「未开始」首页就全是灰点。真正一次都没跑过的才是「未开始」。
- */
-fun projectStateOf(project: Project, primary: Session?): ProjectState = when {
-    primary == null -> if (project.session_title.isNullOrBlank()) ProjectState.NEVER else ProjectState.DONE
-    primary.needsReply() -> ProjectState.NEEDS_REPLY
-    primary.state == "running" -> ProjectState.RUNNING
-    else -> ProjectState.DONE
+/** 三个字之一。在问 = 轮到你，哪怕屏幕还在变也算「已激活」而不是「执行中」。 */
+fun projectStateOf(primary: Session?): ProjectState = when {
+    primary == null || primary.state == "exited" -> ProjectState.INACTIVE
+    primary.state == "running" && !primary.needsReply() -> ProjectState.RUNNING
+    else -> ProjectState.ACTIVE
 }
 
 /**
- * 第二行的一句话：只说状态。标题行已经是会话名，这里再放标题就是重复；也不用 preview——
- * 它是屏幕末 4 行，TUI 型 agent 那里永远是输入框和底栏，当摘要只会是垃圾。
+ * 一项目一行，**最近更新的会话在前**（2026-09-06 用户拍板，单列，不再分「激活 / 未激活」
+ * 两栏）。排序看的是 daemon 的 `updated_at`（状态翻转 / 改名），不是每个字节都动的
+ * last_output_at——几个会话同时在跑时行才不会互相换位。同刻按路径稳住。
  */
-@Suppress("UNUSED_PARAMETER")
-fun projectSummary(project: Project, primary: Session?, state: ProjectState): String = when (state) {
-    ProjectState.NEEDS_REPLY -> "等你回答"
-    ProjectState.RUNNING -> if (primary?.compacting == true) "整理上下文中" else "执行中"
-    // 未激活的项目没什么可说的：点一行就是 resume，不必每行都写「点击继续」。
-    // 上一轮以错误收场的除外：那句话值得留着
-    ProjectState.DONE -> primary?.error?.let { errorLabel(it) } ?: ""
-    ProjectState.NEVER -> "未开始"
-}
-
-/** StopFailure 的错误类型 → 一句人话 */
-fun errorLabel(kind: String): String = when (kind) {
-    "rate_limit" -> "上轮出错：限流"
-    "overloaded" -> "上轮出错：服务过载"
-    "authentication_failed" -> "上轮出错：登录失效"
-    "billing_error" -> "上轮出错：账单问题"
-    else -> "上轮出错：$kind"
-}
-
 fun projectRows(projects: List<Project>, sessions: List<Session>): List<ProjectRow> = projects.map { p ->
     val primary = primarySessionFor(p, sessions)
-    val state = projectStateOf(p, primary)
-    ProjectRow(p, primary, state, projectSummary(p, primary, state))
-}
+    val latest = sessions
+        .filter { it.project_path == p.path && it.agent != "shell" }
+        .maxOfOrNull { it.updatedIso() }
+        ?.takeIf { it.isNotBlank() }
+    ProjectRow(p, primary, projectStateOf(primary), latest ?: p.mtime)
+}.sortedWith(compareByDescending<ProjectRow> { it.updatedIso }.thenBy { it.project.path })
 
-/**
- * 两栏分组，空栏不出现。**顺序不随状态或输出变**：激活栏按会话开启时间
- * （created_at 升序，末尾最新）再按路径稳住，几个会话同时在跑也不跳行——刚激活的
- * 落在上栏底部；未激活栏最近有动静的在前——刚关掉的会话所属项目排第一，从没跑过的
- * 按目录 mtime 靠后（与 mac 侧栏同一口径，2026-09-03）。状态交给色点。
- */
-fun groupProjectRows(rows: List<ProjectRow>): List<Pair<ProjectGroup, List<ProjectRow>>> =
-    ProjectGroup.entries
-        .map { g ->
-            val inGroup = rows.filter { it.group == g }
-            g to when (g) {
-                ProjectGroup.ACTIVE -> inGroup.sortedWith(compareBy({ it.primary?.created_at.orEmpty() }, { it.project.path }))
-                ProjectGroup.INACTIVE -> inGroup.sortedWith(compareByDescending<ProjectRow> { it.timeIso }.thenBy { it.project.path })
-            }
-        }
-        .filter { it.second.isNotEmpty() }
-
-private fun ProjectGroup.dotColor(): Color = when (this) {
-    ProjectGroup.ACTIVE -> Tok.Green
-    ProjectGroup.INACTIVE -> Tok.Faint
-}
-
-private fun ProjectState.dotColor(): Color = when (this) {
-    ProjectState.NEEDS_REPLY -> Tok.Amber
+private fun ProjectState.color(): Color = when (this) {
     ProjectState.RUNNING -> Tok.Green
-    ProjectState.DONE -> Tok.Faint
-    ProjectState.NEVER -> Tok.Faint.copy(alpha = 0.45f)
-}
-
-private fun ProjectState.summaryColor(): Color = when (this) {
-    ProjectState.NEEDS_REPLY -> Tok.Amber
-    ProjectState.RUNNING, ProjectState.DONE -> Tok.Dim
-    ProjectState.NEVER -> Tok.Faint
+    ProjectState.ACTIVE -> Tok.Amber
+    ProjectState.INACTIVE -> Tok.Faint
 }
 
 /**
@@ -246,12 +180,11 @@ fun ProjectsHome(store: AppStore, nav: NavHostController) {
     LaunchedEffect(Unit) { store.refreshProjects() }
 
     // 只在输入变化时重算，不跟着 conn 延迟数字的重组一起算
-    val groups = remember(projects, sessions, query) {
-        val rows = projectRows(projects, sessions).filter { r ->
+    val rows = remember(projects, sessions, query) {
+        projectRows(projects, sessions).filter { r ->
             query.isBlank() || r.project.name.contains(query, true) ||
                 r.project.session_title.orEmpty().contains(query, true)
         }
-        groupProjectRows(rows)
     }
 
     fun toast(msg: String) = Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
@@ -365,7 +298,7 @@ fun ProjectsHome(store: AppStore, nav: NavHostController) {
             },
             modifier = Modifier.fillMaxSize(),
         ) {
-            if (groups.isEmpty()) {
+            if (rows.isEmpty()) {
                 Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
                     if (projects.isEmpty()) {
                         Text("暂无项目", color = Tok.Faint)
@@ -375,31 +308,16 @@ fun ProjectsHome(store: AppStore, nav: NavHostController) {
                     }
                 }
             }
-            LazyColumn(Modifier.fillMaxSize()) {
-                groups.forEach { (group, rows) ->
-                    item(key = "hdr-${group.name}") {
-                        Row(
-                            Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 2.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            StateDot(group.dotColor(), 6)
-                            Spacer(Modifier.width(7.dp))
-                            Text(
-                                "${group.label} ${rows.size}", color = Tok.Faint, fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace,
-                            )
-                        }
-                    }
-                    items(rows, key = { it.project.path }) { row ->
-                        // 同一个 LazyColumn 里跨栏搬家：Compose 按 key 做位移过渡，上移/下移都有动画
-                        ProjectRowItem(
-                            row,
-                            modifier = Modifier.animateItem(),
-                            busy = row.project.path in busy,
-                            onClick = { open(row) },
-                            onLongClick = { actionsFor = row.project },
-                        )
-                    }
+            LazyColumn(Modifier.fillMaxSize().padding(top = 6.dp)) {
+                items(rows, key = { it.project.path }) { row ->
+                    // 顺序随最近更新变：Compose 按 key 做位移过渡，上移/下移都有动画
+                    ProjectRowItem(
+                        row,
+                        modifier = Modifier.animateItem(),
+                        busy = row.project.path in busy,
+                        onClick = { open(row) },
+                        onLongClick = { actionsFor = row.project },
+                    )
                 }
                 item {
                     Text(
@@ -418,6 +336,72 @@ fun ProjectsHome(store: AppStore, nav: NavHostController) {
     }
     purgeReport?.let { results -> PurgeReportDialog(results) { purgeReport = null } }
     if (planDialog) plan?.let { PlanUsageDialog(it) { planDialog = false } }
+}
+
+/**
+ * 会话页 ☰ 抽屉里的项目列表：与首页同一份行（同一排序、同一状态字），点一行切过去——
+ * 会话活着直接进，退出了 / 没有就 `POST /sessions` resume 再进。当前项目高亮。
+ */
+@Composable
+fun ProjectSwitcher(store: AppStore, currentPath: String?, onHome: () -> Unit, onOpened: () -> Unit) {
+    val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+    val openSession = LocalOpenSession.current
+    val projects by store.projects.collectAsState()
+    val sessions by store.sessions.collectAsState()
+    var busy by remember { mutableStateOf<String?>(null) }
+    val rows = remember(projects, sessions) { projectRows(projects, sessions) }
+    LaunchedEffect(Unit) { store.refreshProjects() }
+
+    fun open(row: ProjectRow) {
+        val primary = row.primary
+        if (primary != null && primary.state != "exited") { onOpened(); openSession(primary.id, ""); return }
+        if (busy != null) return
+        busy = row.project.path
+        scope.launch {
+            try {
+                val api = store.client ?: throw IllegalStateException("未连接 daemon")
+                val sess = api.createSession(row.project.path, row.project.agent ?: DEFAULT_AGENT, resume = true)
+                onOpened(); openSession(sess.id, "")
+            } catch (e: Exception) {
+                Toast.makeText(context, "启动失败：${e.message}", Toast.LENGTH_LONG).show()
+            } finally { busy = null }
+        }
+    }
+
+    Column(Modifier.fillMaxSize().navigationBarsPadding()) {
+        Row(
+            Modifier.fillMaxWidth().padding(start = 18.dp, end = 8.dp, top = 14.dp, bottom = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("项目", color = Tok.Ink, fontSize = 16.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            TextButton(onClick = onHome) { Text("首页", color = Tok.Accent, fontSize = 13.sp) }
+        }
+        LazyColumn(Modifier.weight(1f).fillMaxWidth()) {
+            items(rows, key = { it.project.path }) { row ->
+                val current = row.project.path == currentPath
+                Row(
+                    Modifier.fillMaxWidth()
+                        .background(if (current) Tok.Raised else Color.Transparent)
+                        .clickable { open(row) }
+                        .padding(horizontal = 18.dp, vertical = 11.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(Modifier.width(44.dp), contentAlignment = Alignment.CenterStart) {
+                        if (busy == row.project.path) CircularProgressIndicator(Modifier.width(12.dp).height(12.dp), strokeWidth = 1.5.dp, color = Tok.Accent)
+                        else Text(row.state.label, color = row.state.color(), fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                    }
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        row.title, color = if (row.alive || current) Tok.Ink else Tok.Dim, fontSize = 14.sp,
+                        fontWeight = if (current) FontWeight.Bold else FontWeight.Medium,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
+                    )
+                }
+            }
+            if (rows.isEmpty()) item { Text("暂无项目", color = Tok.Faint, modifier = Modifier.padding(18.dp)) }
+        }
+    }
 }
 
 /** 每个窗口一行：名称 + 百分比（按级别着色）+ 重置时间 */
@@ -455,36 +439,31 @@ fun PlanUsageDialog(plan: PlanUsage, onDismiss: () -> Unit) {
     )
 }
 
-/** 一行：色点 + 项目名 + 时间；第二行一句摘要。目录大小等细节在长按单里。 */
+/** 一行到底：状态字 + 标题 + 更新时间。不再有第二行——目录大小等细节在长按单里。 */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ProjectRowItem(row: ProjectRow, busy: Boolean, onClick: () -> Unit, onLongClick: () -> Unit, modifier: Modifier = Modifier) {
     Column(modifier) {
-    Column(
-        Modifier.fillMaxWidth()
-            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
-            .padding(horizontal = 16.dp, vertical = 9.dp),
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.width(12.dp), contentAlignment = Alignment.CenterStart) {
-                if (busy) CircularProgressIndicator(Modifier.width(10.dp).height(10.dp), strokeWidth = 1.5.dp, color = Tok.Accent)
-                else StateDot(row.state.dotColor())
+        Row(
+            Modifier.fillMaxWidth()
+                .combinedClickable(onClick = onClick, onLongClick = onLongClick)
+                .padding(horizontal = 16.dp, vertical = 11.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            // 状态字定宽，标题才对得齐；正在 resume 的行用转圈顶替
+            Box(Modifier.width(44.dp), contentAlignment = Alignment.CenterStart) {
+                if (busy) CircularProgressIndicator(Modifier.width(12.dp).height(12.dp), strokeWidth = 1.5.dp, color = Tok.Accent)
+                else Text(row.state.label, color = row.state.color(), fontSize = 11.sp, fontFamily = FontFamily.Monospace)
             }
-            Spacer(Modifier.width(8.dp))
+            Spacer(Modifier.width(6.dp))
             Text(
-                row.title, color = Tok.Ink, fontSize = 15.sp, fontWeight = FontWeight.Bold,
+                row.title, color = if (row.alive) Tok.Ink else Tok.Dim, fontSize = 15.sp, fontWeight = FontWeight.Bold,
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
             )
             Spacer(Modifier.width(8.dp))
-            Text(relativeTime(row.timeIso), color = Tok.Faint, fontSize = 11.sp)
+            Text(relativeTime(row.updatedIso), color = Tok.Faint, fontSize = 11.sp)
         }
-        if (row.subtitle.isNotEmpty()) Text(
-            row.subtitle, color = row.state.summaryColor(), fontSize = 13.sp,
-            maxLines = 1, overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.padding(start = 20.dp, top = 3.dp),
-        )
-    }
-    HorizontalDivider(color = Tok.Edge, thickness = 1.dp, modifier = Modifier.padding(start = 36.dp))
+        HorizontalDivider(color = Tok.Edge, thickness = 1.dp, modifier = Modifier.padding(start = 66.dp))
     }
 }
 
@@ -560,8 +539,8 @@ fun ProjectActionsSheet(
             }
             if (alive) {
                 // 与 mac 侧栏的 × 同一规则：只有执行中的才确认（被顺手点掉最伤），等你的直接结束
-                SheetItem("■", "结束会话", "项目回到未激活栏", danger = true) {
-                    if (primary?.state == "running") killConfirm = true else killPrimary()
+                SheetItem("■", "结束会话", "项目变为未激活", danger = true) {
+                    if (primary.state == "running") killConfirm = true else killPrimary()
                 }
             }
             if (!alive) SheetItem("▶", "继续会话", "resume") {
@@ -584,9 +563,6 @@ fun ProjectActionsSheet(
                         onDismiss(); nav.openTerminal(sess.id)
                     } catch (e: Exception) { toast("失败：${e.message}") }
                 }
-            }
-            SheetItem("📥", "任务收件箱", "agent 等待输入时自动喂入") {
-                onDismiss(); nav.navigate("inbox/${Uri.encode(p.path)}")
             }
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 10.dp),
@@ -630,102 +606,5 @@ fun ProjectActionsSheet(
             },
             onCancel = { deleteConfirm = false },
         )
-    }
-}
-
-// ---------- v1.1 任务收件箱 ----------
-
-@Composable
-fun InboxScreen(store: AppStore, nav: NavHostController, projectPath: String) {
-    val scope = rememberCoroutineScope()
-    val context = LocalContext.current
-    var items by remember { mutableStateOf<List<InboxItem>>(emptyList()) }
-    var input by rememberSaveable { mutableStateOf("") }
-    var error by remember { mutableStateOf<String?>(null) }
-
-    suspend fun reload() {
-        try { items = store.client?.inbox(projectPath).orEmpty(); error = null }
-        catch (e: DaemonHttpException) { error = if (e.code == 404) "daemon 版本不支持收件箱（需 v1.1）" else e.message }
-        catch (e: Exception) { error = e.message }
-    }
-    LaunchedEffect(projectPath) { reload() }
-    LaunchedEffect(projectPath) {
-        store.frames.collectLatest { if (it is EventFrame.InboxChanged && it.path == projectPath) reload() }
-    }
-
-    Column(Modifier.fillMaxSize().background(Tok.Bg).navigationBarsPadding()) {
-        Row(Modifier.fillMaxWidth().padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("‹", color = Tok.Dim, fontSize = 26.sp, modifier = Modifier.clickable { nav.popBackStack() }.padding(horizontal = 8.dp))
-            Column {
-                Text("任务收件箱", color = Tok.Ink, fontSize = 17.sp, fontWeight = FontWeight.Bold)
-                Text(projectPath.substringAfterLast('/'), color = Tok.Faint, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
-            }
-        }
-        Text(
-            "排队的任务会在 agent 下次等待输入时自动喂入（拼成一条任务清单消息）。",
-            color = Tok.Dim, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-        )
-        error?.let { Text(it, color = Tok.Red, fontSize = 13.sp, modifier = Modifier.padding(16.dp)) }
-
-        // 添加框放在列表上方（跟首页的新建框一个位置），不钉在屏幕底部
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Box(
-                Modifier.weight(1f).background(Tok.Raised, RoundedCornerShape(10.dp)).padding(horizontal = 12.dp, vertical = 8.dp),
-                contentAlignment = Alignment.CenterStart,
-            ) {
-                if (input.isEmpty()) Text("添加任务…", color = Tok.Faint, fontSize = 14.sp)
-                BasicTextField(
-                    input, { input = it },
-                    modifier = Modifier.fillMaxWidth(), maxLines = 3,
-                    textStyle = androidx.compose.ui.text.TextStyle(color = Tok.Ink, fontSize = 14.sp),
-                    cursorBrush = SolidColor(Tok.Accent),
-                )
-            }
-            Spacer(Modifier.width(6.dp))
-            TextButton(
-                enabled = input.isNotBlank(),
-                onClick = {
-                    val text = input.trim(); input = ""
-                    scope.launch {
-                        runCatching { store.client?.inboxAdd(projectPath, text) }
-                            .onFailure { Toast.makeText(context, "添加失败：${it.message}", Toast.LENGTH_SHORT).show() }
-                        reload()
-                    }
-                },
-            ) { Text("添加", color = if (input.isNotBlank()) Tok.Accent else Tok.Faint) }
-        }
-
-        LazyColumn(Modifier.weight(1f).fillMaxWidth()) {
-            items(items, key = { it.id }) { item ->
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = Tok.Surface),
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
-                ) {
-                    Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Text(item.text, color = Tok.Ink, fontSize = 14.sp)
-                            Text(relativeTime(item.created_at), color = Tok.Faint, fontSize = 11.sp)
-                        }
-                        Text(
-                            "✕", color = Tok.Faint, fontSize = 16.sp,
-                            modifier = Modifier.clickable {
-                                scope.launch {
-                                    runCatching { store.client?.inboxDelete(item.id) }
-                                        .onFailure { Toast.makeText(context, "删除失败：${it.message}", Toast.LENGTH_SHORT).show() }
-                                    reload()
-                                }
-                            }.padding(8.dp),
-                        )
-                    }
-                }
-            }
-            if (items.isEmpty() && error == null) {
-                item { Text("收件箱为空", color = Tok.Faint, modifier = Modifier.fillMaxWidth().padding(24.dp)) }
-            }
-        }
-
     }
 }

@@ -30,6 +30,8 @@ import java.net.URLDecoder
     val resume_id: String? = null,
     val created_at: String = "",
     val last_output_at: String = "",
+    /** v1.5：状态翻转 / 改名的时刻（不随每个 PTY 字节跳），首页按它排序；老 daemon 不给 → 空 */
+    val updated_at: String = "",
     /** v1.3：状态由 Claude Code hooks 驱动（不再是屏幕静默猜的） */
     val hooked: Boolean = false,
     /** StopFailure 的错误类型：rate_limit / overloaded / authentication_failed… */

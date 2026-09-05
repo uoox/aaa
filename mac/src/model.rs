@@ -61,6 +61,10 @@ pub struct Session {
     pub created_at: String,
     #[serde(default)]
     pub last_output_at: String,
+    /// v1.5：状态翻转 / 改名的时刻（不随每个 PTY 字节跳），侧栏按它排序；
+    /// 老 daemon 不给 → 空串，排序时退到 created_at
+    #[serde(default)]
+    pub updated_at: String,
     /// v1.3：状态由 Claude Code hooks 驱动
     #[serde(default)]
     pub hooked: bool,

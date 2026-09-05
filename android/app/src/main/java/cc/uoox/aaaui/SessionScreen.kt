@@ -46,6 +46,10 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DrawerValue
+import androidx.compose.material3.ModalDrawerSheet
+import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.rememberDrawerState
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
@@ -120,7 +124,14 @@ fun SessionScreen(
     }
     val showMessages = effectiveMode == "messages" && messagesSupported != false
 
-    var composer by rememberSaveable { mutableStateOf(prefill) }
+    // 输入框：内容跟着会话存在 AppStore（并落盘），返回首页 / 切去别的 app 再回来字还在；
+    // 通知带来的 prefill 优先，它本身也成为新草稿
+    var composer by remember(sessionId) { mutableStateOf(prefill.ifEmpty { store.draft(sessionId) }) }
+    LaunchedEffect(sessionId) {
+        val saved = store.awaitDraft(sessionId)
+        if (composer.isEmpty() && saved.isNotEmpty()) composer = saved
+    }
+    LaunchedEffect(sessionId) { snapshotFlow { composer }.collect { store.setDraft(sessionId, it) } }
     var showMenu by remember { mutableStateOf(false) }
     var showArtifacts by remember { mutableStateOf(false) }
     val ctrlStickyState = remember { mutableStateOf(false) }
@@ -176,10 +187,52 @@ fun SessionScreen(
         }
     }
 
+    // 待发送：项目收件箱里的条目，就画在消息流末尾。agent 还在跑时点「发送」进这里，
+    // daemon 在它这轮跑完（或此刻已空着）时自动写进去——和终端里先敲好等它一样
+    val projectPath = s?.project_path
+    val pending = remember(sessionId) { mutableStateOf<List<InboxItem>>(emptyList()) }
+    suspend fun fetchPending() {
+        val api = store.client ?: return
+        val path = projectPath ?: return
+        try { pending.value = api.inbox(path) } catch (_: Exception) { }
+    }
+    LaunchedEffect(projectPath) { fetchPending() }
+    LaunchedEffect(projectPath) {
+        store.frames.collectLatest { f ->
+            if (f is EventFrame.InboxChanged && f.path == projectPath) fetchPending()
+        }
+    }
+
     fun sendInput(text: String, enter: Boolean) {
         scope.launch {
             try { store.client?.input(sessionId, text, enter) }
             catch (e: Exception) { Toast.makeText(context, "发送失败：${e.message}", Toast.LENGTH_SHORT).show() }
+        }
+    }
+    /** 输入框「发送」：agent 空着就直接写进去；还在跑（或弹着问题）就排成待发送。 */
+    fun submitComposer() {
+        val text = composer
+        if (text.isBlank()) return
+        composer = ""
+        val path = projectPath
+        if (queueInsteadOfSend(s?.state, s?.asking == true) && path != null) {
+            scope.launch {
+                try { store.client?.inboxAdd(path, text); fetchPending() }
+                catch (e: Exception) {
+                    composer = text // 没排上：字还给输入框
+                    Toast.makeText(context, "排队失败：${e.message}", Toast.LENGTH_SHORT).show()
+                }
+            }
+        } else {
+            sendInput(text, enter = true)
+        }
+    }
+    fun deletePending(item: InboxItem) {
+        pending.value = pending.value.filter { it.id != item.id }
+        scope.launch {
+            runCatching { store.client?.inboxDelete(item.id) }
+                .onFailure { Toast.makeText(context, "撤回失败：${it.message}", Toast.LENGTH_SHORT).show() }
+            fetchPending()
         }
     }
     /**
@@ -210,6 +263,20 @@ fun SessionScreen(
         }
     }
 
+    // 左上角 ☰：拉出项目列表直接切会话（2026-09-06 用户拍板，代替返回键；系统返回仍回首页）
+    val drawerState = rememberDrawerState(DrawerValue.Closed)
+    ModalNavigationDrawer(
+        drawerState = drawerState,
+        drawerContent = {
+            ModalDrawerSheet(drawerContainerColor = Tok.Surface, drawerContentColor = Tok.Ink) {
+                ProjectSwitcher(
+                    store, currentPath = s?.project_path,
+                    onHome = { scope.launch { drawerState.close() }; onClose() },
+                    onOpened = { scope.launch { drawerState.close() } },
+                )
+            }
+        },
+    ) {
     Box(Modifier.fillMaxSize().background(Tok.Bg).navigationBarsPadding().imePadding()) {
     Column(Modifier.fillMaxSize()) {
         // 顶栏
@@ -217,7 +284,10 @@ fun SessionScreen(
             Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text("‹", color = Tok.Dim, fontSize = 26.sp, modifier = Modifier.clickable(onClick = onClose).padding(horizontal = 8.dp))
+            Text(
+                "☰", color = Tok.Dim, fontSize = 20.sp,
+                modifier = Modifier.clickable { scope.launch { drawerState.open() } }.padding(horizontal = 8.dp, vertical = 2.dp),
+            )
             Column(Modifier.weight(1f)) {
                 Text(
                     s?.title?.ifBlank { s.project_name } ?: sessionId,
@@ -278,7 +348,6 @@ fun SessionScreen(
                 KeyChip("⏎", onClick = key(KeyEvent.KEYCODE_ENTER))
                 KeyChip("选择", active = selectMode.value) { selectMode.value = !selectMode.value }
                 KeyChip("Esc", onClick = key(KeyEvent.KEYCODE_ESCAPE))
-                KeyChip("Tab", onClick = key(KeyEvent.KEYCODE_TAB))
                 KeyChip("Ctrl", active = ctrlSticky) { ctrlSticky = !ctrlSticky }
                 KeyChip("↑", onClick = key(KeyEvent.KEYCODE_DPAD_UP))
                 KeyChip("↓", onClick = key(KeyEvent.KEYCODE_DPAD_DOWN))
@@ -289,11 +358,8 @@ fun SessionScreen(
                 KeyChip("换行", onClick = lit("\\\r"))
                 KeyChip("Home", onClick = key(KeyEvent.KEYCODE_MOVE_HOME))
                 KeyChip("End", onClick = key(KeyEvent.KEYCODE_MOVE_END))
-                // 手机键盘上最难摸到的几个：flag 的 -、路径与 slash 命令的 /、管道、家目录
-                KeyChip("-", onClick = lit("-"))
+                // 手机键盘上最难摸到的：路径与 slash 命令的 /（2026-09-06 去掉了 Tab、-、|、~）
                 KeyChip("/", onClick = lit("/"))
-                KeyChip("|", onClick = lit("|"))
-                KeyChip("~", onClick = lit("~"))
                 // 长按选区工具条里也有粘贴，但那要先长按选中；这里给一个直达入口
                 KeyChip("粘贴") { pasteViaDaemon() }
             }
@@ -306,6 +372,8 @@ fun SessionScreen(
                     messages.value, messagesSupported, live = s?.state == "running",
                     sessionAlive = s?.state != "exited",
                     sessionCreatedAt = s?.created_at,
+                    pending = pending.value,
+                    onDeletePending = { deletePending(it) },
                     onAnswer = { _, answers ->
                         try {
                             store.client?.answer(sessionId, answers)
@@ -320,14 +388,9 @@ fun SessionScreen(
                 )
             } else {
                 TerminalHost(
-                    attachment, settings.fontSize, ctrlStickyState,
+                    attachment, ctrlStickyState,
                     onHyperlinkClick = { openUrl(context, it) },
                     onPasteRequest = { pasteViaDaemon() },
-                    onFontSize = { target ->
-                        // 双指捏合改的是全局字号并且会记住，所以报出来；要精确就去设置里调
-                        scope.launch { store.settings.setFontSize(target) }
-                        Toast.makeText(context, "终端字号 $target（设置里可改回）", Toast.LENGTH_SHORT).show()
-                    },
                     screenText = { store.client?.screen(sessionId)?.text },
                     selectMode = selectMode,
                     inputRef = inputRef,
@@ -360,7 +423,7 @@ fun SessionScreen(
                 Spacer(Modifier.width(6.dp))
                 TextButton(
                     enabled = composer.isNotBlank() && s?.state != "exited",
-                    onClick = { sendInput(composer, enter = true); composer = "" },
+                    onClick = { submitComposer() },
                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                 ) { Text("发送", color = if (composer.isNotBlank() && s?.state != "exited") Tok.Accent else Tok.Faint, fontSize = 14.sp) }
             }
@@ -370,6 +433,7 @@ fun SessionScreen(
     // 条本身在顶部，按钮留在右下角是为了不盖住画面第一行的输出）
     if (!showMessages && !keysOpen) {
         Box(Modifier.align(Alignment.BottomEnd).padding(end = 14.dp, bottom = 14.dp)) { KeyChip("⌨") { keysOpen = true } }
+    }
     }
     }
 
@@ -477,6 +541,9 @@ fun MessagesView(
     sessionAlive: Boolean = true,
     sessionCreatedAt: String? = null,
     onAnswer: suspend (seq: Long, answers: List<AnswerItem>) -> Unit = { _, _ -> },
+    /** 待发送（项目收件箱），画在末尾；✕ 撤回 */
+    pending: List<InboxItem> = emptyList(),
+    onDeletePending: (InboxItem) -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
@@ -490,26 +557,27 @@ fun MessagesView(
     // 空列表算在底部：没东西可滚，浮动按钮也不该出现
     val atBottom by remember { derivedStateOf { !listState.canScrollForward } }
     val latestMessages by rememberUpdatedState(messages)
+    val latestPending by rememberUpdatedState(pending)
     val latestItems by rememberUpdatedState(items)
     LaunchedEffect(Unit) {
         // 跟不跟到底看的是变化**之前**的位置：wasAtBottom 取自上一次快照，而不是新条目
         // 已经排进布局之后再读（那时 canScrollForward 必然为 true）。观察的是消息集
-        // （条数 + 末条 seq）而不是列表项数：展开 / 收起过程不是新消息，不触发滚动。
+        // （条数 + 末条 seq + 待发送条数）而不是列表项数：展开 / 收起过程不是新消息，不触发滚动。
         var wasAtBottom = true
         var seen = -1L to -1L
-        snapshotFlow { Triple(latestMessages.size, latestMessages.lastOrNull()?.seq ?: -1L, atBottom) }
+        snapshotFlow { Triple(latestMessages.size + latestPending.size, latestMessages.lastOrNull()?.seq ?: -1L, atBottom) }
             .collect { (size, lastSeq, bottom) ->
                 val sig = size.toLong() to lastSeq
                 if (sig != seen) {
                     if (shouldFollowTail(wasAtBottom, hadMessages = seen.first > 0, hasMessages = size > 0)) {
-                        listState.scrollToItem(latestItems.size) // 尾部占位项才是真正的底
+                        listState.scrollToItem(latestItems.size + latestPending.size) // 尾部占位项才是真正的底
                     }
                     seen = sig
                 }
                 wasAtBottom = bottom
             }
     }
-    if (messages.isEmpty()) {
+    if (messages.isEmpty() && pending.isEmpty()) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text(if (supported == null) "加载消息…" else "暂无消息", color = Tok.Faint)
         }
@@ -540,12 +608,18 @@ fun MessagesView(
                     )
                 }
             }
+            // 待发送排在最后：还没进对话，但已经是「你说的话」，画在你这一侧
+            itemsIndexed(pending, key = { _, it -> "pending-" + it.id }) { i, item ->
+                Box(Modifier.padding(top = if (i == 0 && items.isEmpty()) 0.dp else 14.dp)) {
+                    PendingBlock(item) { onDeletePending(item) }
+                }
+            }
             item(key = "tail") { Spacer(Modifier.height(14.dp)) }
         }
         ScrollToEndButton(
             visible = !atBottom,
             modifier = Modifier.align(Alignment.BottomEnd).padding(14.dp),
-        ) { scope.launch { listState.animateScrollToItem(latestItems.size) } }
+        ) { scope.launch { listState.animateScrollToItem(latestItems.size + latestPending.size) } }
     }
 }
 
@@ -582,6 +656,32 @@ private fun UserBlock(m: ChatMessage) {
         }
     }
 }
+
+/**
+ * 待发送：和用户气泡同侧同款，但底色更淡、边框虚一点，小字写「待发送」，右侧 ✕ 撤回。
+ * daemon 在 agent 这轮跑完（或此刻已空着）时把它写进去，写进去后它就变成一条普通的用户消息。
+ */
+@Composable
+private fun PendingBlock(item: InboxItem, onDelete: () -> Unit) {
+    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End) {
+        BubbleCaption("待发送 · 执行完自动发出", Tok.Amber)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                "✕", color = Tok.Faint, fontSize = 14.sp,
+                modifier = Modifier.clickable(onClick = onDelete).padding(horizontal = 8.dp, vertical = 6.dp),
+            )
+            UserBubble(tint = Tok.Amber) {
+                Text(item.text, color = Tok.Dim, fontSize = 14.5.sp, lineHeight = 21.sp)
+            }
+        }
+    }
+}
+
+/**
+ * 「发送」是直接写进 PTY 还是排成待发送：agent 在跑就排队（和终端里先敲好等它一样）；
+ * 弹着问题也排队——自由文本会替你按下高亮项，问题请用表单答。空着才直接发。
+ */
+fun queueInsteadOfSend(state: String?, asking: Boolean): Boolean = state == "running" || asking
 
 /** Claude 的回复：左对齐整宽、不画气泡；上方一行强调色的「✻ Claude」小字，正文仍是 Markdown。 */
 @Composable
@@ -910,7 +1010,6 @@ fun SessionMenuSheet(
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val openSession = LocalOpenSession.current
-    val settings by store.settings.flow.collectAsState(initial = AppSettings())
     var renameDialog by remember { mutableStateOf(false) }
     var killDialog by remember { mutableStateOf(false) }
     var deleteDialog by remember { mutableStateOf(false) }
@@ -964,7 +1063,6 @@ fun SessionMenuSheet(
                 }
             }
             SheetItem("📦", "产物", "会话里发布的 Artifact", onClick = onArtifacts)
-            SheetItem("📥", "任务收件箱", s.project_name) { onDismiss(); nav.navigate("inbox/${Uri.encode(s.project_path)}") }
             SheetItem("🔁", "重启 agent", "resume 同一会话") {
                 scope.launch {
                     try {
@@ -977,18 +1075,6 @@ fun SessionMenuSheet(
                         openSession(fresh.id, "")
                     } catch (e: Exception) { toast("重启失败：${e.message}") }
                 }
-            }
-            // 字号
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("Aa", color = Tok.Dim, fontSize = 14.sp)
-                Spacer(Modifier.width(12.dp))
-                Text("字号", color = Tok.Ink, fontSize = 15.sp, modifier = Modifier.weight(1f))
-                TextButton(onClick = { scope.launch { store.settings.setFontSize(settings.fontSize - 1) } }) { Text("−", fontSize = 18.sp) }
-                Text("${settings.fontSize}", color = Tok.Ink, fontFamily = FontFamily.Monospace)
-                TextButton(onClick = { scope.launch { store.settings.setFontSize(settings.fontSize + 1) } }) { Text("＋", fontSize = 16.sp) }
             }
             // 只有还在执行（running 且不在问）的才确认——顺手点掉最伤；等你的直接结束
             if (s.state != "exited") SheetItem("⛔", "结束进程", "保留回放", danger = true) {

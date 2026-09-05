@@ -81,6 +81,43 @@ class AppStore private constructor(context: Context) {
         }
     }
 
+    // ---------- 输入框草稿 ----------
+
+    /**
+     * 会话 id → 没发出去的输入。SessionScreen 离开 composition（返回首页、切去别的 app
+     * 被系统回收）rememberSaveable 都保不住，所以放这里，并落盘到 DataStore：进程被杀
+     * 再回来字也还在。内存里这份是权威，磁盘写入去抖，多敲几个字不多写几次。
+     */
+    private val drafts = HashMap<String, String>()
+    private val draftsLoaded = kotlinx.coroutines.CompletableDeferred<Unit>()
+    private var draftFlush: Job? = null
+
+    init {
+        scope.launch {
+            val saved = runCatching { settings.drafts() }.getOrDefault(emptyMap())
+            synchronized(drafts) { saved.forEach { (k, v) -> drafts.putIfAbsent(k, v) } }
+            draftsLoaded.complete(Unit)
+        }
+    }
+
+    /** 等磁盘那份读完再给（冷启动直接深链进会话时会用到）；已加载就立刻返回。 */
+    suspend fun awaitDraft(sessionId: String): String {
+        draftsLoaded.await()
+        return synchronized(drafts) { drafts[sessionId].orEmpty() }
+    }
+
+    fun draft(sessionId: String): String = synchronized(drafts) { drafts[sessionId].orEmpty() }
+
+    fun setDraft(sessionId: String, text: String) {
+        synchronized(drafts) { if (text.isEmpty()) drafts.remove(sessionId) else drafts[sessionId] = text }
+        draftFlush?.cancel()
+        draftFlush = scope.launch {
+            delay(400)
+            val snapshot = synchronized(drafts) { drafts.toMap() }
+            runCatching { settings.setDrafts(snapshot) }
+        }
+    }
+
     /** Save server config (from pairing / manual entry) and reconnect immediately. */
     suspend fun applyServer(server: ServerConfig) {
         settings.setServer(server)

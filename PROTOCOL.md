@@ -92,17 +92,19 @@ daemon 在启动时用 `zsh -lic` 问一次「终端里应有的 PATH」（带�
   "rows": 40, "cols": 120,
   "pid": 12345, "exit_code": null,
   "resume_id": "9f2c81…",        // 本次启动实际 resume 的会话 id（无则 null）
-  "created_at": "…", "last_output_at": "…"
+  "created_at": "…", "last_output_at": "…",
+  "updated_at": "…"               // v1.6：最近一次状态翻转（running ⇄ waiting、exited）或改名的时刻；
+                                  // 不随 PTY 字节跳（last_output_at 会），项目列表按它排序
 }
 ```
 
 状态机（2026-09-02 简化）：屏幕内容在变 → `running`；进程存活 + **可见屏幕 6s 没变** → `waiting`（这轮干完了，轮到你）；进程退出 → `exited`（保留屏幕 + 回滚缓冲，daemon 重启后仍可查看回放）。
 daemon **不再读屏猜「它在问什么」**：没有 `idle`，没有 `question`，没有提示模式匹配。agent 在等一个具体回答这件事只认一个来源——claude transcript 里的 `AskUserQuestion` 工具调用（结构化，见「消息流」），`asking` 就是它的镜像；其它 agent 没有这种结构化信号，`asking` 恒为 false。
 
-GUI 列表口径（2026-09-03，mac 侧栏 / Android 首页一致）——**两栏，不按状态分组**：
-- **激活** = 有存活项目会话（`running` / `waiting`，终端不算）。行首色点表状态：绿 = `running`，黄 = `asking` 或 `waiting`（轮到你）。
-- **未激活** = 其余项目：会话已 `exited`、只有旧对话、从没跑过。**`exited` 会话不进列表**——进程没了它就只是历史，项目回到未激活栏，点/双击即 resume（`POST /sessions` `resume:true`）。
-- **顺序稳定**：激活栏按会话 `created_at` 升序（末尾最新），状态、最近输出都不参与排序，多个会话同时在跑也不跳行；未激活栏 mac 按注册表顺序、Android 按项目名。
+GUI 列表口径（2026-09-06 用户拍板，mac 侧栏 / Android 首页一致）——**单列，一项目一行，不分栏**：
+- 行首是**状态字，不是色点**：`执行中` = 会话 `running` 且不 `asking`；`已激活` = 会话活着但轮到你（`waiting`，或 `asking` 哪怕屏幕还在变）；`未激活` = 没有存活项目会话（已 `exited`、只有旧对话、从没跑过）。终端（shell）不算。Android 一行到底（状态字 + 标题 + 更新时间），没有第二行摘要。
+- **`exited` 会话不代表项目**——进程没了它就只是历史，项目标未激活，点一下即 resume（`POST /sessions` `resume:true`）。
+- **顺序 = 最近更新的会话在前**：键是该项目最新一条会话（含已退出）的 `updated_at`（老 daemon 没有 → `created_at`），没有会话的用目录 mtime；同刻按路径稳住。`updated_at` 只在状态翻转 / 改名时变，所以几个会话同时在跑时行不互相换位。
 - **关闭确认只在还在执行时弹**：`running` 且不 `asking` → 确认后 `kill`；`waiting` / `asking` → 直接 `kill`；`exited` → 只收起页面，不删记录。
 
 CLI 的 `ls` / 交互菜单仍按「执行中 / 待回复 / 已完成」三组打印（待回复 = `asking`，已完成 = `waiting`），那是一次性文本输出，不存在跳行问题。
@@ -252,9 +254,10 @@ Claude 以 `--dangerously-skip-permissions` 运行，`PermissionRequest` 不会�
 ### 任务收件箱
 
 - `GET /inbox?path=<proj>` → `[{"id","text","created_at"}]`；`POST /inbox` `{path,text}`；`DELETE /inbox/:id`。
-- 自动喂入：项目会话**进入 waiting**（每会话最多一次）且收件箱非空时，daemon 把条目拼成一条消息（`任务清单：\n1. …\n2. …` + `\r`）写入 PTY 并删除条目。`POST /sessions` 可带 `"feed_inbox":false` 禁用。**不喂的两种情形（都是结构化判断，不读屏）**：claude 会话 `asking`（对话框开着，自由文本会替用户按下高亮项）；claude 会话的目录在 `~/.claude.json` 里尚无 `hasTrustDialogAccepted`（新项目第一屏是信任对话框）。这两种情形条目留在箱里，下一次 waiting 再试。daemon 只读 `~/.claude.json`，永不写它（claude 自己频繁改写，读改写会撞）。
+- 自动喂入（2026-09-06 起**每次**进入 waiting 都喂，不再每会话一次）：项目会话进入 `waiting` 且收件箱非空时，daemon 把条目写入 PTY（+ `\r`）并删除条目；**`POST /inbox` 时若该项目已有空着的（`waiting`）项目会话，立刻就喂**，不等下一轮。一条就是那句话本身；多条拼成 `任务清单：\n1. …\n2. …`。`POST /sessions` 可带 `"feed_inbox":false` 禁用。**不喂的两种情形（都是结构化判断，不读屏）**：claude 会话 `asking`（对话框开着，自由文本会替用户按下高亮项）；claude 会话的目录在 `~/.claude.json` 里尚无 `hasTrustDialogAccepted`（新项目第一屏是信任对话框）。这两种情形条目留在箱里，下一次 waiting 再试。daemon 只读 `~/.claude.json`，永不写它（claude 自己频繁改写，读改写会撞）。
 - **自动信任（2026-09-03）**：config `auto_trust=true`（默认）时，daemon 在每秒 tick 里看 claude 会话的可见屏幕，同时出现「Do you trust the files in this folder」和「Yes, proceed」两串就替用户按一次 `\r`（高亮项即「Yes, proceed」），2 秒后仍在则再按，最多 3 次。用户在 AAA 里已经选定了目录，再问一遍纯属摩擦。信任记录仍由 claude 自己写进 `~/.claude.json`，daemon 不碰。这是 daemon 唯一保留的「读屏行动」，条件刻意收窄（两串同现、仅 claude、有上限）。
 - `POST /sessions` **幂等**：同项目 + 同 agent 已有存活会话时直接返回该会话（不孵第二个进程）；显式并行开第二个用 `"fresh":true`。事件 `{"t":"inbox_changed","path"}`。
+- **客户端呈现（2026-09-06 用户拍板）**：Android 没有单独的收件箱页——收件箱就画在消息流末尾，标「待发送」，✕ 撤回（`DELETE /inbox/:id`）。消息流的「发送」按会话状态分流：会话 `running` 或 `asking` → `POST /inbox`（排成待发送，和终端里先敲好等它一样）；空着 → `POST /sessions/:id/input`。输入框的草稿按会话保存在客户端本地，切出去再回来字还在。会话页左上角是 ☰（不是返回）：拉出与首页同一份项目列表，点一行切会话（回退栈始终 home → 当前会话）。mac 的收件箱仍在详情面板（⌘I）。
 
 ### 手机→项目文件通道
 
@@ -295,8 +298,8 @@ CLI 开的会话在 Mac App 和手机上同样可见、可接管。
 | term-bg | `#0a0e12` | 终端底 |
 | cyan | `#53c6dd` | 主操作/选中 |
 | magenta | `#c583e0` | 品牌（banner） |
-| green / amber / red | `#5ecb8f` / `#e3b45c` / `#e57373` | running / waiting / exited |
+| green / amber / red | `#5ecb8f` / `#e3b45c` / `#e57373` | 执行中 / 已激活（轮到你）/ 出错、已退出 |
 | agent 色 | 已取消（只有 Claude 一个 agent，不再按 agent 着色） | — |
 
-状态点语义：绿=运行中、黄=等待输入（一等状态：置顶、高亮、推送）、灰=空闲、红=已退出。
+项目列表不用色点（2026-09-06）：状态写成字——`执行中`（绿）/ `已激活`（黄）/ `未激活`（faint）。连接状态行、工具步骤等处的小色点照旧。
 终端字体：等宽（mac 端 SF Mono/Menlo 族，Android 端打包 JetBrains Mono 或系统 monospace）。
