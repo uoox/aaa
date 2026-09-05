@@ -61,14 +61,16 @@ const val DEFAULT_AGENT = "claude"
 
 /**
  * 项目行的状态字（2026-09-06 用户拍板，三端一致；不再用色点）：
- * 执行中 = 会话在跑；已激活 = 会话活着但轮到你（waiting，或弹着问题）；
- * 未激活 = 没有存活会话（退出了 / 只有旧对话 / 从没跑过）。
+ * 执行中 = 会话在跑；待回复 = 弹着选项等你选，不选就卡住（asking，哪怕屏幕还在变）；
+ * 已激活 = 会话活着、停在输入框轮到你（waiting）；未激活 = 没有存活会话
+ * （退出了 / 只有旧对话 / 从没跑过）。
  * 一个项目只有一个 agent（建项目时定死，从不切换），项目 ↔ 会话事实上一对一，所以
  * 会话状态直接挂在项目行上，首页不再单开会话页。终端永远不代表项目。全部由客户端把
  * projects × sessions 两个流拼出来。
  */
 enum class ProjectState(val label: String) {
     RUNNING("执行中"),
+    NEEDS_REPLY("待回复"),
     ACTIVE("已激活"),
     INACTIVE("未激活"),
 }
@@ -123,10 +125,11 @@ fun primarySessionFor(project: Project, sessions: List<Session>): Session? {
     return mine.maxByOrNull { it.last_output_at }
 }
 
-/** 三个字之一。在问 = 轮到你，哪怕屏幕还在变也算「已激活」而不是「执行中」。 */
+/** 四态之一。在问 = 待回复，哪怕屏幕还在变也不算「执行中」。 */
 fun projectStateOf(primary: Session?): ProjectState = when {
     primary == null || primary.state == "exited" -> ProjectState.INACTIVE
-    primary.state == "running" && !primary.needsReply() -> ProjectState.RUNNING
+    primary.needsReply() -> ProjectState.NEEDS_REPLY
+    primary.state == "running" -> ProjectState.RUNNING
     else -> ProjectState.ACTIVE
 }
 
@@ -146,7 +149,8 @@ fun projectRows(projects: List<Project>, sessions: List<Session>): List<ProjectR
 
 private fun ProjectState.color(): Color = when (this) {
     ProjectState.RUNNING -> Tok.Green
-    ProjectState.ACTIVE -> Tok.Amber
+    ProjectState.NEEDS_REPLY -> Tok.Amber
+    ProjectState.ACTIVE -> Tok.Dim
     ProjectState.INACTIVE -> Tok.Faint
 }
 

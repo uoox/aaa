@@ -21,17 +21,18 @@ class ProjectStateTest {
         val running = s("run", "running", "2026-09-02T10:00:00Z")
         val asking = s("ask", "waiting", "2026-09-02T09:00:00Z", asking = true, title = "选部署方式")
         assertSame(asking, primarySessionFor(p, listOf(running, asking)))
-        // 在问 = 轮到你 = 已激活；表单刚弹出、屏幕还没静下来（state 还是 running）也一样
-        assertEquals(ProjectState.ACTIVE, projectStateOf(asking))
-        assertEquals(ProjectState.ACTIVE, projectStateOf(s("r", "running", "2026-09-02T10:00:00Z", asking = true)))
+        // 在问 = 待回复；表单刚弹出、屏幕还没静下来（state 还是 running）也一样
+        assertEquals(ProjectState.NEEDS_REPLY, projectStateOf(asking))
+        assertEquals(ProjectState.NEEDS_REPLY, projectStateOf(s("r", "running", "2026-09-02T10:00:00Z", asking = true)))
     }
 
-    @Test fun threeWords() {
+    @Test fun fourWords() {
         assertEquals(ProjectState.RUNNING, projectStateOf(s("r", "running", "2026-09-02T10:00:00Z")))
         assertEquals(ProjectState.ACTIVE, projectStateOf(s("w", "waiting", "2026-09-02T09:00:00Z")))
         assertEquals(ProjectState.INACTIVE, projectStateOf(s("x", "exited", "2026-09-02T09:00:00Z")))
         assertEquals(ProjectState.INACTIVE, projectStateOf(null))
         assertEquals("执行中", ProjectState.RUNNING.label)
+        assertEquals("待回复", ProjectState.NEEDS_REPLY.label)
         assertEquals("已激活", ProjectState.ACTIVE.label)
         assertEquals("未激活", ProjectState.INACTIVE.label)
     }
@@ -80,7 +81,7 @@ class ProjectStateTest {
         val d1 = s("d1", "waiting", "2026-09-02T12:00:00Z", path = p3.path, asking = true, updated = "2026-09-02T10:00:00Z")
         val rows = projectRows(listOf(p, p2, p3), listOf(a1, c1, d1))
         assertEquals(listOf("c", "d", "a"), rows.map { it.project.name })
-        assertEquals(listOf(ProjectState.ACTIVE, ProjectState.ACTIVE, ProjectState.RUNNING), rows.map { it.state })
+        assertEquals(listOf(ProjectState.ACTIVE, ProjectState.NEEDS_REPLY, ProjectState.RUNNING), rows.map { it.state })
         // 输出再多、状态再翻，updated_at 不变顺序就不变
         val churn = listOf(a1.copy(last_output_at = "2026-09-09T00:00:00Z", state = "waiting"), c1.copy(state = "running"), d1)
         assertEquals(listOf("c", "d", "a"), projectRows(listOf(p, p2, p3), churn).map { it.project.name })

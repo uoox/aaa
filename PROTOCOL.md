@@ -98,11 +98,11 @@ daemon 在启动时用 `zsh -lic` 问一次「终端里应有的 PATH」（带�
 }
 ```
 
-状态机（2026-09-02 简化）：屏幕内容在变 → `running`；进程存活 + **可见屏幕 6s 没变** → `waiting`（这轮干完了，轮到你）；进程退出 → `exited`（保留屏幕 + 回滚缓冲，daemon 重启后仍可查看回放）。
+状态机（2026-09-02 简化）：屏幕内容在变 → `running`；进程存活 + **可见屏幕 6s 没变** → `waiting`（这轮干完了，轮到你）；进程退出 → `exited`（保留屏幕 + 回滚缓冲，daemon 重启后仍可查看回放）。claude 会话（2026-09-06）：**起始就是 `waiting`、`hooked=true`**——TUI 起来停在输入框就是轮到你；`SessionStart`（startup / resume / clear，不含 compact）也置 `waiting` 并触发一次收件箱喂入；第一次 `UserPromptSubmit` 才是 `running`。以前起始 `running` 没人翻回来，resume 出来的会话会一直显示执行中。
 daemon **不再读屏猜「它在问什么」**：没有 `idle`，没有 `question`，没有提示模式匹配。agent 在等一个具体回答这件事只认一个来源——claude transcript 里的 `AskUserQuestion` 工具调用（结构化，见「消息流」），`asking` 就是它的镜像；其它 agent 没有这种结构化信号，`asking` 恒为 false。
 
 GUI 列表口径（2026-09-06 用户拍板，mac 侧栏 / Android 首页一致）——**单列，一项目一行，不分栏**：
-- 行首是**状态字，不是色点**：`执行中` = 会话 `running` 且不 `asking`；`已激活` = 会话活着但轮到你（`waiting`，或 `asking` 哪怕屏幕还在变）；`未激活` = 没有存活项目会话（已 `exited`、只有旧对话、从没跑过）。终端（shell）不算。Android 一行到底（状态字 + 标题 + 更新时间），没有第二行摘要。
+- 行首是**状态字，不是色点**，四态：`执行中` = 会话 `running` 且不 `asking`；`待回复` = `asking`（弹着选项等你选，不选就卡住；哪怕屏幕还在变）；`已激活` = 会话活着、停在输入框轮到你（`waiting`）；`未激活` = 没有存活项目会话（已 `exited`、只有旧对话、从没跑过）。终端（shell）不算。Android 一行到底（状态字 + 标题 + 更新时间），没有第二行摘要。
 - **`exited` 会话不代表项目**——进程没了它就只是历史，项目标未激活，点一下即 resume（`POST /sessions` `resume:true`）。
 - **顺序 = 最近更新的会话在前**：键是该项目最新一条会话（含已退出）的 `updated_at`（老 daemon 没有 → `created_at`），没有会话的用目录 mtime；同刻按路径稳住。`updated_at` 只在状态翻转 / 改名时变，所以几个会话同时在跑时行不互相换位。
 - **关闭确认只在还在执行时弹**：`running` 且不 `asking` → 确认后 `kill`；`waiting` / `asking` → 直接 `kill`；`exited` → 只收起页面，不删记录。
@@ -210,6 +210,7 @@ daemon 起 claude 会话时追加 `--settings ~/.local/state/aaa-daemon/claude-h
 
 | 事件 | 作用 |
 |---|---|
+| `SessionStart` | `source≠compact` → `state=waiting`（TUI 就绪停在输入框），触发收件箱投喂 |
 | `UserPromptSubmit` | `state=running`，清 `error` |
 | `Stop` / `Notification(idle_prompt)` | `state=waiting`（精确的「这轮跑完」；触发收件箱投喂） |
 | `StopFailure` | `state=waiting`，`error`=错误类型（rate_limit / overloaded / authentication_failed…） |
@@ -301,5 +302,5 @@ CLI 开的会话在 Mac App 和手机上同样可见、可接管。
 | green / amber / red | `#5ecb8f` / `#e3b45c` / `#e57373` | 执行中 / 已激活（轮到你）/ 出错、已退出 |
 | agent 色 | 已取消（只有 Claude 一个 agent，不再按 agent 着色） | — |
 
-项目列表不用色点（2026-09-06）：状态写成字——`执行中`（绿）/ `已激活`（黄）/ `未激活`（faint）。连接状态行、工具步骤等处的小色点照旧。
+项目列表不用色点（2026-09-06）：状态写成字——`执行中`（绿）/ `待回复`（黄）/ `已激活`（dim）/ `未激活`（faint）。连接状态行、工具步骤等处的小色点照旧。
 终端字体：等宽（mac 端 SF Mono/Menlo 族，Android 端打包 JetBrains Mono 或系统 monospace）。

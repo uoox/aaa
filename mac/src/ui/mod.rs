@@ -61,11 +61,13 @@ fn kill_needs_confirm(s: &Session) -> bool {
 }
 
 /// 项目行的状态字（2026-09-06 用户拍板，三端一致；不再用色点）：
-/// 执行中 = 会话在跑；已激活 = 会话活着但轮到你（waiting，或弹着问题）；
-/// 未激活 = 没有存活会话（退出了 / 只有旧对话 / 从没跑过）。
+/// 执行中 = 会话在跑；待回复 = 弹着选项等你选，不选就卡住（`asking`，哪怕屏幕还在变）；
+/// 已激活 = 会话活着、停在输入框轮到你（waiting）；未激活 = 没有存活会话
+/// （退出了 / 只有旧对话 / 从没跑过）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RowStatus {
     Running,
+    Asking,
     Active,
     Inactive,
 }
@@ -73,7 +75,8 @@ enum RowStatus {
 impl RowStatus {
     fn of(session: Option<&Session>) -> RowStatus {
         match session {
-            Some(s) if is_active(s) && s.state == SessionState::Running && !s.asking => RowStatus::Running,
+            Some(s) if is_active(s) && s.asking => RowStatus::Asking,
+            Some(s) if is_active(s) && s.state == SessionState::Running => RowStatus::Running,
             Some(s) if is_active(s) => RowStatus::Active,
             _ => RowStatus::Inactive,
         }
@@ -82,6 +85,7 @@ impl RowStatus {
     fn label(self) -> &'static str {
         match self {
             RowStatus::Running => "执行中",
+            RowStatus::Asking => "待回复",
             RowStatus::Active => "已激活",
             RowStatus::Inactive => "未激活",
         }
@@ -90,7 +94,8 @@ impl RowStatus {
     fn color(self) -> u32 {
         match self {
             RowStatus::Running => theme::green(),
-            RowStatus::Active => theme::amber(),
+            RowStatus::Asking => theme::amber(),
+            RowStatus::Active => theme::dim(),
             RowStatus::Inactive => theme::faint(),
         }
     }
@@ -1741,8 +1746,8 @@ mod tests {
                 ("/p/a", RowStatus::Running, "改登录页"),
                 // b：只有终端——终端不算，按目录 mtime 05
                 ("/p/b", RowStatus::Inactive, "b"),
-                // c：在问 = 已激活（轮到你），03
-                ("/p/c", RowStatus::Active, "c"),
+                // c：在问 = 待回复（不选就卡住），03
+                ("/p/c", RowStatus::Asking, "c"),
             ]
         );
         assert_eq!(rows[0].session.as_ref().map(|s| s.id.as_str()), Some("a1"));
@@ -1777,12 +1782,14 @@ mod tests {
     fn status_words() {
         use SessionState::*;
         assert_eq!(RowStatus::of(Some(&sess("a", Running, false, ""))), RowStatus::Running);
-        // 在问：哪怕屏幕还在变也是「轮到你」
-        assert_eq!(RowStatus::of(Some(&sess("a", Running, true, ""))), RowStatus::Active);
+        // 在问：哪怕屏幕还在变也是「待回复」
+        assert_eq!(RowStatus::of(Some(&sess("a", Running, true, ""))), RowStatus::Asking);
+        assert_eq!(RowStatus::of(Some(&sess("a", Waiting, true, ""))), RowStatus::Asking);
         assert_eq!(RowStatus::of(Some(&sess("a", Waiting, false, ""))), RowStatus::Active);
         assert_eq!(RowStatus::of(Some(&sess("a", Exited, false, ""))), RowStatus::Inactive);
         assert_eq!(RowStatus::of(None), RowStatus::Inactive);
         assert_eq!(RowStatus::Running.label(), "执行中");
+        assert_eq!(RowStatus::Asking.label(), "待回复");
         assert_eq!(RowStatus::Active.label(), "已激活");
         assert_eq!(RowStatus::Inactive.label(), "未激活");
     }

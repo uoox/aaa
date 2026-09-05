@@ -580,13 +580,18 @@ impl SessionPool {
             .map_err(|e| format!("take writer: {e}"))?;
 
         let now = Utc::now();
+        // claude 会话从第一刻起就由 hooks 驱动（settings 是我们注入的）：起始状态是
+        // waiting——TUI 起来就停在输入框，轮到你；第一次 UserPromptSubmit 才是 running。
+        // 以前起始 running 又没人把它翻回来（Stop 只在一轮结束时来），resume 出来的
+        // 会话会一直显示「执行中」（2026-09-06 修）。shell 没有 hooks，仍按屏幕静默判断。
+        let hooked = spec.agent == "claude";
         let meta = Meta {
             title: spec.title,
             custom_title: false,
             project_path: spec.project_path.clone(),
             project_name: spec.project_name.clone(),
             agent: spec.agent.clone(),
-            state: State::Running,
+            state: if hooked { State::Waiting } else { State::Running },
             rows: DEFAULT_ROWS,
             cols: DEFAULT_COLS,
             pid,
@@ -605,7 +610,7 @@ impl SessionPool {
             user_killed: false,
             trust_presses: 0,
             trust_pressed_inst: None,
-            hooked: false,
+            hooked,
             error: None,
             compacting: false,
             asking_hint_inst: None,

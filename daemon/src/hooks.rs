@@ -9,6 +9,7 @@
 //! is listed in `allowedEnvVars`).
 //!
 //! What the events replace:
+//! - `SessionStart`（startup / resume / clear）：TUI 就绪停在输入框 → `waiting`
 //! - `UserPromptSubmit` / `Stop` / `StopFailure` / `Notification(idle_prompt)`
 //!   drive `running ↔ waiting` exactly, instead of the 6s screen-silence guess.
 //! - `PreToolUse(AskUserQuestion)` raises `asking` the moment the form appears.
@@ -205,6 +206,19 @@ pub fn apply(sess: &Session, event: &str, body: &Value, now: Instant) -> Applied
                 out.dirty = true;
             }
             out.plan = plan_usage(body);
+        }
+        "SessionStart" => {
+            // TUI 起来了、停在输入框：轮到你。compact 是一轮中途的整理，不算
+            let source = body.get("source").and_then(Value::as_str).unwrap_or("");
+            if source != "compact" {
+                if meta.state == State::Running {
+                    meta.state = State::Waiting;
+                    meta.touch();
+                }
+                // 收件箱里排着的（比如 daemon 重启前发的待发送）这时喂进去
+                out.entered_waiting = true;
+                out.dirty = true;
+            }
         }
         "UserPromptSubmit" => {
             if meta.state != State::Running {
@@ -511,6 +525,22 @@ mod tests {
         assert!(!a.entered_waiting);
         let a = apply(&sess, "Notification", &body("Notification", json!({"notification_type": "idle_prompt"})), now);
         assert!(a.entered_waiting);
+    }
+
+    #[test]
+    fn session_start_means_waiting_at_the_prompt() {
+        let now = Instant::now();
+        let sess = Session::for_test("claude", "/p");
+        assert_eq!(sess.meta.lock().unwrap().state, State::Running);
+        // resume 出来的会话：起来就停在输入框，是 waiting，并且要喂一次收件箱
+        let a = apply(&sess, "SessionStart", &body("SessionStart", json!({"source": "resume"})), now);
+        assert!(a.entered_waiting);
+        assert_eq!(sess.meta.lock().unwrap().state, State::Waiting);
+        // 一轮中途的 compact 重启不算：正在跑就还是跑
+        apply(&sess, "UserPromptSubmit", &body("UserPromptSubmit", json!({})), now);
+        let a = apply(&sess, "SessionStart", &body("SessionStart", json!({"source": "compact"})), now);
+        assert!(!a.entered_waiting);
+        assert_eq!(sess.meta.lock().unwrap().state, State::Running);
     }
 
     #[test]
