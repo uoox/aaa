@@ -732,7 +732,8 @@ async fn sessions_create(
     let sess = app.pool.spawn(spec).map_err(ApiError::internal)?;
     // 进度清单跟着对话走：resume 出来的新会话把同一对话上一份清单带过来（先找池子里
     // 已退出的同对话记录，再找会话日志），不用等第一轮跑完才重新有
-    if let Some(rid) = sess.meta.lock().unwrap().resume_id.clone() {
+    let resume_id = sess.meta.lock().unwrap().resume_id.clone();
+    if let Some(rid) = resume_id {
         let from_pool = app.pool.all().into_iter().find_map(|s| {
             if s.id == sess.id {
                 return None;
