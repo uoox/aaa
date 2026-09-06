@@ -131,6 +131,60 @@ pub fn local_day_of(iso: &str) -> Option<String> {
     Some(t.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string())
 }
 
+/// 任务视图的分组（2026-09-07 用户拍板，照 todo 应用的样子）：
+/// 进行中 = 会话还活着；未完成 = 清单里有没勾的；已完成 = 清单全勾了或没有清单；已删除
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum TaskGroup {
+    Active,
+    Open,
+    Done,
+    Deleted,
+}
+
+impl TaskGroup {
+    pub fn label(self) -> &'static str {
+        match self {
+            TaskGroup::Active => "进行中",
+            TaskGroup::Open => "未完成",
+            TaskGroup::Done => "已完成",
+            TaskGroup::Deleted => "已删除",
+        }
+    }
+    pub const ALL: [TaskGroup; 4] = [TaskGroup::Active, TaskGroup::Open, TaskGroup::Done, TaskGroup::Deleted];
+}
+
+pub fn task_group(e: &HistoryEntry, alive: bool) -> TaskGroup {
+    if e.deleted_at.is_some() {
+        return TaskGroup::Deleted;
+    }
+    if alive {
+        return TaskGroup::Active;
+    }
+    if parse_checklist(&e.summary).iter().any(|i| !i.done) {
+        TaskGroup::Open
+    } else {
+        TaskGroup::Done
+    }
+}
+
+/// 行的第二行：没勾的项用「/」串起来（最多 4 项）；全勾了写 n/n 完成；没清单写空
+pub fn task_subline(e: &HistoryEntry) -> String {
+    let items = parse_checklist(&e.summary);
+    if items.is_empty() {
+        return String::new();
+    }
+    let open: Vec<&str> = items.iter().filter(|i| !i.done).map(|i| i.text.as_str()).collect();
+    if open.is_empty() {
+        format!("{}/{} 完成", items.len(), items.len())
+    } else {
+        let mut s = open.iter().take(4).copied().collect::<Vec<_>>().join(" / ");
+        if open.len() > 4 {
+            s.push_str(&format!(" …+{}", open.len() - 4));
+        }
+        s
+    }
+}
+
 /// 历史搜索：标题 / 项目 / 清单里含关键字（不分大小写）；空串全匹配
 pub fn history_matches(e: &HistoryEntry, query: &str) -> bool {
     let q = query.trim().to_lowercase();
@@ -751,6 +805,22 @@ mod tests {
         assert!(s.is_terminal());
         let s: Session = serde_json::from_str(r#"{"id":"s_2","agent":"claude"}"#).unwrap();
         assert!(!s.is_terminal());
+    }
+
+    #[test]
+    fn task_grouping_and_subline() {
+        let mut e = HistoryEntry { summary: "- [x] 修登录\n- [ ] 补测试\n- [ ] 发版".into(), ..Default::default() };
+        assert_eq!(task_group(&e, true), TaskGroup::Active);
+        assert_eq!(task_group(&e, false), TaskGroup::Open);
+        assert_eq!(task_subline(&e), "补测试 / 发版");
+        e.summary = "- [x] 修登录".into();
+        assert_eq!(task_group(&e, false), TaskGroup::Done);
+        assert_eq!(task_subline(&e), "1/1 完成");
+        e.summary.clear();
+        assert_eq!(task_group(&e, false), TaskGroup::Done);
+        assert_eq!(task_subline(&e), "");
+        e.deleted_at = Some("t".into());
+        assert_eq!(task_group(&e, true), TaskGroup::Deleted, "删了就是删了，哪怕还活着");
     }
 
     #[test]

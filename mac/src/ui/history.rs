@@ -8,7 +8,7 @@ use gpui::{Context, SharedString, div, prelude::*, px};
 
 use super::RootView;
 use super::kit::*;
-use crate::model::{DayDigest, HistoryEntry, history_matches, local_day_of, parse_checklist};
+use crate::model::{DayDigest, HistoryEntry, TaskGroup, history_matches, local_day_of, parse_checklist, task_group, task_subline};
 use crate::theme;
 
 impl RootView {
@@ -169,82 +169,185 @@ impl RootView {
                 .child(div().text_size(px(12.5)).text_color(c(theme::ink())).whitespace_normal().child(SharedString::from(body)))
         });
 
-        // ── 会话列表（按搜索 + 选中日期过滤）──
-        let mut list = div().flex().flex_col().gap(px(2.)).w_full();
-        let filtered: Vec<&HistoryEntry> = self
-            .history
-            .iter()
-            .filter(|e| history_matches(e, &query))
-            .filter(|e| self.history_day.as_deref().is_none_or(|d| local_day_of(&e.created_at).as_deref() == Some(d)))
-            .collect();
-        if filtered.is_empty() {
-            list = list.child(div().text_size(px(12.)).text_color(c(theme::faint())).child(if self.history.is_empty() {
-                "还没有记录（daemon 每秒把会话同步进日志）"
-            } else {
-                "没有匹配的会话"
-            }));
-        }
-        for e in filtered {
+        // ── 行（两种视图共用）：状态格 + 标题 + 第二行；点一行展开清单；「打开」进会话 ──
+        let row_of = |e: &HistoryEntry, group: TaskGroup, cx: &mut Context<Self>| -> gpui::Stateful<gpui::Div> {
             let openable = alive_ids.contains(e.id.as_str());
-            let (status, color) = if e.deleted_at.is_some() {
-                ("已删除", theme::faint())
-            } else {
-                match e.last_state.as_str() {
-                    "running" => ("执行中", theme::green()),
-                    "waiting" => ("已激活", theme::accent()),
-                    _ => ("已退出", theme::dim()),
-                }
+            let items = parse_checklist(&e.summary);
+            let expanded = self.history_expanded.contains(&e.id);
+            let (glyph, glyph_color) = match group {
+                TaskGroup::Active => ("◐", theme::green()),
+                TaskGroup::Open => ("☐", theme::amber()),
+                TaskGroup::Done => ("☑", theme::dim()),
+                TaskGroup::Deleted => ("✕", theme::faint()),
             };
             let when = super::detail_panel::fmt_artifact_time(&e.created_at, &now, &chrono::Local).unwrap_or_default();
-            let ended = e.ended_at.as_deref().and_then(|t| super::detail_panel::fmt_artifact_time(t, &now, &chrono::Local));
-            let checklist = parse_checklist(&e.summary);
-            let progress = if checklist.is_empty() {
-                String::new()
-            } else {
-                format!(" · {}/{} 完成", checklist.iter().filter(|i| i.done).count(), checklist.len())
-            };
-            let meta = format!(
-                "{}{} · {}{}{}",
-                e.project_name,
-                if e.agent == "shell" { " · 终端" } else { "" },
-                when,
-                ended.map(|t| format!(" → {t}")).unwrap_or_default(),
-                progress
-            );
-            let id = e.id.clone();
+            let sub = task_subline(e);
+            let id_toggle = e.id.clone();
+            let id_open = e.id.clone();
             let title = if e.title.is_empty() { e.project_name.clone() } else { e.title.clone() };
-            list = list.child(
-                div()
-                    .id(SharedString::from(format!("hist:{}", e.id)))
+            let mut card = div()
+                .id(SharedString::from(format!("hist:{}", e.id)))
+                .flex()
+                .flex_col()
+                .px(px(10.))
+                .py(px(7.))
+                .rounded(px(6.))
+                .cursor_pointer()
+                .hover(|st| st.bg(c(theme::surface_raised())))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if !this.history_expanded.remove(&id_toggle) {
+                        this.history_expanded.insert(id_toggle.clone());
+                    }
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .flex()
+                        .items_start()
+                        .gap(px(10.))
+                        .child(div().flex_none().w(px(16.)).text_size(px(14.)).text_color(c(glyph_color)).child(glyph))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_size(px(13.))
+                                        .text_color(c(if group == TaskGroup::Deleted { theme::dim() } else { theme::ink() }))
+                                        .child(SharedString::from(title)),
+                                )
+                                .when(!sub.is_empty(), |el| {
+                                    el.child(div().truncate().text_size(px(11.)).text_color(c(theme::dim())).child(SharedString::from(sub.clone())))
+                                })
+                                .child(
+                                    div()
+                                        .flex()
+                                        .gap(px(8.))
+                                        .font_family("Menlo")
+                                        .text_size(px(10.))
+                                        .text_color(c(theme::faint()))
+                                        .child(SharedString::from(when))
+                                        .child(div().flex_1())
+                                        .child(SharedString::from(e.project_name.clone())),
+                                ),
+                        )
+                        .when(openable, |el| {
+                            el.child(
+                                div()
+                                    .id(SharedString::from(format!("hist-open:{}", e.id)))
+                                    .flex_none()
+                                    .px(px(6.))
+                                    .py(px(2.))
+                                    .rounded(px(4.))
+                                    .text_size(px(10.5))
+                                    .text_color(c(theme::accent()))
+                                    .hover(|st| st.bg(c(theme::edge_light())))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.open_session(id_open.clone(), cx);
+                                    }))
+                                    .child("打开"),
+                            )
+                        }),
+                );
+            if expanded {
+                let mut cl = div().flex().flex_col().gap(px(3.)).pl(px(26.)).pt(px(6.));
+                if items.is_empty() {
+                    cl = cl.child(div().text_size(px(11.)).text_color(c(theme::faint())).child("没有进度清单"));
+                }
+                for it in items {
+                    cl = cl.child(
+                        div()
+                            .flex()
+                            .gap(px(6.))
+                            .child(div().flex_none().text_size(px(11.5)).text_color(c(if it.done { theme::green() } else { theme::faint() })).child(if it.done { "☑" } else { "☐" }))
+                            .child(div().text_size(px(11.5)).text_color(c(if it.done { theme::dim() } else { theme::ink() })).child(SharedString::from(it.text))),
+                    );
+                }
+                card = card.child(cl);
+            }
+            card
+        };
+
+        let matched: Vec<&HistoryEntry> = self.history.iter().filter(|e| history_matches(e, &query)).collect();
+
+        // ── 任务视图：按组 ──
+        let mut task_col = div().flex().flex_col().gap(px(10.)).w_full();
+        if !self.history_calendar_tab {
+            if matched.is_empty() {
+                task_col = task_col.child(div().text_size(px(12.)).text_color(c(theme::faint())).child(if self.history.is_empty() {
+                    "还没有记录（daemon 每秒把会话同步进日志）"
+                } else {
+                    "没有匹配的会话"
+                }));
+            }
+            for g in TaskGroup::ALL {
+                let rows: Vec<&HistoryEntry> = matched.iter().copied().filter(|e| task_group(e, alive_ids.contains(e.id.as_str())) == g).collect();
+                if rows.is_empty() {
+                    continue;
+                }
+                let mut section = div()
                     .flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .px(px(10.))
-                    .py(px(6.))
-                    .rounded(px(6.))
-                    .when(openable, |el| {
-                        el.cursor_pointer()
-                            .hover(|st| st.bg(c(theme::surface_raised())))
-                            .on_click(cx.listener(move |this, _, _, cx| this.open_session(id.clone(), cx)))
-                    })
-                    .child(div().flex_none().w(px(44.)).font_family("Menlo").text_size(px(10.)).text_color(c(color)).child(status))
+                    .flex_col()
+                    .gap(px(2.))
+                    .p(px(8.))
+                    .rounded(px(10.))
+                    .bg(c(theme::surface()))
+                    .border_1()
+                    .border_color(c(theme::edge()))
                     .child(
                         div()
-                            .flex_1()
-                            .min_w(px(0.))
                             .flex()
-                            .flex_col()
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_size(px(12.5))
-                                    .text_color(c(if e.deleted_at.is_some() { theme::dim() } else { theme::ink() }))
-                                    .child(SharedString::from(title)),
-                            )
-                            .child(div().truncate().font_family("Menlo").text_size(px(10.)).text_color(c(theme::faint())).child(SharedString::from(meta))),
-                    ),
-            );
+                            .items_center()
+                            .px(px(10.))
+                            .pb(px(4.))
+                            .child(div().text_size(px(13.)).font_weight(gpui::FontWeight::BOLD).text_color(c(theme::ink())).child(g.label()))
+                            .child(div().flex_1())
+                            .child(div().font_family("Menlo").text_size(px(10.5)).text_color(c(theme::faint())).child(SharedString::from(rows.len().to_string()))),
+                    );
+                for e in rows {
+                    section = section.child(row_of(e, g, cx));
+                }
+                task_col = task_col.child(section);
+            }
         }
+
+        // ── 日历视图：月历 + 摘要 + 那天的会话 ──
+        let mut cal_col = div().flex().flex_col().gap(px(12.)).w_full();
+        if self.history_calendar_tab {
+            cal_col = cal_col.child(calendar).when_some(digest, |el, d| el.child(d));
+            let mut list = div().flex().flex_col().gap(px(2.));
+            let day_rows: Vec<&HistoryEntry> = matched
+                .iter()
+                .copied()
+                .filter(|e| self.history_day.as_deref().is_none_or(|d| local_day_of(&e.created_at).as_deref() == Some(d)))
+                .collect();
+            if day_rows.is_empty() {
+                list = list.child(div().text_size(px(12.)).text_color(c(theme::faint())).child(if self.history_day.is_some() { "这天没有匹配的会话" } else { "没有匹配的会话" }));
+            }
+            for e in day_rows {
+                let g = task_group(e, alive_ids.contains(e.id.as_str()));
+                list = list.child(row_of(e, g, cx));
+            }
+            cal_col = cal_col.child(list);
+        }
+
+        let tab = |id: &'static str, label: &'static str, on: bool| {
+            div()
+                .id(id)
+                .px(px(10.))
+                .py(px(3.))
+                .rounded(px(6.))
+                .cursor_pointer()
+                .text_size(px(12.))
+                .text_color(c(if on { theme::accent() } else { theme::dim() }))
+                .when(on, |el| el.bg(ca(theme::accent(), 0.14)))
+                .hover(|st| st.bg(c(theme::surface_raised())))
+                .child(label)
+        };
 
         div()
             .id("history-scroll")
@@ -260,19 +363,26 @@ impl RootView {
                     .items_center()
                     .gap(px(10.))
                     .child(div().text_size(px(14.)).font_weight(gpui::FontWeight::BOLD).text_color(c(theme::ink())).child("历史"))
+                    .child(tab("hist-tab-tasks", "任务", !self.history_calendar_tab).on_click(cx.listener(|this, _, _, cx| {
+                        this.history_calendar_tab = false;
+                        cx.notify();
+                    })))
+                    .child(tab("hist-tab-cal", "日历", self.history_calendar_tab).on_click(cx.listener(|this, _, _, cx| {
+                        this.history_calendar_tab = true;
+                        cx.notify();
+                    })))
                     .child(
                         div()
                             .font_family("Menlo")
                             .text_size(px(10.))
                             .text_color(c(theme::faint()))
-                            .child(SharedString::from(format!("{} 条 · 含已退出、已删除", self.history.len()))),
+                            .child(SharedString::from(format!("{} 条", self.history.len()))),
                     )
                     .child(div().flex_1())
                     .child(div().w(px(260.)).child(self.history_input.clone())),
             )
-            .child(calendar)
-            .when_some(digest, |el, d| el.child(d))
-            .child(list)
+            .child(task_col)
+            .child(cal_col)
     }
 }
 

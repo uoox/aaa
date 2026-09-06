@@ -170,6 +170,28 @@ fun parseChecklist(md: String): List<ChecklistItem> = md.lines().mapNotNull { ra
 @Serializable data class DayDigest(val date: String, val text: String = "", val sessions: Int = 0)
 @Serializable data class DaysResponse(val days: List<DayDigest> = emptyList())
 
+/**
+ * 任务视图的分组（2026-09-07 用户拍板，照 todo 应用的样子）：
+ * 进行中 = 会话还活着；未完成 = 清单里有没勾的；已完成 = 清单全勾了或没有清单；已删除。枚举顺序即显示顺序。
+ */
+enum class TaskGroup(val label: String) { ACTIVE("进行中"), OPEN("未完成"), DONE("已完成"), DELETED("已删除") }
+
+fun taskGroup(e: HistoryEntry, alive: Boolean): TaskGroup = when {
+    e.deleted_at != null -> TaskGroup.DELETED
+    alive -> TaskGroup.ACTIVE
+    parseChecklist(e.summary).any { !it.done } -> TaskGroup.OPEN
+    else -> TaskGroup.DONE
+}
+
+/** 行的第二行：没勾的项用「/」串起来（最多 4 项）；全勾了写 n/n 完成；没清单写空 */
+fun taskSubline(e: HistoryEntry): String {
+    val items = parseChecklist(e.summary)
+    if (items.isEmpty()) return ""
+    val open = items.filter { !it.done }.map { it.text }
+    if (open.isEmpty()) return "${items.size}/${items.size} 完成"
+    return open.take(4).joinToString(" / ") + if (open.size > 4) " …+${open.size - 4}" else ""
+}
+
 /** 历史搜索：标题 / 项目 / 清单里含关键字（不分大小写）；空串全匹配 */
 fun historyMatches(e: HistoryEntry, query: String): Boolean {
     val q = query.trim().lowercase()

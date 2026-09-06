@@ -120,7 +120,7 @@ CLI 的 `ls` / 交互菜单仍按「执行中 / 待回复 / 已完成」三组�
 | GET | `/projects` | collect 移植：`[{path,name,mtime,dir_size,ctx_size,agent,session_title}]`，按 mtime 降序。**注册表就是项目名册**：根目录下未登记的目录（顺手 clone 的仓库、杂物）不出现在列表里；经 daemon 建项目/开会话的目录都会自动登记 |
 | POST | `/projects` | `{name?, agent?}`；name 经 slugify，空则 `YYYY-MM-DD-HHMM`；已存在 → 409；agent 给了就写注册表。**响应 = 完整项目对象（至少 `{path,name,agent}`）**，客户端依赖 `path` 直接开会话 |
 | GET | `/history?limit=<n=200>` | v1.9 会话日志 `{entries:[{id, project_path, project_name, agent, title, created_at, ended_at, exit_code, deleted_at, summary, last_state}]}`：**所有出现过的会话，含已退出、已删除**，最新在前，最多 500 条（`~/.local/state/aaa-daemon/history.json`）。daemon 每秒把池子里的会话同步进去（标题 / 状态 / 清单变了就更新）；`DELETE /sessions/:id`、删项目盖 `deleted_at`。mac 侧栏底部「历史」、Android 首页 ⏱ 进入；会话还在就点开，已删除的只能看 |
-| GET | `/history/days` | v1.10 日历 `{days:[{date, text, sessions}]}`：按 daemon 本机时区把日志按开始日期分组（终端不算），每天会话数；`text` 是 haiku 写的「这一天做了什么」要点（daemon 起来 30s 后、之后每 5 分钟给输入变了的日子重写，一次最多两天；没写出来为空）。mac 历史页、Android 历史页顶部是月历，点一天只看那天 |
+| GET | `/history/days` | v1.10 日历 `{days:[{date, text, sessions}]}`：按 daemon 本机时区把日志按开始日期分组（终端不算），每天会话数；`text` 是 haiku 写的「这一天做了什么」要点（daemon 起来 30s 后、之后每 5 分钟给输入变了的日子重写，一次最多两天；没写出来为空）。历史页两个 tab（2026-09-07 用户拍板，照 todo 应用）：「任务」以会话为任务，按 进行中（活着）/ 未完成（清单有没勾的）/ 已完成（全勾或无清单）/ 已删除 分组，行上是标题 + 没勾的项，点开展开清单；「日历」= 月历 + 那天摘要 + 那天的会话。搜索两边共用 |
 | POST | `/projects/pin` | `{path, pinned}`：置顶 / 取消置顶，daemon 侧存（`~/.local/state/aaa-daemon/pins.json`），随后广播 `projects_changed`；`GET /projects` 行多一个 `pinned`。列表口径：置顶的在最前，组内仍按最近更新 |
 | POST | `/projects/delete` | `{paths:[…]}` → `{results:[{path, ok, purged:[{agent_label,count}]}]}`；目录删除 + Claude Code 会话存储 purge（`purged` 里只会有 `Claude` 一项） |
 | GET | `/sessions` | 全部会话（含 exited） |

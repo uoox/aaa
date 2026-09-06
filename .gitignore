@@ -16,3 +16,6 @@ android/terminal-view/build/
 *.log
 .claude/
 android/.kotlin/
+
+# 手机 / 分享上传进项目的附件（POST /projects/upload）
+_inbox/

@@ -88,6 +88,18 @@ class ProtocolTest {
         assertEquals("跑一遍测试", items[0].text)
     }
 
+    @Test fun taskGroupingAndSubline() {
+        var e = HistoryEntry(id = "s", summary = "- [x] 修登录\n- [ ] 补测试\n- [ ] 发版")
+        assertEquals(TaskGroup.ACTIVE, taskGroup(e, true))
+        assertEquals(TaskGroup.OPEN, taskGroup(e, false))
+        assertEquals("补测试 / 发版", taskSubline(e))
+        e = e.copy(summary = "- [x] 修登录")
+        assertEquals(TaskGroup.DONE, taskGroup(e, false))
+        assertEquals("1/1 完成", taskSubline(e))
+        assertEquals("", taskSubline(e.copy(summary = "")))
+        assertEquals(TaskGroup.DELETED, taskGroup(e.copy(deleted_at = "t"), true))
+    }
+
     @Test fun historySearchAndDayGrouping() {
         val e = HistoryEntry(id = "s", project_name = "Shop", title = "改登录页", summary = "- [x] 补测试", created_at = "2026-09-06T02:00:00Z")
         assertTrue(historyMatches(e, "") && historyMatches(e, "登录") && historyMatches(e, "shop") && historyMatches(e, "测试"))

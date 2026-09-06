@@ -374,6 +374,10 @@ pub struct RootView {
     pub history_month: String,
     /// 历史页搜索框
     pub history_input: Entity<MiniInput>,
+    /// 历史页：任务视图 / 日历视图
+    pub history_calendar_tab: bool,
+    /// 任务视图里展开了清单的会话 id
+    pub history_expanded: HashSet<String>,
     /// 每会话的产物 / 改动状态（含各自的拉取节流器）
     detail: HashMap<String, detail_panel::SessionDetail>,
     /// 项目路径 → 收件箱条目
@@ -504,6 +508,8 @@ impl RootView {
             history_day: None,
             history_month: chrono::Local::now().format("%Y-%m").to_string(),
             history_input,
+            history_calendar_tab: false,
+            history_expanded: HashSet::new(),
             detail: HashMap::new(),
             inbox: HashMap::new(),
             inbox_input,
