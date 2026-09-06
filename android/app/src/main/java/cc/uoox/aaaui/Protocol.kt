@@ -42,7 +42,11 @@ import java.net.URLDecoder
     val user_killed: Boolean = false,
     /** v1.4：Claude Code statusline 喂来的用量（模型 / 上下文占比 / 花费）；没有就 null */
     val usage: SessionUsage? = null,
+    /** v1.7：每轮结束后 daemon 让 haiku 写的一句话，最新在末尾 */
+    val summaries: List<TurnSummary> = emptyList(),
 )
+
+@Serializable data class TurnSummary(val ts: String = "", val text: String = "")
 
 @Serializable data class SessionUsage(
     val model: String? = null,

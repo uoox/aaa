@@ -107,6 +107,9 @@ pub struct Meta {
     /// statusLine 转来的本会话用量（模型 / 上下文占比 / 费用），持久化以便退出后还能看
     #[serde(default)]
     pub usage: Option<serde_json::Value>,
+    /// v1.7：每轮结束后 haiku 写的一句话（summary.rs），最新在末尾，最多 KEEP 条；持久化
+    #[serde(default)]
+    pub summaries: Vec<crate::summary::TurnSummary>,
 }
 
 fn default_true() -> bool {
@@ -136,6 +139,8 @@ pub struct Session {
     pub out_tx: broadcast::Sender<Bytes>,
     pub live: Mutex<Option<Live>>,
     pub dirty: AtomicBool,
+    /// v1.7: a turn summary is being generated (one at a time per session)
+    pub summarizing: AtomicBool,
     /// v1.1: structured message stream (agent store tail)
     pub msgs: Mutex<crate::messages::MsgStore>,
 }
@@ -192,11 +197,13 @@ impl Session {
                 compacting: false,
                 asking_hint_inst: None,
                 usage: None,
+                summaries: Vec::new(),
             }),
             parser: Mutex::new(None),
             out_tx: tx,
             live: Mutex::new(None),
             dirty: AtomicBool::new(false),
+            summarizing: AtomicBool::new(false),
             msgs: Mutex::new(crate::messages::MsgStore::for_agent(agent)),
         }
     }
@@ -235,6 +242,8 @@ impl Session {
             "compacting": meta.compacting,
             "user_killed": meta.user_killed,
             "usage": meta.usage,
+            // v1.7：每轮一句话摘要，最新在末尾
+            "summaries": meta.summaries,
         })
     }
 
@@ -517,6 +526,7 @@ impl SessionPool {
                 out_tx: tx,
                 live: Mutex::new(None),
                 dirty: AtomicBool::new(false),
+                summarizing: AtomicBool::new(false),
                 msgs: Mutex::new(msgs),
             });
             self.map.lock().unwrap().insert(id, sess);
@@ -615,6 +625,7 @@ impl SessionPool {
             compacting: false,
             asking_hint_inst: None,
             usage: None,
+            summaries: Vec::new(),
         };
         // Backpressure: send never blocks; a client that can't keep up drops
         // to Lagged and gets a fresh full redraw (api::attach_loop), so a slow
@@ -632,6 +643,7 @@ impl SessionPool {
             out_tx: tx,
             live: Mutex::new(Some(Live { master: pair.master, writer, killer, pid })),
             dirty: AtomicBool::new(true),
+            summarizing: AtomicBool::new(false),
             msgs: Mutex::new(msgs),
         });
         self.map

@@ -134,6 +134,7 @@ fun SessionScreen(
     LaunchedEffect(sessionId) { snapshotFlow { composer }.collect { store.setDraft(sessionId, it) } }
     var showMenu by remember { mutableStateOf(false) }
     var showArtifacts by remember { mutableStateOf(false) }
+    var showSummaries by remember { mutableStateOf(false) }
     val ctrlStickyState = remember { mutableStateOf(false) }
     var ctrlSticky by ctrlStickyState
     // 终端视图的键位条 + 输入框：默认收起，右下角 ⌨ 放出来；不持久化，每次进来都是收起的
@@ -438,10 +439,49 @@ fun SessionScreen(
     }
 
     if (showMenu && s != null) {
-        SessionMenuSheet(store, nav, s, attachment, showMessagesMode = showMessages, onDismiss = { showMenu = false }, onArtifacts = { showMenu = false; showArtifacts = true })
+        SessionMenuSheet(
+            store, nav, s, attachment, showMessagesMode = showMessages, onDismiss = { showMenu = false },
+            onArtifacts = { showMenu = false; showArtifacts = true },
+            onSummaries = { showMenu = false; showSummaries = true },
+        )
     }
     if (showArtifacts) {
         ArtifactsSheet(store, sessionId, onDismiss = { showArtifacts = false })
+    }
+    if (showSummaries && s != null) {
+        SummariesSheet(s.summaries, onDismiss = { showSummaries = false })
+    }
+}
+
+// ---------- 摘要（每轮一句话） ----------
+
+/** daemon 在每次 Stop 后让 haiku 写的一句话，最新在上。会话对象自带，不用另拉。 */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SummariesSheet(summaries: List<TurnSummary>, onDismiss: () -> Unit) {
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = Tok.Surface) {
+        Column(Modifier.fillMaxWidth().padding(bottom = 20.dp)) {
+            Row(Modifier.padding(horizontal = 18.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("摘要", color = Tok.Ink, fontSize = 16.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                if (summaries.isNotEmpty()) Text("${summaries.size}", color = Tok.Faint, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+            }
+            if (summaries.isEmpty()) {
+                Text(
+                    "每轮回复结束后这里会多一句「这轮做了什么」",
+                    color = Tok.Faint, fontSize = 13.sp, modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 24.dp),
+                )
+            } else {
+                LazyColumn(Modifier.fillMaxWidth().heightIn(max = 480.dp)) {
+                    items(summaries.asReversed(), key = { it.ts + it.text }) { t ->
+                        Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 8.dp), verticalAlignment = Alignment.Top) {
+                            Text(artifactTimeLabel(t.ts), color = Tok.Faint, fontSize = 11.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.width(48.dp).padding(top = 2.dp))
+                            Text(t.text, color = Tok.Ink, fontSize = 14.sp, lineHeight = 20.sp, modifier = Modifier.weight(1f))
+                        }
+                    }
+                }
+            }
+            TextButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) { Text("关闭", color = Tok.Dim) }
+        }
     }
 }
 
@@ -1006,6 +1046,7 @@ fun SessionMenuSheet(
     showMessagesMode: Boolean,
     onDismiss: () -> Unit,
     onArtifacts: () -> Unit = {},
+    onSummaries: () -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -1062,6 +1103,7 @@ fun SessionMenuSheet(
                     if (urls.isEmpty()) toast("回放里没有链接") else urlsDialog = urls
                 }
             }
+            SheetItem("📝", "摘要", if (s.summaries.isEmpty()) "每轮一句话" else s.summaries.last().text, onClick = onSummaries)
             SheetItem("📦", "产物", "会话里发布的 Artifact", onClick = onArtifacts)
             SheetItem("🔁", "重启 agent", "resume 同一会话") {
                 scope.launch {

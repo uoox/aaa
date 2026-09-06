@@ -518,6 +518,7 @@ impl RootView {
             .min_h(px(0.))
             .overflow_y_scroll()
             .child(Self::section("会话", Self::render_usage_section(s.usage.as_ref())))
+            .child(Self::section("摘要", Self::render_summaries_section(s, &now)))
             .child(Self::section("产物", self.render_artifacts_section(d, &now, cx)))
             .child(Self::section("收件箱", self.render_inbox_section(s, cx)))
             .child(Self::section("通知", self.render_notify_section(s, cx)));
@@ -536,6 +537,41 @@ impl RootView {
                 .child(header)
                 .child(body),
         )
+    }
+
+    /// 每轮一句话（daemon 在每次 Stop 后让 haiku 写的），最新在上；时间用产物同一格式
+    fn render_summaries_section(s: &Session, now: &DateTime<chrono::Local>) -> gpui::Div {
+        if s.summaries.is_empty() {
+            return Self::empty_hint("每轮回复结束后这里会多一句「这轮做了什么」");
+        }
+        let mut col = div().flex().flex_col().gap(px(7.));
+        for t in s.summaries.iter().rev() {
+            let time = fmt_artifact_time(&t.ts, now, &chrono::Local).unwrap_or_default();
+            col = col.child(
+                div()
+                    .flex()
+                    .items_start()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(38.))
+                            .font_family("Menlo")
+                            .text_size(px(10.5))
+                            .text_color(c(theme::faint()))
+                            .child(SharedString::from(time)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .text_size(px(12.))
+                            .text_color(c(theme::ink()))
+                            .child(SharedString::from(t.text.clone())),
+                    ),
+            );
+        }
+        col
     }
 
     fn render_usage_section(usage: Option<&SessionUsage>) -> gpui::Div {

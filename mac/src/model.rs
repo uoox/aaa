@@ -81,6 +81,18 @@ pub struct Session {
     /// 没到之前为 None，详情面板显示空态
     #[serde(default)]
     pub usage: Option<SessionUsage>,
+    /// v1.7：每轮结束后 daemon 让 haiku 写的一句话，最新在末尾；详情面板「摘要」
+    #[serde(default)]
+    pub summaries: Vec<TurnSummary>,
+}
+
+/// 一轮的一句话摘要（Session JSON 的 `summaries[]`）
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct TurnSummary {
+    #[serde(default)]
+    pub ts: String,
+    #[serde(default)]
+    pub text: String,
 }
 
 /// 会话用量（Session JSON 的 `usage`）。字段全部可缺省：daemon 拿到多少给多少。
@@ -657,6 +669,18 @@ mod tests {
         assert!(s.is_terminal());
         let s: Session = serde_json::from_str(r#"{"id":"s_2","agent":"claude"}"#).unwrap();
         assert!(!s.is_terminal());
+    }
+
+    #[test]
+    fn session_summaries_parse_and_default_empty() {
+        let s: Session = serde_json::from_str(
+            r#"{"id":"s","summaries":[{"ts":"2026-09-06T10:00:00Z","text":"修好了登录页"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(s.summaries.len(), 1);
+        assert_eq!(s.summaries[0].text, "修好了登录页");
+        let old: Session = serde_json::from_str(r#"{"id":"s"}"#).unwrap();
+        assert!(old.summaries.is_empty(), "老 daemon 没有这个字段");
     }
 
     #[test]

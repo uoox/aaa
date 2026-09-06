@@ -88,6 +88,12 @@ class ProtocolTest {
         assertEquals("跑一遍测试", items[0].text)
     }
 
+    @Test fun sessionSummariesParseAndDefaultEmpty() {
+        val s = json.decodeFromString<Session>("""{"id":"s","summaries":[{"ts":"2026-09-06T10:00:00Z","text":"修好了登录页"}]}""")
+        assertEquals("修好了登录页", s.summaries.single().text)
+        assertTrue(json.decodeFromString<Session>("""{"id":"s"}""").summaries.isEmpty())
+    }
+
     @Test fun uploadResultParses() {
         val r = json.decodeFromString<UploadResult>("""{"saved_path":"/p/demo/_inbox/20260830-shot.png"}""")
         assertTrue(r.saved_path.endsWith("shot.png"))

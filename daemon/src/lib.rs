@@ -24,4 +24,5 @@ pub mod screen;
 pub mod service;
 pub mod slug;
 pub mod stores;
+pub mod summary;
 pub mod trust;

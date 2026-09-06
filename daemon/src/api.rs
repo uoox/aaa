@@ -697,7 +697,13 @@ async fn hook_event(
     }
     if applied.entered_waiting {
         let app2 = Arc::clone(&app);
-        let _ = tokio::task::spawn_blocking(move || crate::feed::on_waiting(&app2, sess)).await;
+        let sess2 = Arc::clone(&sess);
+        let _ = tokio::task::spawn_blocking(move || crate::feed::on_waiting(&app2, sess2)).await;
+    }
+    // 一轮回复结束：让 haiku 写一句这轮做了什么（summary.rs）。不等它——要跑几秒到一分钟
+    if event == "Stop" {
+        let app2 = Arc::clone(&app);
+        tokio::task::spawn_blocking(move || crate::summary::on_turn_done(&app2, sess));
     }
     Json(json!({}))
 }

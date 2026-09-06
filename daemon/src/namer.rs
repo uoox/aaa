@@ -55,7 +55,7 @@ fn take_chars(s: &str, n: usize) -> String {
 
 /// Run `claude -p --model haiku` with the prompt on stdin, 60s timeout.
 /// Returns None on any failure (silent downgrade).
-fn run_haiku(exe: &Path, prompt: &str) -> Option<String> {
+pub fn run_haiku(exe: &Path, prompt: &str) -> Option<String> {
     use std::io::Write;
     use std::process::{Command, Stdio};
     let mut child = Command::new(exe)
