@@ -1,6 +1,7 @@
 //! UI 根视图：侧栏（唯一的会话切换入口）+ 页面区 + 状态栏 + 模态框。
 
 mod detail_panel;
+mod history;
 mod kit;
 mod messages_view;
 mod mini_input;
@@ -33,6 +34,8 @@ pub enum Page {
     Settings,
     /// 常驻多标签终端面板（侧栏底部入口），标签 = 存活的 shell 会话
     Terminal,
+    /// 会话日志（侧栏底部入口）：所有出现过的会话，含已退出、已删除
+    History,
 }
 
 /// 关掉 `closed` 之后停在哪一页：只有关的正是当前页才换页，换到剩下的最近一个
@@ -361,6 +364,8 @@ pub struct RootView {
     pub muted_projects: Vec<String>,
     /// 套餐用量（GET /usage + usage 帧）；None = 没有套餐信息，侧栏不画
     pub plan: Option<PlanUsage>,
+    /// 会话日志（GET /history），打开「历史」页时拉
+    pub history: Vec<HistoryEntry>,
     /// 每会话的产物 / 改动状态（含各自的拉取节流器）
     detail: HashMap<String, detail_panel::SessionDetail>,
     /// 项目路径 → 收件箱条目
@@ -485,6 +490,7 @@ impl RootView {
             detail_visible: ui_state.detail_visible,
             muted_projects: ui_state.muted_projects,
             plan: None,
+            history: Vec::new(),
             detail: HashMap::new(),
             inbox: HashMap::new(),
             inbox_input,
@@ -955,7 +961,7 @@ impl RootView {
                         cx.stop_propagation();
                     }
                 }
-                Page::Home | Page::Settings => {}
+                Page::Home | Page::Settings | Page::History => {}
             }
             return;
         }
@@ -1217,6 +1223,8 @@ impl RootView {
             )
             // 终端面板入口：常驻工具，坐在 daemon 状态行上方
             .child(self.render_terminal_entry(cx))
+            // 会话日志入口
+            .child(self.render_history_entry(cx))
             .child(
                 div()
                     .flex()
@@ -1502,7 +1510,7 @@ impl RootView {
                 }
             }
             Page::Terminal => self.render_terminal_statusbar(bar),
-            Page::Home | Page::Settings => {
+            Page::Home | Page::Settings | Page::History => {
                 // 终端不是会话，不进这里的计数
                 let total = self.sessions.iter().filter(|s| !s.is_terminal()).count();
                 let asking = self
@@ -1595,6 +1603,7 @@ impl Render for RootView {
                 ),
                 Page::Settings => el.child(self.render_settings(window, cx)),
                 Page::Terminal => el.child(self.render_terminal_page(cx)),
+                Page::History => el.child(self.render_history_page(cx)),
             }
         });
 

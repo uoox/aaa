@@ -30,6 +30,7 @@ fn build_app(root: &Path, home: &Path) -> aaa_daemon::api::SharedApp {
     });
     let inbox = aaa_daemon::inbox::Inbox::load(&paths.state_dir());
     let pins = aaa_daemon::pins::Pins::load(&paths.state_dir());
+    let history = aaa_daemon::history::History::load(&paths.state_dir());
     Arc::new(aaa_daemon::api::App {
         cfg,
         paths,
@@ -39,6 +40,7 @@ fn build_app(root: &Path, home: &Path) -> aaa_daemon::api::SharedApp {
         store_lock: std::sync::Mutex::new(()),
         bound_port: std::sync::atomic::AtomicU16::new(0),
         pins: std::sync::Mutex::new(pins),
+        history: std::sync::Mutex::new(history),
         inbox: std::sync::Mutex::new(inbox),
         plan_usage: std::sync::Mutex::new(None),
         root_state: std::sync::atomic::AtomicU8::new(aaa_daemon::rootcheck::RootState::Ok.as_u8()),

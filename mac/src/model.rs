@@ -87,6 +87,33 @@ pub struct Session {
     pub summary: String,
 }
 
+/// 会话日志一条（GET /history）
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+pub struct HistoryEntry {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub project_path: String,
+    #[serde(default)]
+    pub project_name: String,
+    #[serde(default)]
+    pub agent: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub ended_at: Option<String>,
+    #[serde(default)]
+    pub exit_code: Option<i64>,
+    #[serde(default)]
+    pub deleted_at: Option<String>,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub last_state: String,
+}
+
 /// 进度清单的一项（解析 `summary` 的一行）
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChecklistItem {

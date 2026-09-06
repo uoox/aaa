@@ -326,6 +326,9 @@ fun ProjectsHome(store: AppStore, nav: NavHostController) {
                 val terminalCount = terminalSessions(sessions).size
                 if (terminalCount > 0) Text(terminalCount.toString(), color = Tok.Accent, fontSize = 10.sp)
             }
+            IconButton(onClick = { nav.navigate("history") }) {
+                Text("⏱", color = Tok.Dim, fontSize = 17.sp)
+            }
             IconButton(onClick = { nav.navigate("settings") }) {
                 Text("⚙", color = Tok.Dim, fontSize = 20.sp)
             }

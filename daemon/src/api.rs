@@ -42,6 +42,8 @@ pub struct App {
     pub inbox: std::sync::Mutex<crate::inbox::Inbox>,
     /// v1.8 置顶的项目路径（三端共享）
     pub pins: std::sync::Mutex<crate::pins::Pins>,
+    /// v1.9 会话日志：所有出现过的会话，含已退出、已删除
+    pub history: std::sync::Mutex<crate::history::History>,
     /// v1.3 账号 plan 配额：5h / 7d 来自最近一次 statusLine 的 rate_limits，
     /// 按模型窗口（Fable）来自 quota.rs 对 claude.ai usage 接口的轮询
     pub plan_usage: std::sync::Mutex<Option<Value>>,
@@ -442,6 +444,20 @@ async fn projects_create(
 }
 
 #[derive(Deserialize)]
+struct HistoryQuery {
+    limit: Option<usize>,
+}
+
+/// 会话日志：所有出现过的会话（含已退出、已删除），最新在前
+async fn history_list(
+    State(app): State<SharedApp>,
+    axum::extract::Query(q): axum::extract::Query<HistoryQuery>,
+) -> ApiResult<Json<Value>> {
+    let list = app.history.lock().unwrap().list(q.limit.unwrap_or(200).min(crate::history::KEEP));
+    Ok(Json(json!({"entries": list})))
+}
+
+#[derive(Deserialize)]
 struct PinBody {
     path: String,
     pinned: bool,
@@ -531,6 +547,9 @@ async fn projects_delete(
     .await?;
     for p in &deleted_paths {
         app.pins.lock().unwrap().forget(p);
+        let mut h = app.history.lock().unwrap();
+        h.mark_project_deleted(p);
+        h.save_if_dirty();
     }
     app.hub.projects_changed();
     Ok(Json(json!({"results": results})))
@@ -910,6 +929,13 @@ async fn session_delete(
     }
     app.pool.remove(&id);
     sess.remove_persisted(&app.pool.ctx);
+    {
+        // 日志里留着：先把最后一版同步进去，再盖删除戳
+        let mut h = app.history.lock().unwrap();
+        h.upsert(crate::history::entry_from(&sess));
+        h.mark_deleted(&id);
+        h.save_if_dirty();
+    }
     app.hub.session_removed(&id);
     Ok(Json(json!({"ok": true})))
 }
@@ -1458,6 +1484,7 @@ pub fn router(app: SharedApp) -> Router {
         .route("/api/v1/projects", get(projects_list).post(projects_create))
         .route("/api/v1/projects/delete", post(projects_delete))
         .route("/api/v1/projects/pin", post(projects_pin))
+        .route("/api/v1/history", get(history_list))
         .route("/api/v1/sessions", get(sessions_list).post(sessions_create))
         .route("/api/v1/sessions/{id}", delete(session_delete))
         .route("/api/v1/sessions/{id}/input", post(session_input))

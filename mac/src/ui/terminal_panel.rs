@@ -181,6 +181,38 @@ impl RootView {
     // ── 渲染 ────────────────────────────────────────────────────────────
 
     /// 侧栏底部的入口行（daemon 状态行上方）：`>_ 终端   n  ＋`
+    /// 侧栏底部「历史」入口：所有出现过的会话，含已退出、已删除
+    pub(super) fn render_history_entry(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let active = self.page == Page::History;
+        div()
+            .id("sb-history")
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .px(px(16.))
+            .py(px(7.))
+            .border_t_1()
+            .border_color(c(theme::edge()))
+            .cursor_pointer()
+            .when(active, |el| el.bg(c(theme::surface_raised())))
+            .hover(|st| st.bg(c(theme::surface_raised())))
+            .on_click(cx.listener(|this, _, _, cx| this.open_history(cx)))
+            .child(
+                div()
+                    .font_family("Menlo")
+                    .text_size(px(11.))
+                    .text_color(c(if active { theme::accent() } else { theme::dim() }))
+                    .child("⏱"),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(px(12.5))
+                    .text_color(c(if active { theme::accent() } else { theme::ink() }))
+                    .child("历史"),
+            )
+    }
+
     pub(super) fn render_terminal_entry(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let n = self.live_terminal_tabs().len();
         let active = self.page == Page::Terminal;

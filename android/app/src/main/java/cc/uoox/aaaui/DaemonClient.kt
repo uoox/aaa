@@ -153,6 +153,10 @@ class DaemonClient(
 
     suspend fun inboxDelete(id: String) { delete("/inbox/$id") }
 
+    /** 会话日志（含已退出、已删除），最新在前 */
+    suspend fun history(limit: Int = 300): List<HistoryEntry> =
+        json.decodeFromString(HistoryResponse.serializer(), get("/history?limit=$limit")).entries
+
     // ---------- v1.4 ----------
 
     /** 套餐用量；plan 为 null = daemon 暂时没有数据 */

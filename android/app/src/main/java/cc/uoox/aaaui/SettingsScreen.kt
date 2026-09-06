@@ -18,8 +18,6 @@ import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -87,154 +85,113 @@ fun SettingsScreen(store: AppStore, nav: NavHostController) {
             Text("设置", color = Tok.Ink, fontSize = 17.sp, fontWeight = FontWeight.Bold)
         }
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 24.dp)) {
-
-        // ---------- 服务器 ----------
-        GroupTitle("服务器")
+        // 一张卡、几行到底（2026-09-07 用户拍板：不再按 服务器/通知/外观/界面/daemon 分组）
         Group {
+            // 服务器：当前地址 + 状态一行；token 尾号进副标题；备用地址折叠
             val server = settings.server
             if (server == null) {
                 SettingRow("未配对") { TextButton(onClick = { nav.navigate("pair") }) { Text("去配对") } }
             } else {
-                // 只摆当前在用的 host 一行（右侧直接写状态）；其余备用地址折叠在一行
-                // 「备用 N 个」后面，点开才列（2026-09-06 用户拍板：设置页要简）
                 val current = (conn as? ConnState.Connected)?.host ?: server.preferredHost ?: server.hosts.firstOrNull()
                 val backups = server.hosts.filter { it != current }
                 var showBackups by remember { mutableStateOf(false) }
-                @Composable fun hostRow(host: String) {
-                    val active = (conn as? ConnState.Connected)?.host == host
-                    Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                        StateDot(if (active) Tok.Green else Tok.Dim)
-                        Spacer(Modifier.width(8.dp))
-                        Text(host, color = Tok.Ink, fontSize = 13.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.weight(1f))
+                val status = when (val c = conn) {
+                    is ConnState.Connected -> "已连接 · ${c.latencyMs}ms"
+                    is ConnState.Connecting -> "连接中…"
+                    is ConnState.Failed -> "已断开"
+                    ConnState.NoServer -> "未配对"
+                }
+                Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    StateDot(if (conn is ConnState.Connected) Tok.Green else if (conn is ConnState.Failed) Tok.Red else Tok.Amber)
+                    Spacer(Modifier.width(8.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(current ?: "—", color = Tok.Ink, fontSize = 13.sp, fontFamily = FontFamily.Monospace)
                         Text(
-                            if (active) "已连接 · ${(conn as ConnState.Connected).latencyMs}ms" else "备用",
-                            color = if (active) Tok.Green else Tok.Faint, fontSize = 11.sp,
+                            buildString {
+                                append(status); append(" · token ····"); append(server.token.takeLast(4))
+                                if (backups.isNotEmpty()) append(" · 备用 ${backups.size} 个")
+                            },
+                            color = if (conn is ConnState.Failed) Tok.Red else Tok.Faint, fontSize = 11.sp,
+                            modifier = Modifier.clickable { showBackups = !showBackups },
                         )
                     }
+                    if (conn is ConnState.Failed) TextButton(onClick = { store.kickReconnect() }) { Text("重试", fontSize = 12.sp) }
+                    TextButton(onClick = { nav.navigate("pair") }) { Text("重新配对", fontSize = 12.sp) }
                 }
-                current?.let { hostRow(it) }
-                if (backups.isNotEmpty()) {
-                    Text(
-                        (if (showBackups) "▾ " else "▸ ") + "备用 ${backups.size} 个",
-                        color = Tok.Faint, fontSize = 12.sp,
-                        modifier = Modifier.fillMaxWidth().clickable { showBackups = !showBackups }.padding(horizontal = 14.dp, vertical = 6.dp),
-                    )
-                    if (showBackups) backups.forEach { hostRow(it) }
-                }
-                when (val c = conn) {
-                    is ConnState.Connecting -> SettingRow("连接中…") {}
-                    is ConnState.Failed -> Row(
-                        Modifier.fillMaxWidth().padding(start = 14.dp, end = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(c.message, color = Tok.Red, fontSize = 12.sp, modifier = Modifier.weight(1f))
-                        TextButton(onClick = { store.kickReconnect() }) { Text("重试") }
-                    }
-                    else -> {}
-                }
-                SettingRow("Token ····${server.token.takeLast(4)}") {
-                    TextButton(onClick = { nav.navigate("pair") }) { Text("重新配对") }
+                if (showBackups) backups.forEach { host ->
+                    Text(host, color = Tok.Dim, fontSize = 12.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.padding(start = 36.dp, end = 14.dp, bottom = 4.dp))
                 }
             }
-        }
-
-        // ---------- 通知 ----------
-        GroupTitle("通知")
-        Group {
-            ToggleRow("任务完成时通知", settings.notifyDone) { scope.launch { store.settings.setNotifyDone(it) } }
-            ToggleRow("后台常驻（前台服务维持连接）", settings.serviceEnabled) { on ->
+            ToggleRow("完成时通知", settings.notifyDone) { scope.launch { store.settings.setNotifyDone(it) } }
+            ToggleRow("后台常驻", settings.serviceEnabled) { on ->
                 scope.launch { store.settings.setServiceEnabled(on) }
                 if (on) NotificationService.start(context) else NotificationService.stop(context)
             }
             if (settings.mutedProjects.isNotEmpty()) {
-                Text("已静音项目", color = Tok.Faint, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 14.dp, vertical = 4.dp))
-                settings.mutedProjects.forEach { path ->
-                    Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text(path.substringAfterLast('/'), color = Tok.Dim, fontSize = 13.sp, modifier = Modifier.weight(1f))
-                        TextButton(onClick = { scope.launch { store.settings.setProjectMuted(path, false) } }) { Text("取消静音", fontSize = 12.sp) }
-                    }
+                // 静音的项目挤在一行里，点名字取消
+                Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("已静音", color = Tok.Ink, fontSize = 14.sp)
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        settings.mutedProjects.joinToString(" · ") { it.substringAfterLast('/') } + "（点取消）",
+                        color = Tok.Dim, fontSize = 12.sp, modifier = Modifier.weight(1f).clickable {
+                            scope.launch { settings.mutedProjects.forEach { store.settings.setProjectMuted(it, false) } }
+                        },
+                    )
                 }
             }
-        }
-
-        // ---------- 外观 ----------
-        GroupTitle("外观")
-        Group {
-            Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("主题", color = Tok.Ink, fontSize = 14.sp, modifier = Modifier.weight(1f))
-                // 点下去立刻生效：Tok.current 是 snapshot state，凡是画过颜色的地方自动重组
                 SingleChoiceSegmentedButtonRow {
                     Palette.all.forEachIndexed { i, p ->
                         SegmentedButton(
                             selected = settings.theme == p.name,
                             onClick = { scope.launch { store.settings.setTheme(p.name) } },
                             shape = SegmentedButtonDefaults.itemShape(i, Palette.all.size),
-                            icon = {}, // 选中态靠底色就够了，不要再塞一个 ✓
+                            icon = {},
                         ) { Text(p.label, fontSize = 12.sp, maxLines = 1) }
                     }
                 }
             }
-        }
-
-        // ---------- 界面 ----------
-        GroupTitle("界面")
-        Group {
-            Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("会话默认视图", color = Tok.Ink, fontSize = 14.sp, modifier = Modifier.weight(1f))
+            Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("默认视图", color = Tok.Ink, fontSize = 14.sp, modifier = Modifier.weight(1f))
                 SingleChoiceSegmentedButtonRow {
                     SegmentedButton(
                         selected = settings.defaultUi == "messages",
                         onClick = { scope.launch { store.settings.setDefaultUi("messages") } },
-                        shape = SegmentedButtonDefaults.itemShape(0, 2),
-                        icon = {},
+                        shape = SegmentedButtonDefaults.itemShape(0, 2), icon = {},
                     ) { Text("消息流", fontSize = 12.sp) }
                     SegmentedButton(
                         selected = settings.defaultUi == "terminal",
                         onClick = { scope.launch { store.settings.setDefaultUi("terminal") } },
-                        shape = SegmentedButtonDefaults.itemShape(1, 2),
-                        icon = {},
+                        shape = SegmentedButtonDefaults.itemShape(1, 2), icon = {},
                     ) { Text("终端", fontSize = 12.sp) }
                 }
             }
-        }
-
-        // ---------- daemon 状态 ----------
-        GroupTitle("daemon")
-        Group {
+            // daemon：一行说完 版本 · SSD · 运行时长 · 项目根；有新构建时右边亮「重启」
             val h = health
-            // 没连上时这四行全是「—」，与其摆四行破折号不如说清楚现在拿不到
-            if (h == null) {
-                SettingRow("尚未拿到 daemon 状态") {}
-            } else {
-                SettingRow("版本") { Text("v${h.version}", color = Tok.Dim, fontSize = 13.sp, fontFamily = FontFamily.Monospace) }
-                SettingRow("SSD") {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
                     Text(
-                        if (h.ssd_mounted) "已挂载 ✓" else "未挂载 ✗",
-                        color = if (h.ssd_mounted) Tok.Green else Tok.Red, fontSize = 13.sp,
+                        if (h == null) "daemon 尚未连上" else "daemon v${h.version} · ${formatUptime(h.uptime_s)}" + (if (h.update_pending) " · 有新构建" else ""),
+                        color = if (h?.update_pending == true) Tok.Amber else Tok.Ink, fontSize = 13.sp,
+                    )
+                    if (h != null) Text(
+                        (if (h.ssd_mounted) "SSD 已挂载 · " else "SSD 未挂载 ✗ · ") + h.project_root,
+                        color = if (h.ssd_mounted) Tok.Faint else Tok.Red, fontSize = 11.sp, fontFamily = FontFamily.Monospace,
+                        maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                     )
                 }
-                SettingRow("项目根") { Text(h.project_root, color = Tok.Dim, fontSize = 12.sp, fontFamily = FontFamily.Monospace) }
-                SettingRow("运行时长") { Text(formatUptime(h.uptime_s), color = Tok.Dim, fontSize = 13.sp) }
-                if (h.update_pending) {
-                    SettingRow("更新") { Text("有新构建，需重启才生效", color = Tok.Amber, fontSize = 13.sp) }
-                }
-                // 重启：daemon 的 PTY 都是它的子进程，有存活会话时先问一声再强制
-                val alive = sessions.count { it.state != "exited" }
-                SettingRow("重启 daemon") {
-                    Button(
-                        onClick = { if (alive > 0) restartDialog = true else restartDaemon(false) },
-                        colors = if (h.update_pending) ButtonDefaults.buttonColors() else ButtonDefaults.outlinedButtonColors(),
-                    ) { Text(if (alive > 0) "重启（$alive 个活会话）" else "重启", fontSize = 13.sp) }
+                if (h != null) {
+                    val alive = sessions.count { it.state != "exited" }
+                    TextButton(onClick = { if (alive > 0) restartDialog = true else restartDaemon(false) }) {
+                        Text(if (alive > 0) "重启（$alive 活）" else "重启", color = if (h.update_pending) Tok.Amber else Tok.Dim, fontSize = 12.sp)
+                    }
                 }
             }
         }
         }
     }
-}
-
-@Composable
-private fun GroupTitle(title: String) {
-    Text(title, color = Tok.Faint, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp))
 }
 
 @Composable

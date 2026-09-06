@@ -151,6 +151,22 @@ fun parseChecklist(md: String): List<ChecklistItem> = md.lines().mapNotNull { ra
     val messages: List<ChatMessage> = emptyList(),
 )
 
+// v1.9 会话日志（GET /history）：所有出现过的会话，含已退出、已删除
+@Serializable data class HistoryEntry(
+    val id: String,
+    val project_path: String = "",
+    val project_name: String = "",
+    val agent: String = "",
+    val title: String = "",
+    val created_at: String = "",
+    val ended_at: String? = null,
+    val exit_code: Long? = null,
+    val deleted_at: String? = null,
+    val summary: String = "",
+    val last_state: String = "",
+)
+@Serializable data class HistoryResponse(val entries: List<HistoryEntry> = emptyList())
+
 // v1.1 inbox
 @Serializable data class InboxItem(val id: String, val text: String, val created_at: String = "")
 

@@ -111,6 +111,7 @@ fn run() {
     pool.restore_persisted();
     let inbox = crate::inbox::Inbox::load(&paths.state_dir());
     let pins = crate::pins::Pins::load(&paths.state_dir());
+    let history = crate::history::History::load(&paths.state_dir());
 
     let app: SharedApp = Arc::new(App {
         cfg,
@@ -122,6 +123,7 @@ fn run() {
         bound_port: std::sync::atomic::AtomicU16::new(0),
         inbox: std::sync::Mutex::new(inbox),
         pins: std::sync::Mutex::new(pins),
+        history: std::sync::Mutex::new(history),
         plan_usage: std::sync::Mutex::new(None),
         root_state: std::sync::atomic::AtomicU8::new(root_state.as_u8()),
         restarting: std::sync::atomic::AtomicBool::new(false),
@@ -160,6 +162,8 @@ fn run() {
                             for sess in app2.pool.all() {
                                 crate::feed::on_waiting(&app2, sess);
                             }
+                            // 会话日志跟着池子走：标题 / 状态 / 清单变了就更新，落盘只在有变化时
+                            crate::history::sync(&app2);
                         })
                         .await;
                     }

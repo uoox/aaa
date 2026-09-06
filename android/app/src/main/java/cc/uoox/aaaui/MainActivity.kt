@@ -126,6 +126,7 @@ fun AaaApp(
             composable("pair") { PairScreen(store) { nav.navigate("home") { popUpTo("pair") { inclusive = true } } } }
             composable("home") { HomeScreen(store, nav) }
             composable("settings") { SettingsScreen(store, nav) }
+            composable("history") { HistoryScreen(store, nav) }
             composable("terminal?focus={focus}", arguments = listOf(androidx.navigation.navArgument("focus") { defaultValue = "" })) { entry ->
                 TerminalScreen(store, nav, focusId = entry.arguments?.getString("focus").orEmpty())
             }
