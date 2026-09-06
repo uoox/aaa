@@ -20,6 +20,8 @@ pub const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 pub const POLL_INTERVAL: Duration = Duration::from_secs(60);
 /// 没有活的 claude 会话时每几个 tick 才拉一次（60s × 5 = 5 分钟）
 pub const IDLE_POLL_EVERY: u64 = 5;
+/// 被 429 限流后跳过的 tick 数（60s × 5 = 5 分钟）
+pub const RATE_LIMIT_BACKOFF_TICKS: u64 = 5;
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
 
 /// 凭据文件路径：`$CLAUDE_CONFIG_DIR/.credentials.json`，没设就 `~/.claude/.credentials.json`

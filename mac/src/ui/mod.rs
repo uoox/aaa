@@ -114,6 +114,8 @@ struct ProjectRow {
     /// 排序键：该项目最新一条会话的 `updated_at`（老 daemon 退到 created_at），
     /// 没有会话的用目录 mtime。都是 ISO 时间串，字典序即时间序。
     sort_key: String,
+    /// 置顶的排在最前（组内仍按 sort_key）
+    pinned: bool,
 }
 
 fn session_updated(s: &Session) -> &str {
@@ -162,6 +164,7 @@ fn project_rows(projects: &[Project], sessions: &[Session]) -> Vec<ProjectRow> {
             session: live.cloned(),
             project: Some(p.clone()),
             sort_key: latest.unwrap_or(p.mtime.as_str()).to_owned(),
+            pinned: p.pinned,
         });
     }
     for s in sessions.iter().filter(|s| is_active(s)) {
@@ -177,9 +180,16 @@ fn project_rows(projects: &[Project], sessions: &[Session]) -> Vec<ProjectRow> {
             session: live.cloned(),
             project: None,
             sort_key: latest.unwrap_or("").to_owned(),
+            pinned: false,
         });
     }
-    rows.sort_by(|a, b| b.sort_key.cmp(&a.sort_key).then_with(|| a.title.cmp(&b.title)));
+    // 置顶的在最前，其余按最近更新；同刻按标题稳住
+    rows.sort_by(|a, b| {
+        b.pinned
+            .cmp(&a.pinned)
+            .then_with(|| b.sort_key.cmp(&a.sort_key))
+            .then_with(|| a.title.cmp(&b.title))
+    });
     rows
 }
 
@@ -861,6 +871,16 @@ impl RootView {
         );
     }
 
+    /// 置顶开关：POST /projects/pin；列表靠 projects_changed 帧重拉，这里先乐观改一下
+    fn set_pinned(&mut self, path: String, pinned: bool, cx: &mut Context<Self>) {
+        if let Some(p) = self.projects.iter_mut().find(|p| p.path == path) {
+            p.pinned = pinned;
+        }
+        let fut = self.net.set_pinned(&path, pinned);
+        self.spawn_fetch(fut, |_, _: serde_json::Value, _| {}, true, cx);
+        cx.notify();
+    }
+
     fn session(&self, id: &str) -> Option<&Session> {
         self.sessions.iter().find(|s| s.id == id)
     }
@@ -1005,7 +1025,8 @@ impl RootView {
             let open_project = row.project.clone();
             let kill = row.session.as_ref().map(|s| (s.id.clone(), kill_needs_confirm(s)));
             let del_path = row.project.as_ref().map(|p| p.path.clone());
-            let title = row.title;
+            let pin = row.project.as_ref().map(|p| (p.path.clone(), p.pinned));
+            let title = if row.pinned { format!("📌 {}", row.title) } else { row.title };
             // 元素 id 用路径而不是序号：排序变了悬停 / 点击态跟着行走，不留在原位
             let row_id = SharedString::from(format!("sb-proj:{}", row.path));
             let act_id = SharedString::from(format!("sb-act:{}", row.path));
@@ -1051,8 +1072,30 @@ impl RootView {
                         }))
                         .child(SharedString::from(title)),
                 );
-            // 行尾按钮：活着的 × = 结束会话（只有执行中的才确认，被顺手点掉最伤）；
-            // 未激活的「删」= 删项目。非当前行悬停才现身；invisible 连命中盒一起去掉
+            // 行尾按钮（非当前行悬停才现身；invisible 连命中盒一起去掉）：
+            // 「顶 / 取消」= 置顶开关（daemon 侧存，三端一起变）；
+            // 活着的 × = 结束会话（只有执行中的才确认，被顺手点掉最伤）；未激活的「删」= 删项目
+            let hover_btn = |id: SharedString| {
+                div()
+                    .id(id)
+                    .flex_none()
+                    .px(px(3.))
+                    .rounded(px(4.))
+                    .text_size(px(10.))
+                    .text_color(c(theme::faint()))
+                    .when(!active, |el| el.invisible().group_hover("sb-row", |st| st.visible()))
+            };
+            if let Some((pin_path, pinned)) = pin {
+                el = el.child(
+                    hover_btn(SharedString::from(format!("sb-pin:{}", row.path)))
+                        .hover(|st| st.text_color(c(theme::accent())).bg(c(theme::edge_light())))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.set_pinned(pin_path.clone(), !pinned, cx);
+                        }))
+                        .child(if pinned { "取消顶" } else { "顶" }),
+                );
+            }
             let button = div()
                 .id(act_id)
                 .flex_none()
@@ -1796,6 +1839,13 @@ mod tests {
         let rows = project_rows(&[proj("/p/z", "z", "", Some("上次聊的"))], &[]);
         assert_eq!(rows[0].title, "上次聊的");
         assert_eq!(rows[0].status, RowStatus::Inactive);
+        // 置顶的排最前，哪怕它最久没动
+        let mut old = proj("/p/old", "old", "2026-01-01T00:00:00Z", None);
+        old.pinned = true;
+        let fresh = proj("/p/new", "new", "2026-09-01T00:00:00Z", None);
+        let rows = project_rows(&[fresh, old], &[]);
+        assert_eq!(rows.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(), ["/p/old", "/p/new"]);
+        assert!(rows[0].pinned && !rows[1].pinned);
     }
 
     #[test]

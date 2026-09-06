@@ -118,6 +118,7 @@ CLI 的 `ls` / 交互菜单仍按「执行中 / 待回复 / 已完成」三组�
 | GET | `/agents` | agent 表 + `available`（which 检查） |
 | GET | `/projects` | collect 移植：`[{path,name,mtime,dir_size,ctx_size,agent,session_title}]`，按 mtime 降序。**注册表就是项目名册**：根目录下未登记的目录（顺手 clone 的仓库、杂物）不出现在列表里；经 daemon 建项目/开会话的目录都会自动登记 |
 | POST | `/projects` | `{name?, agent?}`；name 经 slugify，空则 `YYYY-MM-DD-HHMM`；已存在 → 409；agent 给了就写注册表。**响应 = 完整项目对象（至少 `{path,name,agent}`）**，客户端依赖 `path` 直接开会话 |
+| POST | `/projects/pin` | `{path, pinned}`：置顶 / 取消置顶，daemon 侧存（`~/.local/state/aaa-daemon/pins.json`），随后广播 `projects_changed`；`GET /projects` 行多一个 `pinned`。列表口径：置顶的在最前，组内仍按最近更新 |
 | POST | `/projects/delete` | `{paths:[…]}` → `{results:[{path, ok, purged:[{agent_label,count}]}]}`；目录删除 + Claude Code 会话存储 purge（`purged` 里只会有 `Claude` 一项） |
 | GET | `/sessions` | 全部会话（含 exited） |
 | POST | `/sessions` | `{project_path, agent, resume}`；resume=true 时按 aaa 逻辑找最近会话套 resume 模板；目录不存在则创建（但见 SSD 守卫） |

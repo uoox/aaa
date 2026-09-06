@@ -40,6 +40,8 @@ pub struct App {
     pub bound_port: std::sync::atomic::AtomicU16,
     /// v1.1 task inbox
     pub inbox: std::sync::Mutex<crate::inbox::Inbox>,
+    /// v1.8 置顶的项目路径（三端共享）
+    pub pins: std::sync::Mutex<crate::pins::Pins>,
     /// v1.3 账号 plan 配额：5h / 7d 来自最近一次 statusLine 的 rate_limits，
     /// 按模型窗口（Fable）来自 quota.rs 对 claude.ai usage 接口的轮询
     pub plan_usage: std::sync::Mutex<Option<Value>>,
@@ -336,6 +338,11 @@ async fn projects_list(State(app): State<SharedApp>) -> ApiResult<Json<Value>> {
         let rows = stores::collect(&app2.paths, &mut cache, &app2.cfg.project_root);
         let reg = Registry::load(&app2.cfg.project_root);
         let namer = Namer::new(&app2.paths, app2.cfg.namer);
+        let pinned: std::collections::HashSet<String> = rows
+            .iter()
+            .filter(|r| app2.pins.lock().unwrap().is_pinned(&r.path))
+            .map(|r| r.path.clone())
+            .collect();
         let out: Vec<Value> = rows
             .iter()
             // 注册表就是项目名册：根目录下没登记的目录（顺手 clone 的仓库、
@@ -371,6 +378,8 @@ async fn projects_list(State(app): State<SharedApp>) -> ApiResult<Json<Value>> {
                     "ctx_size": r.ctx_size.unwrap_or(0),
                     "agent": agent,
                     "session_title": if title.is_empty() { Value::Null } else { Value::String(title) },
+                    // v1.8：置顶（POST /projects/pin）
+                    "pinned": pinned.contains(&r.path),
                 })
             })
             .collect();
@@ -428,7 +437,27 @@ async fn projects_create(
         "ctx_size": 0,
         "agent": agent,
         "session_title": Value::Null,
+        "pinned": false,
     })))
+}
+
+#[derive(Deserialize)]
+struct PinBody {
+    path: String,
+    pinned: bool,
+}
+
+/// 置顶 / 取消置顶：daemon 侧存，三端一起变；随后广播 projects_changed
+async fn projects_pin(State(app): State<SharedApp>, Json(body): Json<PinBody>) -> ApiResult<Json<Value>> {
+    if !body.path.starts_with('/') {
+        return Err(ApiError::not_found("path must be absolute"));
+    }
+    let key = stores::realpath(&body.path);
+    let changed = app.pins.lock().unwrap().set_pinned(&key, body.pinned);
+    if changed {
+        app.hub.projects_changed();
+    }
+    Ok(Json(json!({"ok": true, "path": key, "pinned": body.pinned})))
 }
 
 #[derive(Deserialize)]
@@ -442,6 +471,7 @@ async fn projects_delete(
 ) -> ApiResult<Json<Value>> {
     ssd_guard(&app)?;
     let app2 = Arc::clone(&app);
+    let deleted_paths: Vec<String> = body.paths.iter().map(|p| stores::realpath(p)).collect();
     let results = blocking(move || {
         // deletion stays fully serialized (no LLM work in here, cost is small)
         let _g = app2.store_lock.lock().unwrap();
@@ -499,6 +529,9 @@ async fn projects_delete(
         results
     })
     .await?;
+    for p in &deleted_paths {
+        app.pins.lock().unwrap().forget(p);
+    }
     app.hub.projects_changed();
     Ok(Json(json!({"results": results})))
 }
@@ -1424,6 +1457,7 @@ pub fn router(app: SharedApp) -> Router {
         .route("/api/v1/agents", get(agents_list))
         .route("/api/v1/projects", get(projects_list).post(projects_create))
         .route("/api/v1/projects/delete", post(projects_delete))
+        .route("/api/v1/projects/pin", post(projects_pin))
         .route("/api/v1/sessions", get(sessions_list).post(sessions_create))
         .route("/api/v1/sessions/{id}", delete(session_delete))
         .route("/api/v1/sessions/{id}/input", post(session_input))

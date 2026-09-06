@@ -111,6 +111,8 @@ fun parseChecklist(md: String): List<ChecklistItem> = md.lines().mapNotNull { ra
     val ctx_size: Long = 0,
     val agent: String? = null,
     val session_title: String? = null,
+    /** v1.8：置顶（daemon 侧存，三端一起变） */
+    val pinned: Boolean = false,
 )
 @Serializable data class PortInfo(val port: Int, val cmd: String = "")
 @Serializable data class ScreenText(val text: String = "", val alternate_screen: Boolean = false)

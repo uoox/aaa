@@ -287,6 +287,9 @@ pub struct Project {
     pub agent: Option<String>,
     #[serde(default)]
     pub session_title: Option<String>,
+    /// v1.8：置顶（daemon 侧存，三端一起变）
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 // ── 其它 REST 响应 ──────────────────────────────────────────────────────────

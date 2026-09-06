@@ -100,6 +100,11 @@ class DaemonClient(
         return json.decodeFromJsonElement(ListSerializer(ProjectDeleteResult.serializer()), resp["results"]!!)
     }
 
+    /** 置顶 / 取消置顶；列表靠随后的 projects_changed 帧重拉 */
+    suspend fun setPinned(path: String, pinned: Boolean) {
+        post("/projects/pin", buildJsonObject { put("path", path); put("pinned", pinned) }.toString())
+    }
+
     suspend fun sessions(): List<Session> = json.decodeFromString(ListSerializer(Session.serializer()), get("/sessions"))
 
     suspend fun createSession(projectPath: String, agent: String, resume: Boolean, feedInbox: Boolean = true, fresh: Boolean = false): Session {

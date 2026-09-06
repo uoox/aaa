@@ -15,6 +15,7 @@ pub mod namer;
 pub mod pair;
 pub mod paths;
 pub mod perms;
+pub mod pins;
 pub mod pool;
 pub mod quota;
 pub mod ports;

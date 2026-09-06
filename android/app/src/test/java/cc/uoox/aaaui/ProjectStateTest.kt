@@ -92,6 +92,12 @@ class ProjectStateTest {
         assertEquals(ProjectState.INACTIVE, rows2[0].state)
     }
 
+    @Test fun pinnedProjectsComeFirst() {
+        val old = p.copy(path = "/r/old", name = "old", mtime = "2026-01-01T00:00:00Z", pinned = true)
+        val fresh = p.copy(path = "/r/new", name = "new", mtime = "2026-09-01T00:00:00Z")
+        assertEquals(listOf("old", "new"), projectRows(listOf(fresh, old), emptyList()).map { it.project.name })
+    }
+
     @Test fun oldDaemonWithoutUpdatedAtFallsBackToCreatedAt() {
         val p2 = p.copy(path = "/r/c", name = "c", mtime = "2026-09-05T00:00:00Z")
         val early = s("a1", "waiting", "2026-09-02T00:00:00Z").copy(created_at = "2026-09-02T00:00:00Z")

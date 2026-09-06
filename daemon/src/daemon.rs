@@ -110,6 +110,7 @@ fn run() {
     });
     pool.restore_persisted();
     let inbox = crate::inbox::Inbox::load(&paths.state_dir());
+    let pins = crate::pins::Pins::load(&paths.state_dir());
 
     let app: SharedApp = Arc::new(App {
         cfg,
@@ -120,6 +121,7 @@ fn run() {
         store_lock: std::sync::Mutex::new(()),
         bound_port: std::sync::atomic::AtomicU16::new(0),
         inbox: std::sync::Mutex::new(inbox),
+        pins: std::sync::Mutex::new(pins),
         plan_usage: std::sync::Mutex::new(None),
         root_state: std::sync::atomic::AtomicU8::new(root_state.as_u8()),
         restarting: std::sync::atomic::AtomicBool::new(false),
@@ -172,8 +174,14 @@ fn run() {
                 let mut iv = tokio::time::interval(crate::quota::POLL_INTERVAL);
                 let mut last_err: Option<String> = None;
                 let mut ticks: u64 = 0;
+                // 被 claude.ai 限流（429）后歇 5 分钟再问；成功一次恢复每分钟
+                let mut backoff_ticks: u64 = 0;
                 loop {
                     iv.tick().await;
+                    if backoff_ticks > 0 {
+                        backoff_ticks -= 1;
+                        continue;
+                    }
                     // 没有活着的 claude 会话时数字基本不动（别的设备在用除外），
                     // 降到每 5 分钟问一次
                     let any_live = app.pool.all().iter().any(|s| {
@@ -201,6 +209,9 @@ fn run() {
                         }
                         Ok(Some(Ok(None))) => {}
                         Ok(Some(Err(e))) => {
+                            if e == "HTTP 429" {
+                                backoff_ticks = crate::quota::RATE_LIMIT_BACKOFF_TICKS;
+                            }
                             // 同一个错只报一次，网断了不刷屏
                             if last_err.as_deref() != Some(e.as_str()) {
                                 eprintln!("quota: usage poll failed: {e}");

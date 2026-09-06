@@ -152,7 +152,7 @@ fun projectRows(projects: List<Project>, sessions: List<Session>): List<ProjectR
         .maxOfOrNull { it.updatedIso() }
         ?.takeIf { it.isNotBlank() }
     ProjectRow(p, primary, projectStateOf(primary), latest ?: p.mtime)
-}.sortedWith(compareByDescending<ProjectRow> { it.updatedIso }.thenBy { it.project.path })
+}.sortedWith(compareByDescending<ProjectRow> { it.project.pinned }.thenByDescending { it.updatedIso }.thenBy { it.project.path })
 
 private fun ProjectState.color(): Color = when (this) {
     ProjectState.RUNNING -> Tok.Green
@@ -463,6 +463,7 @@ fun ProjectSwitcher(store: AppStore, currentPath: String?, onHome: () -> Unit, o
                         else StateTag(row.state)
                     }
                     Spacer(Modifier.width(10.dp))
+                    if (row.project.pinned) Text("📌", fontSize = 11.sp, modifier = Modifier.padding(end = 4.dp))
                     Text(
                         row.title, color = if (row.alive || current) Tok.Ink else Tok.Dim, fontSize = 14.sp,
                         fontWeight = if (current) FontWeight.Bold else FontWeight.Medium,
@@ -527,6 +528,7 @@ private fun ProjectRowItem(row: ProjectRow, busy: Boolean, onClick: () -> Unit, 
                 else StateTag(row.state)
             }
             Spacer(Modifier.width(10.dp))
+            if (row.project.pinned) Text("📌", fontSize = 12.sp, modifier = Modifier.padding(end = 4.dp))
             Text(
                 row.title, color = if (row.alive) Tok.Ink else Tok.Dim, fontSize = 15.sp, fontWeight = FontWeight.Bold,
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
@@ -626,6 +628,13 @@ fun ProjectActionsSheet(
             if (primary != null && primary.state == "exited") {
                 // 点行 = resume 新会话；上一条已退出的会话仍留着 transcript 回放入口
                 SheetItem("↺", "上次会话回放", "消息流 · 终端回放") { onDismiss(); openSession(primary.id, "") }
+            }
+            SheetItem("📌", if (p.pinned) "取消置顶" else "置顶", "列表最前") {
+                scope.launch {
+                    runCatching { store.client?.setPinned(p.path, !p.pinned) }.onFailure { toast("失败：${it.message}") }
+                    store.refreshProjects()
+                }
+                onDismiss()
             }
             SheetItem("＞", "在此目录开终端", "zsh") {
                 scope.launch {
