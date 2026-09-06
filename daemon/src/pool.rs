@@ -107,9 +107,10 @@ pub struct Meta {
     /// statusLine 转来的本会话用量（模型 / 上下文占比 / 费用），持久化以便退出后还能看
     #[serde(default)]
     pub usage: Option<serde_json::Value>,
-    /// v1.7：每轮结束后 haiku 写的一句话（summary.rs），最新在末尾，最多 KEEP 条；持久化
+    /// v1.7：整个对话的进度清单（summary.rs）：`- [x] 已做` / `- [ ] 未做` 的 markdown，
+    /// 每轮结束后 haiku 重写一遍；持久化
     #[serde(default)]
-    pub summaries: Vec<crate::summary::TurnSummary>,
+    pub summary: String,
 }
 
 fn default_true() -> bool {
@@ -197,7 +198,7 @@ impl Session {
                 compacting: false,
                 asking_hint_inst: None,
                 usage: None,
-                summaries: Vec::new(),
+                summary: String::new(),
             }),
             parser: Mutex::new(None),
             out_tx: tx,
@@ -242,8 +243,8 @@ impl Session {
             "compacting": meta.compacting,
             "user_killed": meta.user_killed,
             "usage": meta.usage,
-            // v1.7：每轮一句话摘要，最新在末尾
-            "summaries": meta.summaries,
+            // v1.7：整个对话的进度清单（markdown 任务列表）
+            "summary": meta.summary,
         })
     }
 
@@ -625,7 +626,7 @@ impl SessionPool {
             compacting: false,
             asking_hint_inst: None,
             usage: None,
-            summaries: Vec::new(),
+            summary: String::new(),
         };
         // Backpressure: send never blocks; a client that can't keep up drops
         // to Lagged and gets a fresh full redraw (api::attach_loop), so a slow

@@ -81,18 +81,35 @@ pub struct Session {
     /// 没到之前为 None，详情面板显示空态
     #[serde(default)]
     pub usage: Option<SessionUsage>,
-    /// v1.7：每轮结束后 daemon 让 haiku 写的一句话，最新在末尾；详情面板「摘要」
+    /// v1.7：整个对话的进度清单（`- [x] 已做` / `- [ ] 未做` 的 markdown），每轮结束后
+    /// daemon 让 haiku 重写；详情面板「进度」
     #[serde(default)]
-    pub summaries: Vec<TurnSummary>,
+    pub summary: String,
 }
 
-/// 一轮的一句话摘要（Session JSON 的 `summaries[]`）
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
-pub struct TurnSummary {
-    #[serde(default)]
-    pub ts: String,
-    #[serde(default)]
+/// 进度清单的一项（解析 `summary` 的一行）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChecklistItem {
+    pub done: bool,
     pub text: String,
+}
+
+/// `- [x] …` / `- [ ] …` 行 → 项；其它行忽略
+pub fn parse_checklist(md: &str) -> Vec<ChecklistItem> {
+    md.lines()
+        .filter_map(|raw| {
+            let l = raw.trim().trim_start_matches(['-', '*']).trim_start();
+            let (done, rest) = if let Some(r) = l.strip_prefix("[x]").or_else(|| l.strip_prefix("[X]")) {
+                (true, r)
+            } else if let Some(r) = l.strip_prefix("[ ]") {
+                (false, r)
+            } else {
+                return None;
+            };
+            let text = rest.trim();
+            (!text.is_empty()).then(|| ChecklistItem { done, text: text.to_string() })
+        })
+        .collect()
 }
 
 /// 会话用量（Session JSON 的 `usage`）。字段全部可缺省：daemon 拿到多少给多少。
@@ -672,15 +689,14 @@ mod tests {
     }
 
     #[test]
-    fn session_summaries_parse_and_default_empty() {
-        let s: Session = serde_json::from_str(
-            r#"{"id":"s","summaries":[{"ts":"2026-09-06T10:00:00Z","text":"修好了登录页"}]}"#,
-        )
-        .unwrap();
-        assert_eq!(s.summaries.len(), 1);
-        assert_eq!(s.summaries[0].text, "修好了登录页");
+    fn session_summary_checklist_parses() {
+        let s: Session = serde_json::from_str(r#"{"id":"s","summary":"- [x] 修好登录页\n- [ ] 补测试\n瞎话"}"#).unwrap();
+        let items = parse_checklist(&s.summary);
+        assert_eq!(items.len(), 2);
+        assert!(items[0].done && items[0].text == "修好登录页");
+        assert!(!items[1].done && items[1].text == "补测试");
         let old: Session = serde_json::from_str(r#"{"id":"s"}"#).unwrap();
-        assert!(old.summaries.is_empty(), "老 daemon 没有这个字段");
+        assert!(parse_checklist(&old.summary).is_empty(), "老 daemon 没有这个字段");
     }
 
     #[test]

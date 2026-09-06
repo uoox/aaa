@@ -16,7 +16,7 @@ use gpui::{Context, SharedString, div, prelude::*, px, relative};
 
 use super::kit::*;
 use super::{Page, RootView};
-use crate::model::{
+use crate::model::{parse_checklist, 
     Artifact, InboxItem, PlanUsage, Session, SessionUsage, is_muted, toggle_muted,
 };
 use crate::theme;
@@ -518,7 +518,7 @@ impl RootView {
             .min_h(px(0.))
             .overflow_y_scroll()
             .child(Self::section("会话", Self::render_usage_section(s.usage.as_ref())))
-            .child(Self::section("摘要", Self::render_summaries_section(s, &now)))
+            .child(Self::section("进度", Self::render_checklist_section(s)))
             .child(Self::section("产物", self.render_artifacts_section(d, &now, cx)))
             .child(Self::section("收件箱", self.render_inbox_section(s, cx)))
             .child(Self::section("通知", self.render_notify_section(s, cx)));
@@ -539,35 +539,42 @@ impl RootView {
         )
     }
 
-    /// 每轮一句话（daemon 在每次 Stop 后让 haiku 写的），最新在上；时间用产物同一格式
-    fn render_summaries_section(s: &Session, now: &DateTime<chrono::Local>) -> gpui::Div {
-        if s.summaries.is_empty() {
-            return Self::empty_hint("每轮回复结束后这里会多一句「这轮做了什么」");
+    /// 整个对话的进度清单（daemon 在每次 Stop 后让 haiku 重写）：☑ 已做、☐ 未做
+    fn render_checklist_section(s: &Session) -> gpui::Div {
+        let items = parse_checklist(&s.summary);
+        if items.is_empty() {
+            return Self::empty_hint("每轮回复结束后这里会更新一份「做了什么 / 还没做什么」");
         }
-        let mut col = div().flex().flex_col().gap(px(7.));
-        for t in s.summaries.iter().rev() {
-            let time = fmt_artifact_time(&t.ts, now, &chrono::Local).unwrap_or_default();
+        let (done, total) = (items.iter().filter(|i| i.done).count(), items.len());
+        let mut col = div().flex().flex_col().gap(px(5.));
+        col = col.child(
+            div()
+                .font_family("Menlo")
+                .text_size(px(10.5))
+                .text_color(c(theme::faint()))
+                .pb(px(2.))
+                .child(SharedString::from(format!("{done} / {total} 完成"))),
+        );
+        for it in items {
             col = col.child(
                 div()
                     .flex()
                     .items_start()
-                    .gap(px(8.))
+                    .gap(px(7.))
                     .child(
                         div()
                             .flex_none()
-                            .w(px(38.))
-                            .font_family("Menlo")
-                            .text_size(px(10.5))
-                            .text_color(c(theme::faint()))
-                            .child(SharedString::from(time)),
+                            .text_size(px(12.))
+                            .text_color(c(if it.done { theme::green() } else { theme::faint() }))
+                            .child(if it.done { "☑" } else { "☐" }),
                     )
                     .child(
                         div()
                             .flex_1()
                             .min_w(px(0.))
                             .text_size(px(12.))
-                            .text_color(c(theme::ink()))
-                            .child(SharedString::from(t.text.clone())),
+                            .text_color(c(if it.done { theme::dim() } else { theme::ink() }))
+                            .child(SharedString::from(it.text)),
                     ),
             );
         }

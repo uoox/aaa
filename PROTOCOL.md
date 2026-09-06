@@ -93,7 +93,7 @@ daemon 在启动时用 `zsh -lic` 问一次「终端里应有的 PATH」（带�
   "pid": 12345, "exit_code": null,
   "resume_id": "9f2c81…",        // 本次启动实际 resume 的会话 id（无则 null）
   "created_at": "…", "last_output_at": "…",
-  "summaries": [{"ts":"…","text":"修好了登录页，测试全过"}],  // v1.7：每轮结束后 haiku 写的一句话，最新在末尾，最多 40 条
+  "summary": "- [x] 修好登录页\n- [ ] 补测试",   // v1.7：整个对话的进度清单（markdown 任务列表），每轮结束后 haiku 重写
   "updated_at": "…"               // v1.6：最近一次状态翻转（running ⇄ waiting、exited）或改名的时刻；
                                   // 不随 PTY 字节跳（last_output_at 会），项目列表按它排序
 }
@@ -213,7 +213,7 @@ daemon 起 claude 会话时追加 `--settings ~/.local/state/aaa-daemon/claude-h
 |---|---|
 | `SessionStart` | `source≠compact` → `state=waiting`（TUI 就绪停在输入框），触发收件箱投喂 |
 | `UserPromptSubmit` | `state=running`，清 `error` |
-| `Stop` / `Notification(idle_prompt)` | `state=waiting`（精确的「这轮跑完」；触发收件箱投喂）。`Stop` 还触发**每轮摘要**：daemon 让 haiku（`claude -p --model haiku`，与 namer 同一开关 `namer`）用一句话概括这轮（最近一条用户消息起：要求、用过的工具、最后回复），写进会话的 `summaries[]`；mac 详情面板「摘要」、Android 会话菜单「摘要」按最新在上列出 |
+| `Stop` / `Notification(idle_prompt)` | `state=waiting`（精确的「这轮跑完」；触发收件箱投喂）。`Stop` 还触发**进度清单**：daemon 让 haiku（`claude -p --model haiku`，与 namer 同一开关 `namer`）拿「上一版清单 + 这一轮（要求、用过的工具、最后回复）」重写整个对话的 todo list——`- [x] 已做` / `- [ ] 未做`，已做在前，最多 16 项——写进会话的 `summary`；第一份（新会话或 resume 进来还没有清单）看整段对话。mac 详情面板「进度」、Android 会话菜单「进度」渲染成 ☑ / ☐ |
 | `StopFailure` | `state=waiting`，`error`=错误类型（rate_limit / overloaded / authentication_failed…） |
 | `PreToolUse`（matcher `AskUserQuestion`） | 立刻 `asking=true`，不等 transcript 落盘 |
 | `PreCompact` / `PostCompact` | `compacting` 开/关（「整理上下文中」） |

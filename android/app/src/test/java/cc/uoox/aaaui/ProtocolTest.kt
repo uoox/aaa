@@ -88,10 +88,11 @@ class ProtocolTest {
         assertEquals("跑一遍测试", items[0].text)
     }
 
-    @Test fun sessionSummariesParseAndDefaultEmpty() {
-        val s = json.decodeFromString<Session>("""{"id":"s","summaries":[{"ts":"2026-09-06T10:00:00Z","text":"修好了登录页"}]}""")
-        assertEquals("修好了登录页", s.summaries.single().text)
-        assertTrue(json.decodeFromString<Session>("""{"id":"s"}""").summaries.isEmpty())
+    @Test fun sessionChecklistParses() {
+        val s = json.decodeFromString<Session>("""{"id":"s","summary":"- [x] 修好登录页\n- [ ] 补测试\n瞎话"}""")
+        val items = parseChecklist(s.summary)
+        assertEquals(listOf(ChecklistItem(true, "修好登录页"), ChecklistItem(false, "补测试")), items)
+        assertTrue(parseChecklist(json.decodeFromString<Session>("""{"id":"s"}""").summary).isEmpty())
     }
 
     @Test fun uploadResultParses() {

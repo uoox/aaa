@@ -449,33 +449,35 @@ fun SessionScreen(
         ArtifactsSheet(store, sessionId, onDismiss = { showArtifacts = false })
     }
     if (showSummaries && s != null) {
-        SummariesSheet(s.summaries, onDismiss = { showSummaries = false })
+        ChecklistSheet(s.summary, onDismiss = { showSummaries = false })
     }
 }
 
-// ---------- 摘要（每轮一句话） ----------
+// ---------- 进度（整个对话的清单） ----------
 
-/** daemon 在每次 Stop 后让 haiku 写的一句话，最新在上。会话对象自带，不用另拉。 */
+/** daemon 在每次 Stop 后让 haiku 重写的进度清单：☑ 已做、☐ 未做。会话对象自带，不用另拉。 */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SummariesSheet(summaries: List<TurnSummary>, onDismiss: () -> Unit) {
+fun ChecklistSheet(summary: String, onDismiss: () -> Unit) {
+    val items = remember(summary) { parseChecklist(summary) }
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = Tok.Surface) {
         Column(Modifier.fillMaxWidth().padding(bottom = 20.dp)) {
             Row(Modifier.padding(horizontal = 18.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("摘要", color = Tok.Ink, fontSize = 16.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-                if (summaries.isNotEmpty()) Text("${summaries.size}", color = Tok.Faint, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                Text("进度", color = Tok.Ink, fontSize = 16.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                if (items.isNotEmpty()) Text(checklistProgress(items), color = Tok.Faint, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
             }
-            if (summaries.isEmpty()) {
+            if (items.isEmpty()) {
                 Text(
-                    "每轮回复结束后这里会多一句「这轮做了什么」",
+                    "每轮回复结束后这里会更新一份「做了什么 / 还没做什么」",
                     color = Tok.Faint, fontSize = 13.sp, modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 24.dp),
                 )
             } else {
-                LazyColumn(Modifier.fillMaxWidth().heightIn(max = 480.dp)) {
-                    items(summaries.asReversed(), key = { it.ts + it.text }) { t ->
-                        Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 8.dp), verticalAlignment = Alignment.Top) {
-                            Text(artifactTimeLabel(t.ts), color = Tok.Faint, fontSize = 11.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.width(48.dp).padding(top = 2.dp))
-                            Text(t.text, color = Tok.Ink, fontSize = 14.sp, lineHeight = 20.sp, modifier = Modifier.weight(1f))
+                LazyColumn(Modifier.fillMaxWidth().heightIn(max = 520.dp)) {
+                    items(items.size) { i ->
+                        val it = items[i]
+                        Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 7.dp), verticalAlignment = Alignment.Top) {
+                            Text(if (it.done) "☑" else "☐", color = if (it.done) Tok.Green else Tok.Faint, fontSize = 16.sp, modifier = Modifier.width(26.dp))
+                            Text(it.text, color = if (it.done) Tok.Dim else Tok.Ink, fontSize = 14.sp, lineHeight = 20.sp, modifier = Modifier.weight(1f))
                         }
                     }
                 }
@@ -484,6 +486,9 @@ fun SummariesSheet(summaries: List<TurnSummary>, onDismiss: () -> Unit) {
         }
     }
 }
+
+/** 菜单副标题 / 抽屉头：`3/5 完成` */
+fun checklistProgress(items: List<ChecklistItem>): String = "${items.count { it.done }}/${items.size} 完成"
 
 // ---------- 产物（会话里发布的 Artifact） ----------
 
@@ -1110,7 +1115,7 @@ fun SessionMenuSheet(
                     if (urls.isEmpty()) toast("回放里没有链接") else urlsDialog = urls
                 }
             }
-            SheetItem("📝", "摘要", if (s.summaries.isEmpty()) "每轮一句话" else s.summaries.last().text, onClick = onSummaries)
+            SheetItem("📝", "进度", parseChecklist(s.summary).let { if (it.isEmpty()) "做了什么 / 还没做什么" else checklistProgress(it) }, onClick = onSummaries)
             SheetItem("📦", "产物", "会话里发布的 Artifact", onClick = onArtifacts)
             SheetItem("🔁", "重启 agent", "resume 同一会话") {
                 scope.launch {

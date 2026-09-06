@@ -42,11 +42,23 @@ import java.net.URLDecoder
     val user_killed: Boolean = false,
     /** v1.4：Claude Code statusline 喂来的用量（模型 / 上下文占比 / 花费）；没有就 null */
     val usage: SessionUsage? = null,
-    /** v1.7：每轮结束后 daemon 让 haiku 写的一句话，最新在末尾 */
-    val summaries: List<TurnSummary> = emptyList(),
+    /** v1.7：整个对话的进度清单（`- [x] 已做` / `- [ ] 未做` 的 markdown），每轮结束后 daemon 重写 */
+    val summary: String = "",
 )
 
-@Serializable data class TurnSummary(val ts: String = "", val text: String = "")
+/** 进度清单的一项（[parseChecklist] 解析 `summary` 的一行） */
+data class ChecklistItem(val done: Boolean, val text: String)
+
+/** `- [x] …` / `- [ ] …` 行 → 项；其它行忽略 */
+fun parseChecklist(md: String): List<ChecklistItem> = md.lines().mapNotNull { raw ->
+    val l = raw.trim().trimStart('-', '*').trimStart()
+    val (done, rest) = when {
+        l.startsWith("[x]") || l.startsWith("[X]") -> true to l.substring(3)
+        l.startsWith("[ ]") -> false to l.substring(3)
+        else -> return@mapNotNull null
+    }
+    rest.trim().takeIf { it.isNotEmpty() }?.let { ChecklistItem(done, it) }
+}
 
 @Serializable data class SessionUsage(
     val model: String? = null,
