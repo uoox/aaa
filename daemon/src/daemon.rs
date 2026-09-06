@@ -112,6 +112,7 @@ fn run() {
     let inbox = crate::inbox::Inbox::load(&paths.state_dir());
     let pins = crate::pins::Pins::load(&paths.state_dir());
     let history = crate::history::History::load(&paths.state_dir());
+    let days = crate::history::Days::load(&paths.state_dir());
 
     let app: SharedApp = Arc::new(App {
         cfg,
@@ -124,6 +125,7 @@ fn run() {
         inbox: std::sync::Mutex::new(inbox),
         pins: std::sync::Mutex::new(pins),
         history: std::sync::Mutex::new(history),
+        days: std::sync::Mutex::new(days),
         plan_usage: std::sync::Mutex::new(None),
         root_state: std::sync::atomic::AtomicU8::new(root_state.as_u8()),
         restarting: std::sync::atomic::AtomicBool::new(false),
@@ -224,6 +226,18 @@ fn run() {
                         }
                         Ok(None) | Err(_) => {}
                     }
+                }
+            });
+        }
+        // 日历摘要：起来 30s 后一次，之后每 5 分钟看哪些天的输入变了（history.rs）
+        {
+            let app = Arc::clone(&app);
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                loop {
+                    let app2 = Arc::clone(&app);
+                    let _ = tokio::task::spawn_blocking(move || crate::history::refresh_days(&app2, 2)).await;
+                    tokio::time::sleep(Duration::from_secs(300)).await;
                 }
             });
         }
@@ -349,6 +363,35 @@ fn run() {
             env!("CARGO_PKG_VERSION"),
             app.cfg.project_root.display()
         );
+        // 上一次 /restart 记下的会话：起来后自动 resume（走 POST /sessions，与客户端同一条路）
+        {
+            let file = app.paths.state_dir().join("resume_after_restart.json");
+            if let Ok(body) = std::fs::read(&file) {
+                let _ = std::fs::remove_file(&file);
+                let port = local.port();
+                let token = app.cfg.token.clone();
+                let list: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap_or_default();
+                if !list.is_empty() {
+                    eprintln!("restart: resuming {} session(s)", list.len());
+                    tokio::task::spawn_blocking(move || {
+                        std::thread::sleep(Duration::from_millis(1500));
+                        for item in list {
+                            let body = serde_json::json!({
+                                "project_path": item["project_path"], "agent": item["agent"], "resume": true
+                            });
+                            let r = ureq::post(&format!("http://127.0.0.1:{port}/api/v1/sessions"))
+                                .set("Authorization", &format!("Bearer {token}"))
+                                .timeout(Duration::from_secs(20))
+                                .send_json(body);
+                            if let Err(e) = r {
+                                eprintln!("restart: resume {} failed: {e}", item["project_path"]);
+                            }
+                            std::thread::sleep(Duration::from_millis(400));
+                        }
+                    });
+                }
+            }
+        }
         let router = crate::api::router(Arc::clone(&app));
         axum::serve(
             listener,

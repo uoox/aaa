@@ -157,6 +157,10 @@ class DaemonClient(
     suspend fun history(limit: Int = 300): List<HistoryEntry> =
         json.decodeFromString(HistoryResponse.serializer(), get("/history?limit=$limit")).entries
 
+    /** 日历：每天会话数 + haiku 摘要 */
+    suspend fun historyDays(): List<DayDigest> =
+        json.decodeFromString(DaysResponse.serializer(), get("/history/days")).days
+
     // ---------- v1.4 ----------
 
     /** 套餐用量；plan 为 null = daemon 暂时没有数据 */

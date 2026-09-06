@@ -166,6 +166,20 @@ fun parseChecklist(md: String): List<ChecklistItem> = md.lines().mapNotNull { ra
     val last_state: String = "",
 )
 @Serializable data class HistoryResponse(val entries: List<HistoryEntry> = emptyList())
+/** 日历一天（GET /history/days）：会话数 + haiku 写的「这一天做了什么」（没写出来 text 为空） */
+@Serializable data class DayDigest(val date: String, val text: String = "", val sessions: Int = 0)
+@Serializable data class DaysResponse(val days: List<DayDigest> = emptyList())
+
+/** 历史搜索：标题 / 项目 / 清单里含关键字（不分大小写）；空串全匹配 */
+fun historyMatches(e: HistoryEntry, query: String): Boolean {
+    val q = query.trim().lowercase()
+    return q.isEmpty() || e.title.lowercase().contains(q) || e.project_name.lowercase().contains(q) || e.summary.lowercase().contains(q)
+}
+
+/** ISO 时间 → 本机时区日期 YYYY-MM-DD（日历分组；daemon 按它所在 Mac 的时区分，两边通常一致） */
+fun localDayOf(iso: String): String? = try {
+    java.time.Instant.parse(iso).atZone(java.time.ZoneId.systemDefault()).toLocalDate().toString()
+} catch (_: Exception) { null }
 
 // v1.1 inbox
 @Serializable data class InboxItem(val id: String, val text: String, val created_at: String = "")

@@ -164,6 +164,14 @@ impl Net {
     pub fn sessions(&self) -> impl Future<Output = Result<Vec<Session>>> + use<> {
         self.get_json("/sessions")
     }
+    /// 日历：每天会话数 + haiku 摘要
+    pub fn history_days(&self) -> impl Future<Output = Result<Vec<DayDigest>>> + use<> {
+        let fut = self.get_json::<serde_json::Value>("/history/days");
+        async move {
+            let v = fut.await?;
+            Ok(serde_json::from_value(v["days"].clone()).unwrap_or_default())
+        }
+    }
     /// 会话日志（含已退出、已删除），最新在前
     pub fn history(&self, limit: usize) -> impl Future<Output = Result<Vec<HistoryEntry>>> + use<> {
         let fut = self.get_json::<serde_json::Value>(&format!("/history?limit={limit}"));

@@ -44,6 +44,8 @@ pub struct App {
     pub pins: std::sync::Mutex<crate::pins::Pins>,
     /// v1.9 会话日志：所有出现过的会话，含已退出、已删除
     pub history: std::sync::Mutex<crate::history::History>,
+    /// v1.10 日历：按天的 haiku 摘要
+    pub days: std::sync::Mutex<crate::history::Days>,
     /// v1.3 账号 plan 配额：5h / 7d 来自最近一次 statusLine 的 rate_limits，
     /// 按模型窗口（Fable）来自 quota.rs 对 claude.ai usage 接口的轮询
     pub plan_usage: std::sync::Mutex<Option<Value>>,
@@ -299,6 +301,18 @@ async fn restart(
         app.restarting.store(false, std::sync::atomic::Ordering::SeqCst);
         return Err(ApiError::conflict(msg));
     }
+    // 重启不丢会话：记下活着的项目会话（终端除外），起来后自动 resume（daemon.rs）
+    let to_resume: Vec<Value> = alive
+        .iter()
+        .filter_map(|s| {
+            let m = s.meta.lock().unwrap();
+            (m.agent != "shell").then(|| json!({"project_path": m.project_path, "agent": m.agent}))
+        })
+        .collect();
+    let _ = std::fs::write(
+        app.paths.state_dir().join("resume_after_restart.json"),
+        serde_json::to_vec(&to_resume).unwrap_or_default(),
+    );
     for s in &alive {
         s.meta.lock().unwrap().user_killed = true;
         kill_and_wait(s, 25, 120).await;
@@ -455,6 +469,13 @@ async fn history_list(
 ) -> ApiResult<Json<Value>> {
     let list = app.history.lock().unwrap().list(q.limit.unwrap_or(200).min(crate::history::KEEP));
     Ok(Json(json!({"entries": list})))
+}
+
+/// 日历：每天的会话数 + haiku 写的「这一天做了什么」（还没写出来的 text 为空）
+async fn history_days(State(app): State<SharedApp>) -> ApiResult<Json<Value>> {
+    let entries = app.history.lock().unwrap().list(crate::history::KEEP);
+    let days = app.days.lock().unwrap();
+    Ok(Json(json!({"days": crate::history::calendar(&entries, &days)})))
 }
 
 #[derive(Deserialize)]
@@ -709,6 +730,30 @@ async fn sessions_create(
         feed_inbox: body.feed_inbox,
     };
     let sess = app.pool.spawn(spec).map_err(ApiError::internal)?;
+    // 进度清单跟着对话走：resume 出来的新会话把同一对话上一份清单带过来（先找池子里
+    // 已退出的同对话记录，再找会话日志），不用等第一轮跑完才重新有
+    if let Some(rid) = sess.meta.lock().unwrap().resume_id.clone() {
+        let from_pool = app.pool.all().into_iter().find_map(|s| {
+            if s.id == sess.id {
+                return None;
+            }
+            let m = s.meta.lock().unwrap();
+            (m.resume_id.as_deref() == Some(rid.as_str()) && !m.summary.is_empty()).then(|| m.summary.clone())
+        });
+        let carried = from_pool.or_else(|| {
+            app.history
+                .lock()
+                .unwrap()
+                .list(crate::history::KEEP)
+                .into_iter()
+                .find(|e| e.project_path == canon_str && !e.summary.is_empty())
+                .map(|e| e.summary)
+        });
+        if let Some(summary) = carried {
+            sess.meta.lock().unwrap().summary = summary;
+            sess.mark_dirty();
+        }
+    }
 
     Ok(Json(sess.to_json()))
 }
@@ -1485,6 +1530,7 @@ pub fn router(app: SharedApp) -> Router {
         .route("/api/v1/projects/delete", post(projects_delete))
         .route("/api/v1/projects/pin", post(projects_pin))
         .route("/api/v1/history", get(history_list))
+        .route("/api/v1/history/days", get(history_days))
         .route("/api/v1/sessions", get(sessions_list).post(sessions_create))
         .route("/api/v1/sessions/{id}", delete(session_delete))
         .route("/api/v1/sessions/{id}/input", post(session_input))

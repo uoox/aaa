@@ -88,6 +88,16 @@ class ProtocolTest {
         assertEquals("跑一遍测试", items[0].text)
     }
 
+    @Test fun historySearchAndDayGrouping() {
+        val e = HistoryEntry(id = "s", project_name = "Shop", title = "改登录页", summary = "- [x] 补测试", created_at = "2026-09-06T02:00:00Z")
+        assertTrue(historyMatches(e, "") && historyMatches(e, "登录") && historyMatches(e, "shop") && historyMatches(e, "测试"))
+        assertTrue(!historyMatches(e, "支付"))
+        assertTrue(localDayOf(e.created_at)!!.matches(Regex("\\d{4}-\\d{2}-\\d{2}")))
+        assertTrue(localDayOf("garbage") == null)
+        val d = json.decodeFromString<DaysResponse>("""{"days":[{"date":"2026-09-06","text":"- 修好登录","sessions":3}]}""").days.single()
+        assertEquals(3, d.sessions)
+    }
+
     @Test fun sessionChecklistParses() {
         val s = json.decodeFromString<Session>("""{"id":"s","summary":"- [x] 修好登录页\n- [ ] 补测试\n瞎话"}""")
         val items = parseChecklist(s.summary)

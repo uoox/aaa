@@ -114,6 +114,32 @@ pub struct HistoryEntry {
     pub last_state: String,
 }
 
+/// 日历一天（GET /history/days）
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+pub struct DayDigest {
+    #[serde(default)]
+    pub date: String,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub sessions: usize,
+}
+
+/// ISO 时间 → 本机时区的日期 YYYY-MM-DD（日历分组，与 daemon 同口径：都是这台 Mac 的时区）
+pub fn local_day_of(iso: &str) -> Option<String> {
+    let t = chrono::DateTime::parse_from_rfc3339(iso).ok()?;
+    Some(t.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string())
+}
+
+/// 历史搜索：标题 / 项目 / 清单里含关键字（不分大小写）；空串全匹配
+pub fn history_matches(e: &HistoryEntry, query: &str) -> bool {
+    let q = query.trim().to_lowercase();
+    q.is_empty()
+        || e.title.to_lowercase().contains(&q)
+        || e.project_name.to_lowercase().contains(&q)
+        || e.summary.to_lowercase().contains(&q)
+}
+
 /// 进度清单的一项（解析 `summary` 的一行）
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChecklistItem {
@@ -725,6 +751,16 @@ mod tests {
         assert!(s.is_terminal());
         let s: Session = serde_json::from_str(r#"{"id":"s_2","agent":"claude"}"#).unwrap();
         assert!(!s.is_terminal());
+    }
+
+    #[test]
+    fn history_search_matches_title_project_and_checklist() {
+        let e = HistoryEntry { title: "改登录页".into(), project_name: "Shop".into(), summary: "- [x] 补测试".into(), ..Default::default() };
+        assert!(history_matches(&e, ""));
+        assert!(history_matches(&e, "登录"));
+        assert!(history_matches(&e, "shop"));
+        assert!(history_matches(&e, "测试"));
+        assert!(!history_matches(&e, "支付"));
     }
 
     #[test]

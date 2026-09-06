@@ -366,6 +366,14 @@ pub struct RootView {
     pub plan: Option<PlanUsage>,
     /// 会话日志（GET /history），打开「历史」页时拉
     pub history: Vec<HistoryEntry>,
+    /// 日历（GET /history/days）
+    pub history_days: Vec<DayDigest>,
+    /// 历史页：日历里选中的日期（本地 YYYY-MM-DD）；None = 全部
+    pub history_day: Option<String>,
+    /// 历史页正在看的月份（YYYY-MM）
+    pub history_month: String,
+    /// 历史页搜索框
+    pub history_input: Entity<MiniInput>,
     /// 每会话的产物 / 改动状态（含各自的拉取节流器）
     detail: HashMap<String, detail_panel::SessionDetail>,
     /// 项目路径 → 收件箱条目
@@ -445,6 +453,7 @@ impl RootView {
         let token_input = cx.new(|cx| MiniInput::new(cx, "aaa_tk_…"));
         let root_input = cx.new(|cx| MiniInput::new(cx, "~/project"));
         let inbox_input = cx.new(|cx| MiniInput::new(cx, "加一条，Claude 空下来时自动喂给它"));
+        let history_input = cx.new(|cx| MiniInput::new(cx, "搜索：标题 / 项目 / 清单"));
         // 输入法送来的回车（见 MiniInput::replace_text_in_range）与键盘回车同一出口
         cx.subscribe(&new_input, |this, _, _: &mini_input::InputEvent, cx| {
             if matches!(this.modal, Modal::None) {
@@ -491,6 +500,10 @@ impl RootView {
             muted_projects: ui_state.muted_projects,
             plan: None,
             history: Vec::new(),
+            history_days: Vec::new(),
+            history_day: None,
+            history_month: chrono::Local::now().format("%Y-%m").to_string(),
+            history_input,
             detail: HashMap::new(),
             inbox: HashMap::new(),
             inbox_input,
