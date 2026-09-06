@@ -3,6 +3,8 @@ package cc.uoox.aaaui
 import android.widget.Toast
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
@@ -150,8 +152,22 @@ fun projectRows(projects: List<Project>, sessions: List<Session>): List<ProjectR
 private fun ProjectState.color(): Color = when (this) {
     ProjectState.RUNNING -> Tok.Green
     ProjectState.NEEDS_REPLY -> Tok.Amber
-    ProjectState.ACTIVE -> Tok.Dim
+    ProjectState.ACTIVE -> Tok.Accent
     ProjectState.INACTIVE -> Tok.Faint
+}
+
+/**
+ * 状态字做成带边框的小标签：只靠字色分不开「已激活 / 未激活」，边框把它从标题里
+ * 框出来，颜色（绿 / 黄 / 强调色 / 淡灰）再把四态拉开。定宽，标题才对得齐。
+ */
+@Composable
+private fun StateTag(state: ProjectState) {
+    Box(
+        Modifier.width(48.dp).border(1.dp, state.color().copy(alpha = 0.7f), RoundedCornerShape(5.dp)).padding(vertical = 2.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(state.label, color = state.color(), fontSize = 10.5.sp, fontFamily = FontFamily.Monospace, maxLines = 1)
+    }
 }
 
 /**
@@ -391,11 +407,11 @@ fun ProjectSwitcher(store: AppStore, currentPath: String?, onHome: () -> Unit, o
                         .padding(horizontal = 18.dp, vertical = 11.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Box(Modifier.width(44.dp), contentAlignment = Alignment.CenterStart) {
+                    Box(Modifier.width(48.dp), contentAlignment = Alignment.Center) {
                         if (busy == row.project.path) CircularProgressIndicator(Modifier.width(12.dp).height(12.dp), strokeWidth = 1.5.dp, color = Tok.Accent)
-                        else Text(row.state.label, color = row.state.color(), fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                        else StateTag(row.state)
                     }
-                    Spacer(Modifier.width(6.dp))
+                    Spacer(Modifier.width(10.dp))
                     Text(
                         row.title, color = if (row.alive || current) Tok.Ink else Tok.Dim, fontSize = 14.sp,
                         fontWeight = if (current) FontWeight.Bold else FontWeight.Medium,
@@ -454,12 +470,12 @@ private fun ProjectRowItem(row: ProjectRow, busy: Boolean, onClick: () -> Unit, 
                 .padding(horizontal = 16.dp, vertical = 11.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            // 状态字定宽，标题才对得齐；正在 resume 的行用转圈顶替
-            Box(Modifier.width(44.dp), contentAlignment = Alignment.CenterStart) {
+            // 正在 resume 的行用转圈顶替标签
+            Box(Modifier.width(48.dp), contentAlignment = Alignment.Center) {
                 if (busy) CircularProgressIndicator(Modifier.width(12.dp).height(12.dp), strokeWidth = 1.5.dp, color = Tok.Accent)
-                else Text(row.state.label, color = row.state.color(), fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                else StateTag(row.state)
             }
-            Spacer(Modifier.width(6.dp))
+            Spacer(Modifier.width(10.dp))
             Text(
                 row.title, color = if (row.alive) Tok.Ink else Tok.Dim, fontSize = 15.sp, fontWeight = FontWeight.Bold,
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
@@ -467,7 +483,7 @@ private fun ProjectRowItem(row: ProjectRow, busy: Boolean, onClick: () -> Unit, 
             Spacer(Modifier.width(8.dp))
             Text(relativeTime(row.updatedIso), color = Tok.Faint, fontSize = 11.sp)
         }
-        HorizontalDivider(color = Tok.Edge, thickness = 1.dp, modifier = Modifier.padding(start = 66.dp))
+        HorizontalDivider(color = Tok.Edge, thickness = 1.dp, modifier = Modifier.padding(start = 74.dp))
     }
 }
 

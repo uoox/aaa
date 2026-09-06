@@ -95,7 +95,7 @@ impl RowStatus {
         match self {
             RowStatus::Running => theme::green(),
             RowStatus::Asking => theme::amber(),
-            RowStatus::Active => theme::dim(),
+            RowStatus::Active => theme::accent(),
             RowStatus::Inactive => theme::faint(),
         }
     }
@@ -1008,13 +1008,20 @@ impl RootView {
                         this.open_project(p, cx);
                     }
                 }))
+                // 状态字做成带边框的小标签：只靠字色分不开「已激活 / 未激活」，边框把它
+                // 从标题里框出来，颜色（绿 / 黄 / 强调色 / 淡灰）再把四态拉开
                 .child(
                     div()
                         .flex_none()
-                        .w(px(38.))
-                        .text_size(px(10.))
+                        .px(px(4.))
+                        .py(px(1.))
+                        .rounded(px(4.))
+                        .border_1()
+                        .border_color(c(status.color()))
+                        .text_size(px(9.5))
                         .font_family("Menlo")
                         .text_color(c(status.color()))
+                        .when(status == RowStatus::Inactive, |el| el.opacity(0.8))
                         .child(status.label()),
                 )
                 .child(
