@@ -73,6 +73,11 @@ fun parseChecklist(md: String): List<ChecklistItem> = md.lines().mapNotNull { ra
     val lines_added: Long? = null,
     val lines_removed: Long? = null,
     val effort: String? = null,
+    /** v1.8：提示缓存——最近一次调用里从缓存读 / 新写进缓存 / 新读的 token，与命中率（0–100） */
+    val cache_read_tokens: Long? = null,
+    val cache_creation_tokens: Long? = null,
+    val fresh_input_tokens: Long? = null,
+    val cache_hit_pct: Double? = null,
 )
 
 // v1.4 套餐用量（GET /usage 与 /events 的 usage 帧共用同一个 plan 对象）

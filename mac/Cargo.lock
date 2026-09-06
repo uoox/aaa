@@ -4,10 +4,11 @@ version = 4
 
 [[package]]
 name = "aaa-ui-mac"
-version = "1.7.3"
+version = "1.8.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
+ "block2 0.6.2",
  "chrono",
  "dirs",
  "env_logger",
@@ -15,6 +16,9 @@ dependencies = [
  "gpui",
  "gpui_platform",
  "log",
+ "objc2 0.6.4",
+ "objc2-foundation 0.3.2",
+ "objc2-user-notifications",
  "pulldown-cmark",
  "qrcode",
  "reqwest",

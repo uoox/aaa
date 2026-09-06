@@ -86,7 +86,8 @@ daemon 在启动时用 `zsh -lic` 问一次「终端里应有的 PATH」（带�
   "usage": {                      // v1.4：statusLine 转来的本会话用量；没收到过为 null
     "model": "Fable 5.1", "model_id": "claude-fable-5-1", "effort": "medium",
     "context_pct": 4.0, "context_window_size": 1000000, "input_tokens": 39759, "output_tokens": 4,
-    "cost_usd": 0.28, "duration_ms": 15749, "lines_added": 0, "lines_removed": 0
+    "cost_usd": 0.28, "duration_ms": 15749, "lines_added": 0, "lines_removed": 0,
+    "cache_read_tokens": 30000, "cache_creation_tokens": 10000, "fresh_input_tokens": 200, "cache_hit_pct": 99  // v1.8：statusLine `context_window.current_usage`（最近一次调用的输入构成）；命中率 = 缓存读 ÷ 三项之和
   }
   "preview": "…最近 4 行纯文本…",
   "rows": 40, "cols": 120,
@@ -161,7 +162,7 @@ server → client JSON 文本帧：
 {"t":"usage","plan":{…}}                        // v1.4：plan 配额变化，形状同 GET /usage 的 plan
 ```
 
-通知策略（客户端行为，2026-09-02 用户拍板）：**只有一种通知——「完成」**。`running→waiting` 与 `running→exited`（非本机用户手动 kill）各弹一条，标题带项目名，正文是会话标题。不识别「里面要回什么」、不按问题去重、没有高低优先级、没有空转告警；daemon 侧不推送（ntfy 已移除）。按项目静音是客户端本地配置（两端各存各的）。用户正盯着的会话（窗口前台且当前页就是它）不弹。
+通知策略（客户端行为，2026-09-02 用户拍板）：**只有一种通知——「完成」**。`running→waiting` 与 `running→exited`（非本机用户手动 kill）各弹一条，标题带项目名，正文是会话标题。不识别「里面要回什么」、不按问题去重、没有高低优先级、没有空转告警；daemon 侧不推送（ntfy 已移除）。按项目静音是客户端本地配置（两端各存各的）。用户正盯着的会话（窗口前台且当前页就是它）不弹。mac（2026-09-06）：装成 .app 时走 UserNotifications，以 AAA 自己的名义发、点一下回到 App 打开那条会话（`userInfo.session`）；首次会弹系统的通知授权；`cargo run` 没有 bundle 时退回 `osascript`（发件人是脚本编辑器，点了不跳）。
 
 ## macOS 权限（一键授权）
 

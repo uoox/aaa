@@ -311,6 +311,13 @@ pub fn session_usage(body: &Value) -> Value {
         });
     let cost = body.get("cost");
     let g = |v: Option<&Value>, k: &str| v.and_then(|c| c.get(k)).cloned().unwrap_or(Value::Null);
+    // 最近一次 API 调用的输入构成（= 现在上下文里的东西）：新读的 / 新写进缓存的 / 从缓存读的。
+    // 命中率 = 缓存读 ÷ 三者之和；有 cache_read 就说明这段对话的缓存还活着
+    let cu = cw.and_then(|c| c.get("current_usage"));
+    let n = |k: &str| cu.and_then(|c| c.get(k)).and_then(Value::as_f64).unwrap_or(0.0);
+    let (fresh, created, read) = (n("input_tokens"), n("cache_creation_input_tokens"), n("cache_read_input_tokens"));
+    let total = fresh + created + read;
+    let cache_hit_pct = if cu.is_some() && total > 0.0 { json!((read / total * 100.0).round()) } else { Value::Null };
     json!({
         "model": g(body.get("model"), "display_name"),
         "model_id": g(body.get("model"), "id"),
@@ -318,6 +325,11 @@ pub fn session_usage(body: &Value) -> Value {
         "context_window_size": g(cw, "context_window_size"),
         "input_tokens": g(cw, "total_input_tokens"),
         "output_tokens": g(cw, "total_output_tokens"),
+        // v1.8：提示缓存（current_usage 里的三项 + 命中率）；老 Claude Code 没有 current_usage 就全 null
+        "cache_read_tokens": g(cu, "cache_read_input_tokens"),
+        "cache_creation_tokens": g(cu, "cache_creation_input_tokens"),
+        "fresh_input_tokens": g(cu, "input_tokens"),
+        "cache_hit_pct": cache_hit_pct,
         "cost_usd": g(cost, "total_cost_usd"),
         "duration_ms": g(cost, "total_duration_ms"),
         "lines_added": g(cost, "total_lines_added"),
@@ -418,10 +430,14 @@ mod tests {
         let u = session_usage(&body);
         assert_eq!(u["model"], "Fable 5.1");
         assert_eq!(u["context_pct"], 30.0, "60k of 200k");
+        assert_eq!(u["cache_read_tokens"], 30000);
+        assert_eq!(u["cache_creation_tokens"], 10000);
+        assert_eq!(u["cache_hit_pct"], 50.0, "30k read of 60k");
         assert_eq!(u["cost_usd"], 1.25);
         assert_eq!(u["effort"], "high");
         let with_pct = json!({"context_window": {"used_percentage": 42.5}});
         assert_eq!(session_usage(&with_pct)["context_pct"], 42.5, "native percentage wins");
+        assert!(session_usage(&with_pct)["cache_hit_pct"].is_null(), "没有 current_usage 就不算");
         let p = plan_usage(&body).unwrap();
         assert_eq!(p["five_hour"]["used_percentage"], 32);
         assert_eq!(p["seven_day"]["used_percentage"], 61);

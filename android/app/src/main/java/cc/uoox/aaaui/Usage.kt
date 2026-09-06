@@ -40,6 +40,8 @@ fun usageSubtitleSegments(usage: SessionUsage?): List<UsageSegment> {
     return buildList {
         usage.model?.takeIf { it.isNotBlank() }?.let { add(UsageSegment(it)) }
         usage.context_pct?.let { add(UsageSegment("上下文 " + pctText(it), pctColorLevel(it))) }
+        // 提示缓存命中率（最近一次调用：缓存读 ÷ 全部输入）；读为 0 = 缓存已失效
+        usage.cache_hit_pct?.let { add(UsageSegment("缓存 " + pctText(it))) }
         usage.cost_usd?.let { add(UsageSegment(String.format(Locale.US, "$%.2f", it))) }
     }
 }

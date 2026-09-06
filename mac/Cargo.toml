@@ -1,6 +1,6 @@
 [package]
 name = "aaa-ui-mac"
-version = "1.8.0"
+version = "1.8.1"
 edition = "2024"
 license = "Apache-2.0"
 
@@ -41,6 +41,10 @@ dirs = "6"
 chrono = "0.4"
 log = "0.4"
 env_logger = "0.11"
+objc2 = "0.6"
+objc2-foundation = "0.3"
+block2 = "0.6"
+objc2-user-notifications = { version = "0.3", features = ["UNUserNotificationCenter", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotification", "UNNotificationSettings", "UNNotificationTrigger", "block2"] }
 
 [profile.dev]
 # gpui 全量 debug 信息体积巨大，行号足够排错

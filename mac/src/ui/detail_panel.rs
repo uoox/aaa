@@ -664,6 +664,34 @@ impl RootView {
             );
         }
 
+        // 提示缓存：最近一次调用的输入构成——命中率 = 缓存读 ÷ (缓存读 + 新写 + 新读)。
+        // 有「缓存读」就说明这段对话的缓存还活着；断了一会儿再聊，读会变成 0、写变大
+        if let Some(hit) = u.cache_hit_pct {
+            let k = |n: Option<u64>| match n {
+                Some(n) if n >= 1000 => format!("{:.1}k", n as f64 / 1000.0),
+                Some(n) => n.to_string(),
+                None => "—".into(),
+            };
+            let alive = u.cache_read_tokens.unwrap_or(0) > 0;
+            col = col.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(div().text_size(px(11.)).text_color(c(theme::dim())).child("缓存"))
+                    .child(mono(
+                        format!(
+                            "{} · 命中 {}% · 读 {} 写 {} 新 {}",
+                            if alive { "在" } else { "无" },
+                            hit.round() as i64,
+                            k(u.cache_read_tokens),
+                            k(u.cache_creation_tokens),
+                            k(u.fresh_input_tokens)
+                        ),
+                        if alive { theme::green() } else { theme::faint() },
+                    )),
+            );
+        }
         // 费用 · 行数 · 时长
         let mut stats = div().flex().flex_wrap().items_center().gap(px(10.));
         if let Some(cost) = u.cost_usd {

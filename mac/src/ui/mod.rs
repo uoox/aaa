@@ -409,6 +409,24 @@ impl RootView {
                 }
             }
         });
+        // 系统通知点击 → 回到 App、打开那条会话（notify.rs 把会话 id 丢进这条通道）
+        let mut clicks = crate::notify::install();
+        cx.spawn(async move |this, cx| {
+            while let Some(id) = clicks.next().await {
+                if this
+                    .update(cx, |root: &mut RootView, cx| {
+                        cx.activate(true);
+                        if root.session(&id).is_some() {
+                            root.open_session(id, cx);
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
 
         // 本机偏好先于首帧：主题必须在第一次 render 之前生效，否则会闪一帧黑暗
         let ui_state = UiState::load();
@@ -646,7 +664,7 @@ impl RootView {
         match new.state {
             SessionState::Waiting => {
                 if !watching && !muted {
-                    crate::notify::send(&new.display_title(), "完成 · 等你下一步");
+                    crate::notify::send(&new.display_title(), "完成 · 等你下一步", &new.id);
                 }
             }
             SessionState::Exited => {
@@ -657,7 +675,7 @@ impl RootView {
                         Some(code) => format!("已退出 (exit {code})"),
                         None => "已退出".to_string(),
                     };
-                    crate::notify::send(&new.display_title(), &body);
+                    crate::notify::send(&new.display_title(), &body, &new.id);
                 }
             }
             SessionState::Running => {}

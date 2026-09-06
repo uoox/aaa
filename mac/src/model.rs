@@ -138,6 +138,15 @@ pub struct SessionUsage {
     pub lines_removed: Option<u64>,
     #[serde(default)]
     pub effort: Option<String>,
+    /// v1.8：提示缓存——最近一次调用里从缓存读 / 新写进缓存 / 新读的 token，与命中率（0–100）
+    #[serde(default)]
+    pub cache_read_tokens: Option<u64>,
+    #[serde(default)]
+    pub cache_creation_tokens: Option<u64>,
+    #[serde(default)]
+    pub fresh_input_tokens: Option<u64>,
+    #[serde(default)]
+    pub cache_hit_pct: Option<f64>,
 }
 
 // ── 套餐用量（GET /usage、`usage` 帧） ──────────────────────────────────────
