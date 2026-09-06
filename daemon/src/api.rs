@@ -313,9 +313,18 @@ async fn restart(
         app.paths.state_dir().join("resume_after_restart.json"),
         serde_json::to_vec(&to_resume).unwrap_or_default(),
     );
+    // 一起终止、并行等退出：以前是一个个 kill 再各等最多 3s，十个会话要半分钟；
+    // 现在总共就是最慢那一个的时间（SIGTERM 2s 后补 SIGKILL，上限约 3s）
     for s in &alive {
         s.meta.lock().unwrap().user_killed = true;
-        kill_and_wait(s, 25, 120).await;
+    }
+    let waits: Vec<_> = alive
+        .iter()
+        .cloned()
+        .map(|s| tokio::spawn(async move { kill_and_wait(&s, 25, 120).await }))
+        .collect();
+    for w in waits {
+        let _ = w.await;
     }
     crate::daemon::restart_self_after_ms(600);
     Ok(Json(json!({
