@@ -95,9 +95,12 @@ fun SettingsScreen(store: AppStore, nav: NavHostController) {
             if (server == null) {
                 SettingRow("未配对") { TextButton(onClick = { nav.navigate("pair") }) { Text("去配对") } }
             } else {
-                // 每个 host 一行，右侧直接写状态——原来另有一行「连接状态」重复说
-                // 同一件事，删掉了；连接失败时的重试按钮挪到当前 host 这一行上。
-                server.hosts.forEach { host ->
+                // 只摆当前在用的 host 一行（右侧直接写状态）；其余备用地址折叠在一行
+                // 「备用 N 个」后面，点开才列（2026-09-06 用户拍板：设置页要简）
+                val current = (conn as? ConnState.Connected)?.host ?: server.preferredHost ?: server.hosts.firstOrNull()
+                val backups = server.hosts.filter { it != current }
+                var showBackups by remember { mutableStateOf(false) }
+                @Composable fun hostRow(host: String) {
                     val active = (conn as? ConnState.Connected)?.host == host
                     Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                         StateDot(if (active) Tok.Green else Tok.Dim)
@@ -108,6 +111,15 @@ fun SettingsScreen(store: AppStore, nav: NavHostController) {
                             color = if (active) Tok.Green else Tok.Faint, fontSize = 11.sp,
                         )
                     }
+                }
+                current?.let { hostRow(it) }
+                if (backups.isNotEmpty()) {
+                    Text(
+                        (if (showBackups) "▾ " else "▸ ") + "备用 ${backups.size} 个",
+                        color = Tok.Faint, fontSize = 12.sp,
+                        modifier = Modifier.fillMaxWidth().clickable { showBackups = !showBackups }.padding(horizontal = 14.dp, vertical = 6.dp),
+                    )
+                    if (showBackups) backups.forEach { hostRow(it) }
                 }
                 when (val c = conn) {
                     is ConnState.Connecting -> SettingRow("连接中…") {}
@@ -157,6 +169,7 @@ fun SettingsScreen(store: AppStore, nav: NavHostController) {
                             selected = settings.theme == p.name,
                             onClick = { scope.launch { store.settings.setTheme(p.name) } },
                             shape = SegmentedButtonDefaults.itemShape(i, Palette.all.size),
+                            icon = {}, // 选中态靠底色就够了，不要再塞一个 ✓
                         ) { Text(p.label, fontSize = 12.sp, maxLines = 1) }
                     }
                 }
@@ -173,11 +186,13 @@ fun SettingsScreen(store: AppStore, nav: NavHostController) {
                         selected = settings.defaultUi == "messages",
                         onClick = { scope.launch { store.settings.setDefaultUi("messages") } },
                         shape = SegmentedButtonDefaults.itemShape(0, 2),
+                        icon = {},
                     ) { Text("消息流", fontSize = 12.sp) }
                     SegmentedButton(
                         selected = settings.defaultUi == "terminal",
                         onClick = { scope.launch { store.settings.setDefaultUi("terminal") } },
                         shape = SegmentedButtonDefaults.itemShape(1, 2),
+                        icon = {},
                     ) { Text("终端", fontSize = 12.sp) }
                 }
             }
