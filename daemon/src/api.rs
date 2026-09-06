@@ -787,6 +787,22 @@ async fn session_input(
         guard.as_ref().is_some_and(|p| p.screen().bracketed_paste())
     };
     let text = body.text;
+    // 新项目第一屏是信任对话框：这时写进去的字会被对话框吞掉（甚至替用户按下高亮的
+    // 「No, exit」）。整句消息改进收件箱，tick 里的投喂在对话框被接受后立刻送达。
+    if body.enter && !text.trim().is_empty() && crate::feed::trust_dialog_up(&sess) {
+        let (project_path, agent) = {
+            let m = sess.meta.lock().unwrap();
+            (m.project_path.clone(), m.agent.clone())
+        };
+        if agent == "claude" {
+            {
+                let mut inbox = app.inbox.lock().unwrap();
+                inbox.add(&project_path, text.trim());
+            }
+            app.hub.inbox_changed(&project_path);
+            return Ok(Json(json!({"ok": true, "queued": true})));
+        }
+    }
     if !text.is_empty() {
         sess.write_input(&encode_input(&text, bracketed))
             .map_err(|e| ApiError::internal(format!("pty write: {e}")))?;

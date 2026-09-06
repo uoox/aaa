@@ -62,7 +62,9 @@ pub fn on_waiting(app: &SharedApp, sess: Arc<Session>) {
     if !has_entries {
         return;
     }
-    let trusted = agent != "claude" || claude_trusts(&app.paths.home, &project_path);
+    // 信任：~/.claude.json 有记录，或者屏幕上根本没有信任对话框（父目录已信任时
+    // claude 不问也不写记录——只看文件会把这种会话永远挡在外面）
+    let trusted = agent != "claude" || claude_trusts(&app.paths.home, &project_path) || !trust_dialog_up(&sess);
     if !can_feed(state, alive, feed_inbox, &agent, asking, trusted) {
         return;
     }
@@ -76,6 +78,14 @@ pub fn on_waiting(app: &SharedApp, sess: Arc<Session>) {
         app.hub.inbox_changed(&project_path);
         sess.mark_dirty();
     }
+}
+
+/// Is Claude's folder-trust dialog on this session's screen right now?
+/// Free text typed into it is discarded (or worse, picks the highlighted
+///「No, exit」), so the feed waits and `/input` diverts to the inbox.
+pub fn trust_dialog_up(sess: &Session) -> bool {
+    let guard = sess.parser.lock().unwrap();
+    guard.as_ref().is_some_and(|p| crate::trust::dialog_visible(p.screen()))
 }
 
 /// An entry was just queued for `project_path`: if a live project session is

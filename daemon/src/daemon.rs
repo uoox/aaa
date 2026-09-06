@@ -148,10 +148,16 @@ fn run() {
                         })
                         .await;
                     }
-                    for sess in app.pool.tick_states() {
+                    // 状态翻转由 tick_states 处理；收件箱投喂每秒对所有会话重试一遍
+                    // （空着 + 有条目 + 门槛放行就喂）——信任对话框刚被接受、
+                    // 表单刚答完这类没有状态翻转的时刻也能把排着的话发出去
+                    let _ = app.pool.tick_states();
+                    {
                         let app2 = Arc::clone(&app);
                         let _ = tokio::task::spawn_blocking(move || {
-                            crate::feed::on_waiting(&app2, sess);
+                            for sess in app2.pool.all() {
+                                crate::feed::on_waiting(&app2, sess);
+                            }
                         })
                         .await;
                     }

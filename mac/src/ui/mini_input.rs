@@ -29,6 +29,13 @@ pub struct MiniInput {
     pub focus_handle: FocusHandle,
 }
 
+/// 单行框的事件：输入法以文本形式送来的回车 = 提交（键盘回车由根节点直接接）
+pub enum InputEvent {
+    Submit,
+}
+
+impl gpui::EventEmitter<InputEvent> for MiniInput {}
+
 impl MiniInput {
     pub fn new(cx: &mut Context<Self>, placeholder: impl Into<SharedString>) -> Self {
         MiniInput {
@@ -187,6 +194,13 @@ impl EntityInputHandler for MiniInput {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // 输入法把回车当文本送进来（中文输入法确认后的那一下常是这样）：单行框没有
+        // 换行可言，这就是「提交」——发事件给根节点，和键盘回车同一个出口
+        if matches!(text, "\n" | "\r" | "\r\n") {
+            self.marked = None;
+            cx.emit(InputEvent::Submit);
+            return;
+        }
         let range = self
             .marked
             .take()

@@ -31,6 +31,11 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -170,6 +175,50 @@ private fun StateTag(state: ProjectState) {
     }
 }
 
+/** 新建项目：POST /projects + /sessions，返回新会话。名字留空 = 按日期命名。 */
+suspend fun createProjectSession(store: AppStore, name: String?): Session {
+    val api = store.client ?: throw IllegalStateException("未连接 daemon")
+    // agent 显式写进注册表：daemon 对「没有登记」的目录会自己猜，不留给它猜
+    val path = api.createProject(name, DEFAULT_AGENT).path
+    return api.createSession(path, DEFAULT_AGENT, resume = false)
+}
+
+fun createErrorText(e: Exception): String =
+    if (e is DaemonHttpException && e.errorCode == "conflict") "项目已存在" else "新建失败：${e.message}"
+
+/**
+ * 新建项目的输入框（首页顶部、会话页 ☰ 抽屉共用）：框里有光标时按回车 = 新建。
+ * 回车从三条路来都接住：软键盘的动作键（Go / Done / Send / Search，输入法各不相同）、
+ * 实体键盘 / 折叠屏外接键盘的 Enter，以及右边的 ＋。
+ */
+@Composable
+fun NewProjectField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    creating: Boolean,
+    onCreate: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    OutlinedTextField(
+        value, onValueChange,
+        placeholder = { Text("新建项目：文件夹名，回车", color = Tok.Faint, fontSize = 13.sp) },
+        modifier = modifier.onPreviewKeyEvent { ev ->
+            if (ev.type == KeyEventType.KeyDown && (ev.key == Key.Enter || ev.key == Key.NumPadEnter)) { onCreate(); true } else false
+        },
+        singleLine = true,
+        textStyle = androidx.compose.ui.text.TextStyle(color = Tok.Ink, fontSize = 14.sp),
+        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
+        keyboardActions = KeyboardActions(onGo = { onCreate() }, onDone = { onCreate() }, onSend = { onCreate() }, onSearch = { onCreate() }),
+        trailingIcon = {
+            if (creating) {
+                CircularProgressIndicator(Modifier.width(18.dp).height(18.dp), strokeWidth = 2.dp, color = Tok.Accent)
+            } else {
+                IconButton(onClick = onCreate) { Text("＋", color = Tok.Accent, fontSize = 22.sp) }
+            }
+        },
+    )
+}
+
 /**
  * 首页：项目列表本身。点一行进该项目的消息流——会话活着直接进，退出了/没有就
  * `POST /sessions`（daemon 幂等，且 resume 找不到旧对话会自动开新会话）再进。
@@ -216,15 +265,12 @@ fun ProjectsHome(store: AppStore, nav: NavHostController) {
         val name = query.trim().ifBlank { null }
         scope.launch {
             try {
-                val api = store.client ?: throw IllegalStateException("未连接 daemon")
-                // agent 显式写进注册表：daemon 对「没有登记」的目录会自己猜，不留给它猜
-                val path = api.createProject(name, DEFAULT_AGENT).path
-                val sess = api.createSession(path, DEFAULT_AGENT, resume = false)
+                val sess = createProjectSession(store, name)
                 query = ""
                 focusManager.clearFocus()
                 openSession(sess.id, "")
             } catch (e: Exception) {
-                toast(if (e is DaemonHttpException && e.errorCode == "conflict") "项目已存在" else "新建失败：${e.message}")
+                toast(createErrorText(e))
             } finally { creating = false }
         }
     }
@@ -294,21 +340,7 @@ fun ProjectsHome(store: AppStore, nav: NavHostController) {
             )
         }
         // 与 mac 侧栏同一件东西：边输入边过滤列表，回车或右边 ＋ 就按这个名字新建项目
-        OutlinedTextField(
-            query, { query = it },
-            placeholder = { Text("新建项目：文件夹名，回车", color = Tok.Faint, fontSize = 13.sp) },
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp), singleLine = true,
-            textStyle = androidx.compose.ui.text.TextStyle(color = Tok.Ink, fontSize = 14.sp),
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
-            keyboardActions = KeyboardActions(onGo = { create() }),
-            trailingIcon = {
-                if (creating) {
-                    CircularProgressIndicator(Modifier.width(18.dp).height(18.dp), strokeWidth = 2.dp, color = Tok.Accent)
-                } else {
-                    IconButton(onClick = { create() }) { Text("＋", color = Tok.Accent, fontSize = 22.sp) }
-                }
-            },
-        )
+        NewProjectField(query, { query = it }, creating, onCreate = { create() }, modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp))
 
         PullToRefreshBox(
             isRefreshing = refreshing,
@@ -389,14 +421,33 @@ fun ProjectSwitcher(store: AppStore, currentPath: String?, onHome: () -> Unit, o
         }
     }
 
+    // 抽屉里也能直接新建项目：建完关抽屉、进新会话
+    var newName by remember { mutableStateOf("") }
+    var creating by remember { mutableStateOf(false) }
+    fun create() {
+        if (creating) return
+        creating = true
+        val name = newName.trim().ifBlank { null }
+        scope.launch {
+            try {
+                val sess = createProjectSession(store, name)
+                newName = ""
+                onOpened(); openSession(sess.id, "")
+            } catch (e: Exception) {
+                Toast.makeText(context, createErrorText(e), Toast.LENGTH_LONG).show()
+            } finally { creating = false }
+        }
+    }
+
     Column(Modifier.fillMaxSize().navigationBarsPadding()) {
         Row(
-            Modifier.fillMaxWidth().padding(start = 18.dp, end = 8.dp, top = 14.dp, bottom = 6.dp),
+            Modifier.fillMaxWidth().padding(start = 18.dp, end = 8.dp, top = 14.dp, bottom = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text("项目", color = Tok.Ink, fontSize = 16.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
             TextButton(onClick = onHome) { Text("首页", color = Tok.Accent, fontSize = 13.sp) }
         }
+        NewProjectField(newName, { newName = it }, creating, onCreate = { create() }, modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp))
         LazyColumn(Modifier.weight(1f).fillMaxWidth()) {
             items(rows, key = { it.project.path }) { row ->
                 val current = row.project.path == currentPath

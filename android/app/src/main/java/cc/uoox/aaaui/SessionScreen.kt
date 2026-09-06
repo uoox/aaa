@@ -619,7 +619,14 @@ fun MessagesView(
     }
     if (messages.isEmpty() && pending.isEmpty()) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Text(if (supported == null) "加载消息…" else "暂无消息", color = Tok.Faint)
+            Text(
+                when {
+                    supported == null -> "加载消息…"
+                    sessionAlive -> "新会话，还没有对话 · 在下面输入第一句话"
+                    else -> "暂无消息"
+                },
+                color = Tok.Faint, fontSize = 13.sp,
+            )
         }
         return
     }

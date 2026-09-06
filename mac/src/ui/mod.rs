@@ -412,6 +412,19 @@ impl RootView {
         let token_input = cx.new(|cx| MiniInput::new(cx, "aaa_tk_…"));
         let root_input = cx.new(|cx| MiniInput::new(cx, "~/project"));
         let inbox_input = cx.new(|cx| MiniInput::new(cx, "加一条，Claude 空下来时自动喂给它"));
+        // 输入法送来的回车（见 MiniInput::replace_text_in_range）与键盘回车同一出口
+        cx.subscribe(&new_input, |this, _, _: &mini_input::InputEvent, cx| {
+            if matches!(this.modal, Modal::None) {
+                this.create_project(cx);
+            }
+        })
+        .detach();
+        cx.subscribe(&inbox_input, |this, _, _: &mini_input::InputEvent, cx| {
+            if matches!(this.modal, Modal::None) {
+                this.inbox_add(cx);
+            }
+        })
+        .detach();
         if let Some(ep) = &endpoint {
             host_input.update(cx, |i, cx| i.set_text(ep.host.clone(), cx));
             port_input.update(cx, |i, cx| i.set_text(ep.port.to_string(), cx));
