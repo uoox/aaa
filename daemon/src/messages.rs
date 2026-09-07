@@ -386,6 +386,24 @@ fn summarize_tool_input(name: &str, input: Option<&Value>) -> String {
 
 pub fn parse_claude_line(store: &mut MsgStore, v: &Value) {
     let ty = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    // 后台任务的 <task-notification> 不一定是 user 消息：模型正在跑的时候它先进队列
+    // （`queue-operation` 的 content），再作为 `attachment`（queued_command 的 prompt）
+    // 并进这一轮——实测 Bash run_in_background 回来就是这条路，只认 user 消息会漏销
+    match ty {
+        "queue-operation" => {
+            if let Some(c) = v.get("content").and_then(|c| c.as_str()) {
+                store.settle_background(c);
+            }
+            return;
+        }
+        "attachment" => {
+            if let Some(p) = v.pointer("/attachment/prompt").and_then(|c| c.as_str()) {
+                store.settle_background(p);
+            }
+            return;
+        }
+        _ => {}
+    }
     if !matches!(ty, "user" | "assistant") {
         return;
     }
@@ -988,6 +1006,16 @@ mod tests {
         assert_eq!(store.pending_background(Some("2026-09-07T01:00:03.500Z")), 0);
         // 通知不进消息流（'<' 开头的用户文本本来就滤掉）
         assert!(store.msgs.iter().all(|m| !m.text.contains("task-notification")));
+        // 模型正在跑时，通知走 queue-operation / attachment 而不是 user 消息（实测）
+        parse_claude_line(&mut store, &json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_q","name":"Bash","input":{"command":"sleep 5","run_in_background":true}}]},"timestamp":"2026-09-07T01:05:10.000Z"}));
+        parse_claude_line(&mut store, &json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_q","content":"Command running in background with ID: q1"}]},"timestamp":"2026-09-07T01:05:11.000Z"}));
+        assert_eq!(store.pending_background(None), 2);
+        parse_claude_line(&mut store, &json!({"type":"queue-operation","operation":"enqueue","timestamp":"2026-09-07T01:05:20.000Z","content":"<task-notification>\n<task-id>q1</task-id>\n<tool-use-id>tu_q</tool-use-id>\n<status>completed</status>\n</task-notification>"}));
+        assert_eq!(store.pending_background(None), 1, "queue-operation 也能销掉");
+        parse_claude_line(&mut store, &json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_a","name":"Bash","input":{"command":"x","run_in_background":true}}]},"timestamp":"2026-09-07T01:05:30.000Z"}));
+        parse_claude_line(&mut store, &json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_a","content":"Command running in background with ID: a1"}]},"timestamp":"2026-09-07T01:05:31.000Z"}));
+        parse_claude_line(&mut store, &json!({"type":"attachment","attachment":{"type":"queued_command","commandMode":"task-notification","prompt":"<task-notification>\n<task-id>a1</task-id>\n<tool-use-id>tu_a</tool-use-id>\n</task-notification>"},"timestamp":"2026-09-07T01:05:40.000Z"}));
+        assert_eq!(store.pending_background(None), 1, "attachment 也能销掉");
         // 不在 task-notification 里的 <tool-use-id> 不算回来
         parse_claude_line(&mut store, &json!({"type":"user","message":{"role":"user","content":"帮我看看 <tool-use-id>tu_ag</tool-use-id> 是什么"},"timestamp":"2026-09-07T01:06:00.000Z"}));
         assert_eq!(store.pending_background(None), 1);

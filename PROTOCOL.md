@@ -82,7 +82,7 @@ daemon 在启动时用 `zsh -lic` 问一次「终端里应有的 PATH」（带�
   "hooked": true,                 // v1.3：状态由 Claude Code hooks 驱动（见「Claude Code hooks」）
   "error": null,                  // v1.3：上一轮 StopFailure 的错误类型，下一次提交清空
   "background": false,            // v1.13：waiting 且后台还有任务（run_in_background 的 Bash / 异步子代理 / Monitor）没回来 → 客户端标「后台」
-  "background_tasks": 0,          // v1.13：上面那个数；都从 transcript 数出来（tool_use 发起 → tool_result 确认 → <task-notification> 回来销掉），只算本进程发起的
+  "background_tasks": 0,          // v1.13：上面那个数；都从 transcript 数出来（tool_use 发起 → tool_result 确认 → `<task-notification>` 回来销掉；通知在模型跑着时走 `queue-operation` / `attachment(queued_command)` 记录而不是 user 消息，两种都认），只算本进程发起的
   "compacting": false,            // v1.3：PreCompact → PostCompact 之间
   "user_killed": false,           // v1.3：用户主动结束的，客户端不弹「退出」通知
   "usage": {                      // v1.4：statusLine 转来的本会话用量；没收到过为 null
