@@ -423,8 +423,9 @@ async fn projects_list(State(app): State<SharedApp>) -> ApiResult<Json<Value>> {
                     "session_title": if title.is_empty() { Value::Null } else { Value::String(title) },
                     // v1.8：置顶（POST /projects/pin）
                     "pinned": pinned.contains(&r.path),
-                    // v1.15：归档（POST /projects/archive）——客户端默认藏起来
-                    "archived": archived_set.contains(&r.path),
+                    // v1.15：归档（POST /projects/archive）——客户端默认藏起来。集合里存的是
+                    // realpath（/var → /private/var 这种），列表行是目录扫出来的原路径，两种都认
+                    "archived": archived_set.contains(&r.path) || archived_set.contains(&stores::realpath(&r.path)),
                 })
             })
             .collect();
