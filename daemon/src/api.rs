@@ -487,6 +487,15 @@ async fn history_days(State(app): State<SharedApp>) -> ApiResult<Json<Value>> {
     Ok(Json(json!({"days": crate::history::calendar(&entries, &days)})))
 }
 
+/// 仪表盘：待办（没勾的清单项）+ 按天流水 + 今天 / 近 7 天的数字
+async fn history_dashboard(State(app): State<SharedApp>) -> ApiResult<Json<Value>> {
+    let entries = app.history.lock().unwrap().list(crate::history::KEEP);
+    let alive: std::collections::HashSet<String> = app.pool.list().iter().map(|s| s.id.clone()).collect();
+    let days = app.days.lock().unwrap();
+    let d = crate::history::dashboard(&entries, &days, &alive, &crate::history::today_local());
+    Ok(Json(serde_json::to_value(d).unwrap_or_else(|_| json!({}))))
+}
+
 #[derive(Deserialize)]
 struct PinBody {
     path: String,
@@ -1541,6 +1550,7 @@ pub fn router(app: SharedApp) -> Router {
         .route("/api/v1/projects/pin", post(projects_pin))
         .route("/api/v1/history", get(history_list))
         .route("/api/v1/history/days", get(history_days))
+        .route("/api/v1/history/dashboard", get(history_dashboard))
         .route("/api/v1/sessions", get(sessions_list).post(sessions_create))
         .route("/api/v1/sessions/{id}", delete(session_delete))
         .route("/api/v1/sessions/{id}/input", post(session_input))

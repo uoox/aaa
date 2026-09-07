@@ -152,56 +152,71 @@ fun parseChecklist(md: String): List<ChecklistItem> = md.lines().mapNotNull { ra
 )
 
 // v1.9 会话日志（GET /history）：所有出现过的会话，含已退出、已删除
-@Serializable data class HistoryEntry(
-    val id: String,
-    val project_path: String = "",
-    val project_name: String = "",
-    val agent: String = "",
-    val title: String = "",
-    val created_at: String = "",
-    val ended_at: String? = null,
-    val exit_code: Long? = null,
-    val deleted_at: String? = null,
-    val summary: String = "",
-    val last_state: String = "",
-)
-@Serializable data class HistoryResponse(val entries: List<HistoryEntry> = emptyList())
-/** 日历一天（GET /history/days）：会话数 + haiku 写的「这一天做了什么」（没写出来 text 为空） */
-@Serializable data class DayDigest(val date: String, val text: String = "", val sessions: Int = 0)
-@Serializable data class DaysResponse(val days: List<DayDigest> = emptyList())
-
 /**
- * 任务视图的分组（2026-09-07 用户拍板，照 todo 应用的样子）：
- * 进行中 = 会话还活着；未完成 = 清单里有没勾的；已完成 = 清单全勾了或没有清单；已删除。枚举顺序即显示顺序。
+ * 看板（GET /history/dashboard，2026-09-07 用户拍板取代原来的历史两 tab）：
+ * daemon 一次算好「最近做了什么 / 还有什么没做」，两端只负责画。
  */
-enum class TaskGroup(val label: String) { ACTIVE("进行中"), OPEN("未完成"), DONE("已完成"), DELETED("已删除") }
+@Serializable data class Dashboard(
+    val today: DashStats = DashStats(),
+    val week: DashStats = DashStats(),
+    /** 此刻还活着的会话数 */
+    val active: Int = 0,
+    val open: List<OpenItem> = emptyList(),
+    val days: List<DayCard> = emptyList(),
+    /** 近 8 周每天的会话数，最旧在前 */
+    val spark: List<Int> = emptyList(),
+)
 
-fun taskGroup(e: HistoryEntry, alive: Boolean): TaskGroup = when {
-    e.deleted_at != null -> TaskGroup.DELETED
-    alive -> TaskGroup.ACTIVE
-    parseChecklist(e.summary).any { !it.done } -> TaskGroup.OPEN
-    else -> TaskGroup.DONE
-}
+@Serializable data class DashStats(val sessions: Int = 0, val done: Int = 0, val open: Int = 0)
 
-/** 行的第二行：没勾的项用「/」串起来（最多 4 项）；全勾了写 n/n 完成；没清单写空 */
-fun taskSubline(e: HistoryEntry): String {
-    val items = parseChecklist(e.summary)
-    if (items.isEmpty()) return ""
-    val open = items.filter { !it.done }.map { it.text }
-    if (open.isEmpty()) return "${items.size}/${items.size} 完成"
-    return open.take(4).joinToString(" / ") + if (open.size > 4) " …+${open.size - 4}" else ""
-}
+/** 一条待办：某个会话清单里没勾的一项 */
+@Serializable data class OpenItem(
+    val session_id: String = "",
+    val project_name: String = "",
+    val project_path: String = "",
+    val title: String = "",
+    val text: String = "",
+    val created_at: String = "",
+    val alive: Boolean = false,
+)
 
-/** 历史搜索：标题 / 项目 / 清单里含关键字（不分大小写）；空串全匹配 */
-fun historyMatches(e: HistoryEntry, query: String): Boolean {
+/** 流水里一天的一个会话 */
+@Serializable data class DayEntry(
+    val id: String = "",
+    val title: String = "",
+    val project_name: String = "",
+    val alive: Boolean = false,
+    val deleted: Boolean = false,
+    val done: Int = 0,
+    val open: Int = 0,
+)
+
+/** 流水里的一天：haiku 写的「这一天做了什么」（没写出来 text 为空）+ 当天会话 */
+@Serializable data class DayCard(
+    val date: String = "",
+    val text: String = "",
+    val sessions: Int = 0,
+    val done: Int = 0,
+    val open: Int = 0,
+    val entries: List<DayEntry> = emptyList(),
+)
+
+/** 待办搜索：项目 / 会话标题 / 条目本身含关键字（不分大小写）；空串全匹配 */
+fun openItemMatches(i: OpenItem, query: String): Boolean {
     val q = query.trim().lowercase()
-    return q.isEmpty() || e.title.lowercase().contains(q) || e.project_name.lowercase().contains(q) || e.summary.lowercase().contains(q)
+    return q.isEmpty() || i.text.lowercase().contains(q) || i.title.lowercase().contains(q) || i.project_name.lowercase().contains(q)
 }
 
-/** ISO 时间 → 本机时区日期 YYYY-MM-DD（日历分组；daemon 按它所在 Mac 的时区分，两边通常一致） */
-fun localDayOf(iso: String): String? = try {
-    java.time.Instant.parse(iso).atZone(java.time.ZoneId.systemDefault()).toLocalDate().toString()
-} catch (_: Exception) { null }
+/** 一天是否命中搜索：日摘要或当天任一会话标题 / 项目名含关键字 */
+fun dayCardMatches(d: DayCard, query: String): Boolean {
+    val q = query.trim().lowercase()
+    return q.isEmpty() || d.text.lowercase().contains(q) ||
+        d.entries.any { it.title.lowercase().contains(q) || it.project_name.lowercase().contains(q) }
+}
+
+/** 待办按项目归并，项目内保持原序（daemon 已按会话新→旧排好），项目按首次出现排 */
+fun groupOpenByProject(items: List<OpenItem>): List<Pair<String, List<OpenItem>>> =
+    items.groupBy { it.project_name }.toList()
 
 // v1.1 inbox
 @Serializable data class InboxItem(val id: String, val text: String, val created_at: String = "")

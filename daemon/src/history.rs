@@ -437,3 +437,274 @@ mod day_tests {
         assert!(day_prompt(&date, &groups[&date]).contains("## a · 修登录"));
     }
 }
+
+// ── 仪表盘 ────────────────────────────────────────────────────────────────
+//
+// 「一眼看出最近做了什么，还有什么没做」（2026-09-07 用户拍板：两栏，左待办右流水）。
+// 左栏 = 所有未删除会话里没勾的清单项，聚合成一张待办表；右栏 = 按天倒序的流水，
+// 每天一段 haiku 日摘要 + 当天的会话。数字块（今天 / 近 7 天）在顶上。
+// 聚合只在 daemon 做一次，两端只负责画。
+
+/// 进度清单的一项
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChecklistItem {
+    pub done: bool,
+    pub text: String,
+}
+
+/// `- [x] …` / `- [ ] …` 行 → 项；其它行忽略（与两端客户端同口径）
+pub fn parse_checklist(md: &str) -> Vec<ChecklistItem> {
+    md.lines()
+        .filter_map(|raw| {
+            let l = raw.trim().trim_start_matches(['-', '*']).trim_start();
+            let (done, rest) = if let Some(r) = l.strip_prefix("[x]").or_else(|| l.strip_prefix("[X]")) {
+                (true, r)
+            } else if let Some(r) = l.strip_prefix("[ ]") {
+                (false, r)
+            } else {
+                return None;
+            };
+            let text = rest.trim();
+            (!text.is_empty()).then(|| ChecklistItem { done, text: text.to_string() })
+        })
+        .collect()
+}
+
+/// 左栏一条待办：某个会话清单里没勾的一项
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OpenItem {
+    pub session_id: String,
+    pub project_name: String,
+    pub project_path: String,
+    /// 会话标题（点进去看的是这个会话）
+    pub title: String,
+    /// 没勾的那一项本身
+    pub text: String,
+    pub created_at: String,
+    /// 会话还在池子里（能点开）
+    pub alive: bool,
+}
+
+/// 右栏一天里的一个会话
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DayEntry {
+    pub id: String,
+    pub title: String,
+    pub project_name: String,
+    pub alive: bool,
+    pub deleted: bool,
+    pub done: usize,
+    pub open: usize,
+}
+
+/// 右栏的一天
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DayCard {
+    pub date: String,
+    /// haiku 写的「这一天做了什么」；还没写出来为空
+    pub text: String,
+    pub sessions: usize,
+    pub done: usize,
+    pub open: usize,
+    pub entries: Vec<DayEntry>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Stats {
+    pub sessions: usize,
+    pub done: usize,
+    pub open: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Dashboard {
+    pub today: Stats,
+    pub week: Stats,
+    /// 此刻还活着的会话数
+    pub active: usize,
+    pub open: Vec<OpenItem>,
+    pub days: Vec<DayCard>,
+    /// 近 8 周的每日会话数（热力条），最旧在前，长度 = 56
+    pub spark: Vec<usize>,
+}
+
+/// 待办上限：够看一屏一屏，不至于把响应撑爆
+pub const OPEN_CAP: usize = 200;
+/// 流水天数上限
+pub const DAYS_CAP: usize = 30;
+const SPARK_DAYS: usize = 56;
+
+fn stats_of(entries: &[&Entry]) -> Stats {
+    let mut s = Stats { sessions: entries.len(), done: 0, open: 0 };
+    for e in entries {
+        for it in parse_checklist(&e.summary) {
+            if it.done {
+                s.done += 1;
+            } else {
+                s.open += 1;
+            }
+        }
+    }
+    s
+}
+
+/// `today` = daemon 本机时区的今天；`alive` = 池子里还在的会话 id
+pub fn dashboard(entries: &[Entry], days: &Days, alive: &std::collections::HashSet<String>, today: &str) -> Dashboard {
+    let groups = group_by_day(entries);
+    let week: Vec<String> = last_days(today, 7);
+    let today_rows: Vec<&Entry> = groups.get(today).cloned().unwrap_or_default();
+    let week_rows: Vec<&Entry> = week.iter().filter_map(|d| groups.get(d)).flatten().copied().collect();
+
+    // 左栏：未删除会话里没勾的项，新会话在前
+    let mut open = Vec::new();
+    for e in entries.iter().filter(|e| e.deleted_at.is_none() && e.agent != "shell") {
+        for it in parse_checklist(&e.summary).into_iter().filter(|i| !i.done) {
+            open.push(OpenItem {
+                session_id: e.id.clone(),
+                project_name: e.project_name.clone(),
+                project_path: e.project_path.clone(),
+                title: if e.title.is_empty() { e.project_name.clone() } else { e.title.clone() },
+                text: it.text,
+                created_at: e.created_at.clone(),
+                alive: alive.contains(&e.id),
+            });
+            if open.len() >= OPEN_CAP {
+                break;
+            }
+        }
+        if open.len() >= OPEN_CAP {
+            break;
+        }
+    }
+
+    // 右栏：按天倒序
+    let days_out: Vec<DayCard> = groups
+        .iter()
+        .rev()
+        .take(DAYS_CAP)
+        .map(|(date, es)| {
+            let s = stats_of(es);
+            DayCard {
+                date: date.clone(),
+                text: days.get(date).map(|d| d.text.clone()).unwrap_or_default(),
+                sessions: s.sessions,
+                done: s.done,
+                open: s.open,
+                entries: es
+                    .iter()
+                    .map(|e| {
+                        let items = parse_checklist(&e.summary);
+                        DayEntry {
+                            id: e.id.clone(),
+                            title: if e.title.is_empty() { e.project_name.clone() } else { e.title.clone() },
+                            project_name: e.project_name.clone(),
+                            alive: alive.contains(&e.id),
+                            deleted: e.deleted_at.is_some(),
+                            done: items.iter().filter(|i| i.done).count(),
+                            open: items.iter().filter(|i| !i.done).count(),
+                        }
+                    })
+                    .collect(),
+            }
+        })
+        .collect();
+
+    let spark = last_days(today, SPARK_DAYS)
+        .into_iter()
+        .rev()
+        .map(|d| groups.get(&d).map(|v| v.len()).unwrap_or(0))
+        .collect();
+
+    Dashboard {
+        today: stats_of(&today_rows),
+        week: stats_of(&week_rows),
+        active: entries.iter().filter(|e| alive.contains(&e.id)).count(),
+        open,
+        days: days_out,
+        spark,
+    }
+}
+
+/// 从 `today` 往回数 n 天的日期（最新在前）；`today` 解析不了就返回空
+fn last_days(today: &str, n: usize) -> Vec<String> {
+    let Ok(d0) = chrono::NaiveDate::parse_from_str(today, "%Y-%m-%d") else { return Vec::new() };
+    (0..n).filter_map(|i| d0.checked_sub_signed(chrono::Duration::days(i as i64))).map(|d| d.format("%Y-%m-%d").to_string()).collect()
+}
+
+/// 本机时区的今天
+pub fn today_local() -> String {
+    chrono::Local::now().format("%Y-%m-%d").to_string()
+}
+
+#[cfg(test)]
+mod dashboard_tests {
+    use super::*;
+
+    fn e(id: &str, created: &str, title: &str, summary: &str) -> Entry {
+        Entry {
+            id: id.into(),
+            project_path: "/p/a".into(),
+            project_name: "a".into(),
+            agent: "claude".into(),
+            title: title.into(),
+            created_at: created.into(),
+            ended_at: None,
+            exit_code: None,
+            deleted_at: None,
+            summary: summary.into(),
+            last_state: "waiting".into(),
+        }
+    }
+
+    #[test]
+    fn checklist_parsing() {
+        let items = parse_checklist("- [x] 修登录\n* [ ] 补测试\n随便一句\n- [ ]   \n-[X] 发版");
+        assert_eq!(items.len(), 3);
+        assert!(items[0].done && items[0].text == "修登录");
+        assert!(!items[1].done && items[1].text == "补测试");
+        assert!(items[2].done, "-[X] 也认");
+    }
+
+    #[test]
+    fn dashboard_counts_open_days_and_spark() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut days = Days::load(dir.path());
+        // 用本地时区构造，避免测试机时区把日期挪走
+        let iso = |day: i64, h: u32| {
+            let t = chrono::Local::now() - chrono::Duration::days(day);
+            t.date_naive()
+                .and_hms_opt(h, 0, 0)
+                .unwrap()
+                .and_local_timezone(chrono::Local)
+                .unwrap()
+                .to_rfc3339_opts(SecondsFormat::Secs, true)
+        };
+        let today = today_local();
+        let a = e("a", &iso(0, 9), "修登录", "- [x] 修登录\n- [ ] 补测试");
+        let b = e("b", &iso(2, 9), "发版", "- [x] 打包\n- [x] 上传");
+        let mut gone = e("c", &iso(0, 10), "废弃", "- [ ] 不该出现");
+        gone.deleted_at = Some("t".into());
+        let mut shell = e("t1", &iso(0, 11), "zsh", "- [ ] 终端不算");
+        shell.agent = "shell".into();
+        let entries = vec![a, gone, shell, b];
+        days.put(DayDigest { date: today.clone(), text: "- 修好登录".into(), sessions: 2, input_hash: 0, generated_at: "t".into() });
+        let alive: std::collections::HashSet<String> = ["a".to_string()].into_iter().collect();
+        let d = dashboard(&entries, &days, &alive, &today);
+
+        assert_eq!(d.today.sessions, 2, "今天：a + 已删除的 c（终端不进日历）");
+        assert_eq!((d.today.done, d.today.open), (1, 2));
+        assert_eq!(d.week.sessions, 3, "近 7 天含前天的 b");
+        assert_eq!(d.active, 1);
+        assert_eq!(d.open.len(), 1, "已删除与终端的未完项不进待办");
+        assert_eq!(d.open[0].text, "补测试");
+        assert!(d.open[0].alive);
+        assert_eq!(d.days[0].date, today, "最新的一天在前");
+        assert_eq!(d.days[0].text, "- 修好登录");
+        assert_eq!((d.days[0].done, d.days[0].open), (1, 2));
+        assert_eq!(d.days[0].entries.len(), 2);
+        assert!(d.days[0].entries.iter().any(|x| x.deleted && x.id == "c"));
+        assert_eq!(d.spark.len(), 56);
+        assert_eq!(d.spark[55], 2, "热力条最后一格是今天");
+        assert_eq!(d.spark[53], 1, "前天一条");
+    }
+}

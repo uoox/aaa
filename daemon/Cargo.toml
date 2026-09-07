@@ -1,6 +1,6 @@
 [package]
 name = "aaa-daemon"
-version = "1.10.2"
+version = "1.11.0"
 edition = "2021"
 description = "AAA daemon: PTY pool + server-side VT for AI agent sessions (REST + WS)"
 

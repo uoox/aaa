@@ -13,16 +13,15 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -39,178 +38,215 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavHostController
 import java.time.LocalDate
-import java.time.YearMonth
 
 /**
- * 历史（2026-09-07 用户拍板，照 todo 应用的样子）：两个 tab。
- * 「任务」以会话为任务：按 进行中 / 未完成 / 已完成 / 已删除 分组，行上是标题 + 没勾的项，
- * 点一行展开清单，「打开」进会话。「日历」是月历 + 那天 haiku 写的摘要 + 那天的会话。
- * 顶部搜索框两边共用。
+ * 看板（2026-09-07 用户拍板，取代原来的历史两 tab）：一眼看出**最近做了什么**、
+ * **还有什么没做**。数据是 daemon 一次算好的 `GET /history/dashboard`。
+ *
+ * 手机上一栏从上往下：数字块（今天 / 近 7 天 / 此刻）+ 近 8 周活动条 → 搜索 →
+ * 「还没做」（所有会话里没勾的清单项，按项目归并）→「最近做了什么」（按天倒序，
+ * haiku 日摘要 + 当天会话）。会话还在就能点开，已删除的只能看。
  */
 @Composable
 fun HistoryScreen(store: AppStore, nav: NavHostController) {
     val openSession = LocalOpenSession.current
-    val sessions by store.sessions.collectAsState()
-    var entries by remember { mutableStateOf<List<HistoryEntry>?>(null) }
-    var days by remember { mutableStateOf<List<DayDigest>>(emptyList()) }
+    var dash by remember { mutableStateOf<Dashboard?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var query by rememberSaveable { mutableStateOf("") }
-    var calendarTab by rememberSaveable { mutableStateOf(false) }
-    var month by rememberSaveable { mutableStateOf(YearMonth.now().toString()) }
-    var selectedDay by rememberSaveable { mutableStateOf<String?>(null) }
-    var expanded by remember { mutableStateOf(setOf<String>()) }
+    var expandedDays by remember { mutableStateOf(setOf<String>()) }
     LaunchedEffect(Unit) {
-        try { entries = store.client?.history(500).orEmpty(); error = null }
-        catch (e: DaemonHttpException) { error = if (e.code == 404) "daemon 版本不支持会话日志（需 v1.9）" else e.message }
+        try { dash = store.client?.historyDashboard(); error = null }
+        catch (e: DaemonHttpException) { error = if (e.code == 404) "daemon 版本不支持看板（需 v1.11）" else e.message }
         catch (e: Exception) { error = e.message }
-        runCatching { days = store.client?.historyDays().orEmpty() }
     }
-    val alive = remember(sessions) { sessions.map { it.id }.toSet() }
-    val byDay = remember(days) { days.associateBy { it.date } }
-    val matched = remember(entries, query) { entries.orEmpty().filter { historyMatches(it, query) } }
+    val d = dash
+    val openItems = remember(d, query) { d?.open.orEmpty().filter { openItemMatches(it, query) } }
+    val groups = remember(openItems) { groupOpenByProject(openItems) }
+    val days = remember(d, query) { d?.days.orEmpty().filter { dayCardMatches(it, query) } }
+    val today = remember { LocalDate.now().toString() }
 
     Column(Modifier.fillMaxSize().background(Tok.Bg).navigationBarsPadding()) {
         Row(Modifier.fillMaxWidth().padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("‹", color = Tok.Dim, fontSize = 26.sp, modifier = Modifier.clickable { nav.popBackStack() }.padding(horizontal = 8.dp))
-            Text("历史", color = Tok.Ink, fontSize = 17.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.width(12.dp))
-            Tab("任务", !calendarTab) { calendarTab = false }
-            Spacer(Modifier.width(6.dp))
-            Tab("日历", calendarTab) { calendarTab = true }
+            Text("看板", color = Tok.Ink, fontSize = 17.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.weight(1f))
-            entries?.let { Text("${it.size} 条", color = Tok.Faint, fontSize = 12.sp, fontFamily = FontFamily.Monospace) }
+            d?.let { Text("待办 ${it.open.size}", color = Tok.Amber, fontSize = 12.sp, fontFamily = FontFamily.Monospace) }
         }
         Box(
             Modifier.fillMaxWidth().padding(horizontal = 12.dp).background(Tok.Raised, RoundedCornerShape(10.dp)).padding(horizontal = 12.dp, vertical = 8.dp),
             contentAlignment = Alignment.CenterStart,
         ) {
-            if (query.isEmpty()) Text("搜索：标题 / 项目 / 清单", color = Tok.Faint, fontSize = 14.sp)
+            if (query.isEmpty()) Text("搜索：待办 / 标题 / 项目", color = Tok.Faint, fontSize = 14.sp)
             BasicTextField(query, { query = it }, singleLine = true, modifier = Modifier.fillMaxWidth(), textStyle = TextStyle(color = Tok.Ink, fontSize = 14.sp), cursorBrush = SolidColor(Tok.Accent))
         }
         error?.let { Text(it, color = Tok.Red, fontSize = 13.sp, modifier = Modifier.padding(16.dp)) }
 
         LazyColumn(Modifier.fillMaxSize(), contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 24.dp)) {
-            if (entries == null && error == null) { item { Text("加载中…", color = Tok.Faint, modifier = Modifier.padding(16.dp)) }; return@LazyColumn }
-            if (!calendarTab) {
-                if (matched.isEmpty()) item { Text(if (entries.isNullOrEmpty()) "还没有记录" else "没有匹配的会话", color = Tok.Faint, modifier = Modifier.padding(16.dp)) }
-                TaskGroup.entries.forEach { g ->
-                    val rows = matched.filter { taskGroup(it, it.id in alive) == g }
-                    if (rows.isEmpty()) return@forEach
-                    item(key = "hdr-${g.name}") {
-                        Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Text(g.label, color = Tok.Ink, fontSize = 15.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-                            Text("${rows.size}", color = Tok.Faint, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
-                        }
-                    }
-                    items(rows, key = { it.id }) { e ->
-                        TaskRow(e, g, expanded = e.id in expanded, openable = e.id in alive,
-                            onToggle = { expanded = if (e.id in expanded) expanded - e.id else expanded + e.id },
-                            onOpen = { openSession(e.id, "") })
-                    }
+            if (d == null) {
+                if (error == null) item { Text("加载中…", color = Tok.Faint, modifier = Modifier.padding(16.dp)) }
+                return@LazyColumn
+            }
+            item(key = "stats") {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    StatTile(Modifier.weight(1f), "今天", "${d.today.sessions} 会话", "做完 ${d.today.done} · 没做 ${d.today.open}")
+                    StatTile(Modifier.weight(1f), "近 7 天", "${d.week.sessions} 会话", "做完 ${d.week.done} · 没做 ${d.week.open}")
+                    StatTile(Modifier.weight(1f), "此刻", "${d.active} 在跑", "待办共 ${d.open.size}")
                 }
-            } else {
-                item(key = "calendar") {
-                    val ym = runCatching { YearMonth.parse(month) }.getOrDefault(YearMonth.now())
-                    Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("‹", color = Tok.Dim, fontSize = 20.sp, modifier = Modifier.clickable { month = ym.minusMonths(1).toString() }.padding(horizontal = 10.dp))
-                            Text(ym.toString(), color = Tok.Ink, fontSize = 13.sp, fontFamily = FontFamily.Monospace)
-                            Text("›", color = Tok.Dim, fontSize = 20.sp, modifier = Modifier.clickable { month = ym.plusMonths(1).toString() }.padding(horizontal = 10.dp))
-                        }
-                        Row(Modifier.fillMaxWidth()) {
-                            listOf("一", "二", "三", "四", "五", "六", "日").forEach { Text(it, color = Tok.Faint, fontSize = 10.sp, modifier = Modifier.weight(1f), textAlign = androidx.compose.ui.text.style.TextAlign.Center) }
-                        }
-                        val lead = ym.atDay(1).dayOfWeek.value - 1
-                        val total = lead + ym.lengthOfMonth()
-                        val rows = (total + 6) / 7
-                        val today = LocalDate.now().toString()
-                        for (r in 0 until rows) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                            for (col in 0 until 7) {
-                                val idx = r * 7 + col
-                                val d = idx - lead + 1
-                                if (d < 1 || d > ym.lengthOfMonth()) { Spacer(Modifier.weight(1f).height(40.dp)); continue }
-                                val date = ym.atDay(d).toString()
-                                val n = byDay[date]?.sessions ?: 0
-                                val selected = selectedDay == date
-                                Column(
-                                    Modifier.weight(1f).height(40.dp)
-                                        .then(if (selected) Modifier.background(Tok.Accent.copy(alpha = 0.18f), RoundedCornerShape(6.dp)).border(1.dp, Tok.Accent, RoundedCornerShape(6.dp)) else Modifier)
-                                        .then(if (n > 0) Modifier.clickable { selectedDay = if (selected) null else date } else Modifier),
-                                    horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center,
-                                ) {
-                                    Text("$d", color = if (date == today) Tok.Accent else if (n > 0) Tok.Ink else Tok.Faint, fontSize = 13.sp, fontWeight = if (date == today) FontWeight.Bold else FontWeight.Normal)
-                                    if (n > 0) Text("$n", color = Tok.Green, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
-                                }
-                            }
-                        }
+            }
+            item(key = "spark") { SparkStrip(d.spark) }
+
+            item(key = "todo-hdr") { SectionHeader("还没做", "${openItems.size}", Tok.Amber) }
+            if (groups.isEmpty()) {
+                item(key = "todo-empty") {
+                    Text(
+                        if (d.open.isEmpty()) "没有待办——每个会话的进度清单都勾完了" else "没有匹配的待办",
+                        color = Tok.Faint, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                    )
+                }
+            }
+            groups.forEach { (project, items) ->
+                item(key = "proj-$project") {
+                    Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 2.dp)) {
+                        Text(project, color = Tok.Dim, fontSize = 12.5.sp, modifier = Modifier.weight(1f))
+                        Text("${items.size}", color = Tok.Faint, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
                     }
                 }
-                selectedDay?.let { d -> byDay[d] }?.let { dg ->
-                    item(key = "digest") {
-                        Column(
-                            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
-                                .background(Tok.Surface, RoundedCornerShape(10.dp)).border(1.dp, Tok.Edge, RoundedCornerShape(10.dp)).padding(12.dp),
-                        ) {
-                            Text("${dg.date} · ${dg.sessions} 个会话", color = Tok.Faint, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
-                            Text(dg.text.ifBlank { "haiku 还没写这一天的摘要（daemon 每 5 分钟补一次）" }, color = Tok.Ink, fontSize = 13.5.sp, lineHeight = 20.sp, modifier = Modifier.padding(top = 4.dp))
-                        }
-                    }
+                items(items, key = { "todo-${it.session_id}-${it.text}" }) { it2 ->
+                    TodoRow(it2) { if (it2.alive) openSession(it2.session_id, "") }
                 }
-                val dayRows = matched.filter { e -> selectedDay?.let { localDayOf(e.created_at) == it } ?: true }
-                if (dayRows.isEmpty()) item { Text(if (selectedDay != null) "这天没有匹配的会话" else "没有匹配的会话", color = Tok.Faint, modifier = Modifier.padding(16.dp)) }
-                items(dayRows, key = { it.id }) { e ->
-                    TaskRow(e, taskGroup(e, e.id in alive), expanded = e.id in expanded, openable = e.id in alive,
-                        onToggle = { expanded = if (e.id in expanded) expanded - e.id else expanded + e.id },
-                        onOpen = { openSession(e.id, "") })
+            }
+
+            item(key = "days-hdr") { SectionHeader("最近做了什么", "${days.size} 天", Tok.Faint) }
+            if (days.isEmpty()) {
+                item(key = "days-empty") {
+                    Text(
+                        if (d.days.isEmpty()) "还没有记录（daemon 每秒把会话同步进日志）" else "没有匹配的日子",
+                        color = Tok.Faint, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                    )
                 }
+            }
+            items(days, key = { "day-${it.date}" }) { day ->
+                DayBlock(
+                    day, today, expanded = day.date in expandedDays,
+                    onToggle = { expandedDays = if (day.date in expandedDays) expandedDays - day.date else expandedDays + day.date },
+                    onOpen = { id -> openSession(id, "") },
+                )
             }
         }
     }
 }
 
+/** 数字块：小标题 + 大字 + 副行 */
 @Composable
-private fun Tab(label: String, on: Boolean, onClick: () -> Unit) {
-    Text(
-        label, color = if (on) Tok.Accent else Tok.Dim, fontSize = 13.sp,
-        modifier = Modifier
-            .background(if (on) Tok.Accent.copy(alpha = 0.14f) else androidx.compose.ui.graphics.Color.Transparent, RoundedCornerShape(8.dp))
-            .clickable(onClick = onClick).padding(horizontal = 10.dp, vertical = 4.dp),
-    )
+private fun StatTile(modifier: Modifier, label: String, big: String, sub: String) {
+    Column(
+        modifier.background(Tok.Surface, RoundedCornerShape(10.dp)).border(1.dp, Tok.Edge, RoundedCornerShape(10.dp))
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+    ) {
+        Text(label, color = Tok.Faint, fontSize = 11.sp)
+        Text(big, color = Tok.Ink, fontSize = 17.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(sub, color = Tok.Dim, fontSize = 10.5.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
 }
 
-/** 一条任务 = 一个会话：状态格 + 标题 + 没勾的项；点开展开清单；「打开」进会话 */
+/** 近 8 周活动条：一格一天，最旧在左，深浅按当天会话数 */
 @Composable
-private fun TaskRow(e: HistoryEntry, g: TaskGroup, expanded: Boolean, openable: Boolean, onToggle: () -> Unit, onOpen: () -> Unit) {
-    val items = parseChecklist(e.summary)
-    val (glyph, color) = when (g) {
-        TaskGroup.ACTIVE -> "◐" to Tok.Green
-        TaskGroup.OPEN -> "☐" to Tok.Amber
-        TaskGroup.DONE -> "☑" to Tok.Dim
-        TaskGroup.DELETED -> "✕" to Tok.Faint
-    }
-    val sub = taskSubline(e)
-    Column(Modifier.fillMaxWidth().clickable(onClick = onToggle).padding(horizontal = 16.dp, vertical = 9.dp)) {
-        Row(verticalAlignment = Alignment.Top) {
-            Text(glyph, color = color, fontSize = 17.sp, modifier = Modifier.width(26.dp).padding(top = 1.dp))
-            Column(Modifier.weight(1f)) {
-                Text(e.title.ifBlank { e.project_name }, color = if (g == TaskGroup.DELETED) Tok.Dim else Tok.Ink, fontSize = 15.sp, fontWeight = FontWeight.Medium, maxLines = if (expanded) 3 else 1, overflow = TextOverflow.Ellipsis)
-                if (sub.isNotEmpty()) Text(sub, color = Tok.Dim, fontSize = 12.5.sp, maxLines = if (expanded) 4 else 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
-                Row(Modifier.fillMaxWidth().padding(top = 3.dp)) {
-                    Text(artifactTimeLabel(e.created_at), color = Tok.Faint, fontSize = 11.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.weight(1f))
-                    Text(e.project_name + if (e.agent == "shell") " · 终端" else "", color = Tok.Faint, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }
-            }
-            if (openable) Text("打开", color = Tok.Accent, fontSize = 12.sp, modifier = Modifier.clickable(onClick = onOpen).padding(start = 10.dp, top = 2.dp, bottom = 6.dp))
-        }
-        if (expanded) Column(Modifier.padding(start = 26.dp, top = 6.dp)) {
-            if (items.isEmpty()) Text("没有进度清单", color = Tok.Faint, fontSize = 12.sp)
-            items.forEach { it ->
-                Row(Modifier.padding(vertical = 2.dp), verticalAlignment = Alignment.Top) {
-                    Text(if (it.done) "☑" else "☐", color = if (it.done) Tok.Green else Tok.Faint, fontSize = 14.sp, modifier = Modifier.width(22.dp))
-                    Text(it.text, color = if (it.done) Tok.Dim else Tok.Ink, fontSize = 13.sp, lineHeight = 18.sp)
-                }
-            }
+private fun SparkStrip(spark: List<Int>) {
+    if (spark.isEmpty()) return
+    val max = (spark.maxOrNull() ?: 0).coerceAtLeast(1)
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        Text("8 周", color = Tok.Faint, fontSize = 10.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.padding(end = 4.dp))
+        spark.forEach { n ->
+            val alpha = if (n == 0) 0.10f else 0.25f + 0.75f * (n.toFloat() / max)
+            Box(Modifier.weight(1f).height(14.dp).background(Tok.Accent.copy(alpha = alpha), RoundedCornerShape(2.dp)))
         }
     }
-    HorizontalDivider(color = Tok.Edge, thickness = 1.dp, modifier = Modifier.padding(start = 42.dp))
+}
+
+@Composable
+private fun SectionHeader(title: String, tail: String, tailColor: androidx.compose.ui.graphics.Color) {
+    Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(title, color = Tok.Ink, fontSize = 15.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+        Text(tail, color = tailColor, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+    }
+}
+
+/** 一条待办：☐ + 条目本身；副行是它属于哪个会话、什么时候开的。会话还活着才可点开 */
+@Composable
+private fun TodoRow(item: OpenItem, onOpen: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clickable(enabled = item.alive, onClick = onOpen).padding(horizontal = 16.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Text("☐", color = Tok.Amber, fontSize = 15.sp, modifier = Modifier.width(24.dp))
+        Column(Modifier.weight(1f)) {
+            Text(item.text, color = Tok.Ink, fontSize = 14.sp, lineHeight = 19.sp)
+            Text(
+                item.title + " · " + artifactTimeLabel(item.created_at),
+                color = Tok.Faint, fontSize = 11.sp, fontFamily = FontFamily.Monospace,
+                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp),
+            )
+        }
+        if (item.alive) Text("● 在跑", color = Tok.Green, fontSize = 10.5.sp, modifier = Modifier.padding(start = 8.dp, top = 2.dp))
+    }
+}
+
+/** 一天：日期 + 计数 + haiku 要点；点「这天的会话」展开当天会话 */
+@Composable
+private fun DayBlock(day: DayCard, today: String, expanded: Boolean, onToggle: () -> Unit, onOpen: (String) -> Unit) {
+    Column(
+        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
+            .background(Tok.Surface, RoundedCornerShape(10.dp)).border(1.dp, Tok.Edge, RoundedCornerShape(10.dp)).padding(12.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                day.date + if (day.date == today) "（今天）" else "",
+                color = if (day.date == today) Tok.Accent else Tok.Ink,
+                fontSize = 13.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.weight(1f),
+            )
+            Text("${day.sessions} 会话 · 做完 ${day.done} · 没做 ${day.open}", color = Tok.Faint, fontSize = 10.5.sp, fontFamily = FontFamily.Monospace)
+        }
+        if (day.text.isBlank()) {
+            Text("haiku 还没写这一天的摘要（daemon 每 5 分钟补一次）", color = Tok.Faint, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
+        } else {
+            day.text.lineSequence().map { it.trim().trimStart('-', '*', '•').trim() }.filter { it.isNotEmpty() }.forEach { line ->
+                Row(Modifier.padding(top = 5.dp), verticalAlignment = Alignment.Top) {
+                    Text("▪", color = Tok.Green, fontSize = 12.sp, modifier = Modifier.width(16.dp))
+                    Text(line, color = Tok.Ink, fontSize = 13.5.sp, lineHeight = 19.sp)
+                }
+            }
+        }
+        Text(
+            (if (expanded) "▾" else "▸") + " 这天的会话 ${day.sessions}",
+            color = Tok.Dim, fontSize = 11.5.sp, fontFamily = FontFamily.Monospace,
+            modifier = Modifier.clickable(onClick = onToggle).padding(top = 8.dp, bottom = 2.dp),
+        )
+        if (expanded) day.entries.forEach { e ->
+            val (glyph, color) = when {
+                e.deleted -> "✕" to Tok.Faint
+                e.alive -> "◐" to Tok.Green
+                e.open > 0 -> "☐" to Tok.Amber
+                else -> "☑" to Tok.Dim
+            }
+            Row(
+                Modifier.fillMaxWidth().clickable(enabled = e.alive) { onOpen(e.id) }.padding(vertical = 5.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(glyph, color = color, fontSize = 14.sp, modifier = Modifier.width(22.dp))
+                Text(
+                    e.title, color = if (e.deleted) Tok.Dim else Tok.Ink, fontSize = 13.sp,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
+                )
+                Spacer(Modifier.size(6.dp))
+                Text(
+                    e.project_name + if (e.done + e.open > 0) " ${e.done}/${e.done + e.open}" else "",
+                    color = Tok.Faint, fontSize = 10.5.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+    }
 }

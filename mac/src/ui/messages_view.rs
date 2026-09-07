@@ -769,13 +769,13 @@ impl MessagesView {
     /// 代替箭头，折叠着也报最近一步在干什么。整行可点，悬停淡底。
     fn fold_row(
         &self,
-        turn_key: u64,
+        fold_key: u64,
         steps: &[&ChatMessage],
         live_tail: Option<&ChatMessage>,
         live: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let open = self.fold_open.contains(&turn_key);
+        let open = self.fold_open.contains(&fold_key);
         let n = stream_fold::step_count(steps);
         let label: SharedString = match (live, open) {
             (true, true) => format!("进行中 · {n} 步").into(),
@@ -790,7 +790,7 @@ impl MessagesView {
                 .rounded_full()
                 .bg(c(theme::accent()))
                 .with_animation(
-                    ElementId::from(format!("fold-pulse-{turn_key}")),
+                    ElementId::from(format!("fold-pulse-{fold_key}")),
                     Animation::new(Duration::from_millis(1100)).repeat(),
                     |el, t| {
                         // 0→1→0 的呼吸：t 过半往回走
@@ -807,7 +807,7 @@ impl MessagesView {
                 .into_any_element()
         };
         div()
-            .id(("fold", turn_key as usize))
+            .id(("fold", fold_key as usize))
             .w_full()
             .flex()
             .items_center()
@@ -817,7 +817,7 @@ impl MessagesView {
             .rounded(px(6.))
             .cursor_pointer()
             .hover(|s| s.bg(ca(theme::ink(), 0.05)))
-            .on_click(cx.listener(move |v: &mut Self, _, _, cx| v.toggle_fold(turn_key, cx)))
+            .on_click(cx.listener(move |v: &mut Self, _, _, cx| v.toggle_fold(fold_key, cx)))
             .child(div().flex_none().w(px(10.)).flex().justify_center().child(marker))
             .child(
                 div()
@@ -1441,11 +1441,11 @@ impl Render for MessagesView {
                 .map(|(i, item)| {
                     let el = match item {
                         StreamItem::Fold {
-                            turn_key,
+                            fold_key,
                             steps,
                             live_tail,
                             live,
-                        } => self.fold_row(*turn_key, steps, *live_tail, *live, cx),
+                        } => self.fold_row(*fold_key, steps, *live_tail, *live, cx),
                         StreamItem::Step(m) => self.step_row(m, pending, cx),
                         StreamItem::User(m)
                         | StreamItem::Reply(m)
@@ -1725,7 +1725,7 @@ mod tests {
             item_gap(
                 3,
                 &StreamItem::Fold {
-                    turn_key: 1,
+                    fold_key: 1,
                     steps: vec![&t],
                     live_tail: None,
                     live: false

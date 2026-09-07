@@ -1,14 +1,15 @@
-//! 「历史」页：daemon 会话日志（GET /history）+ 日历（GET /history/days）。
-//! 上面是搜索框和月历（有会话的日子带数字，点一天只看那天，再点取消），
-//! 中间是选中那天 haiku 写的「这一天做了什么」，下面是会话列表。
-//! 点一行：会话还在（活着或有回放）就打开；已删除的只能看。
+//! 「看板」页（2026-09-07 用户拍板，取代原来的历史两 tab）：一眼看出**最近做了什么**、
+//! **还有什么没做**。数据是 daemon 一次算好的 `GET /history/dashboard`。
+//!
+//! 顶上三块数字（今天 / 近 7 天 / 此刻）+ 近 8 周的活动热力条；下面两栏——左边把所有
+//! 会话里没勾的清单项按项目归并成一张待办表，右边按天倒序的流水（haiku 写的「这一天
+//! 做了什么」+ 当天会话）。搜索框两栏共用。会话还在就能点开，已删除的只能看。
 
-use chrono::Datelike as _;
 use gpui::{Context, SharedString, div, prelude::*, px};
 
 use super::RootView;
 use super::kit::*;
-use crate::model::{DayDigest, HistoryEntry, TaskGroup, history_matches, local_day_of, parse_checklist, task_group, task_subline};
+use crate::model::{DayCard, Dashboard, OpenItem, day_card_matches, group_open_by_project, open_item_matches};
 use crate::theme;
 
 impl RootView {
@@ -19,340 +20,335 @@ impl RootView {
     }
 
     pub(super) fn fetch_history(&mut self, cx: &mut Context<Self>) {
-        let fut = self.net.history(500);
+        let fut = self.net.history_dashboard();
         self.spawn_fetch(
             fut,
-            |r, entries: Vec<HistoryEntry>, cx| {
-                r.history = entries;
+            |r, d: Dashboard, cx| {
+                r.dashboard = d;
                 cx.notify();
             },
             true,
             cx,
         );
-        let fut = self.net.history_days();
-        self.spawn_fetch(
-            fut,
-            |r, days: Vec<DayDigest>, cx| {
-                r.history_days = days;
-                cx.notify();
-            },
-            false,
-            cx,
-        );
     }
 
-    fn shift_month(&mut self, delta: i32, cx: &mut Context<Self>) {
-        let (y, m) = parse_ym(&self.history_month);
-        let idx = y * 12 + (m - 1) + delta;
-        self.history_month = format!("{:04}-{:02}", idx.div_euclid(12), idx.rem_euclid(12) + 1);
-        cx.notify();
+    /// 数字块：大字 + 小标题；副行是「做完 / 没做」
+    fn stat_tile(&self, label: &str, big: String, sub: String) -> gpui::Div {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .px(px(12.))
+            .py(px(8.))
+            .min_w(px(120.))
+            .rounded(px(10.))
+            .bg(c(theme::surface()))
+            .border_1()
+            .border_color(c(theme::edge()))
+            .child(div().text_size(px(10.5)).text_color(c(theme::faint())).child(SharedString::from(label.to_string())))
+            .child(
+                div()
+                    .font_family("Menlo")
+                    .text_size(px(20.))
+                    .text_color(c(theme::ink()))
+                    .child(SharedString::from(big)),
+            )
+            .child(div().font_family("Menlo").text_size(px(10.5)).text_color(c(theme::dim())).child(SharedString::from(sub)))
     }
 
-    pub(super) fn render_history_page(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    /// 近 8 周的活动热力条：一格一天，最旧在左，颜色深浅按当天会话数
+    fn spark_strip(&self) -> gpui::Div {
+        let spark = &self.dashboard.spark;
+        let max = spark.iter().copied().max().unwrap_or(0).max(1);
+        let mut row = div().flex().gap(px(2.)).items_end();
+        for n in spark {
+            let alpha = if *n == 0 { 0.10 } else { 0.25 + 0.75 * (*n as f32 / max as f32) };
+            row = row.child(div().w(px(6.)).h(px(14.)).rounded(px(2.)).bg(ca(theme::accent(), alpha)));
+        }
+        div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .child(div().font_family("Menlo").text_size(px(10.)).text_color(c(theme::faint())).child("8 周"))
+            .child(row)
+    }
+
+    /// 左栏一条待办
+    fn open_row(&self, it: &OpenItem, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
         let now = chrono::Local::now();
-        let query = self.history_input.read(cx).text.clone();
-        let alive_ids: std::collections::HashSet<&str> = self.sessions.iter().map(|s| s.id.as_str()).collect();
-        let by_day: std::collections::HashMap<&str, &DayDigest> =
-            self.history_days.iter().map(|d| (d.date.as_str(), d)).collect();
+        let when = super::detail_panel::fmt_artifact_time(&it.created_at, &now, &chrono::Local).unwrap_or_default();
+        let sid = it.session_id.clone();
+        let alive = it.alive;
+        div()
+            .id(SharedString::from(format!("todo:{}:{}", it.session_id, it.text)))
+            .flex()
+            .items_start()
+            .gap(px(8.))
+            .px(px(10.))
+            .py(px(5.))
+            .rounded(px(6.))
+            .when(alive, |el| {
+                el.cursor_pointer().hover(|st| st.bg(c(theme::surface_raised()))).on_click(cx.listener(move |this, _, _, cx| {
+                    this.open_session(sid.clone(), cx);
+                }))
+            })
+            .child(div().flex_none().text_size(px(12.)).text_color(c(theme::amber())).child("☐"))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .flex()
+                    .flex_col()
+                    .child(div().text_size(px(12.5)).text_color(c(theme::ink())).whitespace_normal().child(SharedString::from(it.text.clone())))
+                    .child(
+                        div()
+                            .truncate()
+                            .font_family("Menlo")
+                            .text_size(px(10.))
+                            .text_color(c(theme::faint()))
+                            .child(SharedString::from(format!("{} · {}", it.title, when))),
+                    ),
+            )
+            .when(alive, |el| {
+                el.child(div().flex_none().text_size(px(10.)).text_color(c(theme::green())).child("● 在跑"))
+            })
+    }
 
-        // ── 月历 ──
-        let (y, m) = parse_ym(&self.history_month);
-        let first = chrono::NaiveDate::from_ymd_opt(y, m as u32, 1).unwrap_or_else(|| now.date_naive());
-        let days_in_month = days_in(y, m);
-        let lead = first.weekday().num_days_from_monday() as usize;
-        let today = now.format("%Y-%m-%d").to_string();
-        let mut grid = div().flex().flex_col().gap(px(3.));
-        let mut row = div().flex().gap(px(3.));
-        let cell = |content: gpui::Div| content.w(px(40.)).h(px(34.)).flex().flex_col().items_center().justify_center().rounded(px(6.));
-        for w in ["一", "二", "三", "四", "五", "六", "日"] {
-            row = row.child(cell(div()).child(div().text_size(px(10.)).text_color(c(theme::faint())).child(w)));
-        }
-        grid = grid.child(row);
-        row = div().flex().gap(px(3.));
-        for _ in 0..lead {
-            row = row.child(cell(div()));
-        }
-        let mut col_ix = lead;
-        for d in 1..=days_in_month {
-            let date = format!("{:04}-{:02}-{:02}", y, m, d);
-            let n = by_day.get(date.as_str()).map(|x| x.sessions).unwrap_or(0);
-            let selected = self.history_day.as_deref() == Some(date.as_str());
-            let is_today = date == today;
-            let date2 = date.clone();
-            let mut c_el = cell(div())
-                .id(SharedString::from(format!("cal:{date}")))
-                .when(n > 0, |el| {
-                    el.cursor_pointer()
-                        .hover(|st| st.bg(c(theme::surface_raised())))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.history_day = if this.history_day.as_deref() == Some(date2.as_str()) { None } else { Some(date2.clone()) };
-                            cx.notify();
-                        }))
-                })
-                .when(selected, |el| el.bg(ca(theme::accent(), 0.18)).border_1().border_color(c(theme::accent())))
-                .child(
-                    div()
-                        .text_size(px(12.))
-                        .text_color(c(if n > 0 { theme::ink() } else { theme::faint() }))
-                        .when(is_today, |el| el.font_weight(gpui::FontWeight::BOLD).text_color(c(theme::accent())))
-                        .child(SharedString::from(d.to_string())),
-                );
-            if n > 0 {
-                c_el = c_el.child(
-                    div()
-                        .font_family("Menlo")
-                        .text_size(px(8.5))
-                        .text_color(c(theme::green()))
-                        .child(SharedString::from(format!("{n}"))),
-                );
-            }
-            row = row.child(c_el);
-            col_ix += 1;
-            if col_ix % 7 == 0 {
-                grid = grid.child(row);
-                row = div().flex().gap(px(3.));
-            }
-        }
-        if col_ix % 7 != 0 {
-            grid = grid.child(row);
-        }
-        let nav_btn = |id: &'static str, label: &'static str| {
-            div()
-                .id(id)
-                .px(px(6.))
-                .py(px(2.))
-                .rounded(px(4.))
-                .cursor_pointer()
-                .text_size(px(12.))
-                .text_color(c(theme::dim()))
-                .hover(|st| st.bg(c(theme::surface_raised())).text_color(c(theme::ink())))
-                .child(label)
-        };
-        let calendar = div()
+    /// 右栏一天
+    fn day_card(&self, d: &DayCard, today: &str, cx: &mut Context<Self>) -> gpui::Div {
+        let expanded = self.history_expanded.contains(&d.date);
+        let date_key = d.date.clone();
+        let head = format!("{}{}", d.date, if d.date == today { "（今天）" } else { "" });
+        let counts = format!("{} 会话 · 做完 {} · 没做 {}", d.sessions, d.done, d.open);
+        let mut card = div()
             .flex()
             .flex_col()
             .gap(px(6.))
+            .p(px(12.))
+            .rounded(px(10.))
+            .bg(c(theme::surface()))
+            .border_1()
+            .border_color(c(theme::edge()))
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .child(nav_btn("cal-prev", "‹").on_click(cx.listener(|this, _, _, cx| this.shift_month(-1, cx))))
-                    .child(div().font_family("Menlo").text_size(px(12.)).text_color(c(theme::ink())).child(SharedString::from(self.history_month.clone())))
-                    .child(nav_btn("cal-next", "›").on_click(cx.listener(|this, _, _, cx| this.shift_month(1, cx)))),
-            )
-            .child(grid);
+                    .child(
+                        div()
+                            .font_family("Menlo")
+                            .text_size(px(12.))
+                            .text_color(c(if d.date == today { theme::accent() } else { theme::ink() }))
+                            .child(SharedString::from(head)),
+                    )
+                    .child(div().flex_1())
+                    .child(div().font_family("Menlo").text_size(px(10.)).text_color(c(theme::faint())).child(SharedString::from(counts))),
+            );
+        if d.text.is_empty() {
+            card = card.child(
+                div()
+                    .text_size(px(11.5))
+                    .text_color(c(theme::faint()))
+                    .child("haiku 还没写这一天的摘要（daemon 每 5 分钟补一次）"),
+            );
+        } else {
+            for line in d.text.lines() {
+                let body = line.trim_start_matches(['-', '*', '•']).trim().to_string();
+                if body.is_empty() {
+                    continue;
+                }
+                card = card.child(
+                    div()
+                        .flex()
+                        .gap(px(6.))
+                        .child(div().flex_none().text_size(px(11.)).text_color(c(theme::green())).child("▪"))
+                        .child(div().text_size(px(12.5)).text_color(c(theme::ink())).whitespace_normal().child(SharedString::from(body))),
+                );
+            }
+        }
+        card = card.child(
+            div()
+                .id(SharedString::from(format!("day-toggle:{}", d.date)))
+                .cursor_pointer()
+                .font_family("Menlo")
+                .text_size(px(10.5))
+                .text_color(c(theme::dim()))
+                .hover(|st| st.text_color(c(theme::ink())))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if !this.history_expanded.remove(&date_key) {
+                        this.history_expanded.insert(date_key.clone());
+                    }
+                    cx.notify();
+                }))
+                .child(SharedString::from(format!("{} 这天的会话 {}", if expanded { "▾" } else { "▸" }, d.sessions))),
+        );
+        if expanded {
+            for e in &d.entries {
+                let sid = e.id.clone();
+                let alive = e.alive;
+                let tail = if e.deleted {
+                    "已删除".to_string()
+                } else if e.done + e.open == 0 {
+                    String::new()
+                } else {
+                    format!("{}/{}", e.done, e.done + e.open)
+                };
+                card = card.child(
+                    div()
+                        .id(SharedString::from(format!("day-sess:{}", e.id)))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .px(px(8.))
+                        .py(px(4.))
+                        .rounded(px(6.))
+                        .when(alive, |el| {
+                            el.cursor_pointer().hover(|st| st.bg(c(theme::surface_raised()))).on_click(cx.listener(move |this, _, _, cx| {
+                                this.open_session(sid.clone(), cx);
+                            }))
+                        })
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(11.))
+                                .text_color(c(if e.deleted {
+                                    theme::faint()
+                                } else if alive {
+                                    theme::green()
+                                } else if e.open > 0 {
+                                    theme::amber()
+                                } else {
+                                    theme::dim()
+                                }))
+                                .child(if e.deleted {
+                                    "✕"
+                                } else if alive {
+                                    "◐"
+                                } else if e.open > 0 {
+                                    "☐"
+                                } else {
+                                    "☑"
+                                }),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .truncate()
+                                .text_size(px(12.))
+                                .text_color(c(if e.deleted { theme::dim() } else { theme::ink() }))
+                                .child(SharedString::from(e.title.clone())),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .font_family("Menlo")
+                                .text_size(px(10.))
+                                .text_color(c(theme::faint()))
+                                .child(SharedString::from(format!("{} {}", e.project_name, tail))),
+                        ),
+                );
+            }
+        }
+        card
+    }
 
-        // ── 选中那天的摘要 ──
-        let digest = self.history_day.as_deref().and_then(|d| by_day.get(d)).map(|d| {
-            let body = if d.text.is_empty() {
-                "haiku 还没写这一天的摘要（daemon 每 5 分钟补一次）".to_string()
-            } else {
-                d.text.clone()
-            };
+    pub(super) fn render_history_page(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let query = self.history_input.read(cx).text.clone();
+        let d = &self.dashboard;
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+
+        let open_items: Vec<&OpenItem> = d.open.iter().filter(|i| open_item_matches(i, &query)).collect();
+        let owned: Vec<OpenItem> = open_items.iter().map(|i| (*i).clone()).collect();
+        let groups = group_open_by_project(&owned);
+
+        // ── 左栏：还没做 ──
+        let mut left = div().flex().flex_col().gap(px(10.));
+        left = left.child(
             div()
                 .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(div().text_size(px(13.)).font_weight(gpui::FontWeight::BOLD).text_color(c(theme::ink())).child("还没做"))
+                .child(
+                    div()
+                        .font_family("Menlo")
+                        .text_size(px(10.5))
+                        .text_color(c(theme::amber()))
+                        .child(SharedString::from(open_items.len().to_string())),
+                ),
+        );
+        if groups.is_empty() {
+            left = left.child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(c(theme::faint()))
+                    .child(if d.open.is_empty() { "没有待办——每个会话的进度清单都勾完了" } else { "没有匹配的待办" }),
+            );
+        }
+        for (project, items) in &groups {
+            let mut sec = div()
+                .flex()
                 .flex_col()
-                .gap(px(4.))
-                .p(px(12.))
-                .rounded(px(8.))
+                .gap(px(2.))
+                .p(px(8.))
+                .rounded(px(10.))
                 .bg(c(theme::surface()))
                 .border_1()
                 .border_color(c(theme::edge()))
                 .child(
                     div()
-                        .font_family("Menlo")
-                        .text_size(px(10.))
-                        .text_color(c(theme::faint()))
-                        .child(SharedString::from(format!("{} · {} 个会话", d.date, d.sessions))),
-                )
-                .child(div().text_size(px(12.5)).text_color(c(theme::ink())).whitespace_normal().child(SharedString::from(body)))
-        });
-
-        // ── 行（两种视图共用）：状态格 + 标题 + 第二行；点一行展开清单；「打开」进会话 ──
-        let row_of = |e: &HistoryEntry, group: TaskGroup, cx: &mut Context<Self>| -> gpui::Stateful<gpui::Div> {
-            let openable = alive_ids.contains(e.id.as_str());
-            let items = parse_checklist(&e.summary);
-            let expanded = self.history_expanded.contains(&e.id);
-            let (glyph, glyph_color) = match group {
-                TaskGroup::Active => ("◐", theme::green()),
-                TaskGroup::Open => ("☐", theme::amber()),
-                TaskGroup::Done => ("☑", theme::dim()),
-                TaskGroup::Deleted => ("✕", theme::faint()),
-            };
-            let when = super::detail_panel::fmt_artifact_time(&e.created_at, &now, &chrono::Local).unwrap_or_default();
-            let sub = task_subline(e);
-            let id_toggle = e.id.clone();
-            let id_open = e.id.clone();
-            let title = if e.title.is_empty() { e.project_name.clone() } else { e.title.clone() };
-            let mut card = div()
-                .id(SharedString::from(format!("hist:{}", e.id)))
-                .flex()
-                .flex_col()
-                .px(px(10.))
-                .py(px(7.))
-                .rounded(px(6.))
-                .cursor_pointer()
-                .hover(|st| st.bg(c(theme::surface_raised())))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if !this.history_expanded.remove(&id_toggle) {
-                        this.history_expanded.insert(id_toggle.clone());
-                    }
-                    cx.notify();
-                }))
-                .child(
-                    div()
                         .flex()
-                        .items_start()
-                        .gap(px(10.))
-                        .child(div().flex_none().w(px(16.)).text_size(px(14.)).text_color(c(glyph_color)).child(glyph))
+                        .items_center()
+                        .px(px(10.))
+                        .pb(px(4.))
+                        .child(div().text_size(px(12.)).text_color(c(theme::dim())).child(SharedString::from(project.clone())))
+                        .child(div().flex_1())
                         .child(
                             div()
-                                .flex_1()
-                                .min_w(px(0.))
-                                .flex()
-                                .flex_col()
-                                .child(
-                                    div()
-                                        .truncate()
-                                        .text_size(px(13.))
-                                        .text_color(c(if group == TaskGroup::Deleted { theme::dim() } else { theme::ink() }))
-                                        .child(SharedString::from(title)),
-                                )
-                                .when(!sub.is_empty(), |el| {
-                                    el.child(div().truncate().text_size(px(11.)).text_color(c(theme::dim())).child(SharedString::from(sub.clone())))
-                                })
-                                .child(
-                                    div()
-                                        .flex()
-                                        .gap(px(8.))
-                                        .font_family("Menlo")
-                                        .text_size(px(10.))
-                                        .text_color(c(theme::faint()))
-                                        .child(SharedString::from(when))
-                                        .child(div().flex_1())
-                                        .child(SharedString::from(e.project_name.clone())),
-                                ),
-                        )
-                        .when(openable, |el| {
-                            el.child(
-                                div()
-                                    .id(SharedString::from(format!("hist-open:{}", e.id)))
-                                    .flex_none()
-                                    .px(px(6.))
-                                    .py(px(2.))
-                                    .rounded(px(4.))
-                                    .text_size(px(10.5))
-                                    .text_color(c(theme::accent()))
-                                    .hover(|st| st.bg(c(theme::edge_light())))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        cx.stop_propagation();
-                                        this.open_session(id_open.clone(), cx);
-                                    }))
-                                    .child("打开"),
-                            )
-                        }),
+                                .font_family("Menlo")
+                                .text_size(px(10.))
+                                .text_color(c(theme::faint()))
+                                .child(SharedString::from(items.len().to_string())),
+                        ),
                 );
-            if expanded {
-                let mut cl = div().flex().flex_col().gap(px(3.)).pl(px(26.)).pt(px(6.));
-                if items.is_empty() {
-                    cl = cl.child(div().text_size(px(11.)).text_color(c(theme::faint())).child("没有进度清单"));
-                }
-                for it in items {
-                    cl = cl.child(
-                        div()
-                            .flex()
-                            .gap(px(6.))
-                            .child(div().flex_none().text_size(px(11.5)).text_color(c(if it.done { theme::green() } else { theme::faint() })).child(if it.done { "☑" } else { "☐" }))
-                            .child(div().text_size(px(11.5)).text_color(c(if it.done { theme::dim() } else { theme::ink() })).child(SharedString::from(it.text))),
-                    );
-                }
-                card = card.child(cl);
+            for it in items {
+                sec = sec.child(self.open_row(it, cx));
             }
-            card
-        };
-
-        let matched: Vec<&HistoryEntry> = self.history.iter().filter(|e| history_matches(e, &query)).collect();
-
-        // ── 任务视图：按组 ──
-        let mut task_col = div().flex().flex_col().gap(px(10.)).w_full();
-        if !self.history_calendar_tab {
-            if matched.is_empty() {
-                task_col = task_col.child(div().text_size(px(12.)).text_color(c(theme::faint())).child(if self.history.is_empty() {
-                    "还没有记录（daemon 每秒把会话同步进日志）"
-                } else {
-                    "没有匹配的会话"
-                }));
-            }
-            for g in TaskGroup::ALL {
-                let rows: Vec<&HistoryEntry> = matched.iter().copied().filter(|e| task_group(e, alive_ids.contains(e.id.as_str())) == g).collect();
-                if rows.is_empty() {
-                    continue;
-                }
-                let mut section = div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.))
-                    .p(px(8.))
-                    .rounded(px(10.))
-                    .bg(c(theme::surface()))
-                    .border_1()
-                    .border_color(c(theme::edge()))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .px(px(10.))
-                            .pb(px(4.))
-                            .child(div().text_size(px(13.)).font_weight(gpui::FontWeight::BOLD).text_color(c(theme::ink())).child(g.label()))
-                            .child(div().flex_1())
-                            .child(div().font_family("Menlo").text_size(px(10.5)).text_color(c(theme::faint())).child(SharedString::from(rows.len().to_string()))),
-                    );
-                for e in rows {
-                    section = section.child(row_of(e, g, cx));
-                }
-                task_col = task_col.child(section);
-            }
+            left = left.child(sec);
         }
 
-        // ── 日历视图：月历 + 摘要 + 那天的会话 ──
-        let mut cal_col = div().flex().flex_col().gap(px(12.)).w_full();
-        if self.history_calendar_tab {
-            cal_col = cal_col.child(calendar).when_some(digest, |el, d| el.child(d));
-            let mut list = div().flex().flex_col().gap(px(2.));
-            let day_rows: Vec<&HistoryEntry> = matched
-                .iter()
-                .copied()
-                .filter(|e| self.history_day.as_deref().is_none_or(|d| local_day_of(&e.created_at).as_deref() == Some(d)))
-                .collect();
-            if day_rows.is_empty() {
-                list = list.child(div().text_size(px(12.)).text_color(c(theme::faint())).child(if self.history_day.is_some() { "这天没有匹配的会话" } else { "没有匹配的会话" }));
-            }
-            for e in day_rows {
-                let g = task_group(e, alive_ids.contains(e.id.as_str()));
-                list = list.child(row_of(e, g, cx));
-            }
-            cal_col = cal_col.child(list);
-        }
-
-        let tab = |id: &'static str, label: &'static str, on: bool| {
+        // ── 右栏：最近做了什么 ──
+        let days: Vec<&DayCard> = d.days.iter().filter(|x| day_card_matches(x, &query)).collect();
+        let mut right = div().flex().flex_col().gap(px(10.));
+        right = right.child(
             div()
-                .id(id)
-                .px(px(10.))
-                .py(px(3.))
-                .rounded(px(6.))
-                .cursor_pointer()
-                .text_size(px(12.))
-                .text_color(c(if on { theme::accent() } else { theme::dim() }))
-                .when(on, |el| el.bg(ca(theme::accent(), 0.14)))
-                .hover(|st| st.bg(c(theme::surface_raised())))
-                .child(label)
-        };
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(div().text_size(px(13.)).font_weight(gpui::FontWeight::BOLD).text_color(c(theme::ink())).child("最近做了什么"))
+                .child(
+                    div()
+                        .font_family("Menlo")
+                        .text_size(px(10.5))
+                        .text_color(c(theme::faint()))
+                        .child(SharedString::from(format!("{} 天", days.len()))),
+                ),
+        );
+        if days.is_empty() {
+            right = right.child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(c(theme::faint()))
+                    .child(if d.days.is_empty() { "还没有记录（daemon 每秒把会话同步进日志）" } else { "没有匹配的日子" }),
+            );
+        }
+        for day in days {
+            right = right.child(self.day_card(day, &today, cx));
+        }
 
         div()
-            .id("history-scroll")
             .size_full()
-            .overflow_y_scroll()
             .p(px(16.))
             .flex()
             .flex_col()
@@ -362,40 +358,28 @@ impl RootView {
                     .flex()
                     .items_center()
                     .gap(px(10.))
-                    .child(div().text_size(px(14.)).font_weight(gpui::FontWeight::BOLD).text_color(c(theme::ink())).child("历史"))
-                    .child(tab("hist-tab-tasks", "任务", !self.history_calendar_tab).on_click(cx.listener(|this, _, _, cx| {
-                        this.history_calendar_tab = false;
-                        cx.notify();
-                    })))
-                    .child(tab("hist-tab-cal", "日历", self.history_calendar_tab).on_click(cx.listener(|this, _, _, cx| {
-                        this.history_calendar_tab = true;
-                        cx.notify();
-                    })))
-                    .child(
-                        div()
-                            .font_family("Menlo")
-                            .text_size(px(10.))
-                            .text_color(c(theme::faint()))
-                            .child(SharedString::from(format!("{} 条", self.history.len()))),
-                    )
+                    .child(div().text_size(px(14.)).font_weight(gpui::FontWeight::BOLD).text_color(c(theme::ink())).child("看板"))
+                    .child(self.spark_strip())
                     .child(div().flex_1())
-                    .child(div().w(px(260.)).child(self.history_input.clone())),
+                    .child(div().w(px(240.)).child(self.history_input.clone())),
             )
-            .child(task_col)
-            .child(cal_col)
+            .child(
+                div()
+                    .flex()
+                    .gap(px(10.))
+                    .child(self.stat_tile("今天", format!("{} 会话", d.today.sessions), format!("做完 {} · 没做 {}", d.today.done, d.today.open)))
+                    .child(self.stat_tile("近 7 天", format!("{} 会话", d.week.sessions), format!("做完 {} · 没做 {}", d.week.done, d.week.open)))
+                    .child(self.stat_tile("此刻", format!("{} 在跑", d.active), format!("待办共 {} 条", d.open.len()))),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .flex()
+                    .gap(px(12.))
+                    .items_start()
+                    .child(div().id("dash-todo").w(px(340.)).flex_none().h_full().overflow_y_scroll().child(left))
+                    .child(div().id("dash-days").flex_1().min_w(px(0.)).h_full().overflow_y_scroll().child(right)),
+            )
     }
-}
-
-fn parse_ym(s: &str) -> (i32, i32) {
-    let mut it = s.split('-');
-    let y = it.next().and_then(|v| v.parse().ok()).unwrap_or(2026);
-    let m = it.next().and_then(|v| v.parse().ok()).unwrap_or(1);
-    (y, m)
-}
-
-fn days_in(y: i32, m: i32) -> u32 {
-    let (ny, nm) = if m == 12 { (y + 1, 1) } else { (y, m + 1) };
-    let next = chrono::NaiveDate::from_ymd_opt(ny, nm as u32, 1).unwrap();
-    let this = chrono::NaiveDate::from_ymd_opt(y, m as u32, 1).unwrap();
-    (next - this).num_days() as u32
 }

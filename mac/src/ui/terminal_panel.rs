@@ -181,7 +181,7 @@ impl RootView {
     // ── 渲染 ────────────────────────────────────────────────────────────
 
     /// 侧栏底部的入口行（daemon 状态行上方）：`>_ 终端   n  ＋`
-    /// 侧栏底部「历史」入口：所有出现过的会话，含已退出、已删除
+    /// 侧栏底部「看板」入口：最近做了什么 + 还有什么没做
     pub(super) fn render_history_entry(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let active = self.page == Page::History;
         div()
@@ -202,14 +202,14 @@ impl RootView {
                     .font_family("Menlo")
                     .text_size(px(11.))
                     .text_color(c(if active { theme::accent() } else { theme::dim() }))
-                    .child("⏱"),
+                    .child("▦"),
             )
             .child(
                 div()
                     .flex_1()
                     .text_size(px(12.5))
                     .text_color(c(if active { theme::accent() } else { theme::ink() }))
-                    .child("历史"),
+                    .child("看板"),
             )
     }
 

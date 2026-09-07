@@ -687,8 +687,8 @@ private fun StreamRow(
 ) {
     when (item) {
         is StreamItem.User -> UserBlock(item.msg)
-        is StreamItem.Fold -> FoldRow(item, open = expanded[item.turnKey] == true) {
-            expanded[item.turnKey] = expanded[item.turnKey] != true
+        is StreamItem.Fold -> FoldRow(item, open = expanded[item.foldKey] == true) {
+            expanded[item.foldKey] = expanded[item.foldKey] != true
         }
         is StreamItem.Step -> StepRow(item.msg)
         is StreamItem.Reply -> ReplyBlock(item.msg)

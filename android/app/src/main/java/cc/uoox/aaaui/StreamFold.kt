@@ -5,21 +5,26 @@ package cc.uoox.aaaui
 // ============================================================
 
 /**
- * 一轮 = 用户发出的一条 text 到下一条之间的全部消息。默认只露出用户消息与这一轮
- * 最后一条 assistant text（[reply]）；中间的思考 / 工具调用 / 工具结果 / 中途文本
- * 全部折进 [process]；question / answer 永不折叠（[questions]）。
+ * 一轮 = 用户发出的一条 text 到下一条之间的全部消息。**assistant 的每一条 text 都是回答**，
+ * 一律露出（Claude 的回答天生分段：说一句 → 干活 → 再说一句）；2026-09-07 之前只留最后
+ * 一条、其余折进过程，看起来就像把回答当成了思考。折叠里只有思考 / 工具调用 / 工具结果 /
+ * system；question / answer 永不折叠。
  *
- * [live]：会话仍在 running 且这是最后一轮——过程行画成「进行中」并带最近一步。
- * 最新那条 assistant text 暂当 reply，新工具调用来了它自然滚进 process。
+ * [body] 是除用户消息外的全部消息，保持原序。
+ * [live]：会话仍在 running 且这是最后一轮——贴在轮尾的那段过程画成「进行中」并带最近一步。
  */
 data class Turn(
     val user: ChatMessage?,
-    val process: List<ChatMessage>,
-    val reply: ChatMessage?,
-    val questions: List<ChatMessage>,
+    val body: List<ChatMessage>,
     val key: Long,
     val live: Boolean = false,
-)
+) {
+    /** 轮内所有会被折叠的消息（思考 / 工具 / system） */
+    val steps: List<ChatMessage> get() = body.filter { it.isStep() }
+
+    /** 轮内所有回答（assistant text），按顺序 */
+    val replies: List<ChatMessage> get() = body.filter { it.isAssistantText() }
+}
 
 /** LazyColumn 的一项。key 带类型前缀，同一条消息从 Reply 变成 Step 时 key 跟着变。 */
 sealed class StreamItem {
@@ -29,14 +34,17 @@ sealed class StreamItem {
         override val key: String get() = "u${msg.seq}"
     }
 
-    /** 折叠行；[liveTail] 是 live 尾轮里最后一条 tool_use，折叠着也能看出它在干什么。 */
+    /**
+     * 折叠段；[foldKey] = 段内第一条消息的 seq（展开状态按它记）。
+     * [liveTail] 是 live 尾段里最后一条 tool_use，折叠着也能看出它在干什么。
+     */
     data class Fold(
-        val turnKey: Long,
+        val foldKey: Long,
         val steps: List<ChatMessage>,
         val liveTail: ChatMessage?,
         val live: Boolean = false,
     ) : StreamItem() {
-        override val key: String get() = "f$turnKey"
+        override val key: String get() = "f$foldKey"
     }
 
     data class Step(val msg: ChatMessage) : StreamItem() {
@@ -58,6 +66,10 @@ sealed class StreamItem {
 
 private fun ChatMessage.startsTurn() = role == "user" && kind == "text"
 private fun ChatMessage.isAssistantText() = role == "assistant" && kind == "text"
+private fun ChatMessage.isForm() = kind == "question" || kind == "answer"
+
+/** 会被折叠的：思考 / 工具调用 / 工具结果 / system 提示。回答与表单永远不折。 */
+private fun ChatMessage.isStep() = !isAssistantText() && !isForm()
 
 /**
  * 每条 user text 开一轮；第一轮之前的非 user 消息归入一个 `user == null` 的首轮
@@ -73,47 +85,71 @@ fun foldTurns(messages: List<ChatMessage>, live: Boolean): List<Turn> {
     }
     return groups.mapIndexed { i, g ->
         val user = g.first().takeIf { it.startsTurn() }
-        val body = if (user != null) g.drop(1) else g
-        val questions = body.filter { it.kind == "question" || it.kind == "answer" }
-        val rest = body.filter { it.kind != "question" && it.kind != "answer" }
-        val reply = rest.lastOrNull { it.isAssistantText() }
         Turn(
             user = user,
-            process = if (reply == null) rest else rest.filter { it.seq != reply.seq },
-            reply = reply,
-            questions = questions,
+            body = if (user != null) g.drop(1) else g,
             key = g.first().seq,
             live = live && i == groups.lastIndex,
         )
     }
 }
 
+/** 连续的过程消息切成段（原序）。 */
+private fun segments(body: List<ChatMessage>): List<List<ChatMessage>> {
+    val segs = mutableListOf<MutableList<ChatMessage>>()
+    var open = false
+    for (m in body) {
+        if (m.isStep()) {
+            if (!open) { segs.add(mutableListOf()); open = true }
+            segs.last().add(m)
+        } else {
+            open = false
+        }
+    }
+    return segs
+}
+
 /**
- * 轮 → 列表项。轮内先出 User，随后 Fold / Reply / Question 按各自起始 seq 排序
- * （question 可能出现在过程中间，也可能在回复之后，跟着真实顺序走）；展开的 Fold
- * 紧跟各 Step。process 为空不出 Fold。
+ * 轮 → 列表项。轮内先出 User，随后按真实顺序走：连续的过程消息并成一个 Fold（展开时
+ * 紧跟它的 Step），回答 / question / answer 各自成项。只有 live 轮**贴在轮尾**的那一段
+ * 画成「进行中」——后面还有回答，说明那段已经结束了。
  */
 fun flattenForList(turns: List<Turn>, expanded: Set<Long>): List<StreamItem> = buildList {
     for (t in turns) {
         t.user?.let { add(StreamItem.User(it)) }
-        val blocks = mutableListOf<Pair<Long, List<StreamItem>>>()
-        if (t.process.isNotEmpty()) {
-            val fold = StreamItem.Fold(
-                turnKey = t.key,
-                steps = t.process,
-                liveTail = if (t.live) t.process.lastOrNull { it.kind == "tool_use" } else null,
-                live = t.live,
+        val segs = segments(t.body)
+        val liveKey = if (t.live && t.body.lastOrNull()?.isStep() == true) segs.lastOrNull()?.first()?.seq else null
+        var segIx = 0
+        var inSeg = false
+        for (m in t.body) {
+            if (m.isStep()) {
+                if (!inSeg) {
+                    val seg = segs[segIx]
+                    val foldKey = seg.first().seq
+                    val isLive = foldKey == liveKey
+                    add(
+                        StreamItem.Fold(
+                            foldKey = foldKey,
+                            steps = seg,
+                            liveTail = if (isLive) seg.lastOrNull { it.kind == "tool_use" } else null,
+                            live = isLive,
+                        )
+                    )
+                    if (foldKey in expanded) addAll(seg.map { StreamItem.Step(it) })
+                    segIx++
+                    inSeg = true
+                }
+                continue
+            }
+            inSeg = false
+            add(
+                when {
+                    m.isAssistantText() -> StreamItem.Reply(m)
+                    m.kind == "question" -> StreamItem.Question(m)
+                    else -> StreamItem.Answer(m)
+                }
             )
-            val block = if (t.key in expanded) listOf(fold) + t.process.map { StreamItem.Step(it) } else listOf(fold)
-            blocks += t.process.first().seq to block
         }
-        t.reply?.let { blocks += it.seq to listOf(StreamItem.Reply(it)) }
-        t.questions.forEach {
-            val item = if (it.kind == "question") StreamItem.Question(it) else StreamItem.Answer(it)
-            blocks += it.seq to listOf(item)
-        }
-        blocks.sortBy { it.first }
-        blocks.forEach { addAll(it.second) }
     }
 }
 
@@ -148,7 +184,7 @@ fun answeredQuestionSeqs(messages: List<ChatMessage>): Set<Long> {
     return out
 }
 
-/** 步数 = tool_use 条数；thinking / 中途文本 / 结果都不算步。 */
+/** 步数 = tool_use 条数；thinking / 结果不算步。 */
 fun stepCount(steps: List<ChatMessage>): Int = steps.count { it.kind == "tool_use" }
 
 private fun ChatMessage.toolName(): String = tool?.name?.ifBlank { null } ?: "tool"
@@ -163,7 +199,7 @@ fun foldLabel(steps: List<ChatMessage>): String {
     }
 }
 
-/** live 尾轮的折叠态标签：`进行中 · 5 步 · 最近：Bash cargo test`。 */
+/** live 尾段的折叠态标签：`进行中 · 5 步 · 最近：Bash cargo test`。 */
 fun liveLabel(steps: List<ChatMessage>, tail: ChatMessage?): String {
     val base = "进行中 · ${stepCount(steps)} 步"
     if (tail == null) return base

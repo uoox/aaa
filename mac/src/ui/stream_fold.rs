@@ -1,32 +1,45 @@
 //! 消息流按「轮」折叠——纯函数，不碰 gpui，与 Android `StreamFold.kt` 同构。
 //!
-//! 一轮 = 用户发出的一条 text 到下一条之间的全部消息。默认只露出用户消息与这一轮
-//! 最后一条 assistant text（reply）；中间的思考 / 工具调用 / 工具结果 / 中途文本
-//! 全部折进 process；question / answer 永不折叠，按真实位置独立成项。
+//! 一轮 = 用户发出的一条 text 到下一条之间的全部消息。**assistant 的每一条 text 都是
+//! 回答**，一律露出（Claude 的回答天生分段：说一句 → 干活 → 再说一句），2026-09-07
+//! 之前只留最后一条、其余折进过程，看起来就像把回答当成了思考。折叠里只有思考 /
+//! 工具调用 / 工具结果 / system；轮内的过程按真实位置切成若干折叠段，夹在各段回答
+//! 之间；question / answer 永不折叠，按真实位置独立成项。
 
 use std::collections::HashSet;
 
 use crate::model::ChatMessage;
 
 /// 一轮。`key` 取轮内第一条消息的 seq——用户轮就是用户消息的 seq，跨次刷新稳定。
-/// `live`：会话仍在跑且这是最后一轮——过程行画成「进行中」并带最近一步。
+/// `body` 是除用户消息外的全部消息，保持原序。
+/// `live`：会话仍在跑且这是最后一轮——尾部那段过程画成「进行中」并带最近一步。
 #[derive(Debug)]
 pub struct Turn<'a> {
     pub user: Option<&'a ChatMessage>,
-    pub process: Vec<&'a ChatMessage>,
-    pub reply: Option<&'a ChatMessage>,
-    pub questions: Vec<&'a ChatMessage>,
+    pub body: Vec<&'a ChatMessage>,
     pub key: u64,
     pub live: bool,
+}
+
+impl<'a> Turn<'a> {
+    /// 轮内所有会被折叠的消息（思考 / 工具 / system）
+    pub fn steps(&self) -> Vec<&'a ChatMessage> {
+        self.body.iter().copied().filter(|m| is_step(m)).collect()
+    }
+    /// 轮内所有回答（assistant text），按顺序
+    pub fn replies(&self) -> Vec<&'a ChatMessage> {
+        self.body.iter().copied().filter(|m| is_assistant_text(m)).collect()
+    }
 }
 
 /// 列表的一项。`key()` 带类型前缀，同一条消息从 Reply 变成 Step 时 key 跟着变。
 #[derive(Debug)]
 pub enum StreamItem<'a> {
     User(&'a ChatMessage),
-    /// 折叠行；`live_tail` 是 live 尾轮里最后一条 tool_use，折叠着也能看出它在干什么。
+    /// 折叠段；`fold_key` = 段内第一条消息的 seq（展开状态按它记）。
+    /// `live_tail` 是 live 尾段里最后一条 tool_use，折叠着也能看出它在干什么。
     Fold {
-        turn_key: u64,
+        fold_key: u64,
         steps: Vec<&'a ChatMessage>,
         live_tail: Option<&'a ChatMessage>,
         live: bool,
@@ -43,7 +56,7 @@ impl StreamItem<'_> {
     pub fn key(&self) -> String {
         match self {
             StreamItem::User(m) => format!("u{}", m.seq),
-            StreamItem::Fold { turn_key, .. } => format!("f{turn_key}"),
+            StreamItem::Fold { fold_key, .. } => format!("f{fold_key}"),
             StreamItem::Step(m) => format!("s{}", m.seq),
             StreamItem::Reply(m) => format!("r{}", m.seq),
             StreamItem::Question(m) => format!("q{}", m.seq),
@@ -64,6 +77,11 @@ fn is_form(m: &ChatMessage) -> bool {
     m.kind == "question" || m.kind == "answer"
 }
 
+/// 会被折叠的：思考 / 工具调用 / 工具结果 / system 提示。回答与表单永远不折。
+fn is_step(m: &ChatMessage) -> bool {
+    !is_assistant_text(m) && !is_form(m)
+}
+
 /// 每条 user text 开一轮；第一轮之前的非 user 消息归入一个 `user == None` 的首轮
 /// （增量拉取只拿到后半段时常见）。
 pub fn fold_turns(messages: &[ChatMessage], live: bool) -> Vec<Turn<'_>> {
@@ -81,73 +99,80 @@ pub fn fold_turns(messages: &[ChatMessage], live: bool) -> Vec<Turn<'_>> {
         .map(|(i, g)| {
             let key = g[0].seq;
             let user = g.first().copied().filter(|m| starts_turn(m));
-            let body = if user.is_some() { &g[1..] } else { &g[..] };
-            let questions: Vec<&ChatMessage> = body.iter().copied().filter(|m| is_form(m)).collect();
-            let rest: Vec<&ChatMessage> = body.iter().copied().filter(|m| !is_form(m)).collect();
-            let reply = rest.iter().rev().copied().find(|m| is_assistant_text(m));
-            let process = match reply {
-                Some(r) => rest.into_iter().filter(|m| m.seq != r.seq).collect(),
-                None => rest,
-            };
-            Turn {
-                user,
-                process,
-                reply,
-                questions,
-                key,
-                live: live && i == last,
-            }
+            let body = if user.is_some() { g[1..].to_vec() } else { g };
+            Turn { user, body, key, live: live && i == last }
         })
         .collect()
 }
 
-/// 轮 → 列表项。轮内先出 User，随后 Fold / Reply / Question / Answer 按各自起始 seq
-/// 排序（question 可能出现在过程中间，也可能在回复之后，跟着真实顺序走）；展开的
-/// Fold 紧跟各 Step。process 为空不出 Fold。
+/// 连续的过程消息切成段（原序）。
+fn segments<'a>(body: &[&'a ChatMessage]) -> Vec<Vec<&'a ChatMessage>> {
+    let mut segs: Vec<Vec<&'a ChatMessage>> = Vec::new();
+    let mut open = false;
+    for m in body {
+        if is_step(m) {
+            if !open {
+                segs.push(Vec::new());
+                open = true;
+            }
+            segs.last_mut().unwrap().push(*m);
+        } else {
+            open = false;
+        }
+    }
+    segs
+}
+
+/// 轮 → 列表项。轮内先出 User，随后按真实顺序走：连续的过程消息并成一个 Fold
+/// （展开时紧跟它的 Step），回答 / question / answer 各自成项。只有 live 轮**贴在
+/// 轮尾**的那一段画成「进行中」——后面还有回答，说明那段已经结束了。
 pub fn flatten<'a>(turns: &[Turn<'a>], expanded: &HashSet<u64>) -> Vec<StreamItem<'a>> {
     let mut out = Vec::new();
     for t in turns {
         if let Some(u) = t.user {
             out.push(StreamItem::User(u));
         }
-        let mut blocks: Vec<(u64, Vec<StreamItem<'a>>)> = Vec::new();
-        if let Some(first) = t.process.first() {
-            let fold = StreamItem::Fold {
-                turn_key: t.key,
-                steps: t.process.clone(),
-                live_tail: if t.live {
-                    t.process.iter().rev().copied().find(|m| m.kind == "tool_use")
-                } else {
-                    None
-                },
-                live: t.live,
-            };
-            let mut block = vec![fold];
-            if expanded.contains(&t.key) {
-                block.extend(t.process.iter().map(|m| StreamItem::Step(m)));
+        let segs = segments(&t.body);
+        let live_key = match (t.live, t.body.last(), segs.last()) {
+            (true, Some(last), Some(seg)) if is_step(last) => Some(seg[0].seq),
+            _ => None,
+        };
+        let mut seg_ix = 0usize;
+        let mut in_seg = false;
+        for m in &t.body {
+            if is_step(m) {
+                if !in_seg {
+                    let seg = &segs[seg_ix];
+                    let fold_key = seg[0].seq;
+                    let live = Some(fold_key) == live_key;
+                    out.push(StreamItem::Fold {
+                        fold_key,
+                        steps: seg.clone(),
+                        live_tail: if live { seg.iter().rev().copied().find(|m| m.kind == "tool_use") } else { None },
+                        live,
+                    });
+                    if expanded.contains(&fold_key) {
+                        out.extend(seg.iter().map(|m| StreamItem::Step(m)));
+                    }
+                    seg_ix += 1;
+                    in_seg = true;
+                }
+                continue;
             }
-            blocks.push((first.seq, block));
-        }
-        if let Some(r) = t.reply {
-            blocks.push((r.seq, vec![StreamItem::Reply(r)]));
-        }
-        for q in &t.questions {
-            let item = if q.kind == "question" {
-                StreamItem::Question(q)
+            in_seg = false;
+            out.push(if is_assistant_text(m) {
+                StreamItem::Reply(m)
+            } else if m.kind == "question" {
+                StreamItem::Question(m)
             } else {
-                StreamItem::Answer(q)
-            };
-            blocks.push((q.seq, vec![item]));
-        }
-        blocks.sort_by_key(|(seq, _)| *seq);
-        for (_, b) in blocks {
-            out.extend(b);
+                StreamItem::Answer(m)
+            });
         }
     }
     out
 }
 
-/// 步数 = tool_use 条数；thinking / 中途文本 / 结果都不算步。
+/// 步数 = tool_use 条数；thinking / 结果不算步。
 pub fn step_count(steps: &[&ChatMessage]) -> usize {
     steps.iter().filter(|m| m.kind == "tool_use").count()
 }
@@ -194,17 +219,10 @@ pub fn live_label(steps: &[&ChatMessage], tail: Option<&ChatMessage>) -> String 
     format!("{base} · 最近：{what}")
 }
 
-/// 尾轮是否「进行中」：会话活着，且最后一轮（最后一条 user text 之后）还没有任何
-/// assistant text 当回复。question / answer 不算回复。
+/// 尾部是否「进行中」：会话活着，且最后一条消息不是回答。回答之后又来了工具调用
+/// 说明这一轮还在往下做（回答本来就可以分段），此时仍然是进行中。
 pub fn tail_is_live(messages: &[ChatMessage], alive: bool) -> bool {
-    if !alive || messages.is_empty() {
-        return false;
-    }
-    !messages
-        .iter()
-        .rev()
-        .take_while(|m| !starts_turn(m))
-        .any(|m| is_assistant_text(m))
+    alive && messages.last().map(|m| !is_assistant_text(m)).unwrap_or(false)
 }
 
 /// 消息集变化后要不要滚到底：首批数据总是到底；之后只有变化**前**就在底部才跟——
@@ -280,52 +298,53 @@ mod tests {
         let turns = fold_turns(&msgs, false);
         assert_eq!(turns.len(), 2);
         assert_eq!(turns[0].user.map(|m| m.seq), Some(1));
-        assert_eq!(seqs(&turns[0].process), vec![2, 3]);
-        assert_eq!(turns[0].reply.map(|m| m.seq), Some(4));
+        assert_eq!(seqs(&turns[0].steps()), vec![2, 3]);
+        assert_eq!(seqs(&turns[0].replies()), vec![4]);
         assert_eq!(turns[0].key, 1);
         assert_eq!(turns[1].user.map(|m| m.seq), Some(5));
-        assert!(turns[1].process.is_empty());
-        assert_eq!(turns[1].reply.map(|m| m.seq), Some(6));
+        assert!(turns[1].steps().is_empty());
+        assert_eq!(seqs(&turns[1].replies()), vec![6]);
     }
 
-    // 2. 轮内多条 assistant text：只有最后一条是 reply
+    // 2. 轮内每条 assistant text 都是回答，过程按位置切成多段（2026-09-07 修：
+    //    以前只留最后一条，中间几段真回答被折进「过程」，看着像思考）
     #[test]
-    fn only_the_last_assistant_text_is_the_reply() {
-        let msgs = vec![user(1), say(2), use_(3, "Read"), say(4), use_(5, "Edit"), say(6)];
+    fn every_assistant_text_is_a_reply_and_process_splits_around_them() {
+        let msgs = vec![user(1), say(2), use_(3, "Read"), result(4), say(5), use_(6, "Edit"), say(7)];
         let turns = fold_turns(&msgs, false);
         assert_eq!(turns.len(), 1);
-        assert_eq!(turns[0].reply.map(|m| m.seq), Some(6));
-        assert_eq!(seqs(&turns[0].process), vec![2, 3, 4, 5]);
+        assert_eq!(seqs(&turns[0].replies()), vec![2, 5, 7]);
+        assert_eq!(seqs(&turns[0].steps()), vec![3, 4, 6]);
+        assert_eq!(keys(&flatten(&turns, &none())), ["u1", "r2", "f3", "r5", "f6", "r7"]);
+        // 展开只展开被点的那一段
+        assert_eq!(
+            keys(&flatten(&turns, &HashSet::from([3]))),
+            ["u1", "r2", "f3", "s3", "s4", "r5", "f6", "r7"]
+        );
     }
 
-    // 3. question 永不折叠且不占 reply 位
+    // 3. question 永不折叠，也不吃掉回答
     #[test]
-    fn questions_stay_out_of_process_and_reply() {
+    fn questions_stay_out_of_the_fold() {
         let msgs = vec![user(1), use_(2, "Bash"), question(3)];
         let turns = fold_turns(&msgs, false);
-        let t = &turns[0];
-        assert_eq!(seqs(&t.questions), vec![3]);
-        assert!(t.reply.is_none());
-        assert_eq!(seqs(&t.process), vec![2]);
-        assert_eq!(keys(&flatten(&turns, &none())), ["u1", "f1", "q3"]);
+        assert_eq!(seqs(&turns[0].steps()), vec![2]);
+        assert!(turns[0].replies().is_empty());
+        assert_eq!(keys(&flatten(&turns, &none())), ["u1", "f2", "q3"]);
 
         // 问题排在回复之后也不改变它独立成项
         let msgs = vec![user(1), say(2), question(3)];
         let turns = fold_turns(&msgs, false);
-        assert_eq!(turns[0].reply.map(|m| m.seq), Some(2));
         assert_eq!(keys(&flatten(&turns, &none())), ["u1", "r2", "q3"]);
     }
 
-    // 3b. answer 与 question 一样独立成项、不折叠、不占 reply 位；键前缀 a
+    // 3b. answer 与 question 一样独立成项、不折叠；键前缀 a
     #[test]
     fn answers_are_standalone_items_too() {
         let msgs = vec![user(1), question(2), answer(3), use_(4, "Edit"), say(5)];
         let turns = fold_turns(&msgs, false);
-        let t = &turns[0];
-        assert_eq!(seqs(&t.questions), vec![2, 3]);
-        assert_eq!(seqs(&t.process), vec![4]);
-        assert_eq!(t.reply.map(|m| m.seq), Some(5));
-        assert_eq!(keys(&flatten(&turns, &none())), ["u1", "q2", "a3", "f1", "r5"]);
+        assert_eq!(seqs(&turns[0].steps()), vec![4]);
+        assert_eq!(keys(&flatten(&turns, &none())), ["u1", "q2", "a3", "f4", "r5"]);
     }
 
     // 4. 首条非 user 的消息归入 user==None 首轮
@@ -336,12 +355,12 @@ mod tests {
         assert_eq!(turns.len(), 2);
         assert!(turns[0].user.is_none());
         assert_eq!(turns[0].key, 7);
-        assert_eq!(seqs(&turns[0].process), vec![7, 8]);
-        assert_eq!(turns[0].reply.map(|m| m.seq), Some(9));
+        assert_eq!(seqs(&turns[0].steps()), vec![7, 8]);
+        assert_eq!(seqs(&turns[0].replies()), vec![9]);
         assert_eq!(turns[1].user.map(|m| m.seq), Some(10));
     }
 
-    // 5. process 空 → 不出 Fold 项
+    // 5. 没有过程 → 不出 Fold 项
     #[test]
     fn empty_process_emits_no_fold() {
         let msgs = vec![user(1), say(2)];
@@ -358,7 +377,6 @@ mod tests {
         owned.extend((2..=8).map(|s| use_(s, "Bash")));
         owned.extend((9..=11).map(|s| use_(s, "Read")));
         owned.push(result(12));
-        owned.push(msg(13, "assistant", "text", "中途", None));
         let steps: Vec<&ChatMessage> = owned.iter().collect();
         assert_eq!(step_count(&steps), 10);
         assert_eq!(fold_label(&steps), "过程 · 10 步 · Bash ×7 · Read ×3");
@@ -381,9 +399,9 @@ mod tests {
         assert_eq!(fold_label(&[&anon[0]]), "过程 · 1 步 · tool ×1");
     }
 
-    // 7. live 尾轮的 live_tail = 最后一条 tool_use
+    // 7. 只有贴在轮尾的那一段是 live，live_tail = 段内最后一条 tool_use
     #[test]
-    fn live_tail_is_the_last_tool_use_of_the_live_last_turn() {
+    fn only_the_trailing_segment_of_the_live_turn_is_live() {
         let msgs = vec![
             user(1),
             use_s(2, "Read", "a.kt"),
@@ -394,43 +412,36 @@ mod tests {
         ];
         let turns = fold_turns(&msgs, true);
         let items = flatten(&turns, &none());
+        assert_eq!(keys(&items), ["u1", "f2", "r4", "f5"], "中途那句 say(4) 露在外面");
         let fs = folds(&items);
-        assert_eq!(fs.len(), 1);
-        let StreamItem::Fold { steps, live_tail, live, .. } = fs[0] else {
-            unreachable!()
-        };
-        assert!(*live);
+        assert_eq!(fs.len(), 2);
+        let lives: Vec<bool> = fs.iter().map(|f| matches!(f, StreamItem::Fold { live: true, .. })).collect();
+        assert_eq!(lives, [false, true]);
+        let StreamItem::Fold { steps, live_tail, .. } = fs[1] else { unreachable!() };
         assert_eq!(live_tail.map(|m| m.seq), Some(5));
-        assert_eq!(live_label(steps, *live_tail), "进行中 · 2 步 · 最近：Bash cargo test");
-        assert_eq!(live_label(steps, None), "进行中 · 2 步");
-        // 最新那条 assistant text 暂当 reply；之后的工具调用已经滚进 process
-        assert_eq!(keys(&items), ["u1", "f1", "r4"]);
+        assert_eq!(live_label(steps, *live_tail), "进行中 · 1 步 · 最近：Bash cargo test");
+        assert_eq!(live_label(steps, None), "进行中 · 1 步");
 
-        // 会话不在 running：没有 live_tail
+        // 会话不在 running：没有 live 段
         let turns = fold_turns(&msgs, false);
         let items = flatten(&turns, &none());
-        let StreamItem::Fold { live_tail, live, .. } = folds(&items)[0] else {
-            unreachable!()
-        };
-        assert!(!*live);
-        assert!(live_tail.is_none());
+        assert!(folds(&items).iter().all(|f| matches!(f, StreamItem::Fold { live: false, live_tail: None, .. })));
 
         // 只有最后一轮算 live
         let mut two = msgs.clone();
         two.push(user(7));
         two.push(use_(8, "Edit"));
         let turns = fold_turns(&two, true);
-        let items = flatten(&turns, &none());
-        let fs = folds(&items);
-        let lives: Vec<bool> = fs
-            .iter()
-            .map(|f| matches!(f, StreamItem::Fold { live: true, .. }))
-            .collect();
-        assert_eq!(lives, [false, true]);
-        let StreamItem::Fold { live_tail, .. } = fs[1] else {
-            unreachable!()
-        };
-        assert_eq!(live_tail.map(|m| m.seq), Some(8));
+        let items2 = flatten(&turns, &none());
+        let fs2 = folds(&items2);
+        let lives: Vec<bool> = fs2.iter().map(|f| matches!(f, StreamItem::Fold { live: true, .. })).collect();
+        assert_eq!(lives, [false, false, true]);
+
+        // 尾段后面又出了回答 → 那段不再是「进行中」
+        let done = vec![user(1), use_(2, "Bash"), say(3)];
+        let turns3 = fold_turns(&done, true);
+        let items = flatten(&turns3, &none());
+        assert!(folds(&items).iter().all(|f| matches!(f, StreamItem::Fold { live: false, .. })));
     }
 
     #[test]
@@ -446,13 +457,14 @@ mod tests {
             say(8),
         ];
         let turns = fold_turns(&msgs, false);
-        let items = flatten(&turns, &HashSet::from([1]));
+        // 展开状态按段键（段内第一条 seq）记
+        let items = flatten(&turns, &HashSet::from([2]));
         assert_eq!(
             keys(&items),
-            ["u1", "f1", "s2", "s3", "s4", "r5", "u6", "f6", "r8"]
+            ["u1", "f2", "s2", "s3", "s4", "r5", "u6", "f7", "r8"]
         );
         let collapsed = flatten(&turns, &none());
-        assert_eq!(keys(&collapsed), ["u1", "f1", "r5", "u6", "f6", "r8"]);
+        assert_eq!(keys(&collapsed), ["u1", "f2", "r5", "u6", "f7", "r8"]);
     }
 
     #[test]
@@ -461,17 +473,16 @@ mod tests {
         assert!(flatten(&[], &none()).is_empty());
     }
 
-    // 尾轮进行中 = 活着且最后一轮没有 assistant text；question 不算回复
+    // 尾部进行中 = 活着且最后一条不是回答
     #[test]
-    fn tail_is_live_when_last_turn_has_no_reply() {
+    fn tail_is_live_until_an_answer_lands() {
         assert!(tail_is_live(&[user(1), use_(2, "Bash")], true));
         assert!(tail_is_live(&[user(1)], true));
         assert!(tail_is_live(&[user(1), question(2)], true));
         assert!(!tail_is_live(&[user(1), use_(2, "Bash")], false));
         assert!(!tail_is_live(&[user(1), say(2)], true));
-        // 回复之后又来了工具调用：最新 text 仍暂当 reply，不算进行中
-        assert!(!tail_is_live(&[user(1), say(2), use_(3, "Bash")], true));
-        // 上一轮有回复不影响本轮
+        // 回答之后又来了工具调用：这一轮还在往下做（回答本来就分段）
+        assert!(tail_is_live(&[user(1), say(2), use_(3, "Bash")], true));
         assert!(tail_is_live(&[user(1), say(2), user(3), think(4)], true));
         assert!(!tail_is_live(&[], true));
     }

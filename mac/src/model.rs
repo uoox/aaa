@@ -87,111 +87,116 @@ pub struct Session {
     pub summary: String,
 }
 
-/// 会话日志一条（GET /history）
+/// 仪表盘（GET /history/dashboard）：daemon 一次算好的「做了什么 / 还没做」
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
-pub struct HistoryEntry {
+pub struct Dashboard {
     #[serde(default)]
-    pub id: String,
+    pub today: DashStats,
     #[serde(default)]
-    pub project_path: String,
+    pub week: DashStats,
+    #[serde(default)]
+    pub active: usize,
+    #[serde(default)]
+    pub open: Vec<OpenItem>,
+    #[serde(default)]
+    pub days: Vec<DayCard>,
+    /// 近 8 周每天的会话数，最旧在前
+    #[serde(default)]
+    pub spark: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+pub struct DashStats {
+    #[serde(default)]
+    pub sessions: usize,
+    #[serde(default)]
+    pub done: usize,
+    #[serde(default)]
+    pub open: usize,
+}
+
+/// 左栏一条待办：某个会话清单里没勾的一项
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+pub struct OpenItem {
+    #[serde(default)]
+    pub session_id: String,
     #[serde(default)]
     pub project_name: String,
     #[serde(default)]
-    pub agent: String,
+    pub project_path: String,
     #[serde(default)]
     pub title: String,
     #[serde(default)]
+    pub text: String,
+    #[serde(default)]
     pub created_at: String,
     #[serde(default)]
-    pub ended_at: Option<String>,
-    #[serde(default)]
-    pub exit_code: Option<i64>,
-    #[serde(default)]
-    pub deleted_at: Option<String>,
-    #[serde(default)]
-    pub summary: String,
-    #[serde(default)]
-    pub last_state: String,
+    pub alive: bool,
 }
 
-/// 日历一天（GET /history/days）
+/// 右栏一天里的一个会话
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
-pub struct DayDigest {
+pub struct DayEntry {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub project_name: String,
+    #[serde(default)]
+    pub alive: bool,
+    #[serde(default)]
+    pub deleted: bool,
+    #[serde(default)]
+    pub done: usize,
+    #[serde(default)]
+    pub open: usize,
+}
+
+/// 右栏的一天
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+pub struct DayCard {
     #[serde(default)]
     pub date: String,
     #[serde(default)]
     pub text: String,
     #[serde(default)]
     pub sessions: usize,
+    #[serde(default)]
+    pub done: usize,
+    #[serde(default)]
+    pub open: usize,
+    #[serde(default)]
+    pub entries: Vec<DayEntry>,
 }
 
-/// ISO 时间 → 本机时区的日期 YYYY-MM-DD（日历分组，与 daemon 同口径：都是这台 Mac 的时区）
-pub fn local_day_of(iso: &str) -> Option<String> {
-    let t = chrono::DateTime::parse_from_rfc3339(iso).ok()?;
-    Some(t.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string())
-}
-
-/// 任务视图的分组（2026-09-07 用户拍板，照 todo 应用的样子）：
-/// 进行中 = 会话还活着；未完成 = 清单里有没勾的；已完成 = 清单全勾了或没有清单；已删除
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum TaskGroup {
-    Active,
-    Open,
-    Done,
-    Deleted,
-}
-
-impl TaskGroup {
-    pub fn label(self) -> &'static str {
-        match self {
-            TaskGroup::Active => "进行中",
-            TaskGroup::Open => "未完成",
-            TaskGroup::Done => "已完成",
-            TaskGroup::Deleted => "已删除",
-        }
-    }
-    pub const ALL: [TaskGroup; 4] = [TaskGroup::Active, TaskGroup::Open, TaskGroup::Done, TaskGroup::Deleted];
-}
-
-pub fn task_group(e: &HistoryEntry, alive: bool) -> TaskGroup {
-    if e.deleted_at.is_some() {
-        return TaskGroup::Deleted;
-    }
-    if alive {
-        return TaskGroup::Active;
-    }
-    if parse_checklist(&e.summary).iter().any(|i| !i.done) {
-        TaskGroup::Open
-    } else {
-        TaskGroup::Done
-    }
-}
-
-/// 行的第二行：没勾的项用「/」串起来（最多 4 项）；全勾了写 n/n 完成；没清单写空
-pub fn task_subline(e: &HistoryEntry) -> String {
-    let items = parse_checklist(&e.summary);
-    if items.is_empty() {
-        return String::new();
-    }
-    let open: Vec<&str> = items.iter().filter(|i| !i.done).map(|i| i.text.as_str()).collect();
-    if open.is_empty() {
-        format!("{}/{} 完成", items.len(), items.len())
-    } else {
-        let mut s = open.iter().take(4).copied().collect::<Vec<_>>().join(" / ");
-        if open.len() > 4 {
-            s.push_str(&format!(" …+{}", open.len() - 4));
-        }
-        s
-    }
-}
-
-/// 历史搜索：标题 / 项目 / 清单里含关键字（不分大小写）；空串全匹配
-pub fn history_matches(e: &HistoryEntry, query: &str) -> bool {
+/// 待办搜索：项目 / 会话标题 / 条目本身含关键字（不分大小写）；空串全匹配
+pub fn open_item_matches(i: &OpenItem, query: &str) -> bool {
     let q = query.trim().to_lowercase();
     q.is_empty()
-        || e.title.to_lowercase().contains(&q)
-        || e.project_name.to_lowercase().contains(&q)
-        || e.summary.to_lowercase().contains(&q)
+        || i.text.to_lowercase().contains(&q)
+        || i.title.to_lowercase().contains(&q)
+        || i.project_name.to_lowercase().contains(&q)
+}
+
+/// 一天是否命中搜索：日摘要或当天任一会话标题 / 项目名含关键字
+pub fn day_card_matches(d: &DayCard, query: &str) -> bool {
+    let q = query.trim().to_lowercase();
+    q.is_empty()
+        || d.text.to_lowercase().contains(&q)
+        || d.entries.iter().any(|e| e.title.to_lowercase().contains(&q) || e.project_name.to_lowercase().contains(&q))
+}
+
+/// 待办按项目归并，项目内保持原序（daemon 已按会话新→旧排好）
+pub fn group_open_by_project(items: &[OpenItem]) -> Vec<(String, Vec<&OpenItem>)> {
+    let mut out: Vec<(String, Vec<&OpenItem>)> = Vec::new();
+    for it in items {
+        match out.iter_mut().find(|(name, _)| *name == it.project_name) {
+            Some((_, v)) => v.push(it),
+            None => out.push((it.project_name.clone(), vec![it])),
+        }
+    }
+    out
 }
 
 /// 进度清单的一项（解析 `summary` 的一行）
@@ -808,29 +813,31 @@ mod tests {
     }
 
     #[test]
-    fn task_grouping_and_subline() {
-        let mut e = HistoryEntry { summary: "- [x] 修登录\n- [ ] 补测试\n- [ ] 发版".into(), ..Default::default() };
-        assert_eq!(task_group(&e, true), TaskGroup::Active);
-        assert_eq!(task_group(&e, false), TaskGroup::Open);
-        assert_eq!(task_subline(&e), "补测试 / 发版");
-        e.summary = "- [x] 修登录".into();
-        assert_eq!(task_group(&e, false), TaskGroup::Done);
-        assert_eq!(task_subline(&e), "1/1 完成");
-        e.summary.clear();
-        assert_eq!(task_group(&e, false), TaskGroup::Done);
-        assert_eq!(task_subline(&e), "");
-        e.deleted_at = Some("t".into());
-        assert_eq!(task_group(&e, true), TaskGroup::Deleted, "删了就是删了，哪怕还活着");
-    }
+    fn dashboard_search_and_grouping() {
+        let it = |project: &str, title: &str, text: &str| OpenItem {
+            project_name: project.into(),
+            title: title.into(),
+            text: text.into(),
+            ..Default::default()
+        };
+        let a = it("Shop", "改登录页", "补测试");
+        assert!(open_item_matches(&a, "") && open_item_matches(&a, "测试") && open_item_matches(&a, "shop") && open_item_matches(&a, "登录"));
+        assert!(!open_item_matches(&a, "支付"));
 
-    #[test]
-    fn history_search_matches_title_project_and_checklist() {
-        let e = HistoryEntry { title: "改登录页".into(), project_name: "Shop".into(), summary: "- [x] 补测试".into(), ..Default::default() };
-        assert!(history_matches(&e, ""));
-        assert!(history_matches(&e, "登录"));
-        assert!(history_matches(&e, "shop"));
-        assert!(history_matches(&e, "测试"));
-        assert!(!history_matches(&e, "支付"));
+        let d = DayCard {
+            date: "2026-09-07".into(),
+            text: "- 修好登录".into(),
+            entries: vec![DayEntry { title: "改登录页".into(), project_name: "Shop".into(), ..Default::default() }],
+            ..Default::default()
+        };
+        assert!(day_card_matches(&d, "") && day_card_matches(&d, "修好") && day_card_matches(&d, "shop"));
+        assert!(!day_card_matches(&d, "支付"));
+
+        // 按项目归并，项目内保持原序；项目按首次出现排
+        let items = vec![a.clone(), it("Mail", "DKIM", "轮换"), it("Shop", "改登录页", "发版")];
+        let groups = group_open_by_project(&items);
+        assert_eq!(groups.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["Shop", "Mail"]);
+        assert_eq!(groups[0].1.iter().map(|i| i.text.as_str()).collect::<Vec<_>>(), ["补测试", "发版"]);
     }
 
     #[test]

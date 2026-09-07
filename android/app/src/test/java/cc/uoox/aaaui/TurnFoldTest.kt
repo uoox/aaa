@@ -26,43 +26,45 @@ class TurnFoldTest {
         val turns = foldTurns(listOf(user(1), use(2, "Bash"), result(3), say(4, "done"), user(5), say(6, "ok")), live = false)
         assertEquals(2, turns.size)
         assertEquals(1L, turns[0].user?.seq)
-        assertEquals(listOf(2L, 3L), turns[0].process.map { it.seq })
-        assertEquals(4L, turns[0].reply?.seq)
+        assertEquals(listOf(2L, 3L), turns[0].steps.map { it.seq })
+        assertEquals(listOf(4L), turns[0].replies.map { it.seq })
         assertEquals(1L, turns[0].key)
         assertEquals(5L, turns[1].user?.seq)
-        assertTrue(turns[1].process.isEmpty())
-        assertEquals(6L, turns[1].reply?.seq)
+        assertTrue(turns[1].steps.isEmpty())
+        assertEquals(listOf(6L), turns[1].replies.map { it.seq })
     }
 
-    // 2. 轮内多条 assistant text：只有最后一条是 reply
-    @Test fun onlyTheLastAssistantTextIsTheReply() {
-        val t = foldTurns(listOf(user(1), say(2, "先看看"), use(3, "Read"), say(4, "再改"), use(5, "Edit"), say(6, "改好了")), live = false).single()
-        assertEquals(6L, t.reply?.seq)
-        assertEquals(listOf(2L, 3L, 4L, 5L), t.process.map { it.seq })
+    // 2. 轮内每条 assistant text 都是回答，过程按位置切成多段
+    //    （2026-09-07 修：以前只留最后一条，中间几段真回答被折进「过程」，看着像思考）
+    @Test fun everyAssistantTextIsAReplyAndProcessSplitsAroundThem() {
+        val t = foldTurns(listOf(user(1), say(2, "先看看"), use(3, "Read"), result(4), say(5, "再改"), use(6, "Edit"), say(7, "改好了")), live = false).single()
+        assertEquals(listOf(2L, 5L, 7L), t.replies.map { it.seq })
+        assertEquals(listOf(3L, 4L, 6L), t.steps.map { it.seq })
+        assertEquals(listOf("u1", "r2", "f3", "r5", "f6", "r7"), flattenForList(listOf(t), emptySet()).map { it.key })
+        // 展开只展开被点的那一段
+        assertEquals(
+            listOf("u1", "r2", "f3", "s3", "s4", "r5", "f6", "r7"),
+            flattenForList(listOf(t), expanded = setOf(3L)).map { it.key },
+        )
     }
 
-    // 3. question 永不折叠且不占 reply 位
-    @Test fun questionsStayOutOfProcessAndReply() {
+    // 3. question 永不折叠，也不吃掉回答
+    @Test fun questionsStayOutOfTheFold() {
         val t = foldTurns(listOf(user(1), use(2, "Bash"), question(3)), live = false).single()
-        assertEquals(listOf(3L), t.questions.map { it.seq })
-        assertNull(t.reply)
-        assertEquals(listOf(2L), t.process.map { it.seq })
-        val items = flattenForList(listOf(t), emptySet())
-        assertEquals(listOf("u1", "f1", "q3"), items.map { it.key })
+        assertTrue(t.replies.isEmpty())
+        assertEquals(listOf(2L), t.steps.map { it.seq })
+        assertEquals(listOf("u1", "f2", "q3"), flattenForList(listOf(t), emptySet()).map { it.key })
 
         // 问题排在回复之后也不改变它独立成项
         val t2 = foldTurns(listOf(user(1), say(2), question(3)), live = false).single()
-        assertEquals(2L, t2.reply?.seq)
         assertEquals(listOf("u1", "r2", "q3"), flattenForList(listOf(t2), emptySet()).map { it.key })
     }
 
-    // 3b. answer 与 question 一样独立成项、不折叠、不占 reply 位；键前缀 a
+    // 3b. answer 与 question 一样独立成项、不折叠；键前缀 a
     @Test fun answersAreStandaloneItemsToo() {
         val t = foldTurns(listOf(user(1), question(2), answer(3), use(4, "Edit"), say(5)), live = false).single()
-        assertEquals(listOf(2L, 3L), t.questions.map { it.seq })
-        assertEquals(listOf(4L), t.process.map { it.seq })
-        assertEquals(5L, t.reply?.seq)
-        assertEquals(listOf("u1", "q2", "a3", "f1", "r5"), flattenForList(listOf(t), emptySet()).map { it.key })
+        assertEquals(listOf(4L), t.steps.map { it.seq })
+        assertEquals(listOf("u1", "q2", "a3", "f4", "r5"), flattenForList(listOf(t), emptySet()).map { it.key })
     }
 
     // 3c. 待答 = 会话活着且最新 question 后没有 answer
@@ -91,12 +93,12 @@ class TurnFoldTest {
         assertEquals(2, turns.size)
         assertNull(turns[0].user)
         assertEquals(7L, turns[0].key)
-        assertEquals(listOf(7L, 8L), turns[0].process.map { it.seq })
-        assertEquals(9L, turns[0].reply?.seq)
+        assertEquals(listOf(7L, 8L), turns[0].steps.map { it.seq })
+        assertEquals(listOf(9L), turns[0].replies.map { it.seq })
         assertEquals(10L, turns[1].user?.seq)
     }
 
-    // 5. process 空 → 不出 Fold 项
+    // 5. 没有过程 → 不出 Fold 项
     @Test fun emptyProcessEmitsNoFold() {
         val turns = foldTurns(listOf(user(1), say(2)), live = true)
         val items = flattenForList(turns, expanded = setOf(1L))
@@ -111,7 +113,6 @@ class TurnFoldTest {
             (2L..8L).forEach { add(use(it, "Bash")) }
             (9L..11L).forEach { add(use(it, "Read")) }
             add(result(12))
-            add(say(13, "中途"))
         }
         assertEquals(10, stepCount(steps))
         assertEquals("过程 · 10 步 · Bash ×7 · Read ×3", foldLabel(steps))
@@ -122,35 +123,38 @@ class TurnFoldTest {
         assertEquals("过程 · 0 步", foldLabel(listOf(think(1))))
     }
 
-    // 7. live 尾轮的 liveTail = 最后一条 tool_use
-    @Test fun liveTailIsTheLastToolUseOfTheLiveLastTurn() {
+    // 7. 只有贴在轮尾的那一段是 live，liveTail = 段内最后一条 tool_use
+    @Test fun onlyTheTrailingSegmentOfTheLiveTurnIsLive() {
         val msgs = listOf(user(1), use(2, "Read", "a.kt"), result(3), say(4, "看完了"), use(5, "Bash", "cargo test"), result(6))
         val live = flattenForList(foldTurns(msgs, live = true), emptySet())
-        val fold = live.filterIsInstance<StreamItem.Fold>().single()
-        assertTrue(fold.live)
-        assertEquals(5L, fold.liveTail?.seq)
-        assertEquals("进行中 · 2 步 · 最近：Bash cargo test", liveLabel(fold.steps, fold.liveTail))
-        // 最新那条 assistant text 暂当 reply；之后的工具调用已经滚进 process
-        assertEquals(listOf("u1", "f1", "r4"), live.map { it.key })
+        assertEquals(listOf("u1", "f2", "r4", "f5"), live.map { it.key })
+        val folds = live.filterIsInstance<StreamItem.Fold>()
+        assertEquals(listOf(false, true), folds.map { it.live })
+        assertEquals(5L, folds[1].liveTail?.seq)
+        assertEquals("进行中 · 1 步 · 最近：Bash cargo test", liveLabel(folds[1].steps, folds[1].liveTail))
 
-        // 会话不在 running：没有 liveTail
-        val idle = flattenForList(foldTurns(msgs, live = false), emptySet()).filterIsInstance<StreamItem.Fold>().single()
-        assertFalse(idle.live)
-        assertNull(idle.liveTail)
+        // 会话不在 running：没有 live 段
+        val idle = flattenForList(foldTurns(msgs, live = false), emptySet()).filterIsInstance<StreamItem.Fold>()
+        assertTrue(idle.none { it.live } && idle.all { it.liveTail == null })
 
         // 只有最后一轮算 live
         val two = flattenForList(foldTurns(msgs + listOf(user(7), use(8, "Edit")), live = true), emptySet())
-        val folds = two.filterIsInstance<StreamItem.Fold>()
-        assertEquals(listOf(false, true), folds.map { it.live })
-        assertEquals(8L, folds[1].liveTail?.seq)
+            .filterIsInstance<StreamItem.Fold>()
+        assertEquals(listOf(false, false, true), two.map { it.live })
+        assertEquals(8L, two[2].liveTail?.seq)
+
+        // 尾段后面又出了回答 → 那段不再是「进行中」
+        val done = flattenForList(foldTurns(listOf(user(1), use(2, "Bash"), say(3)), live = true), emptySet())
+        assertTrue(done.filterIsInstance<StreamItem.Fold>().none { it.live })
     }
 
     @Test fun expandedFoldIsFollowedByItsSteps() {
         val turns = foldTurns(listOf(user(1), think(2), use(3, "Bash"), result(4), say(5), user(6), use(7, "Read"), say(8)), live = false)
-        val items = flattenForList(turns, expanded = setOf(1L))
-        assertEquals(listOf("u1", "f1", "s2", "s3", "s4", "r5", "u6", "f6", "r8"), items.map { it.key })
+        // 展开状态按段键（段内第一条 seq）记
+        val items = flattenForList(turns, expanded = setOf(2L))
+        assertEquals(listOf("u1", "f2", "s2", "s3", "s4", "r5", "u6", "f7", "r8"), items.map { it.key })
         val collapsed = flattenForList(turns, expanded = emptySet())
-        assertEquals(listOf("u1", "f1", "r5", "u6", "f6", "r8"), collapsed.map { it.key })
+        assertEquals(listOf("u1", "f2", "r5", "u6", "f7", "r8"), collapsed.map { it.key })
     }
 
     @Test fun emptyInputFoldsToNothing() {

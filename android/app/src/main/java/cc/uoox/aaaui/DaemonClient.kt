@@ -153,13 +153,9 @@ class DaemonClient(
 
     suspend fun inboxDelete(id: String) { delete("/inbox/$id") }
 
-    /** 会话日志（含已退出、已删除），最新在前 */
-    suspend fun history(limit: Int = 300): List<HistoryEntry> =
-        json.decodeFromString(HistoryResponse.serializer(), get("/history?limit=$limit")).entries
-
-    /** 日历：每天会话数 + haiku 摘要 */
-    suspend fun historyDays(): List<DayDigest> =
-        json.decodeFromString(DaysResponse.serializer(), get("/history/days")).days
+    /** 看板：待办 + 按天流水 + 数字（daemon 一次算好） */
+    suspend fun historyDashboard(): Dashboard =
+        json.decodeFromString(Dashboard.serializer(), get("/history/dashboard"))
 
     // ---------- v1.4 ----------
 
