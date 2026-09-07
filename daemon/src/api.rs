@@ -1206,6 +1206,7 @@ async fn config_put(
         .filter(|s| s.state() != SState::Exited)
         .collect();
     let titles: Vec<String> = live.iter().map(|s| s.meta.lock().unwrap().title.clone()).collect();
+    let mut restart_anyway = false;
     let result: ApiResult<(Option<crate::migrate::Report>, Config)> = async {
         if !live.is_empty() && !body.force {
             return Err(ApiError::conflict(format!(
@@ -1226,6 +1227,9 @@ async fn config_put(
             if new_root != cfg.project_root {
                 if body.migrate {
                     let old_root = cfg.project_root.clone();
+                    // 注定失败的（跨卷 / 目标非空 / 嵌套 / 拼错）在收会话**之前**就拒绝，
+                    // 别把人家跑着的会话杀了才发现搬不动（gpt-6 审阅指出）
+                    crate::migrate::preflight(&old_root, &new_root).map_err(ApiError::conflict)?;
                     // 先把活着的会话结束掉（PTY 的 cwd 马上要搬走），resume 清单按新路径记
                     if !live.is_empty() {
                         let (o, n) = (old_root.clone(), new_root.clone());
@@ -1236,13 +1240,24 @@ async fn config_put(
                     }
                     let app2 = Arc::clone(&app);
                     let (o, n) = (old_root.clone(), new_root.clone());
-                    let rep = blocking(move || {
+                    let rep = match blocking(move || {
                         // 与 purge / collect 同一把锁：cwd 缓存和 Claude 目录都在动
                         let _g = app2.store_lock.lock().unwrap();
                         crate::migrate::migrate_root(&app2.paths, &o, &n)
                     })
                     .await?
-                    .map_err(ApiError::conflict)?;
+                    {
+                        Ok(rep) => rep,
+                        Err(e) => {
+                            // 过了 preflight 还失败（rename 本身出错）：会话已经收了，
+                            // 不能白杀——resume 清单改回旧路径，照常重启让它们回来
+                            if !live.is_empty() {
+                                terminate_for_restart(&app, &live, |p| p.to_string()).await;
+                            }
+                            restart_anyway = true;
+                            return Err(ApiError::conflict(format!("{e}（会话已结束，daemon 将重启并按原路径 resume）")));
+                        }
+                    };
                     // 内存里的会话也改指向：重启前若再 persist，别把旧路径写回去
                     for s in app.pool.all() {
                         let mut m = s.meta.lock().unwrap();
@@ -1284,7 +1299,12 @@ async fn config_put(
     let (migrated, cfg) = match result {
         Ok(v) => v,
         Err(e) => {
-            unlock();
+            if restart_anyway {
+                // 会话已收、清单已按旧路径重写：标志保持 true，起来后自动 resume
+                crate::daemon::restart_self_after_ms(600);
+            } else {
+                unlock();
+            }
             return Err(e);
         }
     };
