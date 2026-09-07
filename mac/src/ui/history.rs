@@ -79,6 +79,7 @@ impl RootView {
         let when = super::detail_panel::fmt_artifact_time(&it.created_at, &now, &chrono::Local).unwrap_or_default();
         let sid = it.session_id.clone();
         let alive = it.alive;
+        let running = it.running;
         div()
             .id(SharedString::from(format!("todo:{}:{}", it.session_id, it.text)))
             .flex()
@@ -109,7 +110,7 @@ impl RootView {
                             .child(SharedString::from(format!("{} · {}", it.title, when))),
                     ),
             )
-            .when(alive, |el| {
+            .when(running, |el| {
                 el.child(div().flex_none().text_size(px(10.)).text_color(c(theme::green())).child("● 在跑"))
             })
     }
@@ -186,6 +187,7 @@ impl RootView {
             for e in &d.entries {
                 let sid = e.id.clone();
                 let alive = e.alive;
+                let running = e.running;
                 let tail = if e.deleted {
                     "已删除".to_string()
                 } else if e.done + e.open == 0 {
@@ -213,7 +215,7 @@ impl RootView {
                                 .text_size(px(11.))
                                 .text_color(c(if e.deleted {
                                     theme::faint()
-                                } else if alive {
+                                } else if running {
                                     theme::green()
                                 } else if e.open > 0 {
                                     theme::amber()
@@ -222,7 +224,7 @@ impl RootView {
                                 }))
                                 .child(if e.deleted {
                                     "✕"
-                                } else if alive {
+                                } else if running {
                                     "◐"
                                 } else if e.open > 0 {
                                     "☐"

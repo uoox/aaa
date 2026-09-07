@@ -91,17 +91,19 @@ class ProtocolTest {
     @Test fun dashboardParsingSearchAndGrouping() {
         val d = json.decodeFromString<Dashboard>(
             """{"today":{"sessions":2,"done":1,"open":2},"week":{"sessions":3,"done":3,"open":2},"active":1,
-                "open":[{"session_id":"a","project_name":"Shop","title":"改登录页","text":"补测试","alive":true},
+                "open":[{"session_id":"a","project_name":"Shop","title":"改登录页","text":"补测试","alive":true,"running":true},
                         {"session_id":"b","project_name":"Mail","title":"DKIM","text":"轮换"},
                         {"session_id":"c","project_name":"Shop","title":"改登录页","text":"发版"}],
                 "days":[{"date":"2026-09-07","text":"- 修好登录","sessions":2,"done":1,"open":2,
-                         "entries":[{"id":"a","title":"改登录页","project_name":"Shop","alive":true,"open":1}]}],
+                         "entries":[{"id":"a","title":"改登录页","project_name":"Shop","alive":true,"running":true,"open":1}]}],
                 "spark":[0,1,2]}""",
         )
         assertEquals(2, d.today.sessions)
         assertEquals(1, d.active)
         assertEquals(3, d.open.size)
-        assertTrue(d.open[0].alive && !d.open[1].alive)
+        assertTrue(d.open[0].alive && d.open[0].running && !d.open[1].alive)
+        // 已退出但还在池子里的会话：alive 为真、running 为假（徽标不画，仍可点开）
+        assertTrue(!json.decodeFromString<OpenItem>("""{"alive":true}""").running)
         assertEquals(listOf(0, 1, 2), d.spark)
         assertEquals(1, d.days.single().entries.single().open)
         // 缺字段用默认值，daemon 老版本 404 由界面兜底

@@ -130,8 +130,12 @@ pub struct OpenItem {
     pub text: String,
     #[serde(default)]
     pub created_at: String,
+    /// 还在池子里（能点开，已退出的回放也算）
     #[serde(default)]
     pub alive: bool,
+    /// 进程还没退出——「在跑」的徽标按它画
+    #[serde(default)]
+    pub running: bool,
 }
 
 /// 右栏一天里的一个会话
@@ -145,6 +149,8 @@ pub struct DayEntry {
     pub project_name: String,
     #[serde(default)]
     pub alive: bool,
+    #[serde(default)]
+    pub running: bool,
     #[serde(default)]
     pub deleted: bool,
     #[serde(default)]

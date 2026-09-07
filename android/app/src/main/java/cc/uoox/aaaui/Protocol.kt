@@ -159,7 +159,7 @@ fun parseChecklist(md: String): List<ChecklistItem> = md.lines().mapNotNull { ra
 @Serializable data class Dashboard(
     val today: DashStats = DashStats(),
     val week: DashStats = DashStats(),
-    /** 此刻还活着的会话数 */
+    /** 此刻进程还没退出的会话数（running / waiting） */
     val active: Int = 0,
     val open: List<OpenItem> = emptyList(),
     val days: List<DayCard> = emptyList(),
@@ -177,7 +177,10 @@ fun parseChecklist(md: String): List<ChecklistItem> = md.lines().mapNotNull { ra
     val title: String = "",
     val text: String = "",
     val created_at: String = "",
+    /** 还在池子里（能点开，已退出的回放也算） */
     val alive: Boolean = false,
+    /** 进程还没退出——「在跑」的徽标按它画 */
+    val running: Boolean = false,
 )
 
 /** 流水里一天的一个会话 */
@@ -186,6 +189,7 @@ fun parseChecklist(md: String): List<ChecklistItem> = md.lines().mapNotNull { ra
     val title: String = "",
     val project_name: String = "",
     val alive: Boolean = false,
+    val running: Boolean = false,
     val deleted: Boolean = false,
     val done: Int = 0,
     val open: Int = 0,

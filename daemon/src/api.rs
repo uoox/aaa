@@ -490,9 +490,16 @@ async fn history_days(State(app): State<SharedApp>) -> ApiResult<Json<Value>> {
 /// 仪表盘：待办（没勾的清单项）+ 按天流水 + 今天 / 近 7 天的数字
 async fn history_dashboard(State(app): State<SharedApp>) -> ApiResult<Json<Value>> {
     let entries = app.history.lock().unwrap().list(crate::history::KEEP);
-    let alive: std::collections::HashSet<String> = app.pool.list().iter().map(|s| s.id.clone()).collect();
+    let pooled = app.pool.list();
+    // 池子里的都能点开（含已退出的回放）；「在跑」只算进程还没退出的
+    let alive: std::collections::HashSet<String> = pooled.iter().map(|s| s.id.clone()).collect();
+    let running: std::collections::HashSet<String> = pooled
+        .iter()
+        .filter(|s| s.state() != crate::pool::State::Exited)
+        .map(|s| s.id.clone())
+        .collect();
     let days = app.days.lock().unwrap();
-    let d = crate::history::dashboard(&entries, &days, &alive, &crate::history::today_local());
+    let d = crate::history::dashboard(&entries, &days, &alive, &running, &crate::history::today_local());
     Ok(Json(serde_json::to_value(d).unwrap_or_else(|_| json!({}))))
 }
 

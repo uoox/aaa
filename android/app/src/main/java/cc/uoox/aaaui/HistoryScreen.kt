@@ -191,7 +191,7 @@ private fun TodoRow(item: OpenItem, onOpen: () -> Unit) {
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp),
             )
         }
-        if (item.alive) Text("● 在跑", color = Tok.Green, fontSize = 10.5.sp, modifier = Modifier.padding(start = 8.dp, top = 2.dp))
+        if (item.running) Text("● 在跑", color = Tok.Green, fontSize = 10.5.sp, modifier = Modifier.padding(start = 8.dp, top = 2.dp))
     }
 }
 
@@ -228,7 +228,7 @@ private fun DayBlock(day: DayCard, today: String, expanded: Boolean, onToggle: (
         if (expanded) day.entries.forEach { e ->
             val (glyph, color) = when {
                 e.deleted -> "✕" to Tok.Faint
-                e.alive -> "◐" to Tok.Green
+                e.running -> "◐" to Tok.Green
                 e.open > 0 -> "☐" to Tok.Amber
                 else -> "☑" to Tok.Dim
             }

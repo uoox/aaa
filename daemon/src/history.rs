@@ -481,8 +481,11 @@ pub struct OpenItem {
     /// 没勾的那一项本身
     pub text: String,
     pub created_at: String,
-    /// 会话还在池子里（能点开）
+    /// 会话还在池子里（能点开，已退出的也算）
     pub alive: bool,
+    /// 会话进程还没退出（running / waiting）——「在跑」的徽标按它画
+    #[serde(default)]
+    pub running: bool,
 }
 
 /// 右栏一天里的一个会话
@@ -491,7 +494,11 @@ pub struct DayEntry {
     pub id: String,
     pub title: String,
     pub project_name: String,
+    /// 还在池子里（能点开）
     pub alive: bool,
+    /// 进程还没退出
+    #[serde(default)]
+    pub running: bool,
     pub deleted: bool,
     pub done: usize,
     pub open: usize,
@@ -520,7 +527,7 @@ pub struct Stats {
 pub struct Dashboard {
     pub today: Stats,
     pub week: Stats,
-    /// 此刻还活着的会话数
+    /// 此刻进程还没退出的会话数（running / waiting）
     pub active: usize,
     pub open: Vec<OpenItem>,
     pub days: Vec<DayCard>,
@@ -548,8 +555,16 @@ fn stats_of(entries: &[&Entry]) -> Stats {
     s
 }
 
-/// `today` = daemon 本机时区的今天；`alive` = 池子里还在的会话 id
-pub fn dashboard(entries: &[Entry], days: &Days, alive: &std::collections::HashSet<String>, today: &str) -> Dashboard {
+/// `today` = daemon 本机时区的今天；`alive` = 池子里还在的会话 id（含已退出的，能点开）；
+/// `running` = 其中进程还没退出的（「在跑」与 `active` 按它算——池子里绝大多数是已退出的，
+/// 2026-09-07 首版把两者混成一个，看板上写出「此刻 135 在跑」）
+pub fn dashboard(
+    entries: &[Entry],
+    days: &Days,
+    alive: &std::collections::HashSet<String>,
+    running: &std::collections::HashSet<String>,
+    today: &str,
+) -> Dashboard {
     let groups = group_by_day(entries);
     let week: Vec<String> = last_days(today, 7);
     let today_rows: Vec<&Entry> = groups.get(today).cloned().unwrap_or_default();
@@ -567,6 +582,7 @@ pub fn dashboard(entries: &[Entry], days: &Days, alive: &std::collections::HashS
                 text: it.text,
                 created_at: e.created_at.clone(),
                 alive: alive.contains(&e.id),
+                running: running.contains(&e.id),
             });
             if open.len() >= OPEN_CAP {
                 break;
@@ -599,6 +615,7 @@ pub fn dashboard(entries: &[Entry], days: &Days, alive: &std::collections::HashS
                             title: if e.title.is_empty() { e.project_name.clone() } else { e.title.clone() },
                             project_name: e.project_name.clone(),
                             alive: alive.contains(&e.id),
+                            running: running.contains(&e.id),
                             deleted: e.deleted_at.is_some(),
                             done: items.iter().filter(|i| i.done).count(),
                             open: items.iter().filter(|i| !i.done).count(),
@@ -618,7 +635,7 @@ pub fn dashboard(entries: &[Entry], days: &Days, alive: &std::collections::HashS
     Dashboard {
         today: stats_of(&today_rows),
         week: stats_of(&week_rows),
-        active: entries.iter().filter(|e| alive.contains(&e.id)).count(),
+        active: entries.iter().filter(|e| running.contains(&e.id)).count(),
         open,
         days: days_out,
         spark,
@@ -688,16 +705,18 @@ mod dashboard_tests {
         shell.agent = "shell".into();
         let entries = vec![a, gone, shell, b];
         days.put(DayDigest { date: today.clone(), text: "- 修好登录".into(), sessions: 2, input_hash: 0, generated_at: "t".into() });
-        let alive: std::collections::HashSet<String> = ["a".to_string()].into_iter().collect();
-        let d = dashboard(&entries, &days, &alive, &today);
+        // a 在池子里且还在跑；b 只是没被清理掉的已退出记录
+        let alive: std::collections::HashSet<String> = ["a".to_string(), "b".to_string()].into_iter().collect();
+        let running: std::collections::HashSet<String> = ["a".to_string()].into_iter().collect();
+        let d = dashboard(&entries, &days, &alive, &running, &today);
 
         assert_eq!(d.today.sessions, 2, "今天：a + 已删除的 c（终端不进日历）");
         assert_eq!((d.today.done, d.today.open), (1, 2));
         assert_eq!(d.week.sessions, 3, "近 7 天含前天的 b");
-        assert_eq!(d.active, 1);
+        assert_eq!(d.active, 1, "已退出但还在池子里的 b 不算「在跑」");
         assert_eq!(d.open.len(), 1, "已删除与终端的未完项不进待办");
         assert_eq!(d.open[0].text, "补测试");
-        assert!(d.open[0].alive);
+        assert!(d.open[0].alive && d.open[0].running);
         assert_eq!(d.days[0].date, today, "最新的一天在前");
         assert_eq!(d.days[0].text, "- 修好登录");
         assert_eq!((d.days[0].done, d.days[0].open), (1, 2));

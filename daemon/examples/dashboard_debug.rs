@@ -6,7 +6,7 @@ fn main() {
     let dir = std::path::PathBuf::from(std::env::var("HOME").unwrap()).join(".local/state/aaa-daemon");
     let entries = History::load(&dir).list(KEEP);
     let days = Days::load(&dir);
-    let d = dashboard(&entries, &days, &Default::default(), &today_local());
+    let d = dashboard(&entries, &days, &Default::default(), &Default::default(), &today_local());
     println!("今天 {:?}\n近7天 {:?}\n待办 {} 条", d.today, d.week, d.open.len());
     for i in d.open.iter().take(8) {
         println!("  ☐ [{}] {} · {}", i.project_name, i.text, i.title);
