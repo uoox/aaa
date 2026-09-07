@@ -607,7 +607,7 @@ impl MessagesView {
                     .text_size(px(12.5))
                     .font_weight(FontWeight::BOLD)
                     .text_color(c(theme::amber()))
-                    .child(SharedString::from(format!("⚠ Claude 请求授权 · {}", if p.tool_name.is_empty() { "工具" } else { p.tool_name.as_str() }))),
+                    .child(SharedString::from(if p.kind == "elicitation" { "⚠ 有个表单在等你".to_string() } else { format!("⚠ Claude 请求授权 · {}", if p.tool_name.is_empty() { "工具" } else { p.tool_name.as_str() }) })),
             )
             .when(!p.summary.is_empty(), |el| {
                 el.child(
@@ -619,7 +619,9 @@ impl MessagesView {
                         .child(SharedString::from(p.summary.clone())),
                 )
             })
-            .child(
+            .child(if p.kind == "elicitation" {
+                div().text_size(px(11.)).text_color(c(theme::dim())).child("MCP 服务器要你填表单：这个只能在终端里答（⌘E 切过去）")
+            } else {
                 div()
                     .flex()
                     .gap(px(8.))
@@ -627,8 +629,8 @@ impl MessagesView {
                     .child(btn("perm-allow", "允许", theme::green(), cx, "allow"))
                     .child(btn("perm-deny", "拒绝", theme::red(), cx, "deny"))
                     .when(self.perm_busy, |el| el.child(div().text_size(px(11.)).text_color(c(theme::dim())).child("…")))
-                    .child(div().text_size(px(10.5)).text_color(c(theme::faint())).child("在终端里作答也一样")),
-            )
+                    .child(div().text_size(px(10.5)).text_color(c(theme::faint())).child("在终端里作答也一样"))
+            })
             .when_some(self.perm_error.clone(), |el, e| el.child(div().text_size(px(11.)).text_color(c(theme::red())).child(SharedString::from(e))))
             .into_any_element()
     }

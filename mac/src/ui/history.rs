@@ -202,15 +202,14 @@ impl RootView {
         let query = self.history_input.read(cx).text().to_string();
         let d = &self.dashboard;
 
-        // 过滤：搜索 → 状态组 → 已删除 / 已归档开关
-        let matched: Vec<&SessionCard> = d
+        // 过滤：搜索 → 状态组 → 已删除开关；归档的单独一节（2026-09-07 用户：和还在列表里的分开）
+        let (archived_cards, matched): (Vec<&SessionCard>, Vec<&SessionCard>) = d
             .sessions
             .iter()
             .filter(|c| card_matches(c, &query))
             .filter(|c| self.dash_filter.as_deref().is_none_or(|f| c.status == f))
             .filter(|c| self.dash_show_deleted || !c.deleted)
-            .filter(|c| self.dash_show_archived || !c.archived)
-            .collect();
+            .partition(|c| c.archived);
 
         let toggle = |id: &'static str, label: String, on: bool| {
             div()
@@ -229,21 +228,25 @@ impl RootView {
         // 瀑布流：列数随窗口宽度（侧栏约 260px，卡片最窄 300px），卡片按估算高度
         // （标题 + 进度条 + 每项一行）塞进当前最短的一列，高矮不一才不浪费竖向空间
         let cols_n = (((self.win_w - 260.) / 320.).floor() as usize).clamp(1, 6);
-        let mut cols: Vec<(f32, Vec<&SessionCard>)> = (0..cols_n).map(|_| (0., Vec::new())).collect();
-        for card in &matched {
-            let h = 70. + 18. * card.items.len() as f32;
-            let (i, _) = cols.iter().enumerate().min_by(|a, b| a.1.0.partial_cmp(&b.1.0).unwrap()).unwrap();
-            cols[i].0 += h;
-            cols[i].1.push(card);
-        }
-        let mut grid = div().flex().items_start().gap(px(8.));
-        for (_, col) in &cols {
-            let mut col_el = div().flex_1().min_w(px(0.)).flex().flex_col().gap(px(8.));
-            for card in col {
-                col_el = col_el.child(self.card(card, cx));
+        let masonry = |cards: &[&SessionCard], cx: &mut Context<Self>| -> gpui::Div {
+            let mut cols: Vec<(f32, Vec<&SessionCard>)> = (0..cols_n).map(|_| (0., Vec::new())).collect();
+            for card in cards {
+                let h = 70. + 18. * card.items.len() as f32;
+                let (i, _) = cols.iter().enumerate().min_by(|a, b| a.1.0.partial_cmp(&b.1.0).unwrap()).unwrap();
+                cols[i].0 += h;
+                cols[i].1.push(card);
             }
-            grid = grid.child(col_el);
-        }
+            let mut grid = div().flex().items_start().gap(px(8.));
+            for (_, col) in &cols {
+                let mut col_el = div().flex_1().min_w(px(0.)).flex().flex_col().gap(px(8.));
+                for card in col {
+                    col_el = col_el.child(self.card(card, cx));
+                }
+                grid = grid.child(col_el);
+            }
+            grid
+        };
+        let mut grid = div().flex().flex_col().gap(px(10.)).child(masonry(&matched, cx));
         if matched.is_empty() {
             grid = grid.child(div().text_size(px(12.)).text_color(c(theme::faint())).child(if d.sessions.is_empty() {
                 "还没有记录（daemon 每秒把会话同步进日志）"
@@ -251,9 +254,32 @@ impl RootView {
                 "没有匹配的会话"
             }));
         }
+        // 归档的：单独一节，默认收着，点开是自己的一片瀑布流
+        if !archived_cards.is_empty() {
+            grid = grid.child(
+                div()
+                    .id("dash-archived-section")
+                    .mt(px(6.))
+                    .py(px(6.))
+                    .border_t_1()
+                    .border_color(c(theme::edge()))
+                    .cursor_pointer()
+                    .font_family("Menlo")
+                    .text_size(px(11.))
+                    .text_color(c(if self.dash_show_archived { theme::accent() } else { theme::dim() }))
+                    .hover(|st| st.text_color(c(theme::ink())))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.dash_show_archived = !this.dash_show_archived;
+                        cx.notify();
+                    }))
+                    .child(SharedString::from(format!("{} 归档 {}（不在项目列表里的）", if self.dash_show_archived { "▾" } else { "▸" }, archived_cards.len()))),
+            );
+            if self.dash_show_archived {
+                grid = grid.child(masonry(&archived_cards, cx));
+            }
+        }
 
         let deleted_n = d.sessions.iter().filter(|c| c.deleted).count();
-        let archived_n = d.sessions.iter().filter(|c| c.archived && !c.deleted).count();
         let mut chips = div().flex().items_center().gap(px(6.)).flex_wrap();
         for st in STATUSES {
             let n = match st {
@@ -288,14 +314,6 @@ impl RootView {
                     .child(div().text_size(px(14.)).font_weight(gpui::FontWeight::BOLD).text_color(c(theme::ink())).child("看板"))
                     .child(chips)
                     .child(div().flex_1())
-                    .when(archived_n > 0, |el| {
-                        el.child(
-                            toggle("dash-archived", format!("归档 {}", archived_n), self.dash_show_archived).on_click(cx.listener(|this, _, _, cx| {
-                                this.dash_show_archived = !this.dash_show_archived;
-                                cx.notify();
-                            })),
-                        )
-                    })
                     .when(deleted_n > 0, |el| {
                         el.child(
                             toggle("dash-deleted", format!("已删除 {}", deleted_n), self.dash_show_deleted).on_click(cx.listener(|this, _, _, cx| {

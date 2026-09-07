@@ -1296,9 +1296,11 @@ private fun PermissionCard(p: PermissionPrompt, onDecide: suspend (String) -> Un
             .border(1.dp, Tok.Amber.copy(alpha = 0.7f), RoundedCornerShape(10.dp))
             .padding(12.dp),
     ) {
-        Text("⚠ Claude 请求授权 · " + p.tool_name.ifBlank { "工具" }, color = Tok.Amber, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+        Text(if (p.kind == "elicitation") "⚠ 有个表单在等你" else "⚠ Claude 请求授权 · " + p.tool_name.ifBlank { "工具" }, color = Tok.Amber, fontSize = 13.sp, fontWeight = FontWeight.Bold)
         if (p.summary.isNotBlank()) Text(p.summary, color = Tok.Ink, fontSize = 12.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.padding(top = 4.dp), maxLines = 4, overflow = TextOverflow.Ellipsis)
-        Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        if (p.kind == "elicitation") {
+            Text("MCP 服务器要你填表单：这个只能在终端视图里答", color = Tok.Dim, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
+        } else Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("允许", color = Tok.Ink, fontSize = 13.sp, modifier = Modifier.background(Tok.Green.copy(alpha = 0.2f), RoundedCornerShape(6.dp)).border(1.dp, Tok.Green.copy(alpha = 0.6f), RoundedCornerShape(6.dp)).clickable(enabled = !busy) { decide("allow") }.padding(horizontal = 14.dp, vertical = 6.dp))
             Spacer(Modifier.width(8.dp))
             Text("拒绝", color = Tok.Ink, fontSize = 13.sp, modifier = Modifier.background(Tok.Red.copy(alpha = 0.2f), RoundedCornerShape(6.dp)).border(1.dp, Tok.Red.copy(alpha = 0.6f), RoundedCornerShape(6.dp)).clickable(enabled = !busy) { decide("deny") }.padding(horizontal = 14.dp, vertical = 6.dp))

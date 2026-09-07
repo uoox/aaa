@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.staggeredgrid.LazyVerticalStaggeredGrid
 import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridCells
+import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridItemSpan
 import androidx.compose.foundation.lazy.staggeredgrid.items
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.lazy.LazyRow
@@ -72,15 +73,15 @@ fun HistoryScreen(store: AppStore, nav: NavHostController) {
     }
     val d = dash
     // 2026-09-07 第三版：瀑布流、全展开——一眼看全，不折叠、不分组
-    val matched = remember(d, query, filter, showDeleted, showArchived) {
+    // 归档的单独一节（2026-09-07 用户：和还在项目列表里的分开）
+    val (archivedCards, matched) = remember(d, query, filter, showDeleted) {
         d?.sessions.orEmpty()
             .filter { cardMatches(it, query) }
             .filter { filter == null || it.status == filter }
             .filter { showDeleted || !it.deleted }
-            .filter { showArchived || !it.archived }
+            .partition { it.archived }
     }
     val deletedN = d?.sessions.orEmpty().count { it.deleted }
-    val archivedN = d?.sessions.orEmpty().count { it.archived && !it.deleted }
 
     Column(Modifier.fillMaxSize().background(Tok.Bg).navigationBarsPadding()) {
         Row(Modifier.fillMaxWidth().padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -117,13 +118,6 @@ fun HistoryScreen(store: AppStore, nav: NavHostController) {
                         Text("$n", color = Tok.Ink, fontSize = 13.sp, fontFamily = FontFamily.Monospace)
                     }
                 }
-                if (archivedN > 0) item {
-                    Text(
-                        "归档 $archivedN", color = if (showArchived) Tok.Accent else Tok.Dim, fontSize = 11.5.sp,
-                        modifier = Modifier.background(if (showArchived) Tok.Accent.copy(alpha = 0.14f) else Color.Transparent, RoundedCornerShape(8.dp))
-                            .clickable { showArchived = !showArchived }.padding(horizontal = 10.dp, vertical = 6.dp),
-                    )
-                }
                 if (deletedN > 0) item {
                     Text(
                         "已删除 $deletedN", color = if (showDeleted) Tok.Accent else Tok.Dim, fontSize = 11.5.sp,
@@ -136,7 +130,7 @@ fun HistoryScreen(store: AppStore, nav: NavHostController) {
 
         if (d == null) {
             if (error == null) Text("加载中…", color = Tok.Faint, modifier = Modifier.padding(16.dp))
-        } else if (matched.isEmpty()) {
+        } else if (matched.isEmpty() && archivedCards.isEmpty()) {
             Text(
                 if (d.sessions.isEmpty()) "还没有记录（daemon 每秒把会话同步进日志）" else "没有匹配的会话",
                 color = Tok.Faint, fontSize = 13.sp, modifier = Modifier.padding(16.dp),
@@ -150,7 +144,7 @@ fun HistoryScreen(store: AppStore, nav: NavHostController) {
                 verticalItemSpacing = 8.dp,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                items(matched, key = { "card-${it.id}" }) { c ->
+                val card: @Composable (SessionCard) -> Unit = { c ->
                     SessionCardView(
                         c, onOpen = { if (c.alive) openSession(c.id, "") },
                         onToggle = { it ->
@@ -160,6 +154,18 @@ fun HistoryScreen(store: AppStore, nav: NavHostController) {
                             }
                         },
                     )
+                }
+                items(matched, key = { "card-${it.id}" }) { card(it) }
+                if (archivedCards.isNotEmpty()) {
+                    // 归档的单独一节：整行的标题，默认收着
+                    item(key = "archived-hdr", span = StaggeredGridItemSpan.FullLine) {
+                        Text(
+                            (if (showArchived) "▾" else "▸") + " 归档 ${archivedCards.size}（不在项目列表里的）",
+                            color = if (showArchived) Tok.Accent else Tok.Dim, fontSize = 12.sp, fontFamily = FontFamily.Monospace,
+                            modifier = Modifier.fillMaxWidth().clickable { showArchived = !showArchived }.padding(horizontal = 8.dp, vertical = 10.dp),
+                        )
+                    }
+                    if (showArchived) items(archivedCards, key = { "card-${it.id}" }) { card(it) }
                 }
             }
         }

@@ -98,6 +98,9 @@ pub struct Session {
 /// 权限对话框（会话 JSON 的 `permission`）
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct PermissionPrompt {
+    /// permission（能替答）| elicitation（MCP 表单，只能去终端）
+    #[serde(default)]
+    pub kind: String,
     #[serde(default)]
     pub tool_name: String,
     #[serde(default)]

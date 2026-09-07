@@ -125,7 +125,8 @@ fun parseChecklist(md: String): List<ChecklistItem> = md.lines().mapNotNull { ra
     /** v1.15：归档（daemon 侧存）——列表 / 看板默认藏起来，一个开关翻出来 */
     val archived: Boolean = false,
 )
-@Serializable data class PermissionPrompt(val tool_name: String = "", val summary: String = "", val since: String = "")
+/** kind：permission（能替答）| elicitation（MCP 表单，只能去终端） */
+@Serializable data class PermissionPrompt(val kind: String = "permission", val tool_name: String = "", val summary: String = "", val since: String = "")
 @Serializable data class PortInfo(val port: Int, val cmd: String = "")
 @Serializable data class ScreenText(val text: String = "", val alternate_screen: Boolean = false)
 @Serializable data class PurgedAgent(val agent_label: String, val count: Int)

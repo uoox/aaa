@@ -279,6 +279,33 @@ pub fn apply(sess: &Session, event: &str, body: &Value, now: Instant) -> Applied
                 meta.last_stop_at = Some(chrono::Utc::now());
                 meta.running_by_transcript = false;
             }
+            // 兜底：权限对话框已经弹了 6 秒还没人答（PermissionRequest 没送到 / 老版本）、
+            // 或 MCP 的 elicitation 表单在等——都记成待回复。elicitation 没法替答，卡片只
+            // 提示去终端
+            let msg = body.get("message").and_then(Value::as_str).unwrap_or("").to_string();
+            match kind {
+                "permission_prompt" if meta.permission.is_none() => {
+                    meta.permission = Some(json!({"kind": "permission", "tool_name": "权限", "summary": msg, "tool_input": Value::Null, "tool_use_id": Value::Null,
+                        "since": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)}));
+                    meta.asking = true;
+                    meta.asking_hint_inst = Some(now);
+                    out.dirty = true;
+                }
+                "elicitation_dialog" | "elicitation_url_dialog" => {
+                    meta.permission = Some(json!({"kind": "elicitation", "tool_name": "对话框", "summary": msg, "tool_input": Value::Null, "tool_use_id": Value::Null,
+                        "since": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)}));
+                    meta.asking = true;
+                    meta.asking_hint_inst = Some(now);
+                    out.dirty = true;
+                }
+                "elicitation_complete" | "elicitation_response" => {
+                    if meta.permission.as_ref().is_some_and(|p| p["kind"] == "elicitation") {
+                        meta.permission = None;
+                        out.dirty = true;
+                    }
+                }
+                _ => {}
+            }
         }
         "PermissionRequest" => {
             // 权限对话框要弹了（Bash 授权、ExitPlanMode 批准…）：记下来 = 待回复。
@@ -287,6 +314,7 @@ pub fn apply(sess: &Session, event: &str, body: &Value, now: Instant) -> Applied
             let tool = body.get("tool_name").and_then(Value::as_str).unwrap_or("").to_string();
             let input = body.get("tool_input").cloned().unwrap_or(Value::Null);
             meta.permission = Some(json!({
+                "kind": "permission",
                 "tool_name": tool,
                 "summary": permission_summary(&tool, &input),
                 "tool_input": input,
@@ -555,6 +583,23 @@ mod tests {
         assert_eq!(sess.meta.lock().unwrap().permission.as_ref().unwrap()["summary"], "批准计划并退出计划模式");
         apply(&sess, "UserPromptSubmit", &body("UserPromptSubmit", json!({})), now);
         assert!(sess.meta.lock().unwrap().permission.is_none(), "用户又发言了 = 拒绝路径走完了");
+    }
+
+    #[test]
+    fn notification_fallbacks_mark_prompts_and_elicitation() {
+        let sess = Session::for_test("claude", "/p");
+        let now = Instant::now();
+        apply(&sess, "Notification", &body("Notification", json!({"notification_type": "permission_prompt", "message": "Claude needs your permission to use Bash"})), now);
+        {
+            let m = sess.meta.lock().unwrap();
+            assert!(m.asking);
+            assert_eq!(m.permission.as_ref().unwrap()["kind"], "permission");
+        }
+        apply(&sess, "PostToolUse", &body("PostToolUse", json!({})), now);
+        apply(&sess, "Notification", &body("Notification", json!({"notification_type": "elicitation_dialog", "message": "server asks for input"})), now);
+        assert_eq!(sess.meta.lock().unwrap().permission.as_ref().unwrap()["kind"], "elicitation");
+        apply(&sess, "Notification", &body("Notification", json!({"notification_type": "elicitation_response"})), now);
+        assert!(sess.meta.lock().unwrap().permission.is_none());
     }
 
     #[test]
