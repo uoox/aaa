@@ -263,7 +263,7 @@ impl MessagesView {
                 v.uploading = false;
                 match res {
                     Ok(saved) => {
-                        let cur = v.input.read(cx).text.clone();
+                        let cur = v.input.read(cx).text().to_string();
                         let mut next = cur.trim_end().to_string();
                         if !next.is_empty() {
                             next.push(' ');
@@ -298,7 +298,7 @@ impl MessagesView {
         if self.sending {
             return;
         }
-        let text = self.input.read(cx).text.trim().to_string();
+        let text = self.input.read(cx).text().trim().to_string();
         if text.is_empty() {
             return;
         }
@@ -469,7 +469,7 @@ impl MessagesView {
             let multi = q.multi_select;
             // MiniInput 改文本时自己 notify；这里镜像进草稿，并执行「单选自填即弃选」
             cx.observe(&input, move |v: &mut Self, input, cx| {
-                let text = input.read(cx).text.clone();
+                let text = input.read(cx).text().to_string();
                 v.on_other_changed(seq, qi, multi, text, cx);
             })
             .detach();

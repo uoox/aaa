@@ -256,7 +256,7 @@ impl RootView {
     }
 
     pub(super) fn render_history_page(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let query = self.history_input.read(cx).text.clone();
+        let query = self.history_input.read(cx).text().to_string();
         let d = &self.dashboard;
         // 「（今天）」按 daemon 的日期画：客户端与 daemon 不在一个时区时才不会标错天
         let today = d.date.clone();

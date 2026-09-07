@@ -28,7 +28,7 @@ impl RootView {
     /// 「保存到 daemon」：目录变了先问迁移，其余直接提交（daemon 会自我重启）
     fn save_daemon_config(&mut self, cx: &mut Context<Self>) {
         // 不做 unwrap_or 静默兜底：填错端口却显示保存成功，比报错糟得多
-        let port_text = self.port_input.read(cx).text.trim().to_string();
+        let port_text = self.port_input.read(cx).text().trim().to_string();
         let port: u16 = match port_text.parse() {
             Ok(p) if p > 0 => p,
             _ => {
@@ -36,12 +36,12 @@ impl RootView {
                 return;
             }
         };
-        let token = self.token_input.read(cx).text.trim().to_string();
+        let token = self.token_input.read(cx).text().trim().to_string();
         if token.is_empty() {
             self.set_error("token 不能为空".into(), cx);
             return;
         }
-        let new_root = self.root_input.read(cx).text.trim().to_string();
+        let new_root = self.root_input.read(cx).text().trim().to_string();
         let cur_root = self
             .health
             .as_ref()
@@ -293,7 +293,7 @@ impl RootView {
                 )
                 .child(input)
         };
-        let token_for_copy = self.token_input.read(cx).text.clone();
+        let token_for_copy = self.token_input.read(cx).text().to_string();
         let cfg_sect = card()
             .child(sect_title("配置 · 保存会写入 config.toml 并重启 daemon"))
             .child(
@@ -327,10 +327,10 @@ impl RootView {
                     .child(
                         btn_secondary("connect-btn", "连接").flex_none().on_click(cx.listener(
                             |this, _, _, cx| {
-                                let host = this.host_input.read(cx).text.trim().to_string();
+                                let host = this.host_input.read(cx).text().trim().to_string();
                                 let port =
-                                    this.port_input.read(cx).text.trim().parse().unwrap_or(2730);
-                                let token = this.token_input.read(cx).text.trim().to_string();
+                                    this.port_input.read(cx).text().trim().parse().unwrap_or(2730);
+                                let token = this.token_input.read(cx).text().trim().to_string();
                                 if host.is_empty() {
                                     this.set_error("host 不能为空".into(), cx);
                                     return;

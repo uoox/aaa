@@ -387,7 +387,7 @@ impl RootView {
 
     /// 收件箱输入框回车：POST 后清空；列表靠 inbox_changed 帧或这里的乐观重拉对齐
     pub(super) fn inbox_add(&mut self, cx: &mut Context<Self>) {
-        let text = self.inbox_input.read(cx).text.trim().to_string();
+        let text = self.inbox_input.read(cx).text().trim().to_string();
         if text.is_empty() {
             return;
         }

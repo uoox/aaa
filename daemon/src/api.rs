@@ -275,6 +275,40 @@ pub fn restart_blockers(alive: &[String], force: bool) -> Result<(), String> {
 /// 撞进 malloc/GCD 的内部锁卡死）。所有 PTY 都是本进程的子进程，重启 = 全部终止；
 /// 所以有存活会话时要 `force`，并且先把它们正经 kill 掉（屏幕回放留着），不让它们
 /// 在进程退出时无声消失。
+/// 重启前的收尾（`/restart` 与 `PUT /config {force}` 共用）：记下活着的项目会话
+/// （终端除外）到 `resume_after_restart.json`——起来后自动 resume（daemon.rs）——
+/// 然后一起终止、并行等退出：以前是一个个 kill 再各等最多 3s，十个会话要半分钟；
+/// 现在总共就是最慢那一个的时间（SIGTERM 2s 后补 SIGKILL，上限约 3s）。
+/// `path_after` 把会话的 project_path 映射成重启后的路径（迁移根时换前缀）。
+async fn terminate_for_restart(
+    app: &SharedApp,
+    alive: &[Arc<crate::pool::Session>],
+    path_after: impl Fn(&str) -> String,
+) {
+    let to_resume: Vec<Value> = alive
+        .iter()
+        .filter_map(|s| {
+            let m = s.meta.lock().unwrap();
+            (m.agent != "shell").then(|| json!({"project_path": path_after(&m.project_path), "agent": m.agent}))
+        })
+        .collect();
+    let _ = std::fs::write(
+        app.paths.state_dir().join("resume_after_restart.json"),
+        serde_json::to_vec(&to_resume).unwrap_or_default(),
+    );
+    for s in alive {
+        s.meta.lock().unwrap().user_killed = true;
+    }
+    let waits: Vec<_> = alive
+        .iter()
+        .cloned()
+        .map(|s| tokio::spawn(async move { kill_and_wait(&s, 25, 120).await }))
+        .collect();
+    for w in waits {
+        let _ = w.await;
+    }
+}
+
 async fn restart(
     State(app): State<SharedApp>,
     body: Option<Json<RestartBody>>,
@@ -303,31 +337,7 @@ async fn restart(
         app.restarting.store(false, std::sync::atomic::Ordering::SeqCst);
         return Err(ApiError::conflict(msg));
     }
-    // 重启不丢会话：记下活着的项目会话（终端除外），起来后自动 resume（daemon.rs）
-    let to_resume: Vec<Value> = alive
-        .iter()
-        .filter_map(|s| {
-            let m = s.meta.lock().unwrap();
-            (m.agent != "shell").then(|| json!({"project_path": m.project_path, "agent": m.agent}))
-        })
-        .collect();
-    let _ = std::fs::write(
-        app.paths.state_dir().join("resume_after_restart.json"),
-        serde_json::to_vec(&to_resume).unwrap_or_default(),
-    );
-    // 一起终止、并行等退出：以前是一个个 kill 再各等最多 3s，十个会话要半分钟；
-    // 现在总共就是最慢那一个的时间（SIGTERM 2s 后补 SIGKILL，上限约 3s）
-    for s in &alive {
-        s.meta.lock().unwrap().user_killed = true;
-    }
-    let waits: Vec<_> = alive
-        .iter()
-        .cloned()
-        .map(|s| tokio::spawn(async move { kill_and_wait(&s, 25, 120).await }))
-        .collect();
-    for w in waits {
-        let _ = w.await;
-    }
+    terminate_for_restart(&app, &alive, |p| p.to_string()).await;
     crate::daemon::restart_self_after_ms(600);
     Ok(Json(json!({
         "ok": true,
@@ -1159,70 +1169,13 @@ struct ConfigPut {
     port: Option<u16>,
     token: Option<String>,
     project_root: Option<String>,
-    /// project_root 变化时是否迁移（整根移动 + 注册表重写）
+    /// project_root 变化时是否迁移（整根移动 + 会话 / 日志 / 置顶 / Claude 存储全部改指向）
     #[serde(default)]
     migrate: bool,
-}
-
-/// Move the project root wholesale and keep every project resumable.
-/// Caller guarantees no live sessions. Same-volume only (`rename`).
-fn migrate_root(paths: &Paths, old: &Path, new: &Path) -> Result<(), String> {
-    if !old.is_dir() {
-        return Err(format!("旧项目根不存在：{}", old.display()));
-    }
-    if new == old {
-        return Err("新旧目录相同".into());
-    }
-    if new.starts_with(old) || old.starts_with(new) {
-        return Err("新目录不能嵌套在旧目录内（或反之）".into());
-    }
-    // ① 迁移前把每个项目当前的对话 id 落进注册表：迁走后 agent 存储按旧
-    //    cwd 查不到会话，id 只能现在采
-    let _reg_lock = crate::registry::lock();
-    let mut reg = Registry::load(old);
-    let mut cache = CwdCache::load(&paths.cwd_cache());
-    let mut collected: Vec<(String, String, String)> = Vec::new();
-    for (dir, agent, _id) in reg.entries() {
-        if agent == "shell" || !Path::new(&dir).starts_with(old) {
-            continue;
-        }
-        // 一律现采：注册表里的 id 只在经 daemon resume 时回写过，用户可能
-        // 之后用 aaal / 裸 agent 在该目录开过更新的对话。find 落空才留旧 id。
-        let sid = stores::find(paths, &mut cache, &agent, &dir);
-        if !sid.is_empty() {
-            collected.push((dir, agent, sid));
-        }
-    }
-    // 一次 flush 落盘。这一步失败必须中止：rename 之后就没有回头路了，
-    // id 会永远丢在旧根的存储结构里
-    reg.set_ids(&collected)
-        .map_err(|e| format!("采集对话 id 失败（未做任何移动）: {e}"))?;
-    // ② 先把注册表键改成新前缀——趁文件还在旧根，这一步是原子写，失败就
-    //    整体中止，什么都没动过。指向新根的键在 is_live 眼里是「根外路径」，
-    //    会被原样保留。（评审教训：搬完再重写，失败就只剩打日志一条路，
-    //    而名册过滤会让整批项目从所有客户端消失。）
-    reg.rewrite_prefix(old, new)
-        .map_err(|e| format!("注册表预重写失败（未做任何移动）: {e}"))?;
-    // ③ 整根 rename（同卷原子）。目标若已存在必须是空目录——不删它，
-    //    rename(2) 本来就能原子替换空目录；非空直接拒绝。跨卷不装聪明——
-    //    rename 会失败，明说手动拷。
-    if new.exists() {
-        let empty = std::fs::read_dir(new).map(|mut d| d.next().is_none()).unwrap_or(false);
-        if !empty {
-            // 恢复注册表再退出
-            let _ = Registry::load(old).rewrite_prefix(new, old);
-            return Err(format!("目标已存在且非空：{}", new.display()));
-        }
-    }
-    if let Err(e) = std::fs::rename(old, new) {
-        // 根没动，把注册表键改回旧前缀；这次重写失败的概率极低（同一文件
-        // 刚刚才成功原子写过），仍失败也只是 resume 兜底受损，根与配置一致。
-        if let Err(e2) = Registry::load(old).rewrite_prefix(new, old) {
-            eprintln!("migrate: 回滚注册表失败（根未移动，仅影响 resume 兜底）: {e2}");
-        }
-        return Err(format!("移动失败（跨卷迁移请手动 cp 后仅改配置）: {e}"));
-    }
-    Ok(())
+    /// 有存活会话时不再 409：像 `/restart {force}` 一样先正经结束它们，重启后按
+    /// **新**路径自动 resume（v1.12）。没有它，迁移前得手动把每个会话关掉。
+    #[serde(default)]
+    force: bool,
 }
 
 async fn config_put(
@@ -1244,26 +1197,27 @@ async fn config_put(
         return Err(ApiError::conflict("已有一次配置修改在进行（daemon 即将重启）"));
     }
     let unlock = || app.restarting.store(false, std::sync::atomic::Ordering::SeqCst);
-    // 重启会杀掉所有 PTY，有存活会话时一律拒绝，绝不悄悄断人家的 agent。
-    let alive: Vec<String> = app
+    // 重启会杀掉所有 PTY：有存活会话时默认拒绝，绝不悄悄断人家的 agent；
+    // `force` 才像 /restart 一样先正经结束、重启后自动 resume
+    let live: Vec<Arc<crate::pool::Session>> = app
         .pool
         .list()
-        .iter()
+        .into_iter()
         .filter(|s| s.state() != SState::Exited)
-        .map(|s| s.meta.lock().unwrap().title.clone())
         .collect();
-    let result: ApiResult<(bool, Config)> = async {
-        if !alive.is_empty() {
+    let titles: Vec<String> = live.iter().map(|s| s.meta.lock().unwrap().title.clone()).collect();
+    let result: ApiResult<(Option<crate::migrate::Report>, Config)> = async {
+        if !live.is_empty() && !body.force {
             return Err(ApiError::conflict(format!(
-                "有 {} 个存活会话（{}）。改配置需要重启 daemon，先终止它们",
-                alive.len(),
-                alive.join("、")
+                "有 {} 个存活会话（{}）。改配置需要重启 daemon，先终止它们（或带 force）",
+                live.len(),
+                titles.join("、")
             )));
         }
         let cfg_path = app.paths.config_path();
         let mut cfg = crate::config::load_or_create(&cfg_path)
             .map_err(|e| ApiError::internal(format!("读配置: {e}")))?;
-        let mut migrated = false;
+        let mut migrated: Option<crate::migrate::Report> = None;
         if let Some(root) = &body.project_root {
             let new_root = std::path::PathBuf::from(root);
             if !new_root.is_absolute() {
@@ -1271,12 +1225,32 @@ async fn config_put(
             }
             if new_root != cfg.project_root {
                 if body.migrate {
-                    let paths = app.paths.clone();
-                    let (o, n) = (cfg.project_root.clone(), new_root.clone());
-                    blocking(move || migrate_root(&paths, &o, &n))
-                        .await?
-                        .map_err(ApiError::conflict)?;
-                    migrated = true;
+                    let old_root = cfg.project_root.clone();
+                    // 先把活着的会话结束掉（PTY 的 cwd 马上要搬走），resume 清单按新路径记
+                    if !live.is_empty() {
+                        let (o, n) = (old_root.clone(), new_root.clone());
+                        terminate_for_restart(&app, &live, move |p| {
+                            crate::migrate::reroot(p, &o, &n).unwrap_or_else(|| p.to_string())
+                        })
+                        .await;
+                    }
+                    let app2 = Arc::clone(&app);
+                    let (o, n) = (old_root.clone(), new_root.clone());
+                    let rep = blocking(move || {
+                        // 与 purge / collect 同一把锁：cwd 缓存和 Claude 目录都在动
+                        let _g = app2.store_lock.lock().unwrap();
+                        crate::migrate::migrate_root(&app2.paths, &o, &n)
+                    })
+                    .await?
+                    .map_err(ApiError::conflict)?;
+                    // 内存里的会话也改指向：重启前若再 persist，别把旧路径写回去
+                    for s in app.pool.all() {
+                        let mut m = s.meta.lock().unwrap();
+                        if let Some(np) = crate::migrate::reroot(&m.project_path, &old_root, &new_root) {
+                            m.project_path = np;
+                        }
+                    }
+                    migrated = Some(rep);
                 } else if !new_root.is_dir() {
                     return Err(ApiError::conflict(format!(
                         "目录不存在：{}（或选择迁移现有项目）",
@@ -1300,6 +1274,10 @@ async fn config_put(
         }
         crate::config::write_config(&cfg_path, &cfg)
             .map_err(|e| ApiError::internal(format!("写配置: {e}")))?;
+        if migrated.is_none() && !live.is_empty() {
+            // 没迁移只改端口 / token 也带了 force：照 /restart 的规矩收会话
+            terminate_for_restart(&app, &live, |p| p.to_string()).await;
+        }
         Ok((migrated, cfg))
     }
     .await;
@@ -1310,11 +1288,13 @@ async fn config_put(
             return Err(e);
         }
     };
-    // 标志保持 true 直到 exec：sessions_create 在此期间被拒
+    // 标志保持 true 直到进程退出：sessions_create 在此期间被拒
     crate::daemon::restart_self_after_ms(600);
     Ok(Json(json!({
         "ok": true,
-        "migrated": migrated,
+        "migrated": migrated.is_some(),
+        "report": migrated,
+        "killed": titles,
         "restarting": true,
         "port": cfg.port,
         "note": "daemon 将在 1 秒内自动重启，客户端会自动重连"
@@ -1656,42 +1636,6 @@ mod tests {
     }
 
     use super::*;
-
-    #[test]
-    fn migrate_root_moves_everything_and_rewrites_registry() {
-        let base = tempfile::tempdir().unwrap();
-        let home = base.path().join("home");
-        std::fs::create_dir_all(&home).unwrap();
-        let paths = Paths::new(&home);
-        let old = base.path().join("proj-old");
-        let new = base.path().join("proj-new");
-        std::fs::create_dir_all(old.join("alpha")).unwrap();
-        std::fs::write(old.join("alpha/file.txt"), "x").unwrap();
-        let alpha_old = old.join("alpha").to_string_lossy().into_owned();
-        std::fs::write(
-            Registry::registry_path(&old),
-            format!("{alpha_old}\tclaude\tid-42\n/Volumes/Other/x\tcodex\n"),
-        )
-        .unwrap();
-
-        migrate_root(&paths, &old, &new).unwrap();
-
-        assert!(!old.exists(), "旧根整体移走");
-        assert!(new.join("alpha/file.txt").is_file(), "内容随根移动");
-        let reg = Registry::load(&new);
-        let alpha_new = new.join("alpha").to_string_lossy().into_owned();
-        assert_eq!(reg.get(&alpha_new), Some("claude"));
-        assert_eq!(reg.get_id(&alpha_new), Some("id-42"), "对话 id 存活");
-        assert_eq!(reg.get("/Volumes/Other/x"), Some("codex"), "外部条目不动");
-
-        // 防呆：相同 / 嵌套 / 非空目标都拒绝
-        assert!(migrate_root(&paths, &new, &new).is_err());
-        assert!(migrate_root(&paths, &new, &new.join("inner")).is_err());
-        let occupied = base.path().join("occupied");
-        std::fs::create_dir_all(occupied.join("stuff")).unwrap();
-        assert!(migrate_root(&paths, &new, &occupied).is_err());
-        assert!(new.exists(), "拒绝时不动原目录");
-    }
 
     #[test]
     fn auth_check() {

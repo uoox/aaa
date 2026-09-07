@@ -25,7 +25,7 @@ impl RootView {
         self.creating = true;
         cx.notify();
         let name = {
-            let t = self.new_input.read(cx).text.trim().to_string();
+            let t = self.new_input.read(cx).text().trim().to_string();
             if t.is_empty() { None } else { Some(t) }
         };
         // 唯一的 agent；显式写进注册表（名册以注册表为准），不靠 daemon 端兜底
@@ -136,7 +136,7 @@ impl RootView {
     }
 
     fn confirm_rename(&mut self, id: String, cx: &mut Context<Self>) {
-        let title = self.name_input.read(cx).text.trim().to_string();
+        let title = self.name_input.read(cx).text().trim().to_string();
         if title.is_empty() {
             self.set_error("名称不能为空".into(), cx);
             return;

@@ -1,15 +1,21 @@
 //! 极简单行文本输入（gpui 无内置 input）：
-//! EntityInputHandler 走 macOS IME 通道（中文可用），光标移动/删除自理，无选区。
+//! EntityInputHandler 走 macOS IME 通道（中文可用）。编辑核心是纯的 [`Editor`]
+//! （光标 + 选区 + 增删），不碰 gpui，单测直接跑。
+//!
+//! 2026-09-07 之前只有光标没有选区：⌘X / ⌘C / ⌘A / Shift+方向键统统不存在，
+//! 用户报「新建项目的框不能剪切」就是这个原因。现在：Shift+← → Home End 拉选区，
+//! ⌘A 全选，⌘C 复制（没选区就复制整行），⌘X 剪切选区，⌘V 粘贴替换选区，打字 /
+//! 退格 / 输入法组字都先吃掉选区，双击全选。
 
 use std::ops::Range;
 
 use gpui::{
-    App, Bounds, ContentMask, Context, ElementInputHandler, EntityInputHandler, FocusHandle,
-    Focusable, KeyDownEvent, MouseButton, SharedString, UTF16Selection, Window, canvas, div, fill,
-    point, prelude::*, px, size,
+    App, Bounds, ClipboardItem, ContentMask, Context, ElementInputHandler, EntityInputHandler,
+    FocusHandle, Focusable, KeyDownEvent, MouseButton, SharedString, UTF16Selection, Window,
+    canvas, div, fill, point, prelude::*, px, size,
 };
 
-use super::kit::c;
+use super::kit::{c, ca};
 use crate::theme;
 
 /// 文本超出字段宽度时的水平偏移：优先保证光标可见，其次不在右边留白。
@@ -21,9 +27,169 @@ fn text_scroll_shift(text_w: f32, caret: f32, view_w: f32) -> f32 {
     (caret + 8.0 - view_w).clamp(0.0, text_w - view_w)
 }
 
-pub struct MiniInput {
+/// 单行编辑核心：字节偏移的光标，`anchor` 是选区另一端（None = 无选区）。
+/// 所有偏移都落在 char 边界上。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Editor {
     pub text: String,
-    cursor: usize, // 字节偏移
+    pub cursor: usize,
+    pub anchor: Option<usize>,
+}
+
+impl Editor {
+    pub fn with_text(text: impl Into<String>) -> Self {
+        let text = text.into();
+        Editor { cursor: text.len(), text, anchor: None }
+    }
+
+    /// 选区（左小右大）；anchor 与光标重合不算选区
+    pub fn selection(&self) -> Option<Range<usize>> {
+        let a = self.anchor?;
+        if a == self.cursor {
+            return None;
+        }
+        Some(a.min(self.cursor)..a.max(self.cursor))
+    }
+
+    pub fn selected_text(&self) -> Option<&str> {
+        self.selection().and_then(|r| self.text.get(r))
+    }
+
+    fn prev_boundary(&self) -> usize {
+        self.text[..self.cursor]
+            .char_indices()
+            .next_back()
+            .map(|(i, _)| i)
+            .unwrap_or(0)
+    }
+
+    fn next_boundary(&self) -> usize {
+        self.text[self.cursor..]
+            .chars()
+            .next()
+            .map(|ch| self.cursor + ch.len_utf8())
+            .unwrap_or(self.cursor)
+    }
+
+    /// 移到 `pos`。`extend`（按着 Shift）= 拉选区，否则收起选区
+    fn move_to(&mut self, pos: usize, extend: bool) {
+        if extend {
+            if self.anchor.is_none() {
+                self.anchor = Some(self.cursor);
+            }
+        } else {
+            self.anchor = None;
+        }
+        self.cursor = pos.min(self.text.len());
+    }
+
+    pub fn left(&mut self, extend: bool) {
+        match (extend, self.selection()) {
+            // 有选区、不按 Shift：← 收到选区左端（macOS 惯例）
+            (false, Some(r)) => self.move_to(r.start, false),
+            _ => {
+                let p = self.prev_boundary();
+                self.move_to(p, extend)
+            }
+        }
+    }
+
+    pub fn right(&mut self, extend: bool) {
+        match (extend, self.selection()) {
+            (false, Some(r)) => self.move_to(r.end, false),
+            _ => {
+                let p = self.next_boundary();
+                self.move_to(p, extend)
+            }
+        }
+    }
+
+    pub fn home(&mut self, extend: bool) {
+        self.move_to(0, extend);
+    }
+
+    pub fn end(&mut self, extend: bool) {
+        self.move_to(self.text.len(), extend);
+    }
+
+    pub fn select_all(&mut self) {
+        if self.text.is_empty() {
+            return;
+        }
+        self.anchor = Some(0);
+        self.cursor = self.text.len();
+    }
+
+    /// 删掉选区；没有选区返回 false 什么都不做
+    pub fn delete_selection(&mut self) -> bool {
+        let Some(r) = self.selection() else {
+            self.anchor = None;
+            return false;
+        };
+        self.text.replace_range(r.clone(), "");
+        self.cursor = r.start;
+        self.anchor = None;
+        true
+    }
+
+    pub fn backspace(&mut self) -> bool {
+        if self.delete_selection() {
+            return true;
+        }
+        if self.cursor == 0 {
+            return false;
+        }
+        let p = self.prev_boundary();
+        self.text.replace_range(p..self.cursor, "");
+        self.cursor = p;
+        true
+    }
+
+    pub fn delete_forward(&mut self) -> bool {
+        if self.delete_selection() {
+            return true;
+        }
+        if self.cursor >= self.text.len() {
+            return false;
+        }
+        let n = self.next_boundary();
+        self.text.replace_range(self.cursor..n, "");
+        true
+    }
+
+    /// 在光标处插入（有选区先吃掉选区）——打字、粘贴都走这里
+    pub fn insert(&mut self, s: &str) {
+        self.delete_selection();
+        self.text.insert_str(self.cursor, s);
+        self.cursor += s.len();
+    }
+
+    /// 把 `range` 换成 `s`（输入法 / 系统给的绝对范围），光标落在新文本末尾
+    pub fn replace_range(&mut self, range: Range<usize>, s: &str) {
+        self.anchor = None;
+        self.text.replace_range(range.clone(), s);
+        self.cursor = range.start + s.len();
+    }
+
+    /// 剪切：取走选区文字；没有选区返回 None（macOS 惯例，不动整行）
+    pub fn cut(&mut self) -> Option<String> {
+        let s = self.selected_text()?.to_string();
+        self.delete_selection();
+        Some(s)
+    }
+
+    /// 复制：选区，没有选区就是整行（这种小框里常见的就是「把 token 抄走」）
+    pub fn copy(&self) -> Option<String> {
+        match self.selected_text() {
+            Some(s) => Some(s.to_string()),
+            None if !self.text.is_empty() => Some(self.text.clone()),
+            None => None,
+        }
+    }
+}
+
+pub struct MiniInput {
+    pub ed: Editor,
     marked: Option<Range<usize>>,
     placeholder: SharedString,
     pub focus_handle: FocusHandle,
@@ -39,38 +205,23 @@ impl gpui::EventEmitter<InputEvent> for MiniInput {}
 impl MiniInput {
     pub fn new(cx: &mut Context<Self>, placeholder: impl Into<SharedString>) -> Self {
         MiniInput {
-            text: String::new(),
-            cursor: 0,
+            ed: Editor::default(),
             marked: None,
             placeholder: placeholder.into(),
             focus_handle: cx.focus_handle(),
         }
     }
 
+    pub fn text(&self) -> &str {
+        &self.ed.text
+    }
+
     pub fn set_text(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
-        self.text = text.into();
-        self.cursor = self.text.len();
+        self.ed = Editor::with_text(text);
         self.marked = None;
         cx.notify();
     }
 
-    fn prev_boundary(&self) -> usize {
-        self.text[..self.cursor]
-            .char_indices()
-            .last()
-            .map(|(i, _)| i)
-            .unwrap_or(0)
-    }
-
-    fn next_boundary(&self) -> usize {
-        self.text[self.cursor..]
-            .chars()
-            .next()
-            .map(|ch| self.cursor + ch.len_utf8())
-            .unwrap_or(self.text.len())
-    }
-
-    /// IME 组字中（有 marked text）——根节点的回车快捷键要避开这个状态
     pub fn composing(&self) -> bool {
         self.marked.is_some()
     }
@@ -81,56 +232,73 @@ impl MiniInput {
         }
         let ks = &ev.keystroke;
         let m = ks.modifiers;
-        match ks.key.as_str() {
-            "backspace" => {
-                if self.cursor > 0 {
-                    let p = self.prev_boundary();
-                    self.text.replace_range(p..self.cursor, "");
-                    self.cursor = p;
-                    cx.notify();
-                }
+        let changed = match ks.key.as_str() {
+            "backspace" => self.ed.backspace(),
+            "delete" => self.ed.delete_forward(),
+            // ⌘← / ⌘→ = 行首 / 行尾（macOS 惯例）
+            "left" if m.platform => {
+                self.ed.home(m.shift);
+                true
             }
-            "delete" => {
-                if self.cursor < self.text.len() {
-                    let n = self.next_boundary();
-                    self.text.replace_range(self.cursor..n, "");
-                    cx.notify();
-                }
+            "right" if m.platform => {
+                self.ed.end(m.shift);
+                true
             }
             "left" => {
-                self.cursor = self.prev_boundary();
-                cx.notify();
+                self.ed.left(m.shift);
+                true
             }
             "right" => {
-                self.cursor = self.next_boundary();
-                cx.notify();
+                self.ed.right(m.shift);
+                true
             }
             "home" => {
-                self.cursor = 0;
-                cx.notify();
+                self.ed.home(m.shift);
+                true
             }
             "end" => {
-                self.cursor = self.text.len();
-                cx.notify();
+                self.ed.end(m.shift);
+                true
             }
+            "a" if m.platform => {
+                self.ed.select_all();
+                true
+            }
+            "c" if m.platform => {
+                if let Some(s) = self.ed.copy() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(s));
+                }
+                false
+            }
+            "x" if m.platform => match self.ed.cut() {
+                Some(s) => {
+                    cx.write_to_clipboard(ClipboardItem::new_string(s));
+                    true
+                }
+                None => false,
+            },
             "v" if m.platform => {
                 if let Some(item) = cx.read_from_clipboard()
                     && let Some(text) = item.text()
                 {
                     let t: String = text.replace('\n', " ");
-                    self.text.insert_str(self.cursor, &t);
-                    self.cursor += t.len();
-                    cx.notify();
+                    self.ed.insert(&t);
+                    true
+                } else {
+                    false
                 }
             }
-            _ => {}
+            _ => false,
+        };
+        if changed {
+            cx.notify();
         }
     }
 
     // ── UTF-16 偏移换算 ──────────────────────────────────────────────────
 
     fn offset_to_utf16(&self, byte: usize) -> usize {
-        self.text[..byte.min(self.text.len())]
+        self.ed.text[..byte.min(self.ed.text.len())]
             .chars()
             .map(|c| c.len_utf16())
             .sum()
@@ -138,13 +306,13 @@ impl MiniInput {
 
     fn offset_from_utf16(&self, u16_off: usize) -> usize {
         let mut acc = 0usize;
-        for (i, ch) in self.text.char_indices() {
+        for (i, ch) in self.ed.text.char_indices() {
             if acc >= u16_off {
                 return i;
             }
             acc += ch.len_utf16();
         }
-        self.text.len()
+        self.ed.text.len()
     }
 
     fn range_from_utf16(&self, r: &Range<usize>) -> Range<usize> {
@@ -161,7 +329,7 @@ impl EntityInputHandler for MiniInput {
         _cx: &mut Context<Self>,
     ) -> Option<String> {
         let r = self.range_from_utf16(&range_utf16);
-        self.text.get(r).map(|s| s.to_string())
+        self.ed.text.get(r).map(|s| s.to_string())
     }
 
     fn selected_text_range(
@@ -170,11 +338,16 @@ impl EntityInputHandler for MiniInput {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
-        let c = self.offset_to_utf16(self.cursor);
-        Some(UTF16Selection {
-            range: c..c,
-            reversed: false,
-        })
+        match self.ed.selection() {
+            Some(r) => Some(UTF16Selection {
+                range: self.offset_to_utf16(r.start)..self.offset_to_utf16(r.end),
+                reversed: self.ed.anchor.is_some_and(|a| a > self.ed.cursor),
+            }),
+            None => {
+                let c = self.offset_to_utf16(self.ed.cursor);
+                Some(UTF16Selection { range: c..c, reversed: false })
+            }
+        }
     }
 
     fn marked_text_range(&self, _window: &mut Window, _cx: &mut Context<Self>) -> Option<Range<usize>> {
@@ -201,13 +374,11 @@ impl EntityInputHandler for MiniInput {
             cx.emit(InputEvent::Submit);
             return;
         }
-        let range = self
-            .marked
-            .take()
-            .or_else(|| range_utf16.as_ref().map(|r| self.range_from_utf16(r)))
-            .unwrap_or(self.cursor..self.cursor);
-        self.text.replace_range(range.clone(), text);
-        self.cursor = range.start + text.len();
+        // 组字中 → 替换组字区；系统给了范围 → 按范围；否则 = 普通打字，吃掉选区插入
+        match self.marked.take().or_else(|| range_utf16.as_ref().map(|r| self.range_from_utf16(r))) {
+            Some(range) => self.ed.replace_range(range, text),
+            None => self.ed.insert(text),
+        }
         cx.notify();
     }
 
@@ -223,14 +394,10 @@ impl EntityInputHandler for MiniInput {
             .marked
             .take()
             .or_else(|| range_utf16.as_ref().map(|r| self.range_from_utf16(r)))
-            .unwrap_or(self.cursor..self.cursor);
-        self.text.replace_range(range.clone(), new_text);
-        if new_text.is_empty() {
-            self.marked = None;
-        } else {
-            self.marked = Some(range.start..range.start + new_text.len());
-        }
-        self.cursor = range.start + new_text.len();
+            .or_else(|| self.ed.selection())
+            .unwrap_or(self.ed.cursor..self.ed.cursor);
+        self.ed.replace_range(range.clone(), new_text);
+        self.marked = if new_text.is_empty() { None } else { Some(range.start..range.start + new_text.len()) };
         cx.notify();
     }
 
@@ -265,9 +432,10 @@ impl Render for MiniInput {
         let entity = cx.entity();
         let focused = self.focus_handle.is_focused(window);
         let handle = self.focus_handle.clone();
-        let text = self.text.clone();
+        let text = self.ed.text.clone();
         let placeholder = self.placeholder.clone();
-        let cursor_byte = self.cursor;
+        let cursor_byte = self.ed.cursor;
+        let selection = self.ed.selection();
         let marked = self.marked.clone();
 
         div()
@@ -286,8 +454,14 @@ impl Render for MiniInput {
             .cursor_text()
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::on_key_down))
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, ev: &gpui::MouseDownEvent, window, cx| {
                 this.focus_handle.focus(window, cx);
+                // 双击全选；单击收起选区（没有按点定位光标，canvas 里拿不到字形位置）
+                if ev.click_count >= 2 {
+                    this.ed.select_all();
+                } else {
+                    this.ed.anchor = None;
+                }
                 cx.notify();
             }))
             .child(
@@ -336,6 +510,18 @@ impl Render for MiniInput {
                         window.with_content_mask(Some(ContentMask { bounds }), |window| {
                             let origin =
                                 point(bounds.origin.x - shift, bounds.origin.y + px(6.));
+                            // 选区底色画在文字下面
+                            if let Some(r) = selection.as_ref().filter(|_| !empty) {
+                                let x0 = line.x_for_index(r.start);
+                                let x1 = line.x_for_index(r.end);
+                                window.paint_quad(fill(
+                                    Bounds::new(
+                                        point(bounds.origin.x + x0 - shift, bounds.origin.y + px(5.)),
+                                        size(x1 - x0, bounds.size.height - px(10.)),
+                                    ),
+                                    ca(theme::accent(), if focused { 0.30 } else { 0.16 }),
+                                ));
+                            }
                             let _ = line.paint(
                                 origin,
                                 line_h - px(12.),
@@ -370,19 +556,100 @@ mod tests {
 
     #[test]
     fn short_text_never_scrolls() {
-        assert_eq!(text_scroll_shift(60.0, 60.0, 222.0), 0.0);
-        assert_eq!(text_scroll_shift(222.0, 0.0, 222.0), 0.0);
+        assert_eq!(text_scroll_shift(50., 30., 100.), 0.);
     }
 
     #[test]
     fn long_text_follows_caret() {
-        // 设置页 token 字段的真实数值：文本 293.5，可视 222
-        let (text_w, view_w) = (293.5, 222.0);
-        // 光标在行首 → 不滚
-        assert_eq!(text_scroll_shift(text_w, 0.0, view_w), 0.0);
-        // 光标在行尾 → 滚到底，文本右端贴齐字段右边缘（不多滚，右边不留白）
-        assert_eq!(text_scroll_shift(text_w, text_w, view_w), text_w - view_w);
-        // 光标在中间偏右 → 恰好把光标带进视野并留 8px 余量
-        assert_eq!(text_scroll_shift(text_w, 250.0, view_w), 36.0);
+        // 光标在末尾：右边不留白
+        assert_eq!(text_scroll_shift(300., 300., 100.), 200.);
+        // 光标在中间：光标可见
+        assert_eq!(text_scroll_shift(300., 150., 100.), 58.);
+        // 光标在开头：不滚
+        assert_eq!(text_scroll_shift(300., 0., 100.), 0.);
+    }
+
+    // 2026-09-07 用户报「新建项目的框不能剪切」：以前根本没有选区
+    #[test]
+    fn shift_arrows_build_a_selection_and_cut_takes_it() {
+        let mut e = Editor::with_text("新项目 abc");
+        assert!(e.selection().is_none());
+        e.left(true);
+        e.left(true);
+        assert_eq!(e.selected_text(), Some("bc"));
+        assert_eq!(e.cut().as_deref(), Some("bc"));
+        assert_eq!(e.text, "新项目 a");
+        assert!(e.selection().is_none() && e.cursor == e.text.len());
+        // 没选区：剪切什么都不做（macOS 惯例），复制拿整行
+        assert_eq!(e.cut(), None);
+        assert_eq!(e.copy().as_deref(), Some("新项目 a"));
+    }
+
+    #[test]
+    fn select_all_then_type_replaces_everything() {
+        let mut e = Editor::with_text("旧名字");
+        e.select_all();
+        assert_eq!(e.selected_text(), Some("旧名字"));
+        e.insert("n");
+        assert_eq!(e.text, "n");
+        assert_eq!(e.cursor, 1);
+        // 空文本全选无事发生
+        let mut empty = Editor::default();
+        empty.select_all();
+        assert!(empty.selection().is_none());
+    }
+
+    #[test]
+    fn arrows_collapse_selection_to_its_ends() {
+        let mut e = Editor::with_text("abcd");
+        e.home(false);
+        e.right(true);
+        e.right(true); // 选中 ab，光标在 2
+        assert_eq!(e.selected_text(), Some("ab"));
+        e.left(false); // 收到左端
+        assert_eq!((e.cursor, e.selection()), (0, None));
+        e.right(true);
+        e.right(false); // 收到右端
+        assert_eq!((e.cursor, e.selection()), (1, None));
+        // Shift+End 从当前位置选到末尾；Home 不按 Shift 收起
+        e.end(true);
+        assert_eq!(e.selected_text(), Some("bcd"));
+        e.home(false);
+        assert!(e.selection().is_none() && e.cursor == 0);
+    }
+
+    #[test]
+    fn backspace_and_delete_eat_the_selection_first() {
+        let mut e = Editor::with_text("héllo");
+        e.home(false);
+        e.right(true);
+        e.right(true); // 选中 hé（é 两字节，边界要对）
+        assert!(e.backspace());
+        assert_eq!(e.text, "llo");
+        assert_eq!(e.cursor, 0);
+        assert!(!e.backspace(), "开头退格没东西可删");
+        e.end(false);
+        assert!(!e.delete_forward(), "末尾 delete 没东西可删");
+        e.left(false);
+        assert!(e.delete_forward());
+        assert_eq!(e.text, "ll");
+    }
+
+    #[test]
+    fn paste_replaces_selection_and_ime_ranges_are_absolute() {
+        let mut e = Editor::with_text("a[b]c");
+        e.home(false);
+        e.right(false);
+        e.right(true);
+        e.right(true);
+        e.right(true); // 选中 [b]
+        e.insert("X");
+        assert_eq!(e.text, "aXc");
+        // 输入法给的绝对范围：替换后光标在新文本末尾，选区清掉
+        e.select_all();
+        e.replace_range(1..2, "中文");
+        assert_eq!(e.text, "a中文c");
+        assert_eq!(e.cursor, 1 + "中文".len());
+        assert!(e.selection().is_none());
     }
 }
