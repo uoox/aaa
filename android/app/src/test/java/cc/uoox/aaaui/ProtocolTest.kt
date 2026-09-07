@@ -88,45 +88,23 @@ class ProtocolTest {
         assertEquals("跑一遍测试", items[0].text)
     }
 
-    @Test fun dashboardParsingSearchAndGrouping() {
+    @Test fun dashboardCardsParseSearchAndFinished() {
         val d = json.decodeFromString<Dashboard>(
-            """{"today":{"sessions":2,"done":1,"open":2},"week":{"sessions":3,"done":3,"open":2},"active":1,
-                "open":[{"session_id":"a","project_name":"Shop","title":"改登录页","text":"补测试","alive":true,"running":true},
-                        {"session_id":"b","project_name":"Mail","title":"DKIM","text":"轮换"},
-                        {"session_id":"c","project_name":"Shop","title":"改登录页","text":"发版"}],
-                "days":[{"date":"2026-09-07","text":"- 修好登录","sessions":2,"done":1,"open":2,
-                         "entries":[{"id":"a","title":"改登录页","project_name":"Shop","alive":true,"running":true,"open":1}]}],
-                "spark":[0,1,2]}""",
+            """{"counts":{"asking":1,"running":0,"background":1,"active":2,"paused":5,"open_items":7},
+                "sessions":[{"id":"a","title":"改登录页","project_name":"Shop","status":"background","alive":true,"done":1,"open":1,
+                             "items":[{"done":true,"text":"修登录"},{"done":false,"text":"补测试"}]},
+                            {"id":"b","title":"旧活","project_name":"Mail","status":"paused","done":2,"open":0,"items":[]}]}""",
         )
-        assertEquals(2, d.today.sessions)
-        assertEquals(1, d.active)
-        assertEquals(3, d.open.size)
-        assertTrue(d.open[0].alive && d.open[0].running && !d.open[1].alive)
-        // 已退出但还在池子里的会话：alive 为真、running 为假（徽标不画，仍可点开）
-        assertTrue(!json.decodeFromString<OpenItem>("""{"alive":true}""").running)
-        assertEquals(listOf(0, 1, 2), d.spark)
-        assertEquals(1, d.days.single().entries.single().open)
-        // 缺字段用默认值，daemon 老版本 404 由界面兜底
-        assertEquals(0, json.decodeFromString<Dashboard>("{}").active)
-
-        val a = d.open[0]
-        assertTrue(openItemMatches(a, "") && openItemMatches(a, "测试") && openItemMatches(a, "shop") && openItemMatches(a, "登录"))
-        assertTrue(!openItemMatches(a, "支付"))
-        val day = d.days.single()
-        assertTrue(dayCardMatches(day, "") && dayCardMatches(day, "修好") && dayCardMatches(day, "shop"))
-        assertTrue(!dayCardMatches(day, "支付"))
-
-        // 同一会话里两条一模一样的未勾项（haiku 完全写得出来）：都要留着，
-        // 列表 key 因此不能用文字（HistoryScreen 用 itemsIndexed 带序号）
-        val dup = listOf(d.open[0], d.open[0])
-        assertEquals(2, groupOpenByProject(dup).single().second.size)
-        assertEquals(1, dup.map { "todo-${it.session_id}-${it.text}" }.toSet().size)
-        assertEquals(2, dup.mapIndexed { i, it -> "todo-${it.session_id}-$i" }.toSet().size)
-
-        // 按项目归并，项目内保持原序；项目按首次出现排
-        val groups = groupOpenByProject(d.open)
-        assertEquals(listOf("Shop", "Mail"), groups.map { it.first })
-        assertEquals(listOf("补测试", "发版"), groups[0].second.map { it.text })
+        assertEquals(7, d.counts.open_items)
+        assertEquals(2, d.sessions.size)
+        val a = d.sessions[0]
+        assertTrue(a.alive && a.status == "background" && a.items[1].text == "补测试" && !a.items[1].done)
+        assertTrue(cardMatches(a, "") && cardMatches(a, "测试") && cardMatches(a, "shop") && cardMatches(a, "登录"))
+        assertTrue(!cardMatches(a, "支付"))
+        assertTrue(!cardIsFinished(a) && cardIsFinished(d.sessions[1]))
+        assertEquals("后台", statusLabel("background")); assertEquals("暂停", statusLabel("nope"))
+        // 老 daemon 的形状（没有 sessions）必须解码失败 → 界面报「请升级」，不能静默画空看板
+        assertTrue(runCatching { json.decodeFromString<Dashboard>("""{"today":{"sessions":1},"days":[]}""") }.isFailure)
     }
 
     @Test fun sessionChecklistParses() {

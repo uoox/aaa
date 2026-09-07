@@ -125,7 +125,6 @@ fn run() {
     let inbox = crate::inbox::Inbox::load(&paths.state_dir());
     let pins = crate::pins::Pins::load(&paths.state_dir());
     let history = crate::history::History::load(&paths.state_dir());
-    let days = crate::history::Days::load(&paths.state_dir());
 
     let app: SharedApp = Arc::new(App {
         cfg,
@@ -138,7 +137,6 @@ fn run() {
         inbox: std::sync::Mutex::new(inbox),
         pins: std::sync::Mutex::new(pins),
         history: std::sync::Mutex::new(history),
-        days: std::sync::Mutex::new(days),
         plan_usage: std::sync::Mutex::new(None),
         root_state: std::sync::atomic::AtomicU8::new(root_state.as_u8()),
         restarting: std::sync::atomic::AtomicBool::new(false),
@@ -242,18 +240,6 @@ fn run() {
                 }
             });
         }
-        // 日历摘要：起来 30s 后一次，之后每 5 分钟看哪些天的输入变了（history.rs）
-        {
-            let app = Arc::clone(&app);
-            tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_secs(30)).await;
-                loop {
-                    let app2 = Arc::clone(&app);
-                    let _ = tokio::task::spawn_blocking(move || crate::history::refresh_days(&app2, 2)).await;
-                    tokio::time::sleep(Duration::from_secs(300)).await;
-                }
-            });
-        }
         // v1.1 message stream tail (1s; the cadence itself is the >=500ms
         // throttle for messages_changed)
         {
@@ -304,7 +290,10 @@ fn run() {
                                 meta.asking = asking;
                                 drop(meta);
                                 sess.mark_dirty();
+                            } else {
+                                drop(meta);
                             }
+                            crate::messages::mirror_background(sess);
                         }
                     })
                     .await;

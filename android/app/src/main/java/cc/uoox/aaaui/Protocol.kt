@@ -22,6 +22,8 @@ import java.net.URLDecoder
     val agent: String = "",
     val state: String = "",
     val asking: Boolean = false,
+    /** v1.13：waiting 且后台还有任务（后台 Bash / 异步子代理 / Monitor）没回来，会自己被叫醒 → 「后台」 */
+    val background: Boolean = false,
     val preview: String = "",
     val rows: Int = 24,
     val cols: Int = 80,
@@ -47,7 +49,7 @@ import java.net.URLDecoder
 )
 
 /** 进度清单的一项（[parseChecklist] 解析 `summary` 的一行） */
-data class ChecklistItem(val done: Boolean, val text: String)
+@Serializable data class ChecklistItem(val done: Boolean, val text: String)
 
 /** `- [x] …` / `- [ ] …` 行 → 项；其它行忽略 */
 fun parseChecklist(md: String): List<ChecklistItem> = md.lines().mapNotNull { raw ->
@@ -153,76 +155,51 @@ fun parseChecklist(md: String): List<ChecklistItem> = md.lines().mapNotNull { ra
 
 // v1.9 会话日志（GET /history）：所有出现过的会话，含已退出、已删除
 /**
- * 看板（GET /history/dashboard，2026-09-07 用户拍板取代原来的历史两 tab）：
- * daemon 一次算好「最近做了什么 / 还有什么没做」，两端只负责画。
+ * 看板（GET /history/dashboard，2026-09-07 第二版）：**所有会话的进度**，没有时间维度。
+ * daemon 一次算好，两端只画。
  */
-@Serializable data class Dashboard(
-    /** daemon 本机时区的今天（YYYY-MM-DD）；画「（今天）」用它，不用手机自己的日期 */
-    val date: String = "",
-    val today: DashStats = DashStats(),
-    val week: DashStats = DashStats(),
-    /** 此刻进程还没退出的会话数（running / waiting） */
-    val active: Int = 0,
-    val open: List<OpenItem> = emptyList(),
-    val days: List<DayCard> = emptyList(),
-    /** 近 8 周每天的会话数，最旧在前 */
-    val spark: List<Int> = emptyList(),
+/** `sessions` 故意没有默认值：老 daemon（v1.11/1.12）返回的是另一种形状，缺这个字段就该解码失败报「请升级 daemon」，
+ *  而不是静默画一个空看板（gpt-6 审阅指出） */
+@Serializable data class Dashboard(val counts: DashCounts = DashCounts(), val sessions: List<SessionCard>)
+
+@Serializable data class DashCounts(
+    val asking: Int = 0, val running: Int = 0, val background: Int = 0, val active: Int = 0, val paused: Int = 0,
+    /** 未删除会话里没勾的清单项总数 */
+    val open_items: Int = 0,
 )
 
-@Serializable data class DashStats(val sessions: Int = 0, val done: Int = 0, val open: Int = 0)
-
-/** 一条待办：某个会话清单里没勾的一项 */
-@Serializable data class OpenItem(
-    val session_id: String = "",
-    val project_name: String = "",
-    val project_path: String = "",
-    val title: String = "",
-    val text: String = "",
-    val created_at: String = "",
-    /** 还在池子里（能点开，已退出的回放也算） */
-    val alive: Boolean = false,
-    /** 进程还没退出——「在跑」的徽标按它画 */
-    val running: Boolean = false,
-)
-
-/** 流水里一天的一个会话 */
-@Serializable data class DayEntry(
+/** 一张卡 = 一个会话的进度 */
+@Serializable data class SessionCard(
     val id: String = "",
     val title: String = "",
     val project_name: String = "",
+    val project_path: String = "",
+    /** asking | running | background | active | paused */
+    val status: String = "",
+    /** 还在池子里（能点开，已退出的回放也算） */
     val alive: Boolean = false,
-    val running: Boolean = false,
     val deleted: Boolean = false,
     val done: Int = 0,
     val open: Int = 0,
+    val items: List<ChecklistItem> = emptyList(),
+    val updated_at: String = "",
 )
 
-/** 流水里的一天：haiku 写的「这一天做了什么」（没写出来 text 为空）+ 当天会话 */
-@Serializable data class DayCard(
-    val date: String = "",
-    val text: String = "",
-    val sessions: Int = 0,
-    val done: Int = 0,
-    val open: Int = 0,
-    val entries: List<DayEntry> = emptyList(),
-)
+val DASH_STATUSES = listOf("asking", "running", "background", "active", "paused")
 
-/** 待办搜索：项目 / 会话标题 / 条目本身含关键字（不分大小写）；空串全匹配 */
-fun openItemMatches(i: OpenItem, query: String): Boolean {
-    val q = query.trim().lowercase()
-    return q.isEmpty() || i.text.lowercase().contains(q) || i.title.lowercase().contains(q) || i.project_name.lowercase().contains(q)
+/** 状态字（与首页同一套五态） */
+fun statusLabel(status: String): String = when (status) {
+    "asking" -> "待回复"; "running" -> "运行"; "background" -> "后台"; "active" -> "激活"; else -> "暂停"
 }
 
-/** 一天是否命中搜索：日摘要或当天任一会话标题 / 项目名含关键字 */
-fun dayCardMatches(d: DayCard, query: String): Boolean {
+/** 看板搜索：标题 / 项目 / 任一清单项含关键字（不分大小写）；空串全匹配 */
+fun cardMatches(c: SessionCard, query: String): Boolean {
     val q = query.trim().lowercase()
-    return q.isEmpty() || d.text.lowercase().contains(q) ||
-        d.entries.any { it.title.lowercase().contains(q) || it.project_name.lowercase().contains(q) }
+    return q.isEmpty() || c.title.lowercase().contains(q) || c.project_name.lowercase().contains(q) || c.items.any { it.text.lowercase().contains(q) }
 }
 
-/** 待办按项目归并，项目内保持原序（daemon 已按会话新→旧排好），项目按首次出现排 */
-fun groupOpenByProject(items: List<OpenItem>): List<Pair<String, List<OpenItem>>> =
-    items.groupBy { it.project_name }.toList()
+/** 「已完成」= 暂停且清单全勾完（或没清单）：真正结束的活儿，看板默认收起来 */
+fun cardIsFinished(c: SessionCard): Boolean = c.status == "paused" && c.open == 0
 
 // v1.1 inbox
 @Serializable data class InboxItem(val id: String, val text: String, val created_at: String = "")

@@ -31,10 +31,14 @@ class ProjectStateTest {
         assertEquals(ProjectState.ACTIVE, projectStateOf(s("w", "waiting", "2026-09-02T09:00:00Z")))
         assertEquals(ProjectState.INACTIVE, projectStateOf(s("x", "exited", "2026-09-02T09:00:00Z")))
         assertEquals(ProjectState.INACTIVE, projectStateOf(null))
-        assertEquals("执行中", ProjectState.RUNNING.label)
+        assertEquals("运行", ProjectState.RUNNING.label)
         assertEquals("待回复", ProjectState.NEEDS_REPLY.label)
-        assertEquals("已激活", ProjectState.ACTIVE.label)
-        assertEquals("未激活", ProjectState.INACTIVE.label)
+        assertEquals("后台", ProjectState.BACKGROUND.label)
+        assertEquals("激活", ProjectState.ACTIVE.label)
+        assertEquals("暂停", ProjectState.INACTIVE.label)
+        // 后台：waiting 且 background；在问的仍是待回复
+        assertEquals(ProjectState.BACKGROUND, projectStateOf(s("w", "waiting", "2026-09-02T09:00:00Z").copy(background = true)))
+        assertEquals(ProjectState.NEEDS_REPLY, projectStateOf(s("w", "waiting", "2026-09-02T09:00:00Z", asking = true).copy(background = true)))
     }
 
     @Test fun projectAgentSessionBeatsAShellInTheSameDir() {
@@ -73,19 +77,21 @@ class ProjectStateTest {
     }
 
     @Test fun statusDecidesTheOrderBeforeTime() {
-        // 2026-09-07 用户拍板的从上往下：待回复 > 执行中 > 已激活 > 未激活
+        // 2026-09-07 用户拍板的从上往下：待回复 > 运行 > 后台 > 激活 > 暂停
         val pAsk = p.copy(path = "/r/ask", name = "ask", mtime = "2026-09-01T00:00:00Z")
         val pRun = p.copy(path = "/r/run", name = "run", mtime = "2026-09-02T00:00:00Z")
+        val pBg = p.copy(path = "/r/bg", name = "bg", mtime = "2026-09-02T12:00:00Z")
         val pAct = p.copy(path = "/r/act", name = "act", mtime = "2026-09-03T00:00:00Z")
         val pIdle = p.copy(path = "/r/idle", name = "idle", mtime = "2026-09-04T00:00:00Z")
         // 时间故意与状态反着来：只按时间排的话顺序正好倒过来
         val ask = s("s1", "waiting", "2026-09-01T00:00:00Z", path = pAsk.path, asking = true, updated = "2026-09-01T00:00:00Z")
         val run = s("s2", "running", "2026-09-02T00:00:00Z", path = pRun.path, updated = "2026-09-02T00:00:00Z")
+        val bg = s("s4", "waiting", "2026-09-02T12:00:00Z", path = pBg.path, updated = "2026-09-02T12:00:00Z").copy(background = true)
         val act = s("s3", "waiting", "2026-09-03T00:00:00Z", path = pAct.path, updated = "2026-09-03T00:00:00Z")
-        val rows = projectRows(listOf(pAsk, pRun, pAct, pIdle), listOf(ask, run, act))
-        assertEquals(listOf("ask", "run", "act", "idle"), rows.map { it.project.name })
+        val rows = projectRows(listOf(pAsk, pRun, pBg, pAct, pIdle), listOf(ask, run, bg, act))
+        assertEquals(listOf("ask", "run", "bg", "act", "idle"), rows.map { it.project.name })
         assertEquals(
-            listOf(ProjectState.NEEDS_REPLY, ProjectState.RUNNING, ProjectState.ACTIVE, ProjectState.INACTIVE),
+            listOf(ProjectState.NEEDS_REPLY, ProjectState.RUNNING, ProjectState.BACKGROUND, ProjectState.ACTIVE, ProjectState.INACTIVE),
             rows.map { it.state },
         )
         // 同状态里仍是最近更新的在前

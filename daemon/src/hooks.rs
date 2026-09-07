@@ -226,6 +226,7 @@ pub fn apply(sess: &Session, event: &str, body: &Value, now: Instant) -> Applied
                 meta.needs_name = true;
                 meta.touch();
             }
+            meta.running_by_transcript = false;
             meta.error = None;
             meta.compacting = false;
             out.dirty = true;
@@ -236,6 +237,8 @@ pub fn apply(sess: &Session, event: &str, body: &Value, now: Instant) -> Applied
                 meta.touch();
                 out.entered_waiting = true;
             }
+            meta.last_stop_at = Some(chrono::Utc::now());
+            meta.running_by_transcript = false;
             meta.compacting = false;
             out.dirty = true;
         }
@@ -250,6 +253,8 @@ pub fn apply(sess: &Session, event: &str, body: &Value, now: Instant) -> Applied
                 meta.touch();
                 out.entered_waiting = true;
             }
+            meta.last_stop_at = Some(chrono::Utc::now());
+            meta.running_by_transcript = false;
             meta.error = Some(kind);
             meta.compacting = false;
             out.dirty = true;
@@ -265,6 +270,10 @@ pub fn apply(sess: &Session, event: &str, body: &Value, now: Instant) -> Applied
                 meta.touch();
                 out.entered_waiting = true;
                 out.dirty = true;
+            }
+            if kind == "idle_prompt" {
+                meta.last_stop_at = Some(chrono::Utc::now());
+                meta.running_by_transcript = false;
             }
         }
         "PreToolUse" => {

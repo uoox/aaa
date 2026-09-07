@@ -45,7 +45,6 @@ pub struct App {
     /// v1.9 会话日志：所有出现过的会话，含已退出、已删除
     pub history: std::sync::Mutex<crate::history::History>,
     /// v1.10 日历：按天的 haiku 摘要
-    pub days: std::sync::Mutex<crate::history::Days>,
     /// v1.3 账号 plan 配额：5h / 7d 来自最近一次 statusLine 的 rate_limits，
     /// 按模型窗口（Fable）来自 quota.rs 对 claude.ai usage 接口的轮询
     pub plan_usage: std::sync::Mutex<Option<Value>>,
@@ -492,26 +491,24 @@ async fn history_list(
     Ok(Json(json!({"entries": list})))
 }
 
-/// 日历：每天的会话数 + haiku 写的「这一天做了什么」（还没写出来的 text 为空）
-async fn history_days(State(app): State<SharedApp>) -> ApiResult<Json<Value>> {
-    let entries = app.history.lock().unwrap().list(crate::history::KEEP);
-    let days = app.days.lock().unwrap();
-    Ok(Json(json!({"days": crate::history::calendar(&entries, &days)})))
-}
-
-/// 仪表盘：待办（没勾的清单项）+ 按天流水 + 今天 / 近 7 天的数字
+/// 看板：所有会话的进度（daemon 一次算好，两端只画）
 async fn history_dashboard(State(app): State<SharedApp>) -> ApiResult<Json<Value>> {
     let entries = app.history.lock().unwrap().list(crate::history::KEEP);
-    let pooled = app.pool.list();
-    // 池子里的都能点开（含已退出的回放）；「在跑」只算进程还没退出的
-    let alive: std::collections::HashSet<String> = pooled.iter().map(|s| s.id.clone()).collect();
-    let running: std::collections::HashSet<String> = pooled
-        .iter()
-        .filter(|s| s.state() != crate::pool::State::Exited)
-        .map(|s| s.id.clone())
-        .collect();
-    let days = app.days.lock().unwrap();
-    let d = crate::history::dashboard(&entries, &days, &alive, &running, &crate::history::today_local());
+    // 池子里的会话此刻的状态；不在池子里的一律 paused（不能点开）
+    let mut live = std::collections::HashMap::new();
+    for s in app.pool.list() {
+        let m = s.meta.lock().unwrap();
+        let status = match m.state {
+            SState::Exited => "paused",
+            _ if m.asking => "asking",
+            SState::Running => "running",
+            SState::Waiting if m.background > 0 => "background",
+            SState::Waiting => "active",
+        };
+        let updated_at = m.updated_at.unwrap_or(m.created_at).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        live.insert(s.id.clone(), crate::history::LiveStatus { status, updated_at });
+    }
+    let d = crate::history::dashboard(&entries, &live);
     Ok(Json(serde_json::to_value(d).unwrap_or_else(|_| json!({}))))
 }
 
@@ -1603,7 +1600,6 @@ pub fn router(app: SharedApp) -> Router {
         .route("/api/v1/projects/delete", post(projects_delete))
         .route("/api/v1/projects/pin", post(projects_pin))
         .route("/api/v1/history", get(history_list))
-        .route("/api/v1/history/days", get(history_days))
         .route("/api/v1/history/dashboard", get(history_dashboard))
         .route("/api/v1/sessions", get(sessions_list).post(sessions_create))
         .route("/api/v1/sessions/{id}", delete(session_delete))

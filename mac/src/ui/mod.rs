@@ -63,14 +63,16 @@ fn kill_needs_confirm(s: &Session) -> bool {
     s.state == SessionState::Running && !s.asking
 }
 
-/// 项目行的状态字（2026-09-06 用户拍板，三端一致；不再用色点）：
-/// 执行中 = 会话在跑；待回复 = 弹着选项等你选，不选就卡住（`asking`，哪怕屏幕还在变）；
-/// 已激活 = 会话活着、停在输入框轮到你（waiting）；未激活 = 没有存活会话
-/// （退出了 / 只有旧对话 / 从没跑过）。
+/// 项目行的状态字（2026-09-07 用户拍板，三端一致，两个字；不再用色点）：
+/// 运行 = 会话在跑；待回复 = 弹着选项等你选，不选就卡住（`asking`，哪怕屏幕还在变）；
+/// 后台 = 停在输入框但后台还有任务（后台 Bash / 异步子代理 / Monitor）没回来，会自己
+/// 被叫醒（`background`）；激活 = 会话活着、停在输入框轮到你（waiting）；暂停 = 没有
+/// 存活会话（退出了 / 只有旧对话 / 从没跑过）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RowStatus {
     Running,
     Asking,
+    Background,
     Active,
     Inactive,
 }
@@ -80,6 +82,7 @@ impl RowStatus {
         match session {
             Some(s) if is_active(s) && s.asking => RowStatus::Asking,
             Some(s) if is_active(s) && s.state == SessionState::Running => RowStatus::Running,
+            Some(s) if is_active(s) && s.background => RowStatus::Background,
             Some(s) if is_active(s) => RowStatus::Active,
             _ => RowStatus::Inactive,
         }
@@ -87,27 +90,29 @@ impl RowStatus {
 
     fn label(self) -> &'static str {
         match self {
-            RowStatus::Running => "执行中",
+            RowStatus::Running => "运行",
             RowStatus::Asking => "待回复",
-            RowStatus::Active => "已激活",
-            RowStatus::Inactive => "未激活",
+            RowStatus::Background => "后台",
+            RowStatus::Active => "激活",
+            RowStatus::Inactive => "暂停",
         }
     }
 
-    /// 侧栏排序的优先级（2026-09-07 用户拍板）：待回复 > 执行中 > 已激活 > 未激活。
+    /// 侧栏排序的优先级（2026-09-07 用户拍板）：待回复 > 运行 > 后台 > 激活 > 暂停。
     /// 卡在等你回答的排最上——它不动，别的都还能自己往前跑。
     fn rank(self) -> u8 {
         match self {
             RowStatus::Asking => 0,
             RowStatus::Running => 1,
-            RowStatus::Active => 2,
-            RowStatus::Inactive => 3,
+            RowStatus::Background => 2,
+            RowStatus::Active => 3,
+            RowStatus::Inactive => 4,
         }
     }
 
     fn color(self) -> u32 {
         match self {
-            RowStatus::Running => theme::green(),
+            RowStatus::Running | RowStatus::Background => theme::green(),
             RowStatus::Asking => theme::amber(),
             RowStatus::Active => theme::accent(),
             RowStatus::Inactive => theme::faint(),
@@ -382,8 +387,13 @@ pub struct RootView {
     pub dashboard: Dashboard,
     /// 看板搜索框
     pub history_input: Entity<MiniInput>,
-    /// 看板右栏里展开了会话列表的日期
+    /// 看板：展开了「已做 N」的会话 id
     pub history_expanded: HashSet<String>,
+    /// 看板：只看某一状态组（asking/running/background/active/paused）；None = 全部
+    pub dash_filter: Option<String>,
+    /// 看板：显示已删除的 / 展开「已完成」组
+    pub dash_show_deleted: bool,
+    pub dash_show_finished: bool,
     /// 每会话的产物 / 改动状态（含各自的拉取节流器）
     detail: HashMap<String, detail_panel::SessionDetail>,
     /// 项目路径 → 收件箱条目
@@ -463,7 +473,7 @@ impl RootView {
         let token_input = cx.new(|cx| MiniInput::new(cx, "aaa_tk_…"));
         let root_input = cx.new(|cx| MiniInput::new(cx, "~/project"));
         let inbox_input = cx.new(|cx| MiniInput::new(cx, "加一条，Claude 空下来时自动喂给它"));
-        let history_input = cx.new(|cx| MiniInput::new(cx, "搜索：待办 / 标题 / 项目"));
+        let history_input = cx.new(|cx| MiniInput::new(cx, "搜索：标题 / 项目 / 条目"));
         // 输入法送来的回车（见 MiniInput::replace_text_in_range）与键盘回车同一出口
         cx.subscribe(&new_input, |this, _, _: &mini_input::InputEvent, cx| {
             if matches!(this.modal, Modal::None) {
@@ -512,6 +522,9 @@ impl RootView {
             dashboard: Dashboard::default(),
             history_input,
             history_expanded: HashSet::new(),
+            dash_filter: None,
+            dash_show_deleted: false,
+            dash_show_finished: false,
             detail: HashMap::new(),
             inbox: HashMap::new(),
             inbox_input,
@@ -1902,11 +1915,11 @@ mod tests {
         assert_eq!(rows[1].status, RowStatus::Asking, "置顶是自己按的，待回复也挤不掉它");
     }
 
-    /// 2026-09-07 用户拍板的从上往下：待回复 > 执行中 > 已激活 > 未激活
+    /// 2026-09-07 用户拍板的从上往下：待回复 > 运行 > 后台 > 激活 > 暂停
     #[test]
     fn status_decides_the_order_before_time() {
         use SessionState::*;
-        let projects: Vec<Project> = ["ask", "run", "act", "idle"]
+        let projects: Vec<Project> = ["ask", "run", "bg", "act", "idle"]
             .iter()
             .enumerate()
             // 目录 mtime 递增：只按时间排的话顺序会正好反过来
@@ -1915,13 +1928,16 @@ mod tests {
         let mut ask = tsess("s_ask", "claude", Waiting, "/p/ask", "2026-09-01T00:00:00Z");
         ask.asking = true;
         let run = tsess("s_run", "claude", Running, "/p/run", "2026-09-02T00:00:00Z");
+        let mut bg = tsess("s_bg", "claude", Waiting, "/p/bg", "2026-09-02T12:00:00Z");
+        bg.background = true;
         let act = tsess("s_act", "claude", Waiting, "/p/act", "2026-09-03T00:00:00Z");
-        let rows = project_rows(&projects, &[ask, run, act]);
+        let rows = project_rows(&projects, &[ask, run, bg, act]);
         assert_eq!(
             rows.iter().map(|r| (r.status, r.path.as_str())).collect::<Vec<_>>(),
             vec![
                 (RowStatus::Asking, "/p/ask"),
                 (RowStatus::Running, "/p/run"),
+                (RowStatus::Background, "/p/bg"),
                 (RowStatus::Active, "/p/act"),
                 (RowStatus::Inactive, "/p/idle"),
             ]
@@ -1943,10 +1959,17 @@ mod tests {
         assert_eq!(RowStatus::of(Some(&sess("a", Waiting, false, ""))), RowStatus::Active);
         assert_eq!(RowStatus::of(Some(&sess("a", Exited, false, ""))), RowStatus::Inactive);
         assert_eq!(RowStatus::of(None), RowStatus::Inactive);
-        assert_eq!(RowStatus::Running.label(), "执行中");
+        assert_eq!(RowStatus::Running.label(), "运行");
         assert_eq!(RowStatus::Asking.label(), "待回复");
-        assert_eq!(RowStatus::Active.label(), "已激活");
-        assert_eq!(RowStatus::Inactive.label(), "未激活");
+        assert_eq!(RowStatus::Background.label(), "后台");
+        assert_eq!(RowStatus::Active.label(), "激活");
+        assert_eq!(RowStatus::Inactive.label(), "暂停");
+        // 后台：waiting 且 background 标志；在问的仍是待回复
+        let mut bg = sess("b", SessionState::Waiting, false, "2026-09-02T12:00:00Z");
+        bg.background = true;
+        assert_eq!(RowStatus::of(Some(&bg)), RowStatus::Background);
+        bg.asking = true;
+        assert_eq!(RowStatus::of(Some(&bg)), RowStatus::Asking);
     }
 
     #[test]

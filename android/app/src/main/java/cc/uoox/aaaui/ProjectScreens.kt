@@ -68,20 +68,22 @@ const val DEFAULT_AGENT = "claude"
 
 /**
  * 项目行的状态字（2026-09-06 用户拍板，三端一致；不再用色点）：
- * 执行中 = 会话在跑；待回复 = 弹着选项等你选，不选就卡住（asking，哪怕屏幕还在变）；
- * 已激活 = 会话活着、停在输入框轮到你（waiting）；未激活 = 没有存活会话
+ * 运行 = 会话在跑；待回复 = 弹着选项等你选，不选就卡住（asking，哪怕屏幕还在变）；
+ * 后台 = 停在输入框但后台还有任务没回来（background）；激活 = 会话活着、停在输入框轮到你（waiting）；暂停 = 没有存活会话
  * （退出了 / 只有旧对话 / 从没跑过）。
  * 一个项目只有一个 agent（建项目时定死，从不切换），项目 ↔ 会话事实上一对一，所以
  * 会话状态直接挂在项目行上，首页不再单开会话页。终端永远不代表项目。全部由客户端把
  * projects × sessions 两个流拼出来。
  */
 enum class ProjectState(val label: String, val rank: Int) {
-    // rank = 列表从上往下的优先级（2026-09-07 用户拍板）：待回复 > 执行中 > 已激活 > 未激活。
+    // rank = 列表从上往下的优先级（2026-09-07 用户拍板，两个字）：待回复 > 运行 > 后台 > 激活 > 暂停。
     // 卡在等你回答的排最上——它不动，别的都还能自己往前跑。
     NEEDS_REPLY("待回复", 0),
-    RUNNING("执行中", 1),
-    ACTIVE("已激活", 2),
-    INACTIVE("未激活", 3),
+    RUNNING("运行", 1),
+    /** 停在输入框但后台还有任务（后台 Bash / 异步子代理 / Monitor）没回来，会自己被叫醒 */
+    BACKGROUND("后台", 2),
+    ACTIVE("激活", 3),
+    INACTIVE("暂停", 4),
 }
 
 /** 首页一行要的全部东西，纯数据，方便单测。 */
@@ -139,6 +141,7 @@ fun projectStateOf(primary: Session?): ProjectState = when {
     primary == null || primary.state == "exited" -> ProjectState.INACTIVE
     primary.needsReply() -> ProjectState.NEEDS_REPLY
     primary.state == "running" -> ProjectState.RUNNING
+    primary.background -> ProjectState.BACKGROUND
     else -> ProjectState.ACTIVE
 }
 
@@ -164,7 +167,7 @@ fun projectRows(projects: List<Project>, sessions: List<Session>): List<ProjectR
 )
 
 private fun ProjectState.color(): Color = when (this) {
-    ProjectState.RUNNING -> Tok.Green
+    ProjectState.RUNNING, ProjectState.BACKGROUND -> Tok.Green
     ProjectState.NEEDS_REPLY -> Tok.Amber
     ProjectState.ACTIVE -> Tok.Accent
     ProjectState.INACTIVE -> Tok.Faint

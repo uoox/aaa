@@ -104,6 +104,18 @@ pub struct Meta {
     /// asking 又压回 false
     #[serde(skip)]
     pub asking_hint_inst: Option<Instant>,
+    /// v1.13：还没回来的后台任务数（transcript 里的 run_in_background / 异步子代理 /
+    /// Monitor 减去回来的 task-notification）。waiting 且 >0 = 「后台」
+    #[serde(skip)]
+    pub background: usize,
+    /// 最近一次 Stop / StopFailure / idle 把状态压回 waiting 的时刻：transcript 里在
+    /// 这之后又出现 assistant 内容 = 被后台任务叫醒、又在跑了
+    #[serde(skip)]
+    pub last_stop_at: Option<DateTime<Utc>>,
+    /// 当前的 running 是 transcript 判出来的（不是 UserPromptSubmit）：Stop 没来时
+    /// 靠「transcript 60s 没动」兜底压回 waiting
+    #[serde(skip)]
+    pub running_by_transcript: bool,
     /// statusLine 转来的本会话用量（模型 / 上下文占比 / 费用），持久化以便退出后还能看
     #[serde(default)]
     pub usage: Option<serde_json::Value>,
@@ -197,6 +209,9 @@ impl Session {
                 error: None,
                 compacting: false,
                 asking_hint_inst: None,
+                background: 0,
+                last_stop_at: None,
+                running_by_transcript: false,
                 usage: None,
                 summary: String::new(),
             }),
@@ -239,6 +254,9 @@ impl Session {
             "updated_at": iso(&meta.updated_at.unwrap_or(meta.created_at)),
             // v1.3（老客户端忽略未知字段）
             "hooked": meta.hooked,
+            // v1.13：waiting 且后台还有任务没回来 → 客户端标「后台」，排在运行之后
+            "background": meta.state == State::Waiting && meta.background > 0,
+            "background_tasks": meta.background,
             "error": meta.error,
             "compacting": meta.compacting,
             "user_killed": meta.user_killed,
@@ -625,6 +643,9 @@ impl SessionPool {
             error: None,
             compacting: false,
             asking_hint_inst: None,
+            background: 0,
+            last_stop_at: None,
+            running_by_transcript: false,
             usage: None,
             summary: String::new(),
         };

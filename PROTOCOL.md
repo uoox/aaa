@@ -81,6 +81,8 @@ daemon 在启动时用 `zsh -lic` 问一次「终端里应有的 PATH」（带�
   "asking": false,                // claude：transcript 里有一条 AskUserQuestion 还没被回答（结构化事实，不是猜的）
   "hooked": true,                 // v1.3：状态由 Claude Code hooks 驱动（见「Claude Code hooks」）
   "error": null,                  // v1.3：上一轮 StopFailure 的错误类型，下一次提交清空
+  "background": false,            // v1.13：waiting 且后台还有任务（run_in_background 的 Bash / 异步子代理 / Monitor）没回来 → 客户端标「后台」
+  "background_tasks": 0,          // v1.13：上面那个数；都从 transcript 数出来（tool_use 发起 → tool_result 确认 → <task-notification> 回来销掉），只算本进程发起的
   "compacting": false,            // v1.3：PreCompact → PostCompact 之间
   "user_killed": false,           // v1.3：用户主动结束的，客户端不弹「退出」通知
   "usage": {                      // v1.4：statusLine 转来的本会话用量；没收到过为 null
@@ -101,15 +103,17 @@ daemon 在启动时用 `zsh -lic` 问一次「终端里应有的 PATH」（带�
 ```
 
 状态机（2026-09-02 简化）：屏幕内容在变 → `running`；进程存活 + **可见屏幕 6s 没变** → `waiting`（这轮干完了，轮到你）；进程退出 → `exited`（保留屏幕 + 回滚缓冲，daemon 重启后仍可查看回放）。claude 会话（2026-09-06）：**起始就是 `waiting`、`hooked=true`**——TUI 起来停在输入框就是轮到你；`SessionStart`（startup / resume / clear，不含 compact）也置 `waiting` 并触发一次收件箱喂入；第一次 `UserPromptSubmit` 才是 `running`。以前起始 `running` 没人翻回来，resume 出来的会话会一直显示执行中。
+**v1.13 被叫醒**：后台任务 / 异步子代理完成后 Claude Code 把 `<task-notification>` 塞回去、模型重新开跑——这不是用户发言，`UserPromptSubmit` 不触发，以前状态会一直停在 `waiting`（列表上标着激活其实在干活）。现在 daemon 每秒看 transcript：waiting 的 hooked 会话在最近一次 `Stop` 之后（+2s，避免 Stop 前落盘、之后才 tail 到的那条最后回答误判）又出现 assistant 内容 / 工具调用 → 翻回 `running`，直到下一个 `Stop`；这样判出来的 running 若 Stop 一直不来，transcript 60s 没动就压回 `waiting` 兜底。
+
 daemon **不再读屏猜「它在问什么」**：没有 `idle`，没有 `question`，没有提示模式匹配。agent 在等一个具体回答这件事只认一个来源——claude transcript 里的 `AskUserQuestion` 工具调用（结构化，见「消息流」），`asking` 就是它的镜像；其它 agent 没有这种结构化信号，`asking` 恒为 false。
 
-GUI 列表口径（2026-09-06 用户拍板，mac 侧栏 / Android 首页一致）——**单列，一项目一行，不分栏**：
-- 行首是**状态字，不是色点**，四态：`执行中` = 会话 `running` 且不 `asking`；`待回复` = `asking`（弹着选项等你选，不选就卡住；哪怕屏幕还在变）；`已激活` = 会话活着、停在输入框轮到你（`waiting`）；`未激活` = 没有存活项目会话（已 `exited`、只有旧对话、从没跑过）。终端（shell）不算。Android 一行到底（状态字 + 标题 + 更新时间），没有第二行摘要。
+GUI 列表口径（2026-09-06 用户拍板，mac 侧栏 / Android 首页一致；2026-09-07 改成五态、统一两个字）——**单列，一项目一行，不分栏**：
+- 行首是**状态字，不是色点**，五态：`待回复` = `asking`（弹着选项等你选，不选就卡住；哪怕屏幕还在变）；`运行` = 会话 `running` 且不 `asking`；`后台` = `waiting` 且 `background`（停在输入框，但后台 Bash / 异步子代理 / Monitor 还没回来，会自己被叫醒）；`激活` = 会话活着、停在输入框轮到你（`waiting`）；`暂停` = 没有存活项目会话（已 `exited`、只有旧对话、从没跑过）。终端（shell）不算。CLI 的 `ls` / 交互菜单同一套词。Android 一行到底（状态字 + 标题 + 更新时间），没有第二行摘要。
 - **`exited` 会话不代表项目**——进程没了它就只是历史，项目标未激活，点一下即 resume（`POST /sessions` `resume:true`）。
-- **顺序 = 置顶 → 状态 → 时间**（2026-09-07 用户拍板）：置顶的永远在最前（自己按的顶，状态不该把它挤下去）；组内按状态 `待回复` > `执行中` > `已激活` > `未激活`——卡在等你回答的排最上，它不动，别的都还能自己往前跑；**同状态**里才比时间，键是该项目最新一条会话（含已退出）的 `updated_at`（老 daemon 没有 → `created_at`），没有会话的用目录 mtime；同刻按路径 / 标题稳住。`updated_at` 只在状态翻转 / 改名时变，所以几个会话同时在跑时行不互相换位。
+- **顺序 = 置顶 → 状态 → 时间**（2026-09-07 用户拍板）：置顶的永远在最前（自己按的顶，状态不该把它挤下去）；组内按状态 `待回复` > `运行` > `后台` > `激活` > `暂停`——卡在等你回答的排最上，它不动，别的都还能自己往前跑；后台仅低于运行；**同状态**里才比时间，键是该项目最新一条会话（含已退出）的 `updated_at`（老 daemon 没有 → `created_at`），没有会话的用目录 mtime；同刻按路径 / 标题稳住。`updated_at` 只在状态翻转 / 改名时变，所以几个会话同时在跑时行不互相换位。
 - **关闭确认只在还在执行时弹**：`running` 且不 `asking` → 确认后 `kill`；`waiting` / `asking` → 直接 `kill`；`exited` → 只收起页面，不删记录。
 
-CLI 的 `ls` / 交互菜单仍按「执行中 / 待回复 / 已完成」三组打印（待回复 = `asking`，已完成 = `waiting`），那是一次性文本输出，不存在跳行问题。
+CLI 的 `ls` / 交互菜单按同一五组打印（v1.13 起；以前是「执行中 / 待回复 / 已完成」三组），那是一次性文本输出，不存在跳行问题。
 
 ## REST（前缀 `/api/v1`）
 
@@ -120,8 +124,8 @@ CLI 的 `ls` / 交互菜单仍按「执行中 / 待回复 / 已完成」三组�
 | GET | `/projects` | collect 移植：`[{path,name,mtime,dir_size,ctx_size,agent,session_title}]`，按 mtime 降序。**注册表就是项目名册**：根目录下未登记的目录（顺手 clone 的仓库、杂物）不出现在列表里；经 daemon 建项目/开会话的目录都会自动登记 |
 | POST | `/projects` | `{name?, agent?}`；name 经 slugify，空则 `YYYY-MM-DD-HHMM`；已存在 → 409；agent 给了就写注册表。**响应 = 完整项目对象（至少 `{path,name,agent}`）**，客户端依赖 `path` 直接开会话 |
 | GET | `/history?limit=<n=200>` | v1.9 会话日志 `{entries:[{id, project_path, project_name, agent, title, created_at, ended_at, exit_code, deleted_at, summary, last_state}]}`：**所有出现过的会话，含已退出、已删除**，最新在前，最多 500 条（`~/.local/state/aaa-daemon/history.json`）。daemon 每秒把池子里的会话同步进去（标题 / 状态 / 清单变了就更新）；`DELETE /sessions/:id`、删项目盖 `deleted_at`。v1.11 起客户端改用 `/history/dashboard`；本接口仍是原始日志（调试 / 兼容旧客户端） |
-| GET | `/history/days` | v1.10 日历数据 `{days:[{date, text, sessions}]}`：按 daemon 本机时区把日志按开始日期分组（终端不算），每天会话数；`text` 是 haiku 写的「这一天做了什么」要点（daemon 起来 30s 后、之后每 5 分钟给输入变了的日子重写，一次最多两天；没写出来为空）。v1.11 起客户端不再直接用它，日摘要经 `/history/dashboard` 下发 |
-| GET | `/history/dashboard` | v1.11 **看板**（2026-09-07 用户拍板：历史重做成仪表盘，两栏——左待办右流水；聚合只在 daemon 算一次，两端只画）：`{today:{sessions,done,open}, week:{…}, active, date, open:[{session_id, project_name, project_path, title, text, created_at, alive, running}], days:[{date, text, sessions, done, open, entries:[{id, title, project_name, alive, running, deleted, done, open}]}], spark:[n×56]}`。`today`/`week` = 今天 / 近 7 天按会话开始日分组的会话数与清单项计数；`active` = 此刻进程还没退出的会话数（running/waiting）——池子里绝大多数是已退出的回放，**`alive`（还在池子里、能点开）与 `running`（进程没退出、画「在跑」）必须分开**，v1.11.0 混成一个，看板上写出过「此刻 135 在跑」；`open` = 所有**未删除、非终端**会话里没勾的清单项（`- [ ]`），会话新→旧，最多 200 条，按项目归并后就是左栏「还没做」；`days` = 最近 30 天倒序，`text` 是当天的 haiku 摘要（同 `/history/days`），`entries` 是当天会话，构成右栏「最近做了什么」；`spark` = 近 8 周每天的会话数（最旧在前，恒 56 格）用作活动热力条；`date` = daemon 本机时区的今天，客户端画「（今天）」按它，别用自己的 `LocalDate.now()`（手机与 Mac 不同区会标错天）。会话还在池子里（`alive`）才能点开，已删除的只能看；绿点「● 在跑」只按 `running` 画 |
+| GET | `/history/days` | **已移除（v1.13）**：日历 / haiku 日摘要没人看，daemon 不再每 5 分钟跑 haiku 写日摘要 |
+| GET | `/history/dashboard` | v1.13 **看板 = 所有会话的进度，没有时间维度**（2026-09-07 用户拍板第二版；聚合只在 daemon 算一次，两端只画）：`{counts:{asking, running, background, active, paused, open_items}, sessions:[{id, title, project_name, project_path, status, alive, deleted, done, open, items:[{done,text}], updated_at}]}`。`status` ∈ asking/running/background/active/paused 与列表五态同口径（池子里 exited 的 = paused；不在池子里的 = paused 且 `alive:false` 不能点开）；`sessions` 已按 待回复 > 运行 > 后台 > 激活 > 暂停 排好，同状态里已删除的沉到组尾、其余最近更新在前；终端不进；已删除的进（`deleted:true`）但不计数。客户端：顶上计数条（点一个只看那一组）+ 未完成条目数 + 搜索；一会话一张卡：状态字 + 标题 + 项目、进度条 `done/total`、没勾的项直接列、做完的折成「已做 N」；「已完成」（paused 且 open=0）默认收起，已删除默认不显示。v1.11 的 today/week/days/spark/date 全部删除 |
 | POST | `/projects/pin` | `{path, pinned}`：置顶 / 取消置顶，daemon 侧存（`~/.local/state/aaa-daemon/pins.json`），随后广播 `projects_changed`；`GET /projects` 行多一个 `pinned`。列表口径：置顶的在最前，组内仍按状态 → 时间 |
 | POST | `/projects/delete` | `{paths:[…]}` → `{results:[{path, ok, purged:[{agent_label,count}]}], killed:[标题…]}`；目录删除 + Claude Code 会话存储 purge（`purged` 里只会有 `Claude` 一项）。**v1.11.2 起先收会话**：这些目录下还活着的会话（含终端）一起终止（并行，与 `/restart` 同一套）、摘出池子、在会话日志里盖 `deleted_at`，`killed` 报出它们的标题。此前只删目录不动进程——手机上的「删除项目…」对活着的项目也能按，删完 PTY 还在，cwd 成幽灵，`/sessions` 里赖着，mac 侧栏还会为「有会话但没登记」的目录补一行 |
 | GET | `/sessions` | 全部会话（含 exited） |

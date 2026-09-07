@@ -5,7 +5,7 @@
 //! isSidechain/isMeta and injected blocks). 本应用只认 Claude Code；终端
 //! （shell）`supported:false`。
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -88,6 +88,17 @@ pub struct MsgStore {
     /// Artifact 工具调用：tool_use id -> (title, description, file_path)，等 tool_result 里的 url
     pending_artifacts: HashMap<String, (String, String, String)>,
     pub artifacts: Vec<Artifact>,
+    /// v1.13「后台」态：tool_use id → 发起时刻。`bg_launch` 是看到了 tool_use
+    /// （`run_in_background` / Monitor）还没等到 tool_result 的；`bg_pending` 是
+    /// tool_result 确认「在后台跑」了、还没等到 `<task-notification>` 回来的。
+    bg_launch: HashMap<String, String>,
+    bg_pending: HashMap<String, String>,
+    /// 发出去还没等到 tool_result 的**前台**工具调用：有它在就说明模型还在等结果，
+    /// 60s 兜底不许把会话压回 waiting（gpt-6 审阅：长编译期间会被误判成静止）
+    awaiting_result: HashSet<String>,
+    /// 最近一条 assistant 内容 / 工具调用的时间戳：waiting 的会话在这之后又有
+    /// 动静 = 被后台任务叫醒了（那不是用户发言，UserPromptSubmit 不会触发）
+    pub last_activity_ts: String,
     pub discover_ticks: u32,
     /// 当前 file 来自 resume-id 兜底（旧 transcript）。resume 后 agent 会写
     /// **新**文件；兜底命中的旧文件永不增长，必须保留升级到新文件的机会。
@@ -117,7 +128,62 @@ impl MsgStore {
             authoritative: false,
             pending_artifacts: HashMap::new(),
             artifacts: Vec::new(),
+            bg_launch: HashMap::new(),
+            bg_pending: HashMap::new(),
+            awaiting_result: HashSet::new(),
+            last_activity_ts: String::new(),
             dirty: false,
+        }
+    }
+
+    /// 还没回来的后台任务数（发起时刻不早于 `since`：resume 带进来的旧 transcript 里
+    /// 挂着的任务早随上一个进程死了，不算）
+    pub fn pending_background(&self, since: Option<&str>) -> usize {
+        self.bg_pending
+            .values()
+            .filter(|ts| since.is_none_or(|s| ts.is_empty() || ts.as_str() >= s))
+            .count()
+    }
+
+    /// 前台还有工具调用没等到结果
+    pub fn awaiting_tool_result(&self) -> bool {
+        !self.awaiting_result.is_empty()
+    }
+
+    /// 物理清掉早于 `since` 的挂起项（上一个进程的），以及挂了超过 `max_age` 的：
+    /// 通知永远不来（daemon 曾重启、Claude 改了通知形状）也不该让「后台」一直亮着
+    pub fn prune_background(&mut self, since: &str, now: &str, max_age: chrono::Duration) {
+        let cutoff = chrono::DateTime::parse_from_rfc3339(now).ok().map(|t| t - max_age);
+        self.bg_pending.retain(|_, ts| {
+            if ts.as_str() < since {
+                return false;
+            }
+            match (cutoff, chrono::DateTime::parse_from_rfc3339(ts)) {
+                (Some(c), Ok(t)) => t >= c,
+                _ => true,
+            }
+        });
+        self.bg_launch.retain(|_, ts| ts.as_str() >= since);
+    }
+
+    fn note_activity(&mut self, ts: &str) {
+        if ts > self.last_activity_ts.as_str() {
+            self.last_activity_ts = ts.to_string();
+        }
+    }
+
+    /// 用户侧消息里的 `<task-notification>…<tool-use-id>X</tool-use-id>`：X 的后台任务回来了。
+    /// 只认包在 task-notification 里的，别的用户文本里出现这串字不算
+    fn settle_background(&mut self, text: &str) {
+        if !text.contains("<task-notification") {
+            return;
+        }
+        let mut rest = text;
+        while let Some(i) = rest.find("<tool-use-id>") {
+            let after = &rest[i + "<tool-use-id>".len()..];
+            let Some(j) = after.find("</tool-use-id>") else { break };
+            self.bg_pending.remove(after[..j].trim());
+            rest = &after[j..];
         }
     }
 
@@ -334,6 +400,7 @@ pub fn parse_claude_line(store: &mut MsgStore, v: &Value) {
     match ty {
         "user" => match content {
             Some(Value::String(s)) => {
+                store.settle_background(s);
                 if usable_user_text(s) {
                     store.push(ts, "user", "text", cap(s.trim(), TEXT_CAP), None);
                 }
@@ -353,6 +420,15 @@ pub fn parse_claude_line(store: &mut MsgStore, v: &Value) {
                                 .and_then(|id| store.tool_names.get(id).cloned())
                                 .unwrap_or_default();
                             let status = if is_err { "err" } else { "ok" };
+                            // 结果回来也是 transcript 的动静（长编译 60s 没别的输出，不能算静止）
+                            store.note_activity(ts);
+                            if let Some(id) = item.get("tool_use_id").and_then(|i| i.as_str()) {
+                                store.awaiting_result.remove(id);
+                                let launched = store.bg_launch.remove(id).is_some();
+                                if !is_err && (launched || looks_like_background_result(&text)) {
+                                    store.bg_pending.insert(id.to_string(), ts.to_string());
+                                }
+                            }
                             if let Some(pending) = item
                                 .get("tool_use_id")
                                 .and_then(|i| i.as_str())
@@ -393,6 +469,7 @@ pub fn parse_claude_line(store: &mut MsgStore, v: &Value) {
                         }
                         Some("text") | None => {
                             if let Some(t) = item.get("text").and_then(|t| t.as_str()) {
+                                store.settle_background(t);
                                 if usable_user_text(t) {
                                     store.push(ts, "user", "text", cap(t.trim(), TEXT_CAP), None);
                                 }
@@ -411,6 +488,7 @@ pub fn parse_claude_line(store: &mut MsgStore, v: &Value) {
                     Some("text") => {
                         if let Some(t) = item.get("text").and_then(|t| t.as_str()) {
                             if !t.trim().is_empty() {
+                                store.note_activity(ts);
                                 store.push(ts, "assistant", "text", cap(t.trim(), TEXT_CAP), None);
                             }
                         }
@@ -418,6 +496,7 @@ pub fn parse_claude_line(store: &mut MsgStore, v: &Value) {
                     Some("thinking") => {
                         if let Some(t) = item.get("thinking").and_then(|t| t.as_str()) {
                             if !t.trim().is_empty() {
+                                store.note_activity(ts);
                                 store.push(ts, "assistant", "thinking", cap(t.trim(), TEXT_CAP), None);
                             }
                         }
@@ -428,8 +507,14 @@ pub fn parse_claude_line(store: &mut MsgStore, v: &Value) {
                             .and_then(|n| n.as_str())
                             .unwrap_or("")
                             .to_string();
+                        store.note_activity(ts);
                         if let Some(id) = item.get("id").and_then(|i| i.as_str()) {
                             store.tool_names.insert(id.to_string(), name.clone());
+                            if is_background_launch(&name, item.get("input")) {
+                                store.bg_launch.insert(id.to_string(), ts.to_string());
+                            } else {
+                                store.awaiting_result.insert(id.to_string());
+                            }
                             if name == ARTIFACT_TOOL {
                                 let inp = item.get("input");
                                 let g = |k: &str| inp.and_then(|i| i.get(k)).and_then(|x| x.as_str()).unwrap_or("").to_string();
@@ -475,6 +560,24 @@ pub fn parse_claude_line(store: &mut MsgStore, v: &Value) {
 }
 
 pub const ARTIFACT_TOOL: &str = "Artifact";
+
+/// 这次工具调用会在后台跑、之后用 `<task-notification>` 回来：Bash / Agent 带
+/// `run_in_background:true`，或 Monitor（本身就是挂起等条件）。
+fn is_background_launch(name: &str, input: Option<&Value>) -> bool {
+    if name == "Monitor" {
+        return true;
+    }
+    input
+        .and_then(|i| i.get("run_in_background"))
+        .and_then(|b| b.as_bool())
+        .unwrap_or(false)
+}
+
+/// tool_result 的文案说它去后台了（没在 tool_use 入参里看出来的兜底，比如
+/// 子代理一律异步：「Async agent launched」）
+fn looks_like_background_result(text: &str) -> bool {
+    text.contains("running in background with ID") || text.contains("Async agent launched")
+}
 
 /// 「Published <path> at https://claude.ai/code/artifact/<id>」→ 一条产物记录。
 /// 只认 claude.ai 的 artifact 链接；没有 url 的结果（list / read 等动作）忽略。
@@ -641,6 +744,67 @@ pub fn poll_file(store: &mut MsgStore) {
     }
 }
 
+/// v1.13：把 transcript 里的「后台任务」与「被叫醒」镜像到会话状态（每秒轮询后调用）。
+/// - `background` = 本进程发起、还没回来的后台任务数（waiting 且 >0 → 客户端标「后台」）。
+/// - waiting 的 hooked 会话，在最近一次 Stop 之后 transcript 又出现 assistant 内容 /
+///   工具调用 → 它被后台通知叫醒又在跑了（不是用户发言，UserPromptSubmit 不触发）→ running。
+///   Stop 时刻 +2s 起算，避免 Stop 之前落盘、daemon 之后才 tail 到的最后一条回答误判。
+/// - 这样判出来的 running，Stop 若一直没来，transcript 60s 没动就压回 waiting 兜底。
+pub fn mirror_background(sess: &crate::pool::Session) {
+    use crate::pool::State;
+    let (exited, created_at) = {
+        let m = sess.meta.lock().unwrap();
+        (m.state == State::Exited, m.created_at)
+    };
+    if exited {
+        return;
+    }
+    let now = chrono::Utc::now();
+    let since = created_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    // 锁序约定（全库）：meta 与 msgs 两把锁永远不同时持有——取完就放，再拿另一把
+    let (bg, last_act, awaiting) = {
+        let mut ms = sess.msgs.lock().unwrap();
+        ms.prune_background(&since, &now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true), chrono::Duration::hours(2));
+        (ms.pending_background(Some(&since)), ms.last_activity_ts.clone(), ms.awaiting_tool_result())
+    };
+    // Claude 的时间戳是 JS toISOString（毫秒 Z）；解析后比较，不赌字符串格式
+    let last_act = chrono::DateTime::parse_from_rfc3339(&last_act).ok().map(|t| t.with_timezone(&chrono::Utc));
+    let mut meta = sess.meta.lock().unwrap();
+    let mut dirty = false;
+    if meta.background != bg {
+        meta.background = bg;
+        dirty = true;
+    }
+    if meta.hooked && meta.state == State::Waiting {
+        let floor = meta
+            .last_stop_at
+            .map(|t| t + chrono::Duration::seconds(2))
+            .map_or(created_at, |t| t.max(created_at));
+        if last_act.is_some_and(|t| t > floor) {
+            meta.state = State::Running;
+            meta.running_by_transcript = true;
+            meta.touch();
+            dirty = true;
+        }
+    } else if meta.running_by_transcript && meta.state == State::Running && !awaiting {
+        // 兜底只在「没有工具调用在等结果」时生效：长编译期间 transcript 本来就没新行
+        let idle = match last_act {
+            Some(t) => now - t > chrono::Duration::seconds(60),
+            None => true, // 解析不了当作没动静：别卡死在 running
+        };
+        if idle {
+            meta.state = State::Waiting;
+            meta.running_by_transcript = false;
+            meta.touch();
+            dirty = true;
+        }
+    }
+    drop(meta);
+    if dirty {
+        sess.mark_dirty();
+    }
+}
+
 /// One polling pass for a session; returns Some(last_seq) when new messages
 /// arrived (caller emits the throttled messages_changed event).
 /// `claimed`：其他会话已认领的存储文件——同目录并发两个同 agent 会话时，
@@ -739,6 +903,98 @@ mod tests {
         ingest(store, body.as_bytes());
     }
 
+
+    /// v1.13「后台」：后台 Bash / 子代理发起 → pending；<task-notification> 回来 → 销掉；
+    /// 早于 since 的（resume 带进来的旧对话）不算
+    /// v1.13 被叫醒：waiting 的 hooked 会话在最近一次 Stop 之后 transcript 又有 assistant
+    /// 动静 → running；Stop 前落盘、之后才 tail 到的那条不算（+2s 缓冲）；后台数镜像到 meta
+    #[test]
+    fn mirror_background_wakes_a_waiting_session_after_the_last_stop() {
+        use crate::pool::State;
+        let sess = crate::pool::Session::for_test("claude", "/p");
+        let created = chrono::Utc::now() - chrono::Duration::seconds(30);
+        {
+            let mut m = sess.meta.lock().unwrap();
+            m.hooked = true;
+            m.state = State::Waiting;
+            m.created_at = created;
+            m.last_stop_at = Some(chrono::Utc::now() - chrono::Duration::seconds(10));
+        }
+        let iso = |secs_ago: i64| (chrono::Utc::now() - chrono::Duration::seconds(secs_ago)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        // 1) Stop 之前落盘的最后一条回答（比 Stop 早 3s）：不算叫醒
+        parse_claude_line(&mut sess.msgs.lock().unwrap(), &json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}]},"timestamp":iso(13)}));
+        mirror_background(&sess);
+        assert_eq!(sess.meta.lock().unwrap().state, State::Waiting);
+        // 2) 后台任务发起并确认：waiting 且 background>0
+        parse_claude_line(&mut sess.msgs.lock().unwrap(), &json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"Bash","input":{"command":"x","run_in_background":true}}]},"timestamp":iso(12)}));
+        parse_claude_line(&mut sess.msgs.lock().unwrap(), &json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu1","content":"Command running in background with ID: b1"}]},"timestamp":iso(12)}));
+        mirror_background(&sess);
+        {
+            let m = sess.meta.lock().unwrap();
+            assert_eq!(m.state, State::Waiting, "发起时刻还在 Stop 之前，仍是 waiting");
+            assert_eq!(m.background, 1);
+        }
+        // 3) 通知回来、模型开跑（Stop 之后 5s 有新 assistant 内容）→ running，后台数归零
+        parse_claude_line(&mut sess.msgs.lock().unwrap(), &json!({"type":"user","message":{"role":"user","content":"<task-notification><tool-use-id>tu1</tool-use-id></task-notification>"},"timestamp":iso(5)}));
+        parse_claude_line(&mut sess.msgs.lock().unwrap(), &json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"结果来了"}]},"timestamp":iso(5)}));
+        mirror_background(&sess);
+        {
+            let m = sess.meta.lock().unwrap();
+            assert_eq!(m.state, State::Running);
+            assert!(m.running_by_transcript);
+            assert_eq!(m.background, 0);
+        }
+        // 4) 前台发了个长工具调用（编译），61s 没有新行但结果还没回来：**不能**压回 waiting
+        parse_claude_line(&mut sess.msgs.lock().unwrap(), &json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_slow","name":"Bash","input":{"command":"cargo build"}}]},"timestamp":iso(61)}));
+        sess.msgs.lock().unwrap().last_activity_ts = iso(61);
+        mirror_background(&sess);
+        assert_eq!(sess.meta.lock().unwrap().state, State::Running, "还在等 tool_result，不算静止");
+        // 结果回来了：本身算动静（时间戳新），仍是 running
+        parse_claude_line(&mut sess.msgs.lock().unwrap(), &json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_slow","content":"ok"}]},"timestamp":iso(1)}));
+        mirror_background(&sess);
+        assert_eq!(sess.meta.lock().unwrap().state, State::Running);
+        // 5) 之后 Stop 一直不来、transcript 61s 没动、也没有在等的工具：兜底压回 waiting
+        sess.msgs.lock().unwrap().last_activity_ts = iso(61);
+        mirror_background(&sess);
+        assert_eq!(sess.meta.lock().unwrap().state, State::Waiting);
+        // 6) 已退出的什么都不动
+        sess.meta.lock().unwrap().state = State::Exited;
+        sess.msgs.lock().unwrap().last_activity_ts = iso(0);
+        mirror_background(&sess);
+        assert_eq!(sess.meta.lock().unwrap().state, State::Exited);
+    }
+
+    #[test]
+    fn background_tasks_are_tracked_until_their_notification_returns() {
+        let mut store = MsgStore::for_agent("claude");
+        let lines = [
+            json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_bg","name":"Bash","input":{"command":"cargo build","run_in_background":true}}]},"timestamp":"2026-09-07T01:00:00.000Z"}),
+            json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_bg","content":"Command running in background with ID: b1"}]},"timestamp":"2026-09-07T01:00:01.000Z"}),
+            json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_ag","name":"Agent","input":{"prompt":"review"}}]},"timestamp":"2026-09-07T01:00:02.000Z"}),
+            json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_ag","content":[{"type":"text","text":"Async agent launched successfully. agentId: a9"}]}]},"timestamp":"2026-09-07T01:00:03.000Z"}),
+            json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_fg","name":"Bash","input":{"command":"ls"}}]},"timestamp":"2026-09-07T01:00:04.000Z"}),
+            json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_fg","content":"a b"}]},"timestamp":"2026-09-07T01:00:05.000Z"}),
+        ];
+        for l in &lines {
+            parse_claude_line(&mut store, l);
+        }
+        assert_eq!(store.pending_background(None), 2, "后台 Bash + 异步子代理挂着，前台 ls 不算");
+        assert_eq!(store.last_activity_ts, "2026-09-07T01:00:05.000Z", "tool_result 回来也算动静");
+        // 通知回来（user 字符串消息，带 tool-use-id）
+        parse_claude_line(&mut store, &json!({"type":"user","message":{"role":"user","content":"<task-notification>\n<task-id>b1</task-id>\n<tool-use-id>tu_bg</tool-use-id>\n<status>completed</status>\n</task-notification>"},"timestamp":"2026-09-07T01:05:00.000Z"}));
+        assert_eq!(store.pending_background(None), 1);
+        // 早于 since 的不算（上一个进程发起的，进程一死任务就没了）
+        assert_eq!(store.pending_background(Some("2026-09-07T01:00:02.500Z")), 1);
+        assert_eq!(store.pending_background(Some("2026-09-07T01:00:03.500Z")), 0);
+        // 通知不进消息流（'<' 开头的用户文本本来就滤掉）
+        assert!(store.msgs.iter().all(|m| !m.text.contains("task-notification")));
+        // 不在 task-notification 里的 <tool-use-id> 不算回来
+        parse_claude_line(&mut store, &json!({"type":"user","message":{"role":"user","content":"帮我看看 <tool-use-id>tu_ag</tool-use-id> 是什么"},"timestamp":"2026-09-07T01:06:00.000Z"}));
+        assert_eq!(store.pending_background(None), 1);
+        // 挂超过 max_age 的物理清掉
+        store.prune_background("2026-09-07T00:00:00.000Z", "2026-09-07T04:00:00.000Z", chrono::Duration::hours(2));
+        assert_eq!(store.pending_background(None), 0);
+    }
 
     #[test]
     fn claude_full_parse_with_filters() {

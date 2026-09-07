@@ -45,6 +45,10 @@ pub struct Session {
     /// 读屏猜的）。其它 agent 没有这种信号，恒为 false。三态口径里的「待回复」。
     #[serde(default)]
     pub asking: bool,
+    /// v1.13：waiting 且后台还有任务（后台 Bash / 异步子代理 / Monitor）没回来——
+    /// 主对话停在输入框，但它会自己被叫醒。行首标「后台」，排在运行之后
+    #[serde(default)]
+    pub background: bool,
     #[serde(default)]
     pub preview: String,
     #[serde(default)]
@@ -87,63 +91,34 @@ pub struct Session {
     pub summary: String,
 }
 
-/// 仪表盘（GET /history/dashboard）：daemon 一次算好的「做了什么 / 还没做」
+/// 看板（GET /history/dashboard，2026-09-07 第二版：所有会话的进度，没有时间维度）
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
 pub struct Dashboard {
-    /// daemon 本机时区的今天（YYYY-MM-DD）；画「（今天）」用它，不用客户端自己的日期
     #[serde(default)]
-    pub date: String,
+    pub counts: DashCounts,
+    /// 故意没有 default：老 daemon 的响应缺它 → 解码失败 → 弹「请升级 daemon」，不静默画空
+    pub sessions: Vec<SessionCard>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
+pub struct DashCounts {
     #[serde(default)]
-    pub today: DashStats,
+    pub asking: usize,
     #[serde(default)]
-    pub week: DashStats,
+    pub running: usize,
+    #[serde(default)]
+    pub background: usize,
     #[serde(default)]
     pub active: usize,
     #[serde(default)]
-    pub open: Vec<OpenItem>,
+    pub paused: usize,
     #[serde(default)]
-    pub days: Vec<DayCard>,
-    /// 近 8 周每天的会话数，最旧在前
-    #[serde(default)]
-    pub spark: Vec<usize>,
+    pub open_items: usize,
 }
 
+/// 一张卡 = 一个会话的进度
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
-pub struct DashStats {
-    #[serde(default)]
-    pub sessions: usize,
-    #[serde(default)]
-    pub done: usize,
-    #[serde(default)]
-    pub open: usize,
-}
-
-/// 左栏一条待办：某个会话清单里没勾的一项
-#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
-pub struct OpenItem {
-    #[serde(default)]
-    pub session_id: String,
-    #[serde(default)]
-    pub project_name: String,
-    #[serde(default)]
-    pub project_path: String,
-    #[serde(default)]
-    pub title: String,
-    #[serde(default)]
-    pub text: String,
-    #[serde(default)]
-    pub created_at: String,
-    /// 还在池子里（能点开，已退出的回放也算）
-    #[serde(default)]
-    pub alive: bool,
-    /// 进程还没退出——「在跑」的徽标按它画
-    #[serde(default)]
-    pub running: bool,
-}
-
-/// 右栏一天里的一个会话
-#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
-pub struct DayEntry {
+pub struct SessionCard {
     #[serde(default)]
     pub id: String,
     #[serde(default)]
@@ -151,65 +126,52 @@ pub struct DayEntry {
     #[serde(default)]
     pub project_name: String,
     #[serde(default)]
-    pub alive: bool,
+    pub project_path: String,
+    /// asking | running | background | active | paused
     #[serde(default)]
-    pub running: bool,
+    pub status: String,
+    /// 还在池子里（能点开，已退出的回放也算）
+    #[serde(default)]
+    pub alive: bool,
     #[serde(default)]
     pub deleted: bool,
     #[serde(default)]
     pub done: usize,
     #[serde(default)]
     pub open: usize,
+    #[serde(default)]
+    pub items: Vec<ChecklistItem>,
+    #[serde(default)]
+    pub updated_at: String,
 }
 
-/// 右栏的一天
-#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
-pub struct DayCard {
-    #[serde(default)]
-    pub date: String,
-    #[serde(default)]
-    pub text: String,
-    #[serde(default)]
-    pub sessions: usize,
-    #[serde(default)]
-    pub done: usize,
-    #[serde(default)]
-    pub open: usize,
-    #[serde(default)]
-    pub entries: Vec<DayEntry>,
-}
-
-/// 待办搜索：项目 / 会话标题 / 条目本身含关键字（不分大小写）；空串全匹配
-pub fn open_item_matches(i: &OpenItem, query: &str) -> bool {
+/// 看板搜索：标题 / 项目 / 任一清单项含关键字（不分大小写）；空串全匹配
+pub fn card_matches(c: &SessionCard, query: &str) -> bool {
     let q = query.trim().to_lowercase();
     q.is_empty()
-        || i.text.to_lowercase().contains(&q)
-        || i.title.to_lowercase().contains(&q)
-        || i.project_name.to_lowercase().contains(&q)
+        || c.title.to_lowercase().contains(&q)
+        || c.project_name.to_lowercase().contains(&q)
+        || c.items.iter().any(|i| i.text.to_lowercase().contains(&q))
 }
 
-/// 一天是否命中搜索：日摘要或当天任一会话标题 / 项目名含关键字
-pub fn day_card_matches(d: &DayCard, query: &str) -> bool {
-    let q = query.trim().to_lowercase();
-    q.is_empty()
-        || d.text.to_lowercase().contains(&q)
-        || d.entries.iter().any(|e| e.title.to_lowercase().contains(&q) || e.project_name.to_lowercase().contains(&q))
-}
-
-/// 待办按项目归并，项目内保持原序（daemon 已按会话新→旧排好）
-pub fn group_open_by_project(items: &[OpenItem]) -> Vec<(String, Vec<&OpenItem>)> {
-    let mut out: Vec<(String, Vec<&OpenItem>)> = Vec::new();
-    for it in items {
-        match out.iter_mut().find(|(name, _)| *name == it.project_name) {
-            Some((_, v)) => v.push(it),
-            None => out.push((it.project_name.clone(), vec![it])),
-        }
+/// 状态字（与侧栏同一套五态）
+pub fn status_label(status: &str) -> &'static str {
+    match status {
+        "asking" => "待回复",
+        "running" => "运行",
+        "background" => "后台",
+        "active" => "激活",
+        _ => "暂停",
     }
-    out
 }
 
-/// 进度清单的一项（解析 `summary` 的一行）
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// 「已完成」= 暂停且清单全勾完（或没清单）：真正结束的活儿，看板默认收起来
+pub fn card_is_finished(c: &SessionCard) -> bool {
+    c.status == "paused" && c.open == 0
+}
+
+/// 进度清单的一项（解析 `summary` 的一行；看板卡片里由 daemon 直接给）
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 pub struct ChecklistItem {
     pub done: bool,
     pub text: String,
@@ -822,31 +784,28 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_search_and_grouping() {
-        let it = |project: &str, title: &str, text: &str| OpenItem {
-            project_name: project.into(),
-            title: title.into(),
-            text: text.into(),
+    fn dashboard_cards_search_labels_and_finished() {
+        let c = SessionCard {
+            title: "改登录页".into(),
+            project_name: "Shop".into(),
+            status: "paused".into(),
+            open: 1,
+            items: vec![ChecklistItem { done: false, text: "补测试".into() }],
             ..Default::default()
         };
-        let a = it("Shop", "改登录页", "补测试");
-        assert!(open_item_matches(&a, "") && open_item_matches(&a, "测试") && open_item_matches(&a, "shop") && open_item_matches(&a, "登录"));
-        assert!(!open_item_matches(&a, "支付"));
-
-        let d = DayCard {
-            date: "2026-09-07".into(),
-            text: "- 修好登录".into(),
-            entries: vec![DayEntry { title: "改登录页".into(), project_name: "Shop".into(), ..Default::default() }],
-            ..Default::default()
-        };
-        assert!(day_card_matches(&d, "") && day_card_matches(&d, "修好") && day_card_matches(&d, "shop"));
-        assert!(!day_card_matches(&d, "支付"));
-
-        // 按项目归并，项目内保持原序；项目按首次出现排
-        let items = vec![a.clone(), it("Mail", "DKIM", "轮换"), it("Shop", "改登录页", "发版")];
-        let groups = group_open_by_project(&items);
-        assert_eq!(groups.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["Shop", "Mail"]);
-        assert_eq!(groups[0].1.iter().map(|i| i.text.as_str()).collect::<Vec<_>>(), ["补测试", "发版"]);
+        assert!(card_matches(&c, "") && card_matches(&c, "登录") && card_matches(&c, "shop") && card_matches(&c, "测试"));
+        assert!(!card_matches(&c, "支付"));
+        assert_eq!(status_label("asking"), "待回复");
+        assert_eq!(status_label("background"), "后台");
+        assert_eq!(status_label("whatever"), "暂停");
+        assert!(!card_is_finished(&c), "暂停但还有没勾的：不算完");
+        let done = SessionCard { status: "paused".into(), open: 0, ..Default::default() };
+        assert!(card_is_finished(&done));
+        let live = SessionCard { status: "active".into(), open: 0, ..Default::default() };
+        assert!(!card_is_finished(&live), "还活着的不算完");
+        // 老 daemon 的形状（没有 sessions）必须解码失败，不能静默画空看板
+        assert!(serde_json::from_str::<Dashboard>(r#"{"today":{"sessions":1},"days":[]}"#).is_err());
+        assert!(serde_json::from_str::<Dashboard>(r#"{"sessions":[]}"#).is_ok());
     }
 
     #[test]

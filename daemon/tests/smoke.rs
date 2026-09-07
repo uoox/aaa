@@ -600,14 +600,12 @@ async fn inbox_auto_feed_on_first_waiting() {
     }
     assert!(saw_inbox_changed, "inbox_changed event expected");
 
-    // 看板：终端会话不进待办 / 流水，但形状必须齐（spark 恒 56 格）
+    // 看板：终端会话不进看板，但形状必须齐
     let (code, dash) = http("GET", port, "/api/v1/history/dashboard", Some(TOKEN), None);
     assert_eq!(code, 200);
-    assert_eq!(dash["spark"].as_array().unwrap().len(), 56);
-    assert!(dash["open"].as_array().unwrap().is_empty(), "终端会话没有进度清单");
-    assert!(dash["days"].as_array().unwrap().is_empty(), "终端不进流水");
-    assert!(dash["today"]["sessions"].is_number() && dash["week"]["done"].is_number());
-    assert!(dash["active"].as_u64().unwrap() >= 1, "两个终端还活着");
+    assert!(dash["sessions"].as_array().unwrap().is_empty(), "终端不进看板");
+    assert_eq!(dash["counts"]["open_items"], 0);
+    assert!(dash["counts"]["paused"].is_number() && dash["counts"]["background"].is_number());
 
     // messages endpoint: shell sessions are unsupported
     let (code, m) = http(

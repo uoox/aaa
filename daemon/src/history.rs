@@ -6,7 +6,7 @@
 //! change → record updated); deletion is stamped explicitly by the delete
 //! handlers. Capped at [`KEEP`] newest by `created_at`.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use chrono::{SecondsFormat, Utc};
@@ -226,227 +226,16 @@ mod tests {
     }
 }
 
-// ── 日历：按天的 haiku 摘要 ─────────────────────────────────────────────────
+// ── 看板 ────────────────────────────────────────────────────────────────────
 //
-// 每天一段「这一天做了什么」，输入是当天开始的会话（标题 + 进度清单），haiku 写成
-// 要点。输入变了（新会话、清单更新）就重写，没变不碰；一次最多写两天，控制成本。
-// 存 `<state_dir>/history_days.json`。
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DayDigest {
-    /// 本地日期 YYYY-MM-DD
-    pub date: String,
-    pub text: String,
-    pub sessions: usize,
-    #[serde(default)]
-    pub input_hash: u64,
-    #[serde(default)]
-    pub generated_at: String,
-}
-
-/// ISO 时间 → daemon 所在时区的日期
-pub fn local_day(iso: &str) -> Option<String> {
-    let t = chrono::DateTime::parse_from_rfc3339(iso).ok()?;
-    Some(t.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string())
-}
-
-/// 按天分组（按会话开始时间），只收项目会话（终端不算）
-pub fn group_by_day(entries: &[Entry]) -> BTreeMap<String, Vec<&Entry>> {
-    let mut m: BTreeMap<String, Vec<&Entry>> = BTreeMap::new();
-    for e in entries.iter().filter(|e| e.agent != "shell") {
-        if let Some(d) = local_day(&e.created_at) {
-            m.entry(d).or_default().push(e);
-        }
-    }
-    m
-}
-
-pub fn day_hash(entries: &[&Entry]) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    for e in entries {
-        e.id.hash(&mut h);
-        e.title.hash(&mut h);
-        e.summary.hash(&mut h);
-    }
-    h.finish()
-}
-
-const DAY_PROMPT: &str = "下面是某一天里 Claude Code 各个会话的标题和进度清单（[x] 已做 / [ ] 未做）。\
-请用要点写出这一天做了什么：按项目归并，每条一件事、不超过 30 个字，最多 10 条；做完的直接陈述，没做完的末尾标「（未完）」。\
-使用对话的主要语言。只输出要点，每行一条，以「- 」开头，不要标题、不要解释。\n\n";
-
-pub fn day_prompt(date: &str, entries: &[&Entry]) -> String {
-    let mut out = format!("{DAY_PROMPT}日期：{date}\n");
-    for e in entries {
-        out.push_str(&format!("\n## {} · {}\n", e.project_name, if e.title.is_empty() { &e.project_name } else { &e.title }));
-        if !e.summary.is_empty() {
-            out.push_str(&e.summary);
-            out.push('\n');
-        }
-    }
-    out
-}
-
-/// 模型输出 → 规整的要点（只认以 - * • 开头的行；最多 12 行），None = 没有可用内容
-pub fn clean_day(out: &str) -> Option<String> {
-    let lines: Vec<String> = out
-        .lines()
-        .map(str::trim)
-        .filter(|l| l.starts_with(['-', '*', '•']))
-        .map(|l| l.trim_start_matches(['-', '*', '•']).trim())
-        .filter(|l| !l.is_empty())
-        .take(12)
-        .map(|l| format!("- {l}"))
-        .collect();
-    (!lines.is_empty()).then(|| lines.join("\n"))
-}
-
-pub struct Days {
-    file: PathBuf,
-    map: BTreeMap<String, DayDigest>,
-}
-
-impl Days {
-    pub fn load(state_dir: &Path) -> Self {
-        let file = state_dir.join("history_days.json");
-        let map = std::fs::read_to_string(&file)
-            .ok()
-            .and_then(|s| serde_json::from_str::<Vec<DayDigest>>(&s).ok())
-            .map(|v| v.into_iter().map(|d| (d.date.clone(), d)).collect())
-            .unwrap_or_default();
-        Days { file, map }
-    }
-
-    fn save(&self) {
-        if let Some(dir) = self.file.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let v: Vec<&DayDigest> = self.map.values().collect();
-        if let Ok(body) = serde_json::to_string(&v) {
-            let _ = crate::paths::write_atomic(&self.file, body.as_bytes());
-        }
-    }
-
-    pub fn get(&self, date: &str) -> Option<&DayDigest> {
-        self.map.get(date)
-    }
-
-    pub fn put(&mut self, d: DayDigest) {
-        self.map.insert(d.date.clone(), d);
-        self.save();
-    }
-
-    /// 需要（重）写的日期：没有摘要、或输入变了。最新的日期在前
-    pub fn stale<'a>(&self, groups: &'a BTreeMap<String, Vec<&'a Entry>>) -> Vec<&'a str> {
-        let mut v: Vec<&str> = groups
-            .iter()
-            .filter(|(date, es)| self.map.get(*date).map(|d| d.input_hash != day_hash(es)).unwrap_or(true))
-            .map(|(d, _)| d.as_str())
-            .collect();
-        v.reverse();
-        v
-    }
-}
-
-/// 日历数据：每天的会话数 + 摘要（没写出来的 text 为空）
-pub fn calendar(entries: &[Entry], days: &Days) -> Vec<DayDigest> {
-    group_by_day(entries)
-        .iter()
-        .rev()
-        .map(|(date, es)| DayDigest {
-            date: date.clone(),
-            text: days.get(date).map(|d| d.text.clone()).unwrap_or_default(),
-            sessions: es.len(),
-            input_hash: 0,
-            generated_at: days.get(date).map(|d| d.generated_at.clone()).unwrap_or_default(),
-        })
-        .collect()
-}
-
-/// 5 分钟一次：给输入变了的日子重写摘要（一次最多 `max` 天）。阻塞（跑 haiku）
-pub fn refresh_days(app: &crate::api::SharedApp, max: usize) {
-    if !app.cfg.namer {
-        return;
-    }
-    let entries = app.history.lock().unwrap().list(KEEP);
-    let groups = group_by_day(&entries);
-    let stale: Vec<String> = app.days.lock().unwrap().stale(&groups).into_iter().map(str::to_owned).collect();
-    let Some(exe) = crate::agents::which("claude", &app.paths.home) else { return };
-    for date in stale.into_iter().take(max) {
-        let Some(es) = groups.get(&date) else { continue };
-        let hash = day_hash(es);
-        let prompt = day_prompt(&date, es);
-        let Some(text) = crate::namer::run_haiku(&exe, &prompt).as_deref().and_then(clean_day) else { continue };
-        app.days.lock().unwrap().put(DayDigest {
-            date: date.clone(),
-            text,
-            sessions: es.len(),
-            input_hash: hash,
-            generated_at: now_iso(),
-        });
-    }
-}
-
-#[cfg(test)]
-mod day_tests {
-    use super::*;
-
-    fn e(id: &str, created: &str, title: &str, summary: &str) -> Entry {
-        Entry {
-            id: id.into(),
-            project_path: "/p/a".into(),
-            project_name: "a".into(),
-            agent: "claude".into(),
-            title: title.into(),
-            created_at: created.into(),
-            ended_at: None,
-            exit_code: None,
-            deleted_at: None,
-            summary: summary.into(),
-            last_state: "waiting".into(),
-        }
-    }
-
-    #[test]
-    fn grouping_hash_and_staleness() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut days = Days::load(dir.path());
-        let a = e("a", "2026-09-06T02:00:00Z", "修登录", "- [x] 修登录");
-        let mut shell = e("t", "2026-09-06T03:00:00Z", "zsh", "");
-        shell.agent = "shell".into();
-        let entries = vec![a.clone(), shell];
-        let groups = group_by_day(&entries);
-        assert_eq!(groups.len(), 1, "终端不进日历");
-        let date = groups.keys().next().unwrap().clone();
-        assert_eq!(days.stale(&groups), vec![date.as_str()], "没摘要 = 要写");
-        let hash = day_hash(&groups[&date]);
-        days.put(DayDigest { date: date.clone(), text: "- 修好登录".into(), sessions: 1, input_hash: hash, generated_at: "t".into() });
-        assert!(days.stale(&groups).is_empty(), "输入没变不重写");
-        // 清单更新 → 输入变了 → 重写
-        let mut a2 = a.clone();
-        a2.summary = "- [x] 修登录\n- [ ] 补测试".into();
-        let entries2 = vec![a2];
-        assert_eq!(days.stale(&group_by_day(&entries2)).len(), 1);
-        // 日历数据带会话数与摘要；落盘可读回
-        let cal = calendar(&entries, &Days::load(dir.path()));
-        assert_eq!(cal[0].sessions, 1);
-        assert_eq!(cal[0].text, "- 修好登录");
-        assert_eq!(clean_day("要点：\n- 修好登录\n* 补测试（未完）\n\n"), Some("- 修好登录\n- 补测试（未完）".into()));
-        assert!(clean_day("  \n").is_none());
-        assert!(day_prompt(&date, &groups[&date]).contains("## a · 修登录"));
-    }
-}
-
-// ── 仪表盘 ────────────────────────────────────────────────────────────────
-//
-// 「一眼看出最近做了什么，还有什么没做」（2026-09-07 用户拍板：两栏，左待办右流水）。
-// 左栏 = 所有未删除会话里没勾的清单项，聚合成一张待办表；右栏 = 按天倒序的流水，
-// 每天一段 haiku 日摘要 + 当天的会话。数字块（今天 / 近 7 天）在顶上。
-// 聚合只在 daemon 做一次，两端只负责画。
+// 2026-09-07 用户拍板（第二版）：看板 = **所有会话的进度**，没有时间维度。一会话一张
+// 卡：状态 + 标题 + 项目 + 进度（清单 done/total）+ 没勾的项；按 待回复 > 运行 >
+// 后台 > 激活 > 暂停 排，同状态里最近更新在前。第一版的日流水 / haiku 日摘要 / 热力条
+// 全部移除——进度本身就带着时间，「哪天做了什么」没人看。
+// 聚合只在 daemon 做一次，两端只画。
 
 /// 进度清单的一项
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChecklistItem {
     pub done: bool,
     pub text: String,
@@ -470,196 +259,111 @@ pub fn parse_checklist(md: &str) -> Vec<ChecklistItem> {
         .collect()
 }
 
-/// 左栏一条待办：某个会话清单里没勾的一项
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct OpenItem {
-    pub session_id: String,
-    pub project_name: String,
-    pub project_path: String,
-    /// 会话标题（点进去看的是这个会话）
-    pub title: String,
-    /// 没勾的那一项本身
-    pub text: String,
-    pub created_at: String,
-    /// 会话还在池子里（能点开，已退出的也算）
-    pub alive: bool,
-    /// 会话进程还没退出（running / waiting）——「在跑」的徽标按它画
-    #[serde(default)]
-    pub running: bool,
+/// 会话此刻的状态字（与侧栏同一套五态，PROTOCOL「GUI 列表口径」）
+pub const STATUS_ORDER: [&str; 5] = ["asking", "running", "background", "active", "paused"];
+
+pub fn status_rank(status: &str) -> usize {
+    STATUS_ORDER.iter().position(|s| *s == status).unwrap_or(STATUS_ORDER.len())
 }
 
-/// 右栏一天里的一个会话
+/// 池子里一条会话此刻的样子（api 层从 pool 取）
+#[derive(Clone, Debug)]
+pub struct LiveStatus {
+    /// asking | running | background | active | paused（已退出但还在池子里 = paused）
+    pub status: &'static str,
+    /// updated_at（排序键）
+    pub updated_at: String,
+}
+
+/// 一张卡
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DayEntry {
+pub struct SessionCard {
     pub id: String,
     pub title: String,
     pub project_name: String,
-    /// 还在池子里（能点开）
+    pub project_path: String,
+    /// asking | running | background | active | paused
+    pub status: String,
+    /// 还在池子里（能点开，已退出的回放也算）
     pub alive: bool,
-    /// 进程还没退出
-    #[serde(default)]
-    pub running: bool,
     pub deleted: bool,
     pub done: usize,
     pub open: usize,
-}
-
-/// 右栏的一天
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DayCard {
-    pub date: String,
-    /// haiku 写的「这一天做了什么」；还没写出来为空
-    pub text: String,
-    pub sessions: usize,
-    pub done: usize,
-    pub open: usize,
-    pub entries: Vec<DayEntry>,
+    pub items: Vec<ChecklistItem>,
+    /// 排序键：状态翻转 / 改名 / 退出的时刻
+    pub updated_at: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Stats {
-    pub sessions: usize,
-    pub done: usize,
-    pub open: usize,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Dashboard {
-    /// daemon 本机时区的今天（YYYY-MM-DD）。客户端画「（今天）」用它，别用自己的
-    /// `LocalDate.now()`——手机和 Mac 不在一个时区时会标错天。
-    pub date: String,
-    pub today: Stats,
-    pub week: Stats,
-    /// 此刻进程还没退出的会话数（running / waiting）
+pub struct Counts {
+    pub asking: usize,
+    pub running: usize,
+    pub background: usize,
     pub active: usize,
-    pub open: Vec<OpenItem>,
-    pub days: Vec<DayCard>,
-    /// 近 8 周的每日会话数（热力条），最旧在前，长度 = 56
-    pub spark: Vec<usize>,
+    pub paused: usize,
+    /// 未删除会话里没勾的清单项总数
+    pub open_items: usize,
 }
 
-/// 待办上限：够看一屏一屏，不至于把响应撑爆
-pub const OPEN_CAP: usize = 200;
-/// 流水天数上限
-pub const DAYS_CAP: usize = 30;
-const SPARK_DAYS: usize = 56;
-
-fn stats_of(entries: &[&Entry]) -> Stats {
-    let mut s = Stats { sessions: entries.len(), done: 0, open: 0 };
-    for e in entries {
-        for it in parse_checklist(&e.summary) {
-            if it.done {
-                s.done += 1;
-            } else {
-                s.open += 1;
-            }
-        }
-    }
-    s
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Dashboard {
+    pub counts: Counts,
+    pub sessions: Vec<SessionCard>,
 }
 
-/// `today` = daemon 本机时区的今天；`alive` = 池子里还在的会话 id（含已退出的，能点开）；
-/// `running` = 其中进程还没退出的（「在跑」与 `active` 按它算——池子里绝大多数是已退出的，
-/// 2026-09-07 首版把两者混成一个，看板上写出「此刻 135 在跑」）
-pub fn dashboard(
-    entries: &[Entry],
-    days: &Days,
-    alive: &std::collections::HashSet<String>,
-    running: &std::collections::HashSet<String>,
-    today: &str,
-) -> Dashboard {
-    let groups = group_by_day(entries);
-    let week: Vec<String> = last_days(today, 7);
-    let today_rows: Vec<&Entry> = groups.get(today).cloned().unwrap_or_default();
-    let week_rows: Vec<&Entry> = week.iter().filter_map(|d| groups.get(d)).flatten().copied().collect();
-
-    // 左栏：未删除会话里没勾的项，新会话在前
-    let mut open = Vec::new();
-    for e in entries.iter().filter(|e| e.deleted_at.is_none() && e.agent != "shell") {
-        for it in parse_checklist(&e.summary).into_iter().filter(|i| !i.done) {
-            open.push(OpenItem {
-                session_id: e.id.clone(),
+/// `live`：池子里的会话 id → 此刻状态；不在池子里的一律 paused（不能点开）。
+/// 终端不进看板；已删除的进（`deleted:true`，客户端默认藏起来），但不计数。
+pub fn dashboard(entries: &[Entry], live: &std::collections::HashMap<String, LiveStatus>) -> Dashboard {
+    let mut cards: Vec<SessionCard> = entries
+        .iter()
+        .filter(|e| e.agent != "shell")
+        .map(|e| {
+            let items = parse_checklist(&e.summary);
+            let (status, updated_at, alive) = match live.get(&e.id) {
+                Some(l) => (l.status.to_string(), l.updated_at.clone(), true),
+                None => ("paused".to_string(), e.ended_at.clone().unwrap_or_else(|| e.created_at.clone()), false),
+            };
+            SessionCard {
+                id: e.id.clone(),
+                title: if e.title.is_empty() { e.project_name.clone() } else { e.title.clone() },
                 project_name: e.project_name.clone(),
                 project_path: e.project_path.clone(),
-                title: if e.title.is_empty() { e.project_name.clone() } else { e.title.clone() },
-                text: it.text,
-                created_at: e.created_at.clone(),
-                alive: alive.contains(&e.id),
-                running: running.contains(&e.id),
-            });
-            if open.len() >= OPEN_CAP {
-                break;
-            }
-        }
-        if open.len() >= OPEN_CAP {
-            break;
-        }
-    }
-
-    // 右栏：按天倒序
-    let days_out: Vec<DayCard> = groups
-        .iter()
-        .rev()
-        .take(DAYS_CAP)
-        .map(|(date, es)| {
-            let s = stats_of(es);
-            DayCard {
-                date: date.clone(),
-                text: days.get(date).map(|d| d.text.clone()).unwrap_or_default(),
-                sessions: s.sessions,
-                done: s.done,
-                open: s.open,
-                entries: es
-                    .iter()
-                    .map(|e| {
-                        let items = parse_checklist(&e.summary);
-                        DayEntry {
-                            id: e.id.clone(),
-                            title: if e.title.is_empty() { e.project_name.clone() } else { e.title.clone() },
-                            project_name: e.project_name.clone(),
-                            alive: alive.contains(&e.id),
-                            running: running.contains(&e.id),
-                            deleted: e.deleted_at.is_some(),
-                            done: items.iter().filter(|i| i.done).count(),
-                            open: items.iter().filter(|i| !i.done).count(),
-                        }
-                    })
-                    .collect(),
+                status,
+                alive,
+                deleted: e.deleted_at.is_some(),
+                done: items.iter().filter(|i| i.done).count(),
+                open: items.iter().filter(|i| !i.done).count(),
+                items,
+                updated_at,
             }
         })
         .collect();
-
-    let spark = last_days(today, SPARK_DAYS)
-        .into_iter()
-        .rev()
-        .map(|d| groups.get(&d).map(|v| v.len()).unwrap_or(0))
-        .collect();
-
-    Dashboard {
-        date: today.to_string(),
-        today: stats_of(&today_rows),
-        week: stats_of(&week_rows),
-        active: entries.iter().filter(|e| running.contains(&e.id)).count(),
-        open,
-        days: days_out,
-        spark,
+    // 状态 → 已删除的沉到组尾 → 最近更新在前
+    cards.sort_by(|a, b| {
+        status_rank(&a.status)
+            .cmp(&status_rank(&b.status))
+            .then_with(|| a.deleted.cmp(&b.deleted))
+            .then_with(|| b.updated_at.cmp(&a.updated_at))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    let mut counts = Counts::default();
+    for c in cards.iter().filter(|c| !c.deleted) {
+        match c.status.as_str() {
+            "asking" => counts.asking += 1,
+            "running" => counts.running += 1,
+            "background" => counts.background += 1,
+            "active" => counts.active += 1,
+            _ => counts.paused += 1,
+        }
+        counts.open_items += c.open;
     }
-}
-
-/// 从 `today` 往回数 n 天的日期（最新在前）；`today` 解析不了就返回空
-fn last_days(today: &str, n: usize) -> Vec<String> {
-    let Ok(d0) = chrono::NaiveDate::parse_from_str(today, "%Y-%m-%d") else { return Vec::new() };
-    (0..n).filter_map(|i| d0.checked_sub_signed(chrono::Duration::days(i as i64))).map(|d| d.format("%Y-%m-%d").to_string()).collect()
-}
-
-/// 本机时区的今天
-pub fn today_local() -> String {
-    chrono::Local::now().format("%Y-%m-%d").to_string()
+    Dashboard { counts, sessions: cards }
 }
 
 #[cfg(test)]
 mod dashboard_tests {
     use super::*;
+    use std::collections::HashMap;
 
     fn e(id: &str, created: &str, title: &str, summary: &str) -> Entry {
         Entry {
@@ -687,48 +391,58 @@ mod dashboard_tests {
     }
 
     #[test]
-    fn dashboard_counts_open_days_and_spark() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut days = Days::load(dir.path());
-        // 用本地时区构造，避免测试机时区把日期挪走
-        let iso = |day: i64, h: u32| {
-            let t = chrono::Local::now() - chrono::Duration::days(day);
-            t.date_naive()
-                .and_hms_opt(h, 0, 0)
-                .unwrap()
-                .and_local_timezone(chrono::Local)
-                .unwrap()
-                .to_rfc3339_opts(SecondsFormat::Secs, true)
-        };
-        let today = today_local();
-        let a = e("a", &iso(0, 9), "修登录", "- [x] 修登录\n- [ ] 补测试");
-        let b = e("b", &iso(2, 9), "发版", "- [x] 打包\n- [x] 上传");
-        let mut gone = e("c", &iso(0, 10), "废弃", "- [ ] 不该出现");
-        gone.deleted_at = Some("t".into());
-        let mut shell = e("t1", &iso(0, 11), "zsh", "- [ ] 终端不算");
+    fn cards_sort_by_status_then_update_and_counts_skip_deleted() {
+        let ls = |status: &'static str, t: &str| LiveStatus { status, updated_at: t.into() };
+        let mut live = HashMap::new();
+        live.insert("act".to_string(), ls("active", "2026-09-07T09:00:00Z"));
+        live.insert("bg".to_string(), ls("background", "2026-09-07T01:00:00Z"));
+        live.insert("run".to_string(), ls("running", "2026-09-07T02:00:00Z"));
+        live.insert("ask".to_string(), ls("asking", "2026-09-07T00:00:00Z"));
+        live.insert("gone_pooled".to_string(), ls("paused", "2026-09-07T05:00:00Z"));
+        let mut gone = e("gone", "2026-09-06T00:00:00Z", "老会话", "- [ ] 没做完");
+        gone.ended_at = Some("2026-09-06T03:00:00Z".into());
+        let mut del = e("del", "2026-09-07T10:00:00Z", "删了", "- [ ] 不该计数");
+        del.deleted_at = Some("t".into());
+        let mut shell = e("t1", "2026-09-07T11:00:00Z", "zsh", "- [ ] 终端不进看板");
         shell.agent = "shell".into();
-        let entries = vec![a, gone, shell, b];
-        days.put(DayDigest { date: today.clone(), text: "- 修好登录".into(), sessions: 2, input_hash: 0, generated_at: "t".into() });
-        // a 在池子里且还在跑；b 只是没被清理掉的已退出记录
-        let alive: std::collections::HashSet<String> = ["a".to_string(), "b".to_string()].into_iter().collect();
-        let running: std::collections::HashSet<String> = ["a".to_string()].into_iter().collect();
-        let d = dashboard(&entries, &days, &alive, &running, &today);
-
-        assert_eq!(d.date, today, "客户端按 daemon 的今天画「（今天）」，不按自己的时区");
-        assert_eq!(d.today.sessions, 2, "今天：a + 已删除的 c（终端不进日历）");
-        assert_eq!((d.today.done, d.today.open), (1, 2));
-        assert_eq!(d.week.sessions, 3, "近 7 天含前天的 b");
-        assert_eq!(d.active, 1, "已退出但还在池子里的 b 不算「在跑」");
-        assert_eq!(d.open.len(), 1, "已删除与终端的未完项不进待办");
-        assert_eq!(d.open[0].text, "补测试");
-        assert!(d.open[0].alive && d.open[0].running);
-        assert_eq!(d.days[0].date, today, "最新的一天在前");
-        assert_eq!(d.days[0].text, "- 修好登录");
-        assert_eq!((d.days[0].done, d.days[0].open), (1, 2));
-        assert_eq!(d.days[0].entries.len(), 2);
-        assert!(d.days[0].entries.iter().any(|x| x.deleted && x.id == "c"));
-        assert_eq!(d.spark.len(), 56);
-        assert_eq!(d.spark[55], 2, "热力条最后一格是今天");
-        assert_eq!(d.spark[53], 1, "前天一条");
+        let entries = vec![
+            e("act", "2026-09-07T00:00:00Z", "激活的", "- [x] a\n- [ ] b"),
+            e("bg", "2026-09-07T00:00:00Z", "后台的", "- [ ] c"),
+            e("run", "2026-09-07T00:00:00Z", "运行的", ""),
+            e("ask", "2026-09-07T00:00:00Z", "在问的", "- [x] d"),
+            e("gone_pooled", "2026-09-07T00:00:00Z", "退出还在池子", "- [ ] e"),
+            gone,
+            del,
+            shell,
+        ];
+        let d = dashboard(&entries, &live);
+        let order: Vec<(&str, &str)> = d.sessions.iter().map(|c| (c.id.as_str(), c.status.as_str())).collect();
+        assert_eq!(
+            order,
+            vec![
+                ("ask", "asking"),
+                ("run", "running"),
+                ("bg", "background"),
+                ("act", "active"),
+                // paused 里按 updated_at：退出还在池子的 05:00 > 老会话的 ended_at 03:00；
+                // 已删除的哪怕更新（10:00）也沉到组尾
+                ("gone_pooled", "paused"),
+                ("gone", "paused"),
+                ("del", "paused"),
+            ]
+        );
+        assert!(d.sessions.iter().all(|c| c.id != "t1"), "终端不进看板");
+        let gp = d.sessions.iter().find(|c| c.id == "gone_pooled").unwrap();
+        assert!(gp.alive, "还在池子里就能点开");
+        assert!(!d.sessions.iter().find(|c| c.id == "gone").unwrap().alive);
+        assert!(d.sessions.iter().find(|c| c.id == "del").unwrap().deleted);
+        assert_eq!(
+            d.counts,
+            Counts { asking: 1, running: 1, background: 1, active: 1, paused: 2, open_items: 4 },
+            "已删除的不计数（open_items：b c e + 老会话的一项）"
+        );
+        let act = d.sessions.iter().find(|c| c.id == "act").unwrap();
+        assert_eq!((act.done, act.open), (1, 1));
+        assert_eq!(act.items[1].text, "b");
     }
 }

@@ -1,16 +1,29 @@
-//! 「看板」页（2026-09-07 用户拍板，取代原来的历史两 tab）：一眼看出**最近做了什么**、
-//! **还有什么没做**。数据是 daemon 一次算好的 `GET /history/dashboard`。
+//! 「看板」页（2026-09-07 用户拍板，第二版）：**所有会话的进度**，没有时间维度。
+//! 数据是 daemon 一次算好的 `GET /history/dashboard`。
 //!
-//! 顶上三块数字（今天 / 近 7 天 / 此刻）+ 近 8 周的活动热力条；下面两栏——左边把所有
-//! 会话里没勾的清单项按项目归并成一张待办表，右边按天倒序的流水（haiku 写的「这一天
-//! 做了什么」+ 当天会话）。搜索框两栏共用。会话还在就能点开，已删除的只能看。
+//! 顶上一条计数（待回复 / 运行 / 后台 / 激活 / 暂停，点一个 = 只看那一组；再点取消）
+//! + 未完成条目数 + 搜索。主体一会话一张卡：状态字 + 标题 + 项目，一根进度条
+//! `done/total`，下面直接列没勾的项，做完的折成一行「已做 N」点开看。已完成的（暂停
+//! 且全勾完）默认收进「已完成 N」一组；已删除的默认不显示，一个开关切出来。
+//! 会话还在就能点开，已退出的只能看。
 
 use gpui::{Context, SharedString, div, prelude::*, px};
 
 use super::RootView;
 use super::kit::*;
-use crate::model::{DayCard, Dashboard, OpenItem, day_card_matches, group_open_by_project, open_item_matches};
+use crate::model::{Dashboard, SessionCard, card_is_finished, card_matches, status_label};
 use crate::theme;
+
+const STATUSES: [&str; 5] = ["asking", "running", "background", "active", "paused"];
+
+fn status_color(status: &str) -> u32 {
+    match status {
+        "asking" => theme::amber(),
+        "running" | "background" => theme::green(),
+        "active" => theme::accent(),
+        _ => theme::faint(),
+    }
+}
 
 impl RootView {
     pub(super) fn open_history(&mut self, cx: &mut Context<Self>) {
@@ -32,96 +45,41 @@ impl RootView {
         );
     }
 
-    /// 数字块：大字 + 小标题；副行是「做完 / 没做」
-    fn stat_tile(&self, label: &str, big: String, sub: String) -> gpui::Div {
+    /// 顶上的计数块：点一下只看这一组，再点取消
+    fn count_chip(&self, status: &'static str, n: usize, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        let on = self.dash_filter.as_deref() == Some(status);
         div()
-            .flex()
-            .flex_col()
-            .gap(px(2.))
-            .px(px(12.))
-            .py(px(8.))
-            .min_w(px(120.))
-            .rounded(px(10.))
-            .bg(c(theme::surface()))
-            .border_1()
-            .border_color(c(theme::edge()))
-            .child(div().text_size(px(10.5)).text_color(c(theme::faint())).child(SharedString::from(label.to_string())))
-            .child(
-                div()
-                    .font_family("Menlo")
-                    .text_size(px(20.))
-                    .text_color(c(theme::ink()))
-                    .child(SharedString::from(big)),
-            )
-            .child(div().font_family("Menlo").text_size(px(10.5)).text_color(c(theme::dim())).child(SharedString::from(sub)))
-    }
-
-    /// 近 8 周的活动热力条：一格一天，最旧在左，颜色深浅按当天会话数
-    fn spark_strip(&self) -> gpui::Div {
-        let spark = &self.dashboard.spark;
-        let max = spark.iter().copied().max().unwrap_or(0).max(1);
-        let mut row = div().flex().gap(px(2.)).items_end();
-        for n in spark {
-            let alpha = if *n == 0 { 0.10 } else { 0.25 + 0.75 * (*n as f32 / max as f32) };
-            row = row.child(div().w(px(6.)).h(px(14.)).rounded(px(2.)).bg(ca(theme::accent(), alpha)));
-        }
-        div()
+            .id(SharedString::from(format!("dash-chip:{status}")))
             .flex()
             .items_center()
-            .gap(px(8.))
-            .child(div().font_family("Menlo").text_size(px(10.)).text_color(c(theme::faint())).child("8 周"))
-            .child(row)
-    }
-
-    /// 左栏一条待办
-    fn open_row(&self, it: &OpenItem, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
-        let now = chrono::Local::now();
-        let when = super::detail_panel::fmt_artifact_time(&it.created_at, &now, &chrono::Local).unwrap_or_default();
-        let sid = it.session_id.clone();
-        let alive = it.alive;
-        let running = it.running;
-        div()
-            .id(SharedString::from(format!("todo:{}:{}", it.session_id, it.text)))
-            .flex()
-            .items_start()
-            .gap(px(8.))
+            .gap(px(6.))
             .px(px(10.))
             .py(px(5.))
-            .rounded(px(6.))
-            .when(alive, |el| {
-                el.cursor_pointer().hover(|st| st.bg(c(theme::surface_raised()))).on_click(cx.listener(move |this, _, _, cx| {
-                    this.open_session(sid.clone(), cx);
-                }))
-            })
-            .child(div().flex_none().text_size(px(12.)).text_color(c(theme::amber())).child("☐"))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .flex()
-                    .flex_col()
-                    .child(div().text_size(px(12.5)).text_color(c(theme::ink())).whitespace_normal().child(SharedString::from(it.text.clone())))
-                    .child(
-                        div()
-                            .truncate()
-                            .font_family("Menlo")
-                            .text_size(px(10.))
-                            .text_color(c(theme::faint()))
-                            .child(SharedString::from(format!("{} · {}", it.title, when))),
-                    ),
-            )
-            .when(running, |el| {
-                el.child(div().flex_none().text_size(px(10.)).text_color(c(theme::green())).child("● 在跑"))
-            })
+            .rounded(px(8.))
+            .cursor_pointer()
+            .border_1()
+            .border_color(c(if on { status_color(status) } else { theme::edge() }))
+            .when(on, |el| el.bg(ca(status_color(status), 0.14)))
+            .hover(|st| st.bg(c(theme::surface_raised())))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.dash_filter = if this.dash_filter.as_deref() == Some(status) { None } else { Some(status.to_string()) };
+                cx.notify();
+            }))
+            .child(div().text_size(px(11.5)).text_color(c(status_color(status))).child(status_label(status)))
+            .child(div().font_family("Menlo").text_size(px(13.)).text_color(c(theme::ink())).child(SharedString::from(n.to_string())))
     }
 
-    /// 右栏一天
-    fn day_card(&self, d: &DayCard, today: &str, cx: &mut Context<Self>) -> gpui::Div {
-        let expanded = self.history_expanded.contains(&d.date);
-        let date_key = d.date.clone();
-        let head = format!("{}{}", d.date, if d.date == today { "（今天）" } else { "" });
-        let counts = format!("{} 会话 · 做完 {} · 没做 {}", d.sessions, d.done, d.open);
-        let mut card = div()
+    /// 一张卡
+    fn card(&self, card: &SessionCard, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        let total = card.done + card.open;
+        let frac = if total == 0 { 0. } else { card.done as f32 / total as f32 };
+        let done_open = self.history_expanded.contains(&card.id);
+        let id_toggle = card.id.clone();
+        let id_open = card.id.clone();
+        let alive = card.alive;
+        let color = status_color(&card.status);
+        let mut el = div()
+            .id(SharedString::from(format!("card:{}", card.id)))
             .flex()
             .flex_col()
             .gap(px(6.))
@@ -130,6 +88,8 @@ impl RootView {
             .bg(c(theme::surface()))
             .border_1()
             .border_color(c(theme::edge()))
+            .when(card.deleted, |el| el.opacity(0.6))
+            // 标题行：状态字 + 标题 + 项目 +「打开」
             .child(
                 div()
                     .flex()
@@ -137,218 +97,201 @@ impl RootView {
                     .gap(px(8.))
                     .child(
                         div()
+                            .flex_none()
+                            .px(px(5.))
+                            .py(px(1.))
+                            .rounded(px(4.))
+                            .border_1()
+                            .border_color(ca(color, 0.7))
                             .font_family("Menlo")
-                            .text_size(px(12.))
-                            .text_color(c(if d.date == today { theme::accent() } else { theme::ink() }))
-                            .child(SharedString::from(head)),
+                            .text_size(px(10.))
+                            .text_color(c(color))
+                            .child(if card.deleted { "已删除" } else { status_label(&card.status) }),
                     )
-                    .child(div().flex_1())
-                    .child(div().font_family("Menlo").text_size(px(10.)).text_color(c(theme::faint())).child(SharedString::from(counts))),
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .truncate()
+                            .text_size(px(13.))
+                            .text_color(c(if card.deleted { theme::dim() } else { theme::ink() }))
+                            .child(SharedString::from(card.title.clone())),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .font_family("Menlo")
+                            .text_size(px(10.))
+                            .text_color(c(theme::faint()))
+                            .child(SharedString::from(card.project_name.clone())),
+                    )
+                    .when(alive, |el| {
+                        el.child(
+                            div()
+                                .id(SharedString::from(format!("card-open:{}", card.id)))
+                                .flex_none()
+                                .px(px(6.))
+                                .py(px(2.))
+                                .rounded(px(4.))
+                                .text_size(px(10.5))
+                                .text_color(c(theme::accent()))
+                                .cursor_pointer()
+                                .hover(|st| st.bg(c(theme::edge_light())))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.open_session(id_open.clone(), cx);
+                                }))
+                                .child("打开"),
+                        )
+                    }),
             );
-        if d.text.is_empty() {
-            card = card.child(
+        // 进度条 + 数字
+        if total > 0 {
+            el = el.child(
                 div()
-                    .text_size(px(11.5))
-                    .text_color(c(theme::faint()))
-                    .child("haiku 还没写这一天的摘要（daemon 每 5 分钟补一次）"),
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .h(px(4.))
+                            .rounded(px(2.))
+                            .bg(c(theme::edge()))
+                            .child(div().h_full().w(gpui::relative(frac)).rounded(px(2.)).bg(c(if card.open == 0 { theme::green() } else { theme::accent() }))),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .font_family("Menlo")
+                            .text_size(px(10.))
+                            .text_color(c(theme::dim()))
+                            .child(SharedString::from(format!("{}/{}", card.done, total))),
+                    ),
             );
         } else {
-            for line in d.text.lines() {
-                let body = line.trim_start_matches(['-', '*', '•']).trim().to_string();
-                if body.is_empty() {
-                    continue;
+            el = el.child(div().text_size(px(11.)).text_color(c(theme::faint())).child("没有进度清单"));
+        }
+        // 没勾的项
+        for it in card.items.iter().filter(|i| !i.done) {
+            el = el.child(
+                div()
+                    .flex()
+                    .gap(px(6.))
+                    .items_start()
+                    .child(div().flex_none().text_size(px(11.5)).text_color(c(theme::amber())).child("☐"))
+                    .child(div().text_size(px(12.)).text_color(c(theme::ink())).whitespace_normal().child(SharedString::from(it.text.clone()))),
+            );
+        }
+        // 做完的折成一行
+        if card.done > 0 {
+            el = el.child(
+                div()
+                    .id(SharedString::from(format!("card-done:{}", card.id)))
+                    .cursor_pointer()
+                    .font_family("Menlo")
+                    .text_size(px(10.5))
+                    .text_color(c(theme::dim()))
+                    .hover(|st| st.text_color(c(theme::ink())))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        if !this.history_expanded.remove(&id_toggle) {
+                            this.history_expanded.insert(id_toggle.clone());
+                        }
+                        cx.notify();
+                    }))
+                    .child(SharedString::from(format!("{} 已做 {}", if done_open { "▾" } else { "▸" }, card.done))),
+            );
+            if done_open {
+                for it in card.items.iter().filter(|i| i.done) {
+                    el = el.child(
+                        div()
+                            .flex()
+                            .gap(px(6.))
+                            .items_start()
+                            .child(div().flex_none().text_size(px(11.5)).text_color(c(theme::green())).child("☑"))
+                            .child(div().text_size(px(12.)).text_color(c(theme::dim())).whitespace_normal().child(SharedString::from(it.text.clone()))),
+                    );
                 }
-                card = card.child(
-                    div()
-                        .flex()
-                        .gap(px(6.))
-                        .child(div().flex_none().text_size(px(11.)).text_color(c(theme::green())).child("▪"))
-                        .child(div().text_size(px(12.5)).text_color(c(theme::ink())).whitespace_normal().child(SharedString::from(body))),
-                );
             }
         }
-        card = card.child(
-            div()
-                .id(SharedString::from(format!("day-toggle:{}", d.date)))
-                .cursor_pointer()
-                .font_family("Menlo")
-                .text_size(px(10.5))
-                .text_color(c(theme::dim()))
-                .hover(|st| st.text_color(c(theme::ink())))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if !this.history_expanded.remove(&date_key) {
-                        this.history_expanded.insert(date_key.clone());
-                    }
-                    cx.notify();
-                }))
-                .child(SharedString::from(format!("{} 这天的会话 {}", if expanded { "▾" } else { "▸" }, d.sessions))),
-        );
-        if expanded {
-            for e in &d.entries {
-                let sid = e.id.clone();
-                let alive = e.alive;
-                let running = e.running;
-                let tail = if e.deleted {
-                    "已删除".to_string()
-                } else if e.done + e.open == 0 {
-                    String::new()
-                } else {
-                    format!("{}/{}", e.done, e.done + e.open)
-                };
-                card = card.child(
-                    div()
-                        .id(SharedString::from(format!("day-sess:{}", e.id)))
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .px(px(8.))
-                        .py(px(4.))
-                        .rounded(px(6.))
-                        .when(alive, |el| {
-                            el.cursor_pointer().hover(|st| st.bg(c(theme::surface_raised()))).on_click(cx.listener(move |this, _, _, cx| {
-                                this.open_session(sid.clone(), cx);
-                            }))
-                        })
-                        .child(
-                            div()
-                                .flex_none()
-                                .text_size(px(11.))
-                                .text_color(c(if e.deleted {
-                                    theme::faint()
-                                } else if running {
-                                    theme::green()
-                                } else if e.open > 0 {
-                                    theme::amber()
-                                } else {
-                                    theme::dim()
-                                }))
-                                .child(if e.deleted {
-                                    "✕"
-                                } else if running {
-                                    "◐"
-                                } else if e.open > 0 {
-                                    "☐"
-                                } else {
-                                    "☑"
-                                }),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w(px(0.))
-                                .truncate()
-                                .text_size(px(12.))
-                                .text_color(c(if e.deleted { theme::dim() } else { theme::ink() }))
-                                .child(SharedString::from(e.title.clone())),
-                        )
-                        .child(
-                            div()
-                                .flex_none()
-                                .font_family("Menlo")
-                                .text_size(px(10.))
-                                .text_color(c(theme::faint()))
-                                .child(SharedString::from(format!("{} {}", e.project_name, tail))),
-                        ),
-                );
-            }
-        }
-        card
+        el
     }
 
     pub(super) fn render_history_page(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let query = self.history_input.read(cx).text().to_string();
         let d = &self.dashboard;
-        // 「（今天）」按 daemon 的日期画：客户端与 daemon 不在一个时区时才不会标错天
-        let today = d.date.clone();
 
-        let open_items: Vec<&OpenItem> = d.open.iter().filter(|i| open_item_matches(i, &query)).collect();
-        let owned: Vec<OpenItem> = open_items.iter().map(|i| (*i).clone()).collect();
-        let groups = group_open_by_project(&owned);
+        // 过滤：搜索 → 状态组 → 已删除开关
+        let matched: Vec<&SessionCard> = d
+            .sessions
+            .iter()
+            .filter(|c| card_matches(c, &query))
+            .filter(|c| self.dash_filter.as_deref().is_none_or(|f| c.status == f))
+            .filter(|c| self.dash_show_deleted || !c.deleted)
+            .collect();
+        let (finished, active): (Vec<&SessionCard>, Vec<&SessionCard>) = matched.iter().partition(|c| card_is_finished(c) && !c.deleted);
 
-        // ── 左栏：还没做 ──
-        let mut left = div().flex().flex_col().gap(px(10.));
-        left = left.child(
+        let toggle = |id: &'static str, label: String, on: bool| {
             div()
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .child(div().text_size(px(13.)).font_weight(gpui::FontWeight::BOLD).text_color(c(theme::ink())).child("还没做"))
-                .child(
-                    div()
-                        .font_family("Menlo")
-                        .text_size(px(10.5))
-                        .text_color(c(theme::amber()))
-                        .child(SharedString::from(open_items.len().to_string())),
-                ),
-        );
-        if groups.is_empty() {
-            left = left.child(
-                div()
-                    .text_size(px(12.))
-                    .text_color(c(theme::faint()))
-                    .child(if d.open.is_empty() { "没有待办——每个会话的进度清单都勾完了" } else { "没有匹配的待办" }),
-            );
+                .id(id)
+                .px(px(8.))
+                .py(px(3.))
+                .rounded(px(6.))
+                .cursor_pointer()
+                .text_size(px(11.))
+                .text_color(c(if on { theme::accent() } else { theme::dim() }))
+                .when(on, |el| el.bg(ca(theme::accent(), 0.14)))
+                .hover(|st| st.bg(c(theme::surface_raised())))
+                .child(SharedString::from(label))
+        };
+
+        let mut list = div().flex().flex_col().gap(px(8.));
+        if active.is_empty() && finished.is_empty() {
+            list = list.child(div().text_size(px(12.)).text_color(c(theme::faint())).child(if d.sessions.is_empty() {
+                "还没有记录（daemon 每秒把会话同步进日志）"
+            } else {
+                "没有匹配的会话"
+            }));
         }
-        for (project, items) in &groups {
-            let mut sec = div()
-                .flex()
-                .flex_col()
-                .gap(px(2.))
-                .p(px(8.))
-                .rounded(px(10.))
-                .bg(c(theme::surface()))
-                .border_1()
-                .border_color(c(theme::edge()))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .px(px(10.))
-                        .pb(px(4.))
-                        .child(div().text_size(px(12.)).text_color(c(theme::dim())).child(SharedString::from(project.clone())))
-                        .child(div().flex_1())
-                        .child(
-                            div()
-                                .font_family("Menlo")
-                                .text_size(px(10.))
-                                .text_color(c(theme::faint()))
-                                .child(SharedString::from(items.len().to_string())),
-                        ),
-                );
-            for it in items {
-                sec = sec.child(self.open_row(it, cx));
+        for card in &active {
+            list = list.child(self.card(card, cx));
+        }
+        if !finished.is_empty() {
+            list = list.child(
+                toggle("dash-finished", format!("{} 已完成 {}", if self.dash_show_finished { "▾" } else { "▸" }, finished.len()), self.dash_show_finished)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.dash_show_finished = !this.dash_show_finished;
+                        cx.notify();
+                    })),
+            );
+            if self.dash_show_finished {
+                for card in &finished {
+                    list = list.child(self.card(card, cx));
+                }
             }
-            left = left.child(sec);
         }
 
-        // ── 右栏：最近做了什么 ──
-        let days: Vec<&DayCard> = d.days.iter().filter(|x| day_card_matches(x, &query)).collect();
-        let mut right = div().flex().flex_col().gap(px(10.));
-        right = right.child(
+        let deleted_n = d.sessions.iter().filter(|c| c.deleted).count();
+        let mut chips = div().flex().items_center().gap(px(6.)).flex_wrap();
+        for st in STATUSES {
+            let n = match st {
+                "asking" => d.counts.asking,
+                "running" => d.counts.running,
+                "background" => d.counts.background,
+                "active" => d.counts.active,
+                _ => d.counts.paused,
+            };
+            chips = chips.child(self.count_chip(st, n, cx));
+        }
+        chips = chips.child(
             div()
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .child(div().text_size(px(13.)).font_weight(gpui::FontWeight::BOLD).text_color(c(theme::ink())).child("最近做了什么"))
-                .child(
-                    div()
-                        .font_family("Menlo")
-                        .text_size(px(10.5))
-                        .text_color(c(theme::faint()))
-                        .child(SharedString::from(format!("{} 天", days.len()))),
-                ),
+                .font_family("Menlo")
+                .text_size(px(10.5))
+                .text_color(c(theme::amber()))
+                .pl(px(6.))
+                .child(SharedString::from(format!("未完成 {} 条", d.counts.open_items))),
         );
-        if days.is_empty() {
-            right = right.child(
-                div()
-                    .text_size(px(12.))
-                    .text_color(c(theme::faint()))
-                    .child(if d.days.is_empty() { "还没有记录（daemon 每秒把会话同步进日志）" } else { "没有匹配的日子" }),
-            );
-        }
-        for day in days {
-            right = right.child(self.day_card(day, &today, cx));
-        }
 
         div()
             .size_full()
@@ -362,27 +305,18 @@ impl RootView {
                     .items_center()
                     .gap(px(10.))
                     .child(div().text_size(px(14.)).font_weight(gpui::FontWeight::BOLD).text_color(c(theme::ink())).child("看板"))
-                    .child(self.spark_strip())
+                    .child(chips)
                     .child(div().flex_1())
-                    .child(div().w(px(240.)).child(self.history_input.clone())),
+                    .when(deleted_n > 0, |el| {
+                        el.child(
+                            toggle("dash-deleted", format!("已删除 {}", deleted_n), self.dash_show_deleted).on_click(cx.listener(|this, _, _, cx| {
+                                this.dash_show_deleted = !this.dash_show_deleted;
+                                cx.notify();
+                            })),
+                        )
+                    })
+                    .child(div().w(px(220.)).child(self.history_input.clone())),
             )
-            .child(
-                div()
-                    .flex()
-                    .gap(px(10.))
-                    .child(self.stat_tile("今天", format!("{} 会话", d.today.sessions), format!("做完 {} · 没做 {}", d.today.done, d.today.open)))
-                    .child(self.stat_tile("近 7 天", format!("{} 会话", d.week.sessions), format!("做完 {} · 没做 {}", d.week.done, d.week.open)))
-                    .child(self.stat_tile("此刻", format!("{} 在跑", d.active), format!("待办共 {} 条", d.open.len()))),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h(px(0.))
-                    .flex()
-                    .gap(px(12.))
-                    .items_start()
-                    .child(div().id("dash-todo").w(px(340.)).flex_none().h_full().overflow_y_scroll().child(left))
-                    .child(div().id("dash-days").flex_1().min_w(px(0.)).h_full().overflow_y_scroll().child(right)),
-            )
+            .child(div().id("dash-scroll").flex_1().min_h(px(0.)).overflow_y_scroll().child(list))
     }
 }
