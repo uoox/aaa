@@ -16,10 +16,11 @@ use gpui::{Context, SharedString, div, prelude::*, px, relative};
 
 use super::kit::*;
 use super::{Page, RootView};
-use crate::model::{parse_checklist, 
-    Artifact, PlanUsage, Session, SessionUsage, is_muted, toggle_muted,
+use crate::model::{
+    Artifact, PlanUsage, Session, SessionDetailResponse, SessionUsage, is_muted, parse_checklist,
+    toggle_muted,
 };
-use crate::theme;
+use crate::theme::{self, human_bytes};
 
 /// 面板宽度
 pub(super) const DETAIL_W: f32 = 300.0;
@@ -225,11 +226,16 @@ where
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum DetailKind {
     Artifacts,
+    /// v1.17：子代理 / 后台任务 / 已上传 / 技能，一个接口一次拿齐
+    Extras,
 }
 
 pub(super) struct SessionDetail {
     pub artifacts: Vec<Artifact>,
     pub artifacts_fetch: Throttle,
+    /// `GET /sessions/:id/detail` 的结果；老 daemon 404 时留空表
+    pub extras: SessionDetailResponse,
+    pub extras_fetch: Throttle,
 }
 
 impl Default for SessionDetail {
@@ -237,6 +243,8 @@ impl Default for SessionDetail {
         SessionDetail {
             artifacts: Vec::new(),
             artifacts_fetch: Throttle::new(ARTIFACTS_MIN),
+            extras: SessionDetailResponse::default(),
+            extras_fetch: Throttle::new(ARTIFACTS_MIN),
         }
     }
 }
@@ -267,6 +275,7 @@ impl RootView {
             return;
         }
         self.request_detail_fetch(id, DetailKind::Artifacts, cx);
+        self.request_detail_fetch(id, DetailKind::Extras, cx);
     }
 
     /// `messages_changed`：面板正看着它才重拉（不做无谓轮询），节流见模块注释
@@ -275,6 +284,7 @@ impl RootView {
             return;
         }
         self.request_detail_fetch(id, DetailKind::Artifacts, cx);
+        self.request_detail_fetch(id, DetailKind::Extras, cx);
     }
 
     /// 会话没了：面板状态一起丢
@@ -287,6 +297,7 @@ impl RootView {
         let d = self.detail.entry(id.to_string()).or_default();
         let t = match kind {
             DetailKind::Artifacts => &mut d.artifacts_fetch,
+            DetailKind::Extras => &mut d.extras_fetch,
         };
         match t.request(now) {
             Decision::Now => self.fetch_detail_now(id, kind, cx),
@@ -299,6 +310,7 @@ impl RootView {
                         if let Some(d) = r.detail.get_mut(&id) {
                             match kind {
                                 DetailKind::Artifacts => d.artifacts_fetch.fire(Instant::now()),
+                                DetailKind::Extras => d.extras_fetch.fire(Instant::now()),
                             }
                             r.fetch_detail_now(&id, kind, cx);
                         }
@@ -321,6 +333,18 @@ impl RootView {
                         let mut list = resp.artifacts;
                         sort_artifacts_newest_first(&mut list);
                         r.detail.entry(sid).or_default().artifacts = list;
+                        cx.notify();
+                    },
+                    false,
+                    cx,
+                );
+            }
+            DetailKind::Extras => {
+                let fut = self.net.session_detail(id);
+                self.spawn_fetch(
+                    fut,
+                    move |r, resp: crate::model::SessionDetailResponse, cx| {
+                        r.detail.entry(sid).or_default().extras = resp;
                         cx.notify();
                     },
                     false,
@@ -391,6 +415,88 @@ impl RootView {
             .child(body)
     }
 
+    /// 带计数的段（`子代理 3`）：v1.17 的四段都有条数，数字比「有没有内容」更快说明问题
+    fn section_n(label: &'static str, n: usize, body: impl IntoElement) -> gpui::Div {
+        div()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .px(px(14.))
+            .py(px(12.))
+            .border_b_1()
+            .border_color(ca(theme::edge(), 0.7))
+            .child(
+                div()
+                    .font_family("Menlo")
+                    .text_size(px(10.))
+                    .text_color(c(theme::faint()))
+                    .pb(px(6.))
+                    .child(SharedString::from(if n == 0 { label.to_string() } else { format!("{label} {n}") })),
+            )
+            .child(body)
+    }
+
+    /// v1.17 的四段（子代理 / 后台任务 / 已上传 / 技能）长得都是「一行标题 + 一行小字」，
+    /// 排版只写一次。`lead` 是行首那一小块（子代理的状态记号），没有就传 None。
+    fn detail_rows(
+        rows: Vec<(Option<(&'static str, u32)>, String, String, String)>,
+        empty: &'static str,
+    ) -> gpui::Div {
+        if rows.is_empty() {
+            return Self::empty_hint(empty);
+        }
+        let mut col = div().flex().flex_col().gap(px(4.));
+        for (lead, title, sub, trailing) in rows {
+            let mut head = div().flex().items_center().gap(px(6.));
+            if let Some((mark, color)) = lead {
+                head = head.child(
+                    div()
+                        .flex_none()
+                        .w(px(10.))
+                        .font_family("Menlo")
+                        .text_size(px(10.))
+                        .text_color(c(color))
+                        .child(mark),
+                );
+            }
+            head = head
+                .child(
+                    div()
+                        .flex_1()
+                        .truncate()
+                        .text_size(px(12.))
+                        .text_color(c(theme::ink()))
+                        .child(SharedString::from(title)),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .font_family("Menlo")
+                        .text_size(px(10.))
+                        .text_color(c(theme::faint()))
+                        .child(SharedString::from(trailing)),
+                );
+            col = col.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(1.))
+                    .py(px(3.))
+                    .child(head)
+                    .when(!sub.is_empty(), |el| {
+                        el.child(
+                            div()
+                                .line_clamp(2)
+                                .text_size(px(11.))
+                                .text_color(c(theme::dim()))
+                                .child(SharedString::from(sub)),
+                        )
+                    }),
+            );
+        }
+        col
+    }
+
     /// 面板本体；不在会话页 / 面板收起 / 终端会话 → None
     pub(super) fn render_detail_panel(&self, cx: &mut Context<Self>) -> Option<gpui::Div> {
         if !self.detail_visible {
@@ -402,6 +508,8 @@ impl RootView {
             return None;
         }
         let d = self.detail.get(id);
+        let empty_extras = SessionDetailResponse::default();
+        let ex = d.map(|d| &d.extras).unwrap_or(&empty_extras);
         let now = chrono::Local::now();
 
         let header = div()
@@ -448,7 +556,12 @@ impl RootView {
             .overflow_y_scroll()
             .child(Self::section("会话", Self::render_usage_section(s.usage.as_ref())))
             .child(Self::section("进度", Self::render_checklist_section(s)))
-            .child(Self::section("产物", self.render_artifacts_section(d, &now, cx)))
+            // v1.17：消息流里翻不出来的四样（子代理 / 后台任务 / 已上传 / 技能）
+            .child(Self::section_n("子代理", ex.subagents.len(), Self::render_subagents(ex, &now)))
+            .child(Self::section_n("后台任务", ex.background_tasks.len(), Self::render_background(ex, &now)))
+            .child(Self::section_n("已上传", ex.uploads.len(), Self::render_uploads(ex, &now)))
+            .child(Self::section_n("产物", d.map(|d| d.artifacts.len()).unwrap_or(0), self.render_artifacts_section(d, &now, cx)))
+            .child(Self::section_n("已使用技能", ex.skills.len(), Self::render_skills(ex, &now)))
             .child(Self::section("通知", self.render_notify_section(s, cx)));
 
         Some(
@@ -705,6 +818,75 @@ impl RootView {
             );
         }
         col
+    }
+
+    /// 子代理：状态记号（跑着 ⋯ / 成了 ✓ / 挂了 ✗）+ 类型 + 它去干什么
+    fn render_subagents(ex: &SessionDetailResponse, now: &DateTime<chrono::Local>) -> gpui::Div {
+        let rows = ex
+            .subagents
+            .iter()
+            .map(|a| {
+                let lead = match a.status.as_str() {
+                    "running" => ("⋯", theme::accent()),
+                    "err" => ("✗", theme::red()),
+                    _ => ("✓", theme::green()),
+                };
+                let title = if a.kind.is_empty() { a.tool.clone() } else { a.kind.clone() };
+                (Some(lead), title, a.summary.clone(), fmt_artifact_time(&a.ts, now, &chrono::Local).unwrap_or_default())
+            })
+            .collect();
+        Self::detail_rows(rows, "这个会话还没开过子代理")
+    }
+
+    /// 后台任务：还没等到 `<task-notification>` 的那些（会话行上「后台」两个字的来源）
+    fn render_background(ex: &SessionDetailResponse, now: &DateTime<chrono::Local>) -> gpui::Div {
+        let rows = ex
+            .background_tasks
+            .iter()
+            .map(|t| {
+                (
+                    Some(("⋯", theme::accent())),
+                    t.tool.clone(),
+                    t.summary.clone(),
+                    fmt_artifact_time(&t.ts, now, &chrono::Local).unwrap_or_default(),
+                )
+            })
+            .collect();
+        Self::detail_rows(rows, "没有挂着的后台任务")
+    }
+
+    /// 已上传：项目 `_inbox/` 里的文件（📎 和手机的系统分享都落这儿）
+    fn render_uploads(ex: &SessionDetailResponse, now: &DateTime<chrono::Local>) -> gpui::Div {
+        let rows = ex
+            .uploads
+            .iter()
+            .map(|u| {
+                (
+                    None,
+                    u.name.clone(),
+                    human_bytes(u.size),
+                    fmt_artifact_time(&u.ts, now, &chrono::Local).unwrap_or_default(),
+                )
+            })
+            .collect();
+        Self::detail_rows(rows, "还没有传过文件进这个项目")
+    }
+
+    /// 已使用技能：Skill 工具调用，按名字合并计数
+    fn render_skills(ex: &SessionDetailResponse, now: &DateTime<chrono::Local>) -> gpui::Div {
+        let rows = ex
+            .skills
+            .iter()
+            .map(|u| {
+                (
+                    None,
+                    u.name.clone(),
+                    if u.count > 1 { format!("{} 次", u.count) } else { String::new() },
+                    fmt_artifact_time(&u.last_ts, now, &chrono::Local).unwrap_or_default(),
+                )
+            })
+            .collect();
+        Self::detail_rows(rows, "这个会话还没用过技能")
     }
 
     fn render_notify_section(&self, s: &Session, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {

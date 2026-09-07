@@ -21,7 +21,6 @@ fn build_app(root: &Path, home: &Path) -> aaa_daemon::api::SharedApp {
         namer: true, // naming enabled, as in production
         remote_control_name: true,
         auto_trust: true,
-        auto_archive_days: 14,
     };
     let paths = aaa_daemon::paths::Paths::new(home);
     let hub = aaa_daemon::events::EventHub::new();
@@ -31,7 +30,6 @@ fn build_app(root: &Path, home: &Path) -> aaa_daemon::api::SharedApp {
     });
     let inbox = aaa_daemon::inbox::Inbox::load(&paths.state_dir());
     let pins = aaa_daemon::pins::Pins::load(&paths.state_dir());
-    let archived = aaa_daemon::archive::Archive::load(&paths.state_dir());
     let history = aaa_daemon::history::History::load(&paths.state_dir());
     Arc::new(aaa_daemon::api::App {
         cfg,
@@ -42,7 +40,6 @@ fn build_app(root: &Path, home: &Path) -> aaa_daemon::api::SharedApp {
         store_lock: std::sync::Mutex::new(()),
         bound_port: std::sync::atomic::AtomicU16::new(0),
         pins: std::sync::Mutex::new(pins),
-        archived: std::sync::Mutex::new(archived),
         history: std::sync::Mutex::new(history),
         inbox: std::sync::Mutex::new(inbox),
         plan_usage: std::sync::Mutex::new(None),

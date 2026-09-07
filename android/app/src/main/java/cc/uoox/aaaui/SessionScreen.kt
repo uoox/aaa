@@ -133,9 +133,6 @@ fun SessionScreen(
         if (composer.isEmpty() && saved.isNotEmpty()) composer = saved
     }
     LaunchedEffect(sessionId) { snapshotFlow { composer }.collect { store.setDraft(sessionId, it) } }
-    var showMenu by remember { mutableStateOf(false) }
-    var showArtifacts by remember { mutableStateOf(false) }
-    var showSummaries by remember { mutableStateOf(false) }
     val ctrlStickyState = remember { mutableStateOf(false) }
     var ctrlSticky by ctrlStickyState
     // 终端视图的键位条 + 输入框：默认收起，右下角 ⌨ 放出来；不持久化，每次进来都是收起的
@@ -159,6 +156,9 @@ fun SessionScreen(
     val s = session ?: helloSession
 
     LaunchedEffect(sessionId) { if (session == null) store.refreshSessions() }
+    // 黄点：进来就清掉，人在这一屏时又跑完一轮也当场清（2026-09-08）——
+    // 黄点说的是「这台设备还没看」，正看着就不算没看
+    LaunchedEffect(s?.project_path, s?.updated_at, s?.asking) { store.seenProject(s?.project_path) }
 
     // 消息流状态
     val messages = remember(sessionId) { mutableStateOf<List<ChatMessage>>(emptyList()) }
@@ -290,24 +290,22 @@ fun SessionScreen(
                 "☰", color = Tok.Dim, fontSize = 20.sp,
                 modifier = Modifier.clickable { scope.launch { drawerState.open() } }.padding(horizontal = 8.dp, vertical = 2.dp),
             )
-            Column(Modifier.weight(1f)) {
+            // 顶栏只有一行（2026-09-08 用户拍板）：标题 + 模型 + 上下文占比。项目名、resume id、
+            // 缓存命中率、花费都进详情屏——手机顶栏就这么宽，三行叠起来只是把标题挤扁
+            Text(
+                s?.title?.ifBlank { s.project_name } ?: sessionId,
+                color = Tok.Ink, fontSize = 15.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            val usageSegs = usageHeaderSegments(s?.usage)
+            if (usageSegs.isNotEmpty()) {
+                Spacer(Modifier.width(8.dp))
                 Text(
-                    s?.title?.ifBlank { s.project_name } ?: sessionId,
-                    color = Tok.Ink, fontSize = 15.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    segmentsAnnotated(usageSegs, Tok.Dim),
+                    fontSize = 10.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )
-                Text(
-                    listOfNotNull(s?.project_name, s?.resume_id?.let { "resume ${it.take(6)}" }).joinToString(" · "),
-                    color = Tok.Faint, fontSize = 10.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                )
-                // 用量小字：模型 · 上下文占比 · 花费；上下文 ≥70 琥珀、≥90 红。没有用量就一行都不占
-                val usageSegs = usageSubtitleSegments(s?.usage)
-                if (usageSegs.isNotEmpty()) {
-                    Text(
-                        segmentsAnnotated(usageSegs, Tok.Dim),
-                        fontSize = 10.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    )
-                }
             }
+            Spacer(Modifier.width(8.dp))
             // 视图切换：显示当前视图名，点一下换另一种
             if (messagesSupported != false) {
                 Text(
@@ -321,7 +319,12 @@ fun SessionScreen(
                 Spacer(Modifier.width(8.dp))
             }
             StateDot(Tok.stateColor(s?.state ?: ""))
-            Text("⋮", color = Tok.Dim, fontSize = 22.sp, modifier = Modifier.clickable { showMenu = true }.padding(horizontal = 10.dp))
+            // 2026-09-08 用户拍板：⋮ 整个换成详情按钮——里面九项大半一年用一次，而
+            // 子代理 / 后台任务 / 已上传 / 产物 / 技能这些「发生过但翻不出来」的才该占这个位置
+            Text(
+                "ⓘ", color = Tok.Dim, fontSize = 20.sp,
+                modifier = Modifier.clickable { nav.openDetail(sessionId) }.padding(horizontal = 10.dp),
+            )
         }
         if (!wsConnected && !showMessages) {
             Text("连接中…", color = Tok.Amber, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 16.dp))
@@ -441,146 +444,11 @@ fun SessionScreen(
     }
     }
 
-    if (showMenu && s != null) {
-        SessionMenuSheet(
-            store, nav, s, attachment, showMessagesMode = showMessages, onDismiss = { showMenu = false },
-            onArtifacts = { showMenu = false; showArtifacts = true },
-            onSummaries = { showMenu = false; showSummaries = true },
-        )
-    }
-    if (showArtifacts) {
-        ArtifactsSheet(store, sessionId, onDismiss = { showArtifacts = false })
-    }
-    if (showSummaries && s != null) {
-        ChecklistSheet(s.summary, onDismiss = { showSummaries = false })
-    }
 }
 
-// ---------- 进度（整个对话的清单） ----------
-
-/** daemon 在每次 Stop 后让 haiku 重写的进度清单：☑ 已做、☐ 未做。会话对象自带，不用另拉。 */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun ChecklistSheet(summary: String, onDismiss: () -> Unit) {
-    val items = remember(summary) { parseChecklist(summary) }
-    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = Tok.Surface) {
-        Column(Modifier.fillMaxWidth().padding(bottom = 20.dp)) {
-            Row(Modifier.padding(horizontal = 18.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("进度", color = Tok.Ink, fontSize = 16.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-                if (items.isNotEmpty()) Text(checklistProgress(items), color = Tok.Faint, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
-            }
-            if (items.isEmpty()) {
-                Text(
-                    "每轮回复结束后这里会更新一份「做了什么 / 还没做什么」",
-                    color = Tok.Faint, fontSize = 13.sp, modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 24.dp),
-                )
-            } else {
-                LazyColumn(Modifier.fillMaxWidth().heightIn(max = 520.dp)) {
-                    items(items.size) { i ->
-                        val it = items[i]
-                        Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 7.dp), verticalAlignment = Alignment.Top) {
-                            Text(if (it.done) "☑" else "☐", color = if (it.done) Tok.Green else Tok.Faint, fontSize = 16.sp, modifier = Modifier.width(26.dp))
-                            Text(it.text, color = if (it.done) Tok.Dim else Tok.Ink, fontSize = 14.sp, lineHeight = 20.sp, modifier = Modifier.weight(1f))
-                        }
-                    }
-                }
-            }
-            TextButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) { Text("关闭", color = Tok.Dim) }
-        }
-    }
-}
-
-/** 菜单副标题 / 抽屉头：`3/5 完成` */
+/** 进度清单的「3/7 完成」。清单本身在详情屏里画（DetailScreen.kt）。 */
 fun checklistProgress(items: List<ChecklistItem>): String = "${items.count { it.done }}/${items.size} 完成"
 
-// ---------- 产物（会话里发布的 Artifact） ----------
-
-/**
- * 打开时拉一次 `/sessions/{id}/artifacts`；开着期间这个会话的 messages_changed 再拉，
- * 但至少隔 2 秒——一轮回复能刷十几次消息，产物却不会那么频繁地变。
- */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun ArtifactsSheet(store: AppStore, sessionId: String, onDismiss: () -> Unit) {
-    val context = LocalContext.current
-    var items by remember { mutableStateOf<List<ArtifactInfo>?>(null) }
-    var error by remember { mutableStateOf<String?>(null) }
-    var lastFetch by remember { mutableStateOf(0L) }
-
-    suspend fun fetch() {
-        lastFetch = System.currentTimeMillis()
-        try {
-            items = sortArtifacts(store.client?.artifacts(sessionId).orEmpty())
-            error = null
-        } catch (e: DaemonHttpException) {
-            if (e.code == 404) { items = emptyList(); error = null } else error = e.message
-        } catch (e: Exception) { error = e.message }
-    }
-    LaunchedEffect(sessionId) { fetch() }
-    LaunchedEffect(sessionId) {
-        store.frames.collectLatest { f ->
-            if (f is EventFrame.MessagesChanged && f.id == sessionId) {
-                val wait = 2_000L - (System.currentTimeMillis() - lastFetch)
-                if (wait > 0) kotlinx.coroutines.delay(wait) // collectLatest：更新的帧来了就重新等
-                fetch()
-            }
-        }
-    }
-
-    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = Tok.Surface) {
-        Column(Modifier.fillMaxWidth().padding(bottom = 20.dp)) {
-            Row(Modifier.padding(horizontal = 18.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("产物", color = Tok.Ink, fontSize = 16.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-                items?.takeIf { it.isNotEmpty() }?.let { Text("${it.size}", color = Tok.Faint, fontSize = 12.sp, fontFamily = FontFamily.Monospace) }
-            }
-            val list = items
-            when {
-                list == null && error == null -> Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp, color = Tok.Accent)
-                }
-                list.isNullOrEmpty() -> Text(
-                    error?.let { "获取失败：$it" } ?: "这个会话还没有发布产物",
-                    color = if (error != null) Tok.Red else Tok.Faint, fontSize = 13.sp,
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 24.dp),
-                )
-                else -> LazyColumn(Modifier.fillMaxWidth().heightIn(max = 480.dp)) {
-                    items(list, key = { it.url + it.ts }) { a -> ArtifactRow(a) { openUrl(context, a.url) } }
-                }
-            }
-            TextButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) { Text("关闭", color = Tok.Dim) }
-        }
-    }
-}
-
-@Composable
-private fun ArtifactRow(a: ArtifactInfo, onClick: () -> Unit) {
-    Row(
-        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 18.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.Top,
-    ) {
-        Column(Modifier.weight(1f)) {
-            Text(
-                a.title.ifBlank { a.url.substringAfterLast('/').ifBlank { a.url } },
-                color = Tok.Ink, fontSize = 14.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis,
-            )
-            if (a.description.isNotBlank()) {
-                Text(a.description, color = Tok.Dim, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            }
-        }
-        Spacer(Modifier.width(10.dp))
-        Text(artifactTimeLabel(a.ts), color = Tok.Faint, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
-    }
-}
-
-
-// ---------- 消息流视图 ----------
-
-/**
- * 整宽、按轮折叠的消息流。数据形状由 StreamFold.kt 的纯函数决定，这里只管画和滚。
- *
- * 滚动：新消息到来时只有「之前就在底部」才跟到底，用户翻历史时不拽；首批数据到底。
- * 右下角浮动 ↓ 在没到底时出现，点一下滚到底。
- */
 @Composable
 fun MessagesView(
     messages: List<ChatMessage>,
@@ -1060,176 +928,6 @@ private fun AnswerBlock(m: ChatMessage) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SessionMenuSheet(
-    store: AppStore,
-    nav: NavHostController,
-    s: Session,
-    attachment: TerminalAttachment?,
-    showMessagesMode: Boolean,
-    onDismiss: () -> Unit,
-    onArtifacts: () -> Unit = {},
-    onSummaries: () -> Unit = {},
-) {
-    val scope = rememberCoroutineScope()
-    val context = LocalContext.current
-    val openSession = LocalOpenSession.current
-    var renameDialog by remember { mutableStateOf(false) }
-    var killDialog by remember { mutableStateOf(false) }
-    var deleteDialog by remember { mutableStateOf(false) }
-    var portsDialog by remember { mutableStateOf<List<PortInfo>?>(null) }
-    var urlsDialog by remember { mutableStateOf<List<String>?>(null) }
-
-    fun toast(msg: String) = Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-    /** 结束进程（用户自己动的手：随后的 exited 不弹通知），关掉操作单 */
-    fun doKill() {
-        scope.launch {
-            store.markUserKilled(s.id)
-            runCatching { store.client?.kill(s.id) }.onFailure { toast("失败：${it.message}") }
-        }
-        onDismiss()
-    }
-
-    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = Tok.Surface) {
-        Column(Modifier.padding(bottom = 20.dp)) {
-            Column(Modifier.padding(horizontal = 18.dp, vertical = 4.dp)) {
-                Text(s.title.ifBlank { s.project_name }, color = Tok.Ink, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                Text(s.project_path, color = Tok.Faint, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
-            }
-            SheetItem("🌐", "打开 Web 预览", "检测端口 · 内网直连") {
-                scope.launch {
-                    try {
-                        val ports = store.client?.ports(s.id).orEmpty()
-                        if (ports.isEmpty()) toast("未检测到监听端口")
-                        else if (ports.size == 1) { openPort(context, store, ports[0].port); onDismiss() }
-                        else portsDialog = ports
-                    } catch (e: Exception) { toast("获取端口失败：${e.message}") }
-                }
-            }
-            SheetItem("✏️", "重命名会话", if (s.resume_id != null) "当前为 AI 命名" else null) { renameDialog = true }
-            // 屏幕文本问 daemon：它的 vt100 有整屏和回滚（备用屏里 TUI 自己的历史除外），
-            // termlib 0.1.0 没把快照暴露出来，而且两端看到的本来就该是同一份
-            if (!showMessagesMode) SheetItem("📋", "复制屏幕内容", null) {
-                scope.launch {
-                    val text = runCatching { store.client?.screen(s.id)?.text }.getOrNull()?.trim()
-                    if (text.isNullOrBlank()) toast("屏幕为空") else { copyToClipboard(context, text); toast("已复制") }
-                    onDismiss()
-                }
-            }
-            // 直接点链接要点得准；回放里翻出来的地址（编译报错、dev server URL）
-            // 常常已经滚上去了，给一个列表入口
-            if (!showMessagesMode) SheetItem("🔗", "打开链接…", null) {
-                scope.launch {
-                    val fromDaemon = runCatching { store.client?.screen(s.id)?.text }.getOrNull()?.let { findUrls(it).map { u -> u.url } }.orEmpty()
-                    val fromScreen = attachment?.emulator?.getUrls(org.connectbot.terminal.UrlScanScope.ScreenAndScrollback)?.map { it.url }.orEmpty()
-                    val urls = (fromDaemon + fromScreen).distinct()
-                    if (urls.isEmpty()) toast("回放里没有链接") else urlsDialog = urls
-                }
-            }
-            SheetItem("📝", "进度", parseChecklist(s.summary).let { if (it.isEmpty()) "做了什么 / 还没做什么" else checklistProgress(it) }, onClick = onSummaries)
-            SheetItem("📦", "产物", "会话里发布的 Artifact", onClick = onArtifacts)
-            SheetItem("🔁", "重启 agent", "resume 同一会话") {
-                scope.launch {
-                    try {
-                        val api = store.client ?: return@launch
-                        store.markUserKilled(s.id)
-                        runCatching { api.kill(s.id) }
-                        val fresh = api.createSession(s.project_path, s.agent, resume = true)
-                        store.releaseAttachmentNow(s.id) // 老会话已经没了，别让它继续重连
-                        onDismiss()
-                        openSession(fresh.id, "")
-                    } catch (e: Exception) { toast("重启失败：${e.message}") }
-                }
-            }
-            // 只有还在执行（running 且不在问）的才确认——顺手点掉最伤；等你的直接结束
-            if (s.state != "exited") SheetItem("⛔", "结束进程", "保留回放", danger = true) {
-                if (s.state == "running" && !s.asking) killDialog = true else doKill()
-            }
-            SheetItem("🗑", "删除会话记录", null, danger = true) { deleteDialog = true }
-            TextButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) { Text("取消", color = Tok.Dim) }
-        }
-    }
-
-    if (renameDialog) {
-        var title by remember { mutableStateOf(s.title) }
-        AlertDialog(
-            onDismissRequest = { renameDialog = false },
-            containerColor = Tok.Raised,
-            title = { Text("重命名会话", color = Tok.Ink) },
-            text = { OutlinedTextField(title, { title = it }, singleLine = true) },
-            confirmButton = {
-                TextButton(onClick = {
-                    scope.launch {
-                        runCatching { store.client?.rename(s.id, title.trim()) }
-                            .onFailure { toast("重命名失败：${it.message}") }
-                        store.refreshSessions()
-                    }
-                    renameDialog = false; onDismiss()
-                }) { Text("确定") }
-            },
-            dismissButton = { TextButton(onClick = { renameDialog = false }) { Text("取消", color = Tok.Dim) } },
-        )
-    }
-    if (killDialog) {
-        ConfirmDialog("结束进程？", "会话仍在执行中，进程将被终止，屏幕回放保留。", "结束",
-            onConfirm = { killDialog = false; doKill() }, onCancel = { killDialog = false })
-    }
-    if (deleteDialog) {
-        ConfirmDialog("删除会话记录？", "删除会话与回放（进程若存活将先结束），不可恢复。", "删除",
-            onConfirm = {
-                scope.launch {
-                    runCatching { store.client?.deleteSession(s.id) }.onFailure { toast("失败：${it.message}") }
-                    store.releaseAttachmentNow(s.id)
-                    store.refreshSessions()
-                }
-                deleteDialog = false; onDismiss()
-                // 两栏时已经在 home 了，pop 是空操作；右栏靠 retainSelection 自己清空
-                nav.popBackStack("home", inclusive = false)
-            }, onCancel = { deleteDialog = false })
-    }
-    urlsDialog?.let { urls ->
-        AlertDialog(
-            onDismissRequest = { urlsDialog = null },
-            containerColor = Tok.Raised,
-            title = { Text("回放里的链接", color = Tok.Ink) },
-            text = {
-                Column(Modifier.verticalScroll(rememberScrollState())) {
-                    urls.forEach { url ->
-                        Text(
-                            url, color = Tok.Accent, fontSize = 13.sp, fontFamily = FontFamily.Monospace,
-                            maxLines = 2, overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.fillMaxWidth().clickable {
-                                openUrl(context, url); urlsDialog = null; onDismiss()
-                            }.padding(vertical = 8.dp),
-                        )
-                    }
-                }
-            },
-            confirmButton = { TextButton(onClick = { urlsDialog = null }) { Text("取消", color = Tok.Dim) } },
-        )
-    }
-    portsDialog?.let { ports ->
-        AlertDialog(
-            onDismissRequest = { portsDialog = null },
-            containerColor = Tok.Raised,
-            title = { Text("Web 预览", color = Tok.Ink) },
-            text = {
-                Column {
-                    ports.forEach { p ->
-                        Text(
-                            ":${p.port}  ${p.cmd}", color = Tok.Accent, fontFamily = FontFamily.Monospace,
-                            modifier = Modifier.fillMaxWidth().clickable {
-                                openPort(context, store, p.port); portsDialog = null; onDismiss()
-                            }.padding(vertical = 8.dp),
-                        )
-                    }
-                }
-            },
-            confirmButton = { TextButton(onClick = { portsDialog = null }) { Text("取消", color = Tok.Dim) } },
-        )
-    }
-}
-
-@Composable
 fun SheetItem(icon: String, label: String, note: String?, danger: Boolean = false, onClick: () -> Unit) {
     Row(
         Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 18.dp, vertical = 12.dp),
@@ -1258,11 +956,6 @@ fun ConfirmDialog(title: String, body: String, confirmLabel: String, onConfirm: 
 fun copyToClipboard(context: Context, text: String) {
     (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
         .setPrimaryClip(ClipData.newPlainText("aaa-ui", text))
-}
-
-private fun openPort(context: Context, store: AppStore, port: Int) {
-    val host = (store.connState.value as? ConnState.Connected)?.host?.substringBefore(':') ?: return
-    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("http://$host:$port")))
 }
 
 fun readUri(context: Context, uri: Uri): Pair<String, ByteArray> {

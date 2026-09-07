@@ -159,11 +159,14 @@ class DaemonRoundtripTest {
                 val listed = api.projects()
                 assertTrue(listed.any { it.path == proj.path && it.agent == "claude" })
 
-                // 会话：shell 会话 + 重命名 + ports + 列表
+                // 会话：shell 会话 + 重命名 + 详情 + 列表
                 val sess = api.createSession(proj.path, "shell", resume = false)
                 api.rename(sess.id, "重命名测试")
                 assertTrue(api.sessions().first { it.id == sess.id }.title == "重命名测试")
-                api.ports(sess.id) // 不断言内容，只验证解析
+                // v1.17 详情：终端会话四样都空，但形状要能解析
+                val detail = api.detail(sess.id)
+                assertTrue(detail.subagents.isEmpty() && detail.background_tasks.isEmpty())
+                assertTrue(detail.uploads.isEmpty() && detail.skills.isEmpty())
 
                 // 删除项目 → purge 报告
                 api.kill(sess.id)

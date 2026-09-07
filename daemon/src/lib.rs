@@ -2,8 +2,6 @@
 
 pub mod agents;
 pub mod answer;
-pub mod archive;
-pub mod autoarchive;
 pub mod api;
 pub mod cache;
 pub mod config;
@@ -22,7 +20,6 @@ pub mod perms;
 pub mod pins;
 pub mod pool;
 pub mod quota;
-pub mod ports;
 pub mod registry;
 pub mod rootcheck;
 pub mod screen;

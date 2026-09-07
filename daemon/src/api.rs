@@ -43,7 +43,6 @@ pub struct App {
     /// v1.8 置顶的项目路径（三端共享）
     pub pins: std::sync::Mutex<crate::pins::Pins>,
     /// v1.15：归档的项目（列表 / 看板默认藏起来）
-    pub archived: std::sync::Mutex<crate::archive::Archive>,
     /// v1.9 会话日志：所有出现过的会话，含已退出、已删除
     pub history: std::sync::Mutex<crate::history::History>,
     /// v1.10 日历：按天的 haiku 摘要
@@ -297,36 +296,6 @@ pub async fn restart_now(app: SharedApp) -> ApiResult<Value> {
     Ok(json!({"ok": true, "restarting": true, "killed": titles, "note": "daemon 将在 1 秒内重启，客户端会自动重连"}))
 }
 
-/// v1.16 自动归档扫描（每小时）：暂停超过 N 天、清单全勾完的项目自动进归档
-pub fn auto_archive_sweep(app: &SharedApp) {
-    let days = app.cfg.auto_archive_days;
-    let entries = app.history.lock().unwrap().list(crate::history::KEEP);
-    let live: std::collections::HashSet<String> = app
-        .pool
-        .all()
-        .iter()
-        .filter(|s| s.state() != SState::Exited)
-        .map(|s| s.meta.lock().unwrap().project_path.clone())
-        .collect();
-    let wanted = crate::autoarchive::candidates(&entries, &live, chrono::Utc::now(), days);
-    let mut changed = false;
-    {
-        let mut a = app.archived.lock().unwrap();
-        for p in &wanted {
-            if !std::path::Path::new(p).is_dir() {
-                continue;
-            }
-            if a.set_archived(&stores::realpath(p), true) {
-                eprintln!("auto-archive: {p}（暂停超过 {days} 天且清单全勾完）");
-                changed = true;
-            }
-        }
-    }
-    if changed {
-        app.hub.projects_changed();
-    }
-}
-
 /// `POST /restart`：托管环境（launchd / systemd）下退出让服务管理器拉起干净实例，
 /// 游离运行时 spawn 新进程再退出（v1.11.1 起；此前是多线程里 execvp，在 macOS 上会
 /// 撞进 malloc/GCD 的内部锁卡死）。所有 PTY 都是本进程的子进程，重启 = 全部终止；
@@ -445,7 +414,6 @@ async fn projects_list(State(app): State<SharedApp>) -> ApiResult<Json<Value>> {
         let rows = stores::collect(&app2.paths, &mut cache, &app2.cfg.project_root);
         let reg = Registry::load(&app2.cfg.project_root);
         let namer = Namer::new(&app2.paths, app2.cfg.namer);
-        let archived_set = app2.archived.lock().unwrap().all();
         let pinned: std::collections::HashSet<String> = rows
             .iter()
             .filter(|r| app2.pins.lock().unwrap().is_pinned(&r.path))
@@ -488,9 +456,6 @@ async fn projects_list(State(app): State<SharedApp>) -> ApiResult<Json<Value>> {
                     "session_title": if title.is_empty() { Value::Null } else { Value::String(title) },
                     // v1.8：置顶（POST /projects/pin）
                     "pinned": pinned.contains(&r.path),
-                    // v1.15：归档（POST /projects/archive）——客户端默认藏起来。集合里存的是
-                    // realpath（/var → /private/var 这种），列表行是目录扫出来的原路径，两种都认
-                    "archived": archived_set.contains(&r.path) || archived_set.contains(&stores::realpath(&r.path)),
                 })
             })
             .collect();
@@ -549,7 +514,6 @@ async fn projects_create(
         "agent": agent,
         "session_title": Value::Null,
         "pinned": false,
-        "archived": false,
     })))
 }
 
@@ -600,8 +564,7 @@ async fn history_dashboard(State(app): State<SharedApp>) -> ApiResult<Json<Value
         let updated_at = m.updated_at.unwrap_or(m.created_at).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         live.insert(s.id.clone(), crate::history::LiveStatus { status, updated_at });
     }
-    let archived = app.archived.lock().unwrap().all();
-    let d = crate::history::dashboard(&entries, &live, &archived);
+    let d = crate::history::dashboard(&entries, &live);
     Ok(Json(serde_json::to_value(d).unwrap_or_else(|_| json!({}))))
 }
 
@@ -622,49 +585,6 @@ async fn projects_pin(State(app): State<SharedApp>, Json(body): Json<PinBody>) -
         app.hub.projects_changed();
     }
     Ok(Json(json!({"ok": true, "path": key, "pinned": body.pinned})))
-}
-
-#[derive(Deserialize)]
-struct ArchiveBody {
-    path: String,
-    archived: bool,
-}
-
-/// 归档 / 取消归档（v1.15）：daemon 侧存，三端一起变。归档时该项目还活着的会话
-/// 一起结束（不确认：归档就是「先放一边」，比删除轻得多，所以不用像删除那样弹框）；
-/// 目录、对话、日志都不动，取消归档就回来。
-async fn projects_archive(State(app): State<SharedApp>, Json(body): Json<ArchiveBody>) -> ApiResult<Json<Value>> {
-    if !body.path.starts_with('/') {
-        return Err(ApiError::not_found("path must be absolute"));
-    }
-    let key = stores::realpath(&body.path);
-    let mut killed: Vec<String> = Vec::new();
-    if body.archived {
-        let victims: Vec<Arc<crate::pool::Session>> = app
-            .pool
-            .all()
-            .into_iter()
-            .filter(|s| s.state() != SState::Exited && stores::realpath(&s.meta.lock().unwrap().project_path.clone()) == key)
-            .collect();
-        for s in &victims {
-            let mut m = s.meta.lock().unwrap();
-            m.user_killed = true;
-            killed.push(if m.title.is_empty() { s.id.clone() } else { m.title.clone() });
-        }
-        let waits: Vec<_> = victims
-            .iter()
-            .cloned()
-            .map(|s| tokio::spawn(async move { kill_and_wait(&s, 25, 120).await }))
-            .collect();
-        for w in waits {
-            let _ = w.await;
-        }
-    }
-    let changed = app.archived.lock().unwrap().set_archived(&key, body.archived);
-    if changed || !killed.is_empty() {
-        app.hub.projects_changed();
-    }
-    Ok(Json(json!({"ok": true, "path": key, "archived": body.archived, "killed": killed})))
 }
 
 #[derive(Deserialize)]
@@ -783,7 +703,6 @@ async fn projects_delete(
     .await?;
     for p in &deleted_paths {
         app.pins.lock().unwrap().forget(p);
-        app.archived.lock().unwrap().forget(p);
         let mut h = app.history.lock().unwrap();
         h.mark_project_deleted(p);
         h.save_if_dirty();
@@ -1036,6 +955,65 @@ async fn session_artifacts(
     let sess = get_session(&app, &id)?;
     let list = sess.msgs.lock().unwrap().artifacts.clone();
     Ok(Json(json!({ "artifacts": list })))
+}
+
+/// v1.17 详情屏：一次给齐「消息流里翻不出来」的四样东西——子代理、后台任务、上传、技能。
+/// 前三样从 transcript 解析出来的台账里取（messages.rs），上传直接看项目的 `_inbox/`。
+/// 手机的详情屏和 mac 的详情栏画的都是它，所以口径只有一份。
+async fn session_detail(
+    State(app): State<SharedApp>,
+    UrlPath(id): UrlPath<String>,
+) -> ApiResult<Json<Value>> {
+    let sess = get_session(&app, &id)?;
+    let (project_path, created_at) = {
+        let m = sess.meta.lock().unwrap();
+        (m.project_path.clone(), m.created_at)
+    };
+    // 锁序约定：meta 与 msgs 不同时持有
+    let since = created_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let (subagents, background, skills) = {
+        let ms = sess.msgs.lock().unwrap();
+        (ms.subagents.clone(), ms.background_tasks(Some(&since)), ms.skills.clone())
+    };
+    let uploads = blocking(move || list_uploads(&project_path)).await?;
+    Ok(Json(json!({
+        "subagents": subagents,
+        "background_tasks": background,
+        "uploads": uploads,
+        "skills": skills,
+    })))
+}
+
+/// 项目 `_inbox/`（`POST /projects/upload` 的落点）里的文件，新的在前，最多 200 个。
+/// 目录不存在（从没传过东西）= 空列表，不是错误。
+fn list_uploads(project_path: &str) -> Vec<Value> {
+    let dir = Path::new(project_path).join("_inbox");
+    let Ok(rd) = std::fs::read_dir(&dir) else { return Vec::new() };
+    let mut out: Vec<(std::time::SystemTime, Value)> = Vec::new();
+    for e in rd.flatten() {
+        let Ok(meta) = e.metadata() else { continue };
+        if !meta.is_file() {
+            continue;
+        }
+        let name = e.file_name().to_string_lossy().into_owned();
+        // 上传是「先写 .part 再 rename」，半截的不该露出来
+        if name.starts_with('.') {
+            continue;
+        }
+        let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+        out.push((
+            mtime,
+            json!({
+                "name": name,
+                "path": e.path().to_string_lossy(),
+                "size": meta.len(),
+                "ts": iso_from_epoch(mtime.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) as f64),
+            }),
+        ));
+    }
+    out.sort_by(|a, b| b.0.cmp(&a.0));
+    out.truncate(200);
+    out.into_iter().map(|(_, v)| v).collect()
 }
 
 fn get_session(app: &App, id: &str) -> ApiResult<Arc<crate::pool::Session>> {
@@ -1320,19 +1298,6 @@ async fn session_screen(
 /// `/screen` 带多少行回滚：手机复制/抓链接够用，又不至于一次抠出几万行。
 const SCREEN_TEXT_SCROLLBACK: usize = 500;
 
-async fn session_ports(
-    State(app): State<SharedApp>,
-    UrlPath(id): UrlPath<String>,
-) -> ApiResult<Json<Value>> {
-    let sess = get_session(&app, &id)?;
-    let pid = sess.meta.lock().unwrap().pid;
-    let (Some(pid), true) = (pid, sess.state() != SState::Exited) else {
-        return Ok(Json(json!([])));
-    };
-    let entries = blocking(move || crate::ports::listening_ports(pid)).await?;
-    Ok(Json(json!(entries)))
-}
-
 async fn mac_permissions() -> ApiResult<Json<Value>> {
     let statuses = blocking(crate::perms::status_all).await?;
     Ok(Json(json!(statuses)))
@@ -1467,8 +1432,6 @@ async fn config_put(
                             return Err(ApiError::conflict(format!("{e}（会话已结束，daemon 将重启并按原路径 resume）")));
                         }
                     };
-                    // 归档集合的路径前缀跟着换（置顶在 migrate.rs 的 pins.json 里已改）
-                    app.archived.lock().unwrap().reroot(&old_root, &new_root);
                     // 内存里的会话也改指向：重启前若再 persist，别把旧路径写回去
                     for s in app.pool.all() {
                         let mut m = s.meta.lock().unwrap();
@@ -1813,7 +1776,6 @@ pub fn router(app: SharedApp) -> Router {
         .route("/api/v1/projects", get(projects_list).post(projects_create))
         .route("/api/v1/projects/delete", post(projects_delete))
         .route("/api/v1/projects/pin", post(projects_pin))
-        .route("/api/v1/projects/archive", post(projects_archive))
         .route("/api/v1/history/backfill", post(history_backfill))
         .route("/api/v1/sessions/{id}/permission", post(session_permission))
         .route("/api/v1/sessions/{id}/checklist", post(session_checklist))
@@ -1825,7 +1787,6 @@ pub fn router(app: SharedApp) -> Router {
         .route("/api/v1/sessions/{id}/answer", post(session_answer))
         .route("/api/v1/sessions/{id}/kill", post(session_kill))
         .route("/api/v1/sessions/{id}/rename", post(session_rename))
-        .route("/api/v1/sessions/{id}/ports", get(session_ports))
         .route("/api/v1/sessions/{id}/screen", get(session_screen))
         .route("/api/v1/sessions/{id}/messages", get(session_messages))
         .route("/api/v1/inbox", get(inbox_list).post(inbox_add))
@@ -1838,6 +1799,7 @@ pub fn router(app: SharedApp) -> Router {
         .route("/api/v1/hooks/{event}", post(hook_event))
         .route("/api/v1/usage", get(usage_get))
         .route("/api/v1/sessions/{id}/artifacts", get(session_artifacts))
+        .route("/api/v1/sessions/{id}/detail", get(session_detail))
         .route("/api/v1/sessions/{id}/attach", get(ws_attach))
         .route("/api/v1/events", get(ws_events))
         .route("/api/v1/mac/permissions", get(mac_permissions))

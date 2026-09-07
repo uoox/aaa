@@ -18,7 +18,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -38,38 +37,52 @@ import kotlinx.coroutines.launch
 fun terminalTabLabel(index: Int, s: Session, root: String): String =
     "终端 " + (index + 1) + if (s.project_path != root) " · " + s.project_path.substringAfterLast('/') else ""
 
+/**
+ * 一个终端一屏（2026-09-08 用户拍板：终端列表搬到项目面板里，和会话平级，这里就不再需要
+ * 自己的标签条了）。`focusId` 指名要看哪一个；老的 `?focus=` 空参数还兼容——回落到最新的
+ * 那个终端，一个都没有就给一个「开一个」。
+ */
 @Composable
 fun TerminalScreen(store: AppStore, nav: NavHostController, focusId: String) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val sessions by store.sessions.collectAsState()
     val conn by store.connState.collectAsState()
-    val tabs = terminalSessions(sessions)
-    val root = store.health.value?.project_root ?: "/Volumes/SSD/project"
-    var activeId by rememberSaveable { mutableStateOf(focusId) }
-    val effectiveId = if (tabs.any { it.id == activeId }) activeId else tabs.lastOrNull()?.id.orEmpty()
-    LaunchedEffect(tabs.map { it.id }) { if (activeId != effectiveId) activeId = effectiveId }
-    fun createTerminal() = scope.launch { runCatching { store.client?.createSession(root, "shell", resume = false, fresh = true) }.getOrNull()?.let { activeId = it.id } }
+    val terminals = terminalSessions(sessions)
+    val root = store.health.value?.project_root?.takeIf { it.isNotBlank() } ?: "/Volumes/SSD/project"
+    var creating by remember { mutableStateOf(false) }
+    val index = terminals.indexOfFirst { it.id == focusId }
+    val current = terminals.getOrNull(index) ?: terminals.lastOrNull()
+    val label = current?.let { terminalTabLabel(if (index >= 0) index else terminals.lastIndex, it, root) } ?: "终端"
+
+    fun createTerminal() {
+        if (creating) return
+        creating = true
+        scope.launch {
+            try {
+                val sess = store.client?.createSession(root, "shell", resume = false, fresh = true) ?: return@launch
+                store.refreshSessions()
+                store.prewarmAttachment(sess.id)
+                nav.openTerminal(sess.id)
+            } finally { creating = false }
+        }
+    }
+
     Column(Modifier.fillMaxSize().background(Tok.Bg)) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("‹", color = Tok.Dim, fontSize = 28.sp, modifier = Modifier.clickable { nav.popBackStack() }.padding(horizontal = 8.dp))
-            Text("终端", color = Tok.Ink, fontSize = 18.sp, modifier = Modifier.weight(1f))
-            TextButton(onClick = { createTerminal() }) { Text("+", color = Tok.Accent, fontSize = 22.sp) }
-        }
-        Row(Modifier.fillMaxWidth().background(Tok.Surface).horizontalScroll(rememberScrollState()).padding(8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            tabs.forEachIndexed { index, session ->
-                val active = session.id == effectiveId
-                Row(Modifier.background(if (active) Tok.Raised else Tok.Surface, RoundedCornerShape(7.dp)).clickable { activeId = session.id }.padding(start = 11.dp, end = if (active) 4.dp else 11.dp, top = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(terminalTabLabel(index, session, root), color = if (active) Tok.Ink else Tok.Dim, fontSize = 13.sp)
-                    if (active) Text("×", color = Tok.Dim, fontSize = 16.sp, modifier = Modifier.padding(start = 8.dp).clickable {
-                        scope.launch { runCatching { store.client?.kill(session.id) }; runCatching { store.client?.deleteSession(session.id) }; if (activeId == session.id) activeId = tabs.getOrNull((index - 1).coerceAtLeast(0))?.id.orEmpty() }
-                    })
-                }
+            Text(label, color = Tok.Ink, fontSize = 17.sp, maxLines = 1, modifier = Modifier.weight(1f))
+            // 关掉这个终端：列表里立刻消失，kill + DELETE 在后台跑（AppStore.closeTerminal）
+            if (current != null) TextButton(onClick = { store.closeTerminal(current.id); nav.popBackStack() }) {
+                Text("关闭", color = Tok.Faint, fontSize = 13.sp)
             }
         }
-        if (effectiveId.isEmpty()) Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) { Text("还没有终端", color = Tok.Faint); Button(onClick = { createTerminal() }, modifier = Modifier.padding(top = 12.dp)) { Text("开一个") } }
-        } else TerminalPane(store, context, conn, effectiveId, Modifier.weight(1f))
+        if (current == null) Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("还没有终端", color = Tok.Faint)
+                Button(onClick = { createTerminal() }, modifier = Modifier.padding(top = 12.dp)) { Text("开一个") }
+            }
+        } else TerminalPane(store, context, conn, current.id, Modifier.weight(1f))
     }
 }
 
@@ -80,9 +93,11 @@ private fun TerminalPane(store: AppStore, context: Context, conn: ConnState, ses
     var ctrlSticky by ctrlStickyState
     val inputRef = remember { mutableStateOf<TermInputView?>(null) }
     val selectMode = remember { mutableStateOf(false) }
-    var attachment by remember(sessionId) { mutableStateOf<TerminalAttachment?>(null) }
+    // attach 不随本屏销毁（2026-09-08）：终端就那么几个，socket 便宜，而每次重建都是
+    // 一个新的 libvterm 模拟器 + 一次整屏 replay——「进终端很卡」的另一半。真正收掉的时机
+    // 是关闭这个终端（AppStore.closeTerminal）或它自己退出（cleanupExitedShell）。
+    var attachment by remember(sessionId) { mutableStateOf<TerminalAttachment?>(store.peekAttachment(sessionId)) }
     LaunchedEffect(conn, sessionId) { attachment = store.attachmentFor(sessionId) }
-    DisposableEffect(sessionId) { onDispose { store.releaseAttachmentSoon(sessionId) } }
     fun pasteViaDaemon() {
         val clip = (context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager).primaryClip
         val text = clip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(context)?.toString()

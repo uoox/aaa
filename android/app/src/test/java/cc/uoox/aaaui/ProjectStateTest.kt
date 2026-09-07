@@ -8,7 +8,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 首页的项目 ↔ 会话拼接、三个状态字与排序。全在客户端算，daemon 只给两张表。
+ * 首页的项目 ↔ 会话拼接、行首记号（转圈 / 黄点）与排序。全在客户端算，daemon 只给两张表。
  */
 class ProjectStateTest {
     private val p = Project(path = "/r/a", name = "a", mtime = "2026-09-01T00:00:00Z", agent = "claude", session_title = "旧对话")
@@ -26,16 +26,17 @@ class ProjectStateTest {
         assertEquals(ProjectState.NEEDS_REPLY, projectStateOf(s("r", "running", "2026-09-02T10:00:00Z", asking = true)))
     }
 
-    @Test fun fourWords() {
+    @Test fun stateAndSpinning() {
         assertEquals(ProjectState.RUNNING, projectStateOf(s("r", "running", "2026-09-02T10:00:00Z")))
         assertEquals(ProjectState.ACTIVE, projectStateOf(s("w", "waiting", "2026-09-02T09:00:00Z")))
         assertEquals(ProjectState.INACTIVE, projectStateOf(s("x", "exited", "2026-09-02T09:00:00Z")))
         assertEquals(ProjectState.INACTIVE, projectStateOf(null))
-        assertEquals("运行", ProjectState.RUNNING.label)
-        assertEquals("待回复", ProjectState.NEEDS_REPLY.label)
-        assertEquals("后台", ProjectState.BACKGROUND.label)
-        assertEquals("激活", ProjectState.ACTIVE.label)
-        assertEquals("暂停", ProjectState.INACTIVE.label)
+        // 2026-09-08：列表上不再写状态字，枚举只管「转不转圈」和排序
+        assertTrue(ProjectState.RUNNING.spinning)
+        assertTrue(ProjectState.BACKGROUND.spinning)
+        assertFalse(ProjectState.NEEDS_REPLY.spinning)
+        assertFalse(ProjectState.ACTIVE.spinning)
+        assertFalse(ProjectState.INACTIVE.spinning)
         // 后台：waiting 且 background；在问的仍是待回复
         assertEquals(ProjectState.BACKGROUND, projectStateOf(s("w", "waiting", "2026-09-02T09:00:00Z").copy(background = true)))
         assertEquals(ProjectState.NEEDS_REPLY, projectStateOf(s("w", "waiting", "2026-09-02T09:00:00Z", asking = true).copy(background = true)))
@@ -119,6 +120,21 @@ class ProjectStateTest {
         val rows2 = projectRows(listOf(p, p2), listOf(x, c1))
         assertEquals(listOf("c", "a"), rows2.map { it.project.name })
         assertEquals(ProjectState.INACTIVE, rows2[1].state)
+    }
+
+    @Test fun unreadRowsFloatAboveRunningOnesButNotAbovePinned() {
+        // 2026-09-08 用户拍板：置顶 > 有黄点 > 在跑 > 其余
+        val pRun = p.copy(path = "/r/run", name = "run")
+        val pUnread = p.copy(path = "/r/unread", name = "unread")
+        val pTop = p.copy(path = "/r/top", name = "top", pinned = true)
+        val run = s("s1", "running", "2026-09-09T00:00:00Z", path = pRun.path, updated = "2026-09-09T00:00:00Z")
+        val done = s("s2", "waiting", "2026-09-01T00:00:00Z", path = pUnread.path, updated = "2026-09-01T00:00:00Z")
+        val rows = projectRows(listOf(pRun, pUnread, pTop), listOf(run, done), setOf(pUnread.path))
+        assertEquals(listOf("top", "unread", "run"), rows.map { it.project.name })
+        assertTrue(rows[1].unread)
+        assertFalse(rows[2].unread)
+        // 没给 unread 集合时谁都不是黄点，顺序回到「在跑的在前」
+        assertEquals(listOf("top", "run", "unread"), projectRows(listOf(pRun, pUnread, pTop), listOf(run, done)).map { it.project.name })
     }
 
     @Test fun pinnedProjectsComeFirst() {

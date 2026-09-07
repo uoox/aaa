@@ -105,7 +105,8 @@ class ProtocolTest {
         assertTrue(cardMatches(a, "") && cardMatches(a, "测试") && cardMatches(a, "shop") && cardMatches(a, "登录"))
         assertTrue(!cardMatches(a, "支付"))
         assertTrue(!cardIsFinished(a) && cardIsFinished(d.sessions[1]))
-        assertEquals("后台", statusLabel("background")); assertEquals("暂停", statusLabel("nope"))
+        assertTrue(cardSpinning(a.copy(status = "running")) && cardSpinning(a.copy(status = "background")))
+        assertTrue(!cardSpinning(a.copy(status = "active")) && !cardSpinning(a.copy(status = "running", deleted = true)))
         // 老 daemon 的形状（没有 sessions）必须解码失败 → 界面报「请升级」，不能静默画空看板
         assertTrue(runCatching { json.decodeFromString<Dashboard>("""{"today":{"sessions":1},"days":[]}""") }.isFailure)
     }
@@ -166,7 +167,7 @@ class ProtocolTest {
         fun expect(k: String) = fx["expect"]!!.jsonObject[k]!!.jsonArray.map { it.jsonPrimitive.content }
         assertEquals(expect("finished"), d.sessions.filter { cardIsFinished(it) && !it.deleted }.map { it.id })
         assertEquals(expect("match_测试"), d.sessions.filter { cardMatches(it, "测试") }.map { it.id })
-        assertEquals(listOf("ask", "run", "bg", "act", "fin", "old", "arch", "del"), d.sessions.map { it.id })
-        assertEquals(expect("visible_default"), d.sessions.filter { !it.deleted && !it.archived }.map { it.id })
+        assertEquals(listOf("ask", "run", "bg", "act", "pau", "fin", "old", "del"), d.sessions.map { it.id })
+        assertEquals(expect("visible_default"), d.sessions.filter { !it.deleted }.map { it.id })
     }
 }

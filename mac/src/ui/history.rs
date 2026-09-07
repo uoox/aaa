@@ -1,29 +1,20 @@
 //! 「看板」页（2026-09-07 用户拍板，第二版）：**所有会话的进度**，没有时间维度。
 //! 数据是 daemon 一次算好的 `GET /history/dashboard`。
 //!
-//! 顶上一条计数（待回复 / 运行 / 后台 / 激活 / 暂停，点一个 = 只看那一组；再点取消）
-//! + 未完成条目数 + 搜索。主体是**瀑布流、全展开**（2026-09-07 第三版，用户要一眼看全）：
-//! 一会话一张卡——状态字 + 标题 + 项目，一根进度条 `done/total`，全部清单项直接列出
-//! （没勾的在前、做完的灰掉），不折叠、不分组；卡片按估算高度塞进最短的一列，列数随
-//! 窗口宽度变。已删除 / 已归档的默认不显示，各一个开关切出来。会话还在就能点开。
+//! 顶上是未完成条目数 + 搜索（2026-09-08 用户拍板：五态计数条和状态字跟着侧栏一起去掉——
+//! 看板和项目列表要说同一套话）。主体是**瀑布流、全展开**（2026-09-07 第三版，用户要一眼
+//! 看全）：一会话一张卡——转圈 / 什么都没有 + 标题 + 项目，一根进度条 `done/total`，全部
+//! 清单项直接列出（没勾的在前、做完的灰掉），不折叠、不分组；卡片按估算高度塞进最短的一
+//! 列，列数随窗口宽度变。已删除的默认不显示，一个开关切出来。会话还在就能点开。
 
-use gpui::{Context, SharedString, div, prelude::*, px};
+use std::time::Duration;
 
-use super::RootView;
+use gpui::{Animation, AnimationExt as _, Context, ElementId, SharedString, div, prelude::*, px};
+
+use super::{RootView, SPINNER};
 use super::kit::*;
-use crate::model::{Dashboard, SessionCard, card_matches, status_label};
+use crate::model::{Dashboard, SessionCard, card_matches, card_spinning};
 use crate::theme;
-
-const STATUSES: [&str; 5] = ["asking", "running", "background", "active", "paused"];
-
-fn status_color(status: &str) -> u32 {
-    match status {
-        "asking" => theme::amber(),
-        "running" | "background" => theme::green(),
-        "active" => theme::accent(),
-        _ => theme::faint(),
-    }
-}
 
 impl RootView {
     pub(super) fn open_history(&mut self, cx: &mut Context<Self>) {
@@ -51,38 +42,13 @@ impl RootView {
         );
     }
 
-    /// 顶上的计数块：点一下只看这一组，再点取消
-    fn count_chip(&self, status: &'static str, n: usize, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
-        let on = self.dash_filter.as_deref() == Some(status);
-        div()
-            .id(SharedString::from(format!("dash-chip:{status}")))
-            .flex()
-            .items_center()
-            .gap(px(6.))
-            .px(px(10.))
-            .py(px(5.))
-            .rounded(px(8.))
-            .cursor_pointer()
-            .border_1()
-            .border_color(c(if on { status_color(status) } else { theme::edge() }))
-            .when(on, |el| el.bg(ca(status_color(status), 0.14)))
-            .hover(|st| st.bg(c(theme::surface_raised())))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.dash_filter = if this.dash_filter.as_deref() == Some(status) { None } else { Some(status.to_string()) };
-                cx.notify();
-            }))
-            .child(div().text_size(px(11.5)).text_color(c(status_color(status))).child(status_label(status)))
-            .child(div().font_family("Menlo").text_size(px(13.)).text_color(c(theme::ink())).child(SharedString::from(n.to_string())))
-    }
-
     /// 一张卡（全展开：所有清单项都列出来）
     fn card(&self, card: &SessionCard, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
         let total = card.done + card.open;
         let frac = if total == 0 { 0. } else { card.done as f32 / total as f32 };
         let id_open = card.id.clone();
         let alive = card.alive;
-        let color = status_color(&card.status);
-        let dimmed = card.deleted || card.archived;
+        let dimmed = card.deleted;
         let mut el = div()
             .id(SharedString::from(format!("card:{}", card.id)))
             .flex()
@@ -99,19 +65,31 @@ impl RootView {
                     .flex()
                     .items_start()
                     .gap(px(8.))
-                    .child(
-                        div()
-                            .flex_none()
-                            .px(px(5.))
-                            .py(px(1.))
-                            .rounded(px(4.))
-                            .border_1()
-                            .border_color(ca(color, 0.7))
-                            .font_family("Menlo")
-                            .text_size(px(10.))
-                            .text_color(c(color))
-                            .child(if card.deleted { "已删除" } else if card.archived { "归档" } else { status_label(&card.status) }),
-                    )
+                    // 转圈 = 还在跑；已删除的写一个字；其余什么都不画（和项目列表同一套话）
+                    .when(card_spinning(card), |el| {
+                        el.child(
+                            div()
+                                .flex_none()
+                                .font_family("Menlo")
+                                .text_size(px(10.))
+                                .text_color(c(theme::accent()))
+                                .with_animation(
+                                    ElementId::from(SharedString::from(format!("card-spin:{}", card.id))),
+                                    Animation::new(Duration::from_millis(800)).repeat().with_max_fps(12.),
+                                    |el, t| el.child(SPINNER[((t * SPINNER.len() as f32) as usize).min(SPINNER.len() - 1)]),
+                                ),
+                        )
+                    })
+                    .when(card.deleted, |el| {
+                        el.child(
+                            div()
+                                .flex_none()
+                                .font_family("Menlo")
+                                .text_size(px(10.))
+                                .text_color(c(theme::faint()))
+                                .child("已删除"),
+                        )
+                    })
                     .child(
                         div()
                             .flex_1()
@@ -202,14 +180,13 @@ impl RootView {
         let query = self.history_input.read(cx).text().to_string();
         let d = &self.dashboard;
 
-        // 过滤：搜索 → 状态组 → 已删除开关；归档的单独一节（2026-09-07 用户：和还在列表里的分开）
-        let (archived_cards, matched): (Vec<&SessionCard>, Vec<&SessionCard>) = d
+        // 过滤：搜索 → 状态组 → 已删除开关
+        let matched: Vec<&SessionCard> = d
             .sessions
             .iter()
             .filter(|c| card_matches(c, &query))
-            .filter(|c| self.dash_filter.as_deref().is_none_or(|f| c.status == f))
             .filter(|c| self.dash_show_deleted || !c.deleted)
-            .partition(|c| c.archived);
+            .collect();
 
         let toggle = |id: &'static str, label: String, on: bool| {
             div()
@@ -254,51 +231,12 @@ impl RootView {
                 "没有匹配的会话"
             }));
         }
-        // 归档的：单独一节，默认收着，点开是自己的一片瀑布流
-        if !archived_cards.is_empty() {
-            grid = grid.child(
-                div()
-                    .id("dash-archived-section")
-                    .mt(px(6.))
-                    .py(px(6.))
-                    .border_t_1()
-                    .border_color(c(theme::edge()))
-                    .cursor_pointer()
-                    .font_family("Menlo")
-                    .text_size(px(11.))
-                    .text_color(c(if self.dash_show_archived { theme::accent() } else { theme::dim() }))
-                    .hover(|st| st.text_color(c(theme::ink())))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.dash_show_archived = !this.dash_show_archived;
-                        cx.notify();
-                    }))
-                    .child(SharedString::from(format!("{} 归档 {}（不在项目列表里的）", if self.dash_show_archived { "▾" } else { "▸" }, archived_cards.len()))),
-            );
-            if self.dash_show_archived {
-                grid = grid.child(masonry(&archived_cards, cx));
-            }
-        }
-
         let deleted_n = d.sessions.iter().filter(|c| c.deleted).count();
-        let mut chips = div().flex().items_center().gap(px(6.)).flex_wrap();
-        for st in STATUSES {
-            let n = match st {
-                "asking" => d.counts.asking,
-                "running" => d.counts.running,
-                "background" => d.counts.background,
-                "active" => d.counts.active,
-                _ => d.counts.paused,
-            };
-            chips = chips.child(self.count_chip(st, n, cx));
-        }
-        chips = chips.child(
-            div()
-                .font_family("Menlo")
-                .text_size(px(10.5))
-                .text_color(c(theme::amber()))
-                .pl(px(6.))
-                .child(SharedString::from(format!("未完成 {} 条", d.counts.open_items))),
-        );
+        let open_items = div()
+            .font_family("Menlo")
+            .text_size(px(10.5))
+            .text_color(c(theme::amber()))
+            .child(SharedString::from(format!("未完成 {} 条", d.counts.open_items)));
 
         div()
             .size_full()
@@ -312,7 +250,7 @@ impl RootView {
                     .items_center()
                     .gap(px(10.))
                     .child(div().text_size(px(14.)).font_weight(gpui::FontWeight::BOLD).text_color(c(theme::ink())).child("看板"))
-                    .child(chips)
+                    .child(open_items)
                     .child(div().flex_1())
                     .when(deleted_n > 0, |el| {
                         el.child(

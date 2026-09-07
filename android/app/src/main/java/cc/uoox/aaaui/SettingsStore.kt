@@ -22,6 +22,12 @@ data class AppSettings(
     val serviceEnabled: Boolean = false,
     val defaultUi: String = "messages", // "messages" | "terminal"
     val mutedProjects: Set<String> = emptySet(),
+    /**
+     * 有黄点的项目路径（2026-09-08 用户拍板 Q1(a)：**只存本地**）。这台设备还没看过的
+     * 「跑完了 / 在等你回话」。手机看过不影响 Mac 上的黄点——黄点说的是「我这台还没看」，
+     * 跨设备同步反而会替另一台把话说了。
+     */
+    val unreadProjects: Set<String> = emptySet(),
     /** 界面主题：dark | light | claude（见 Palette）。 */
     val theme: String = "dark",
     /** 最近打开的会话 id：没有首页了，app 起来直接回到它 */
@@ -38,6 +44,7 @@ class SettingsStore(private val context: Context) {
         val SERVICE_ENABLED = booleanPreferencesKey("service_enabled")
         val DEFAULT_UI = stringPreferencesKey("default_ui")
         val MUTED_PROJECTS = stringSetPreferencesKey("muted_projects")
+        val UNREAD_PROJECTS = stringSetPreferencesKey("unread_projects")
         val THEME = stringPreferencesKey("theme")
         /** 会话 id → 输入框草稿（JSON 对象）。切出去 / 被系统杀掉再回来，字还在。 */
         val DRAFTS = stringPreferencesKey("drafts_json")
@@ -55,6 +62,7 @@ class SettingsStore(private val context: Context) {
             serviceEnabled = p[K.SERVICE_ENABLED] ?: false,
             defaultUi = p[K.DEFAULT_UI] ?: "messages",
             mutedProjects = p[K.MUTED_PROJECTS] ?: emptySet(),
+            unreadProjects = p[K.UNREAD_PROJECTS] ?: emptySet(),
             theme = p[K.THEME] ?: "dark",
             lastSession = p[K.LAST_SESSION]?.takeIf { it.isNotBlank() },
         )
@@ -100,9 +108,11 @@ class SettingsStore(private val context: Context) {
         context.dataStore.edit { p ->
             val old = p[K.PROJECT_ROOT]
             if (old != null && old != root) {
-                val cur = p[K.MUTED_PROJECTS] ?: emptySet()
-                val next = cur.map { rerootPath(it, old, root) }.toSet()
-                if (next != cur) { p[K.MUTED_PROJECTS] = next; changed = true }
+                for (key in listOf(K.MUTED_PROJECTS, K.UNREAD_PROJECTS)) {
+                    val cur = p[key] ?: emptySet()
+                    val next = cur.map { rerootPath(it, old, root) }.toSet()
+                    if (next != cur) { p[key] = next; changed = true }
+                }
             }
             p[K.PROJECT_ROOT] = root
         }
@@ -112,6 +122,16 @@ class SettingsStore(private val context: Context) {
     suspend fun setProjectMuted(path: String, muted: Boolean) = context.dataStore.edit { p ->
         val cur = p[K.MUTED_PROJECTS] ?: emptySet()
         p[K.MUTED_PROJECTS] = if (muted) cur + path else cur - path
+    }
+
+    /** 打黄点 / 清黄点。path 为空（老 daemon 没给项目路径）时什么都不做。 */
+    suspend fun setProjectUnread(path: String, unread: Boolean) {
+        if (path.isBlank()) return
+        context.dataStore.edit { p ->
+            val cur = p[K.UNREAD_PROJECTS] ?: emptySet()
+            val next = if (unread) cur + path else cur - path
+            if (next != cur) p[K.UNREAD_PROJECTS] = next
+        }
     }
 }
 

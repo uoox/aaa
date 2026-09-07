@@ -64,6 +64,37 @@ pub struct Msg {
     pub question: Option<QuestionSpec>,
 }
 
+/// 一次子代理调用（Agent / Task 工具）。详情屏「子代理」一节（v1.17）。
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Subagent {
+    /// 工具名：Agent（新）/ Task（老）
+    pub tool: String,
+    /// 子代理类型（`subagent_type`），拿不到就空
+    pub kind: String,
+    /// 一句话说它去干什么（`description`，退到入参里第一个字符串）
+    pub summary: String,
+    /// running | ok | err
+    pub status: String,
+    pub ts: String,
+}
+
+/// 一个还没回来的后台任务（`run_in_background` 的 Bash / Agent，或 Monitor）。
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BgTask {
+    pub tool: String,
+    pub summary: String,
+    /// 发起时刻
+    pub ts: String,
+}
+
+/// 会话里用过的技能（Skill 工具），按名字合并计数。
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SkillUse {
+    pub name: String,
+    pub count: usize,
+    pub last_ts: String,
+}
+
 /// 会话里发布过的 Artifact（Claude Code 的 Artifact 工具：报告、原型、图）。按 url 去重，
 /// 重复发布同一 url 只更新时间与描述。
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -91,8 +122,13 @@ pub struct MsgStore {
     /// v1.13「后台」态：tool_use id → 发起时刻。`bg_launch` 是看到了 tool_use
     /// （`run_in_background` / Monitor）还没等到 tool_result 的；`bg_pending` 是
     /// tool_result 确认「在后台跑」了、还没等到 `<task-notification>` 回来的。
-    bg_launch: HashMap<String, String>,
-    bg_pending: HashMap<String, String>,
+    bg_launch: HashMap<String, BgTask>,
+    bg_pending: HashMap<String, BgTask>,
+    /// v1.17 详情屏：这个会话开过的子代理（按发起顺序），以及 tool_use id → 下标
+    pub subagents: Vec<Subagent>,
+    subagent_ix: HashMap<String, usize>,
+    /// v1.17 详情屏：用过的技能，按名字合并（首次出现的顺序）
+    pub skills: Vec<SkillUse>,
     /// 发出去还没等到 tool_result 的**前台**工具调用：有它在就说明模型还在等结果，
     /// 60s 兜底不许把会话压回 waiting（gpt-6 审阅：长编译期间会被误判成静止）
     awaiting_result: HashSet<String>,
@@ -130,6 +166,9 @@ impl MsgStore {
             artifacts: Vec::new(),
             bg_launch: HashMap::new(),
             bg_pending: HashMap::new(),
+            subagents: Vec::new(),
+            subagent_ix: HashMap::new(),
+            skills: Vec::new(),
             awaiting_result: HashSet::new(),
             last_activity_ts: String::new(),
             dirty: false,
@@ -139,10 +178,19 @@ impl MsgStore {
     /// 还没回来的后台任务数（发起时刻不早于 `since`：resume 带进来的旧 transcript 里
     /// 挂着的任务早随上一个进程死了，不算）
     pub fn pending_background(&self, since: Option<&str>) -> usize {
-        self.bg_pending
+        self.background_tasks(since).len()
+    }
+
+    /// 还没回来的后台任务本身（详情屏「后台任务」一节；发起早的在前）
+    pub fn background_tasks(&self, since: Option<&str>) -> Vec<BgTask> {
+        let mut v: Vec<BgTask> = self
+            .bg_pending
             .values()
-            .filter(|ts| since.is_none_or(|s| ts.is_empty() || ts.as_str() >= s))
-            .count()
+            .filter(|t| since.is_none_or(|s| t.ts.is_empty() || t.ts.as_str() >= s))
+            .cloned()
+            .collect();
+        v.sort_by(|a, b| a.ts.cmp(&b.ts).then_with(|| a.summary.cmp(&b.summary)));
+        v
     }
 
     /// 前台还有工具调用没等到结果
@@ -154,16 +202,32 @@ impl MsgStore {
     /// 通知永远不来（daemon 曾重启、Claude 改了通知形状）也不该让「后台」一直亮着
     pub fn prune_background(&mut self, since: &str, now: &str, max_age: chrono::Duration) {
         let cutoff = chrono::DateTime::parse_from_rfc3339(now).ok().map(|t| t - max_age);
-        self.bg_pending.retain(|_, ts| {
-            if ts.as_str() < since {
+        self.bg_pending.retain(|_, task| {
+            if task.ts.as_str() < since {
                 return false;
             }
-            match (cutoff, chrono::DateTime::parse_from_rfc3339(ts)) {
+            match (cutoff, chrono::DateTime::parse_from_rfc3339(&task.ts)) {
                 (Some(c), Ok(t)) => t >= c,
                 _ => true,
             }
         });
-        self.bg_launch.retain(|_, ts| ts.as_str() >= since);
+        self.bg_launch.retain(|_, task| task.ts.as_str() >= since);
+    }
+
+    /// 记一次技能使用：同名合并计数，时间取最后一次。名字为空的不记。
+    fn note_skill(&mut self, name: &str, ts: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            return;
+        }
+        if let Some(u) = self.skills.iter_mut().find(|u| u.name == name) {
+            u.count += 1;
+            if ts > u.last_ts.as_str() {
+                u.last_ts = ts.to_string();
+            }
+        } else {
+            self.skills.push(SkillUse { name: name.to_string(), count: 1, last_ts: ts.to_string() });
+        }
     }
 
     fn note_activity(&mut self, ts: &str) {
@@ -380,7 +444,10 @@ fn summarize_tool_input(name: &str, input: Option<&Value>) -> String {
         "Read" | "Write" | "Edit" | "NotebookEdit" => by_key("file_path"),
         "Grep" | "Glob" => by_key("pattern"),
         "WebFetch" | "WebSearch" => by_key("url").or_else(|| by_key("query")),
-        "Task" => by_key("description"),
+        // 子代理：新版工具叫 Agent，老 transcript 里是 Task。不指名 description 的话会
+        // 落到「入参里第一个字符串」，摘要就成了 subagent_type
+        "Agent" | "Task" => by_key("description"),
+        "Skill" => by_key("skill"),
         _ => None,
     };
     let s = s.unwrap_or_else(|| {
@@ -455,9 +522,19 @@ pub fn parse_claude_line(store: &mut MsgStore, v: &Value) {
                             store.note_activity(ts);
                             if let Some(id) = item.get("tool_use_id").and_then(|i| i.as_str()) {
                                 store.awaiting_result.remove(id);
-                                let launched = store.bg_launch.remove(id).is_some();
-                                if !is_err && (launched || looks_like_background_result(&text)) {
-                                    store.bg_pending.insert(id.to_string(), ts.to_string());
+                                let launched = store.bg_launch.remove(id);
+                                if !is_err && (launched.is_some() || looks_like_background_result(&text)) {
+                                    let task = launched.unwrap_or_else(|| BgTask {
+                                        tool: name.clone(),
+                                        summary: String::new(),
+                                        ts: ts.to_string(),
+                                    });
+                                    store.bg_pending.insert(id.to_string(), BgTask { ts: ts.to_string(), ..task });
+                                }
+                                if let Some(&ix) = store.subagent_ix.get(id) {
+                                    if let Some(a) = store.subagents.get_mut(ix) {
+                                        a.status = status.to_string();
+                                    }
                                 }
                             }
                             if let Some(pending) = item
@@ -539,12 +616,31 @@ pub fn parse_claude_line(store: &mut MsgStore, v: &Value) {
                             .unwrap_or("")
                             .to_string();
                         store.note_activity(ts);
+                        let summary_for_detail = summarize_tool_input(&name, item.get("input"));
                         if let Some(id) = item.get("id").and_then(|i| i.as_str()) {
                             store.tool_names.insert(id.to_string(), name.clone());
                             if is_background_launch(&name, item.get("input")) {
-                                store.bg_launch.insert(id.to_string(), ts.to_string());
+                                store.bg_launch.insert(
+                                    id.to_string(),
+                                    BgTask { tool: name.clone(), summary: summary_for_detail.clone(), ts: ts.to_string() },
+                                );
                             } else {
                                 store.awaiting_result.insert(id.to_string());
+                            }
+                            // v1.17 详情屏：子代理与技能各自留一份台账（消息流里它们只是
+                            // 折叠进「过程」的一行，翻不出来）
+                            if is_subagent_tool(&name) {
+                                store.subagent_ix.insert(id.to_string(), store.subagents.len());
+                                store.subagents.push(Subagent {
+                                    tool: name.clone(),
+                                    kind: str_field(item.get("input"), "subagent_type"),
+                                    summary: summary_for_detail.clone(),
+                                    status: "running".to_string(),
+                                    ts: ts.to_string(),
+                                });
+                            }
+                            if name == SKILL_TOOL {
+                                store.note_skill(&str_field(item.get("input"), "skill"), ts);
                             }
                             if name == ARTIFACT_TOOL {
                                 let inp = item.get("input");
@@ -591,6 +687,21 @@ pub fn parse_claude_line(store: &mut MsgStore, v: &Value) {
 }
 
 pub const ARTIFACT_TOOL: &str = "Artifact";
+pub const SKILL_TOOL: &str = "Skill";
+
+/// 子代理工具：新版叫 `Agent`，老 transcript 里是 `Task`。
+fn is_subagent_tool(name: &str) -> bool {
+    name == "Agent" || name == "Task"
+}
+
+/// 入参里取一个字符串字段，没有就空串
+fn str_field(input: Option<&Value>, key: &str) -> String {
+    input
+        .and_then(|i| i.get(key))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
+}
 
 /// 这次工具调用会在后台跑、之后用 `<task-notification>` 回来：Bash / Agent 带
 /// `run_in_background:true`，或 Monitor（本身就是挂起等条件）。
@@ -940,6 +1051,57 @@ mod tests {
         ingest(store, body.as_bytes());
     }
 
+
+    /// v1.17 详情屏的三份台账：子代理（Agent / Task，状态随 tool_result 落定）、
+    /// 后台任务（带工具名和摘要，不只是一个计数）、技能（同名合并计数）。
+    #[test]
+    fn detail_ledgers_track_subagents_skills_and_background_tasks() {
+        let mut st = MsgStore::for_agent("claude");
+        let use_tool = |id: &str, name: &str, input: Value, ts: &str| {
+            json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":id,"name":name,"input":input}]},"timestamp":ts})
+        };
+        let result = |id: &str, text: &str, is_err: bool, ts: &str| {
+            json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":id,"content":text,"is_error":is_err}]},"timestamp":ts})
+        };
+        feed_lines(
+            &mut st,
+            &[
+                use_tool("a1", "Agent", json!({"subagent_type":"Explore","description":"翻一遍协议"}), "2026-09-08T01:00:00.000Z"),
+                result("a1", "找到了", false, "2026-09-08T01:00:10.000Z"),
+                use_tool("a2", "Task", json!({"description":"跑测试"}), "2026-09-08T01:01:00.000Z"),
+                use_tool("s1", "Skill", json!({"skill":"artifact-design"}), "2026-09-08T01:02:00.000Z"),
+                use_tool("s2", "Skill", json!({"skill":"artifact-design"}), "2026-09-08T01:03:00.000Z"),
+                use_tool("s3", "Skill", json!({"skill":"dataviz"}), "2026-09-08T01:04:00.000Z"),
+                use_tool("b1", "Bash", json!({"command":"cargo build","run_in_background":true}), "2026-09-08T01:05:00.000Z"),
+                result("b1", "running in background with ID 3", false, "2026-09-08T01:05:01.000Z"),
+            ],
+        );
+
+        assert_eq!(st.subagents.len(), 2, "Agent 和 Task 都算子代理");
+        assert_eq!(st.subagents[0].kind, "Explore");
+        assert_eq!(st.subagents[0].summary, "翻一遍协议");
+        assert_eq!(st.subagents[0].status, "ok", "tool_result 回来就落定");
+        assert_eq!(st.subagents[1].status, "running", "还没回来的还在跑");
+
+        assert_eq!(
+            st.skills.iter().map(|u| (u.name.as_str(), u.count)).collect::<Vec<_>>(),
+            [("artifact-design", 2), ("dataviz", 1)],
+            "同名技能合并计数，按首次出现排"
+        );
+
+        let bg = st.background_tasks(None);
+        assert_eq!(bg.len(), 1);
+        assert_eq!(bg[0].tool, "Bash");
+        assert_eq!(bg[0].summary, "cargo build", "后台任务带得上是哪条命令，不只是一个计数");
+        assert_eq!(st.pending_background(None), 1);
+
+        // 回来了就从后台列表里销掉
+        feed_lines(
+            &mut st,
+            &[json!({"type":"user","message":{"role":"user","content":[{"type":"text","text":"<task-notification><tool-use-id>b1</tool-use-id><summary>编完了</summary></task-notification>"}]},"timestamp":"2026-09-08T01:06:00.000Z"})],
+        );
+        assert!(st.background_tasks(None).is_empty());
+    }
 
     /// v1.13「后台」：后台 Bash / 子代理发起 → pending；<task-notification> 回来 → 销掉；
     /// 早于 since 的（resume 带进来的旧对话）不算

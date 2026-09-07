@@ -124,7 +124,6 @@ fn run() {
     pool.restore_persisted();
     let inbox = crate::inbox::Inbox::load(&paths.state_dir());
     let pins = crate::pins::Pins::load(&paths.state_dir());
-    let archived = crate::archive::Archive::load(&paths.state_dir());
     let history = crate::history::History::load(&paths.state_dir());
 
     let app: SharedApp = Arc::new(App {
@@ -137,7 +136,6 @@ fn run() {
         bound_port: std::sync::atomic::AtomicU16::new(0),
         inbox: std::sync::Mutex::new(inbox),
         pins: std::sync::Mutex::new(pins),
-        archived: std::sync::Mutex::new(archived),
         history: std::sync::Mutex::new(history),
         plan_usage: std::sync::Mutex::new(None),
         root_state: std::sync::atomic::AtomicU8::new(root_state.as_u8()),
@@ -260,18 +258,6 @@ fn run() {
                 loop {
                     let app2 = Arc::clone(&app);
                     let _ = tokio::task::spawn_blocking(move || crate::summary::backfill(&app2, 20)).await;
-                    tokio::time::sleep(Duration::from_secs(3600)).await;
-                }
-            });
-        }
-        // v1.16 自动归档：暂停超过 N 天、清单全勾完的项目每小时扫一次（autoarchive.rs）
-        if app.cfg.auto_archive_days > 0 {
-            let app = Arc::clone(&app);
-            tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_secs(120)).await;
-                loop {
-                    let app2 = Arc::clone(&app);
-                    let _ = tokio::task::spawn_blocking(move || crate::api::auto_archive_sweep(&app2)).await;
                     tokio::time::sleep(Duration::from_secs(3600)).await;
                 }
             });

@@ -101,9 +101,6 @@ class DaemonClient(
     }
 
     /** 置顶 / 取消置顶；列表靠随后的 projects_changed 帧重拉 */
-    suspend fun setArchived(path: String, archived: Boolean) {
-        post("/projects/archive", buildJsonObject { put("path", path); put("archived", archived) }.toString())
-    }
     suspend fun setPinned(path: String, pinned: Boolean) {
         post("/projects/pin", buildJsonObject { put("path", path); put("pinned", pinned) }.toString())
     }
@@ -126,7 +123,8 @@ class DaemonClient(
     suspend fun kill(id: String) { post("/sessions/$id/kill") }
     suspend fun deleteSession(id: String) { delete("/sessions/$id") }
     suspend fun rename(id: String, title: String) { post("/sessions/$id/rename", buildJsonObject { put("title", title) }.toString()) }
-    suspend fun ports(id: String): List<PortInfo> = json.decodeFromString(ListSerializer(PortInfo.serializer()), get("/sessions/$id/ports"))
+    /** v1.17 详情屏：子代理 / 后台任务 / 已上传 / 技能，一次拉齐 */
+    suspend fun detail(id: String): SessionDetail = json.decodeFromString(SessionDetail.serializer(), get("/sessions/$id/detail"))
     /** daemon 侧 vt100 的整屏文本（非备用屏时带回滚尾巴）：复制屏幕、抓链接用。 */
     suspend fun screen(id: String): ScreenText = json.decodeFromString(ScreenText.serializer(), get("/sessions/$id/screen"))
 

@@ -23,13 +23,6 @@ pub struct Config {
     /// for the user — they already picked the folder in AAA. See trust.rs.
     #[serde(default = "default_true")]
     pub auto_trust: bool,
-    /// v1.16：暂停超过这么多天、清单全勾完的项目自动归档；0 = 关掉
-    #[serde(default = "default_auto_archive_days")]
-    pub auto_archive_days: u32,
-}
-
-fn default_auto_archive_days() -> u32 {
-    14
 }
 
 fn default_port() -> u16 {
@@ -57,7 +50,6 @@ impl Config {
             namer: true,
             remote_control_name: false,
             auto_trust: true,
-            auto_archive_days: 14,
         }
     }
 }

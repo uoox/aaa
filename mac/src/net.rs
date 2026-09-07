@@ -176,10 +176,6 @@ impl Net {
         self.post_json("/projects", serde_json::json!({"name": name, "agent": agent}))
     }
     /// 置顶 / 取消置顶（daemon 侧存；随后 projects_changed 帧会让列表重拉）
-    /// 归档 / 取消归档（v1.15）：daemon 侧存；归档时活着的会话被结束（不确认）
-    pub fn set_archived(&self, path: &str, archived: bool) -> impl Future<Output = Result<serde_json::Value>> + use<> {
-        self.post_json("/projects/archive", serde_json::json!({ "path": path, "archived": archived }))
-    }
     pub fn set_pinned(&self, path: &str, pinned: bool) -> impl Future<Output = Result<serde_json::Value>> + use<> {
         self.post_json("/projects/pin", serde_json::json!({ "path": path, "pinned": pinned }))
     }
@@ -344,9 +340,6 @@ impl Net {
         });
         async move { rx.await.unwrap_or_else(|_| Err(anyhow!("网络任务中断"))) }
     }
-    pub fn ports(&self, id: &str) -> impl Future<Output = Result<Vec<PortEntry>>> + use<> {
-        self.get_json(&format!("/sessions/{id}/ports"))
-    }
     /// v1.1 消息流：after = 已见最大 seq，增量拉取
     pub fn messages(
         &self,
@@ -363,6 +356,10 @@ impl Net {
     /// 会话发布过的 Artifact 页面
     pub fn artifacts(&self, id: &str) -> impl Future<Output = Result<ArtifactsResponse>> + use<> {
         self.get_json(&format!("/sessions/{id}/artifacts"))
+    }
+    /// v1.17 详情栏：子代理 / 后台任务 / 已上传 / 技能，一次拉齐
+    pub fn session_detail(&self, id: &str) -> impl Future<Output = Result<SessionDetailResponse>> + use<> {
+        self.get_json(&format!("/sessions/{id}/detail"))
     }
     /// 项目收件箱
     pub fn inbox(&self, project_path: &str) -> impl Future<Output = Result<Vec<InboxItem>>> + use<> {

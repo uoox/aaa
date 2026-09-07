@@ -153,9 +153,6 @@ pub struct SessionCard {
     pub alive: bool,
     #[serde(default)]
     pub deleted: bool,
-    /// v1.15：项目已归档
-    #[serde(default)]
-    pub archived: bool,
     #[serde(default)]
     pub done: usize,
     #[serde(default)]
@@ -175,15 +172,10 @@ pub fn card_matches(c: &SessionCard, query: &str) -> bool {
         || c.items.iter().any(|i| i.text.to_lowercase().contains(&q))
 }
 
-/// 状态字（与侧栏同一套五态）
-pub fn status_label(status: &str) -> &'static str {
-    match status {
-        "asking" => "待回复",
-        "running" => "运行",
-        "background" => "后台",
-        "active" => "激活",
-        _ => "暂停",
-    }
+/// 卡片上转不转圈（2026-09-08 用户拍板：看板和侧栏说同一套话——转圈 / 什么都没有，
+/// 五个状态字连同顶上的计数条一起去掉）。`status` 本身还留在协议里，它是排序和这个判断的依据。
+pub fn card_spinning(c: &SessionCard) -> bool {
+    !c.deleted && (c.status == "running" || c.status == "background")
 }
 
 /// 「已完成」= 暂停且清单全勾完（或没清单）：真正结束的活儿，看板默认收起来
@@ -334,6 +326,72 @@ pub struct Artifact {
     pub ts: String,
 }
 
+// ── v1.17 详情栏：GET /sessions/:id/detail ──────────────────────────────────
+
+/// 一次子代理调用（Agent / Task 工具）
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct Subagent {
+    /// 工具名：Agent（新）/ Task（老）
+    #[serde(default)]
+    pub tool: String,
+    /// 子代理类型（subagent_type），拿不到就空
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub summary: String,
+    /// running | ok | err
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub ts: String,
+}
+
+/// 还没回来的后台任务
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct BgTask {
+    #[serde(default)]
+    pub tool: String,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub ts: String,
+}
+
+/// 项目 `_inbox/` 里的一个文件（响应里还有 `path`，mac 侧只显示文件名，不收）
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct UploadInfo {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub size: u64,
+    #[serde(default)]
+    pub ts: String,
+}
+
+/// 用过的一个技能（Skill 工具），按名字合并
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct SkillUse {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub count: usize,
+    #[serde(default)]
+    pub last_ts: String,
+}
+
+/// 老 daemon（< v1.17）没有这个接口：404 时四样都是空表，面板照画不报错
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct SessionDetailResponse {
+    #[serde(default)]
+    pub subagents: Vec<Subagent>,
+    #[serde(default)]
+    pub background_tasks: Vec<BgTask>,
+    #[serde(default)]
+    pub uploads: Vec<UploadInfo>,
+    #[serde(default)]
+    pub skills: Vec<SkillUse>,
+}
+
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct ArtifactsResponse {
     #[serde(default)]
@@ -403,9 +461,6 @@ pub struct Project {
     /// v1.8：置顶（daemon 侧存，三端一起变）
     #[serde(default)]
     pub pinned: bool,
-    /// v1.15：归档（daemon 侧存）——侧栏 / 看板默认藏起来，一个开关翻出来
-    #[serde(default)]
-    pub archived: bool,
 }
 
 // ── 其它 REST 响应 ──────────────────────────────────────────────────────────
@@ -456,15 +511,6 @@ pub struct DeleteResponse {
 pub struct PairResponse {
     #[serde(default)]
     pub payload: String,
-}
-
-/// GET /sessions/:id/ports（Web 预览入口）
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct PortEntry {
-    #[serde(default)]
-    pub port: u16,
-    #[serde(default)]
-    pub cmd: String,
 }
 
 // ── 错误 ────────────────────────────────────────────────────────────────────
@@ -684,6 +730,10 @@ pub struct UiState {
     /// 静音通知的项目路径（详情面板「通知」段的开关）
     #[serde(default)]
     pub muted_projects: Vec<String>,
+    /// 有黄点的项目路径（2026-09-08 用户拍板 Q1(a)：**只存本地**）——这台机器还没进去看过的
+    /// 「跑完了 / 在等你回话」。Mac 看过不影响手机上的黄点：黄点说的是「我这台还没看」。
+    #[serde(default)]
+    pub unread_projects: Vec<String>,
 }
 
 impl Default for UiState {
@@ -693,6 +743,7 @@ impl Default for UiState {
             theme: default_theme(),
             detail_visible: true,
             muted_projects: Vec::new(),
+            unread_projects: Vec::new(),
         }
     }
 }
@@ -701,6 +752,26 @@ impl Default for UiState {
 pub fn is_muted(muted: &[String], project_path: &str) -> bool {
     let p = project_path.trim_end_matches('/');
     !p.is_empty() && muted.iter().any(|m| m.trim_end_matches('/') == p)
+}
+
+/// 打黄点 / 清黄点；返回集合是否真的变了（没变就不用落盘）
+pub fn set_flagged(flags: &mut Vec<String>, project_path: &str, on: bool) -> bool {
+    let p = project_path.trim_end_matches('/');
+    if p.is_empty() {
+        return false;
+    }
+    if on {
+        if is_muted(flags, p) {
+            return false;
+        }
+        flags.push(p.to_string());
+    } else {
+        if !is_muted(flags, p) {
+            return false;
+        }
+        flags.retain(|m| m.trim_end_matches('/') != p);
+    }
+    true
 }
 
 /// 切换静音；返回切换后是否静音
@@ -817,8 +888,8 @@ mod tests {
         assert_eq!(ids(&|c| card_is_finished(c) && !c.deleted), expect("finished"));
         assert_eq!(ids(&|c| card_matches(c, "测试")), expect("match_测试"));
         // 顺序照 daemon 给的，客户端不重排
-        assert_eq!(d.sessions.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["ask", "run", "bg", "act", "fin", "old", "arch", "del"]);
-        assert_eq!(ids(&|c| !c.deleted && !c.archived), expect("visible_default"));
+        assert_eq!(d.sessions.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["ask", "run", "bg", "act", "pau", "fin", "old", "del"]);
+        assert_eq!(ids(&|c| !c.deleted), expect("visible_default"));
     }
 
     #[test]
@@ -833,9 +904,10 @@ mod tests {
         };
         assert!(card_matches(&c, "") && card_matches(&c, "登录") && card_matches(&c, "shop") && card_matches(&c, "测试"));
         assert!(!card_matches(&c, "支付"));
-        assert_eq!(status_label("asking"), "待回复");
-        assert_eq!(status_label("background"), "后台");
-        assert_eq!(status_label("whatever"), "暂停");
+        assert!(card_spinning(&SessionCard { status: "running".into(), ..Default::default() }));
+        assert!(card_spinning(&SessionCard { status: "background".into(), ..Default::default() }));
+        assert!(!card_spinning(&SessionCard { status: "active".into(), ..Default::default() }));
+        assert!(!card_spinning(&SessionCard { status: "running".into(), deleted: true, ..Default::default() }), "已删除的不转圈");
         assert!(!card_is_finished(&c), "暂停但还有没勾的：不算完");
         let done = SessionCard { status: "paused".into(), open: 0, ..Default::default() };
         assert!(card_is_finished(&done));
@@ -1120,6 +1192,7 @@ mod tests {
             theme: "claude".into(),
             detail_visible: false,
             muted_projects: vec!["/p/a".into()],
+            unread_projects: vec!["/p/b".into()],
         };
         let text = toml::to_string(&s).unwrap();
         let back: UiState = toml::from_str(&text).unwrap();

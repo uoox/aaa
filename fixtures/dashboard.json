@@ -1,37 +1,310 @@
 {
   "note": "三端共享的看板测试向量（2026-09-07）：entries+live 是 daemon 的输入，sessions 是 daemon 必须产出的卡片（顺序即断言），expect 是客户端过滤逻辑（finished / 搜索）必须得到的结果。任何一端改口径先改这里。",
   "entries": [
-    {"id": "ask", "project_path": "/p/shop", "project_name": "Shop", "agent": "claude", "title": "改登录页", "created_at": "2026-09-07T01:00:00Z", "ended_at": null, "exit_code": null, "deleted_at": null, "summary": "- [ ] 回答问题", "last_state": "waiting"},
-    {"id": "run", "project_path": "/p/shop", "project_name": "Shop", "agent": "claude", "title": "支付流程", "created_at": "2026-09-07T01:00:00Z", "ended_at": null, "exit_code": null, "deleted_at": null, "summary": "- [x] 修登录\n- [ ] 补测试", "last_state": "running"},
-    {"id": "bg", "project_path": "/p/mail", "project_name": "Mail", "agent": "claude", "title": "后台编译", "created_at": "2026-09-07T01:00:00Z", "ended_at": null, "exit_code": null, "deleted_at": null, "summary": "", "last_state": "waiting"},
-    {"id": "act", "project_path": "/p/mail", "project_name": "Mail", "agent": "claude", "title": "", "created_at": "2026-09-07T01:00:00Z", "ended_at": null, "exit_code": null, "deleted_at": null, "summary": "- [x] a\n- [x] b", "last_state": "waiting"},
-    {"id": "fin", "project_path": "/p/blog", "project_name": "Blog", "agent": "claude", "title": "写完的", "created_at": "2026-09-06T01:00:00Z", "ended_at": "2026-09-06T05:00:00Z", "exit_code": 0, "deleted_at": null, "summary": "- [x] 完成", "last_state": "exited"},
-    {"id": "old", "project_path": "/p/blog", "project_name": "Blog", "agent": "claude", "title": "老活", "created_at": "2026-09-06T01:00:00Z", "ended_at": "2026-09-06T04:00:00Z", "exit_code": 0, "deleted_at": null, "summary": "- [ ] 没做完 测试", "last_state": "exited"},
-    {"id": "del", "project_path": "/p/gone", "project_name": "Gone", "agent": "claude", "title": "删了的", "created_at": "2026-09-06T01:00:00Z", "ended_at": "2026-09-06T10:00:00Z", "exit_code": 0, "deleted_at": "2026-09-06T11:00:00Z", "summary": "- [ ] 删了", "last_state": "exited"},
-    {"id": "arch", "project_path": "/p/old", "project_name": "Old", "agent": "claude", "title": "归档了的", "created_at": "2026-09-06T01:00:00Z", "ended_at": "2026-09-06T12:00:00Z", "exit_code": 0, "deleted_at": null, "summary": "- [ ] 归档后不计数", "last_state": "exited"},
-    {"id": "t1", "project_path": "/p/shop", "project_name": "Shop", "agent": "shell", "title": "zsh", "created_at": "2026-09-07T02:00:00Z", "ended_at": null, "exit_code": null, "deleted_at": null, "summary": "- [ ] 终端不进看板", "last_state": "running"}
+    {
+      "id": "ask",
+      "project_path": "/p/shop",
+      "project_name": "Shop",
+      "agent": "claude",
+      "title": "改登录页",
+      "created_at": "2026-09-07T01:00:00Z",
+      "ended_at": null,
+      "exit_code": null,
+      "deleted_at": null,
+      "summary": "- [ ] 回答问题",
+      "last_state": "waiting"
+    },
+    {
+      "id": "run",
+      "project_path": "/p/shop",
+      "project_name": "Shop",
+      "agent": "claude",
+      "title": "支付流程",
+      "created_at": "2026-09-07T01:00:00Z",
+      "ended_at": null,
+      "exit_code": null,
+      "deleted_at": null,
+      "summary": "- [x] 修登录\n- [ ] 补测试",
+      "last_state": "running"
+    },
+    {
+      "id": "bg",
+      "project_path": "/p/mail",
+      "project_name": "Mail",
+      "agent": "claude",
+      "title": "后台编译",
+      "created_at": "2026-09-07T01:00:00Z",
+      "ended_at": null,
+      "exit_code": null,
+      "deleted_at": null,
+      "summary": "",
+      "last_state": "waiting"
+    },
+    {
+      "id": "act",
+      "project_path": "/p/mail",
+      "project_name": "Mail",
+      "agent": "claude",
+      "title": "",
+      "created_at": "2026-09-07T01:00:00Z",
+      "ended_at": null,
+      "exit_code": null,
+      "deleted_at": null,
+      "summary": "- [x] a\n- [x] b",
+      "last_state": "waiting"
+    },
+    {
+      "id": "fin",
+      "project_path": "/p/blog",
+      "project_name": "Blog",
+      "agent": "claude",
+      "title": "写完的",
+      "created_at": "2026-09-06T01:00:00Z",
+      "ended_at": "2026-09-06T05:00:00Z",
+      "exit_code": 0,
+      "deleted_at": null,
+      "summary": "- [x] 完成",
+      "last_state": "exited"
+    },
+    {
+      "id": "old",
+      "project_path": "/p/blog",
+      "project_name": "Blog",
+      "agent": "claude",
+      "title": "老活",
+      "created_at": "2026-09-06T01:00:00Z",
+      "ended_at": "2026-09-06T04:00:00Z",
+      "exit_code": 0,
+      "deleted_at": null,
+      "summary": "- [ ] 没做完 测试",
+      "last_state": "exited"
+    },
+    {
+      "id": "del",
+      "project_path": "/p/gone",
+      "project_name": "Gone",
+      "agent": "claude",
+      "title": "删了的",
+      "created_at": "2026-09-06T01:00:00Z",
+      "ended_at": "2026-09-06T10:00:00Z",
+      "exit_code": 0,
+      "deleted_at": "2026-09-06T11:00:00Z",
+      "summary": "- [ ] 删了",
+      "last_state": "exited"
+    },
+    {
+      "id": "pau",
+      "project_path": "/p/old",
+      "project_name": "Old",
+      "agent": "claude",
+      "title": "另一台上的活",
+      "created_at": "2026-09-06T01:00:00Z",
+      "ended_at": "2026-09-06T12:00:00Z",
+      "exit_code": 0,
+      "deleted_at": null,
+      "summary": "- [ ] 没做完",
+      "last_state": "exited"
+    },
+    {
+      "id": "t1",
+      "project_path": "/p/shop",
+      "project_name": "Shop",
+      "agent": "shell",
+      "title": "zsh",
+      "created_at": "2026-09-07T02:00:00Z",
+      "ended_at": null,
+      "exit_code": null,
+      "deleted_at": null,
+      "summary": "- [ ] 终端不进看板",
+      "last_state": "running"
+    }
   ],
-  "archived": ["/p/old"],
   "live": {
-    "ask": {"status": "asking", "updated_at": "2026-09-07T09:00:00Z"},
-    "run": {"status": "running", "updated_at": "2026-09-07T08:00:00Z"},
-    "bg": {"status": "background", "updated_at": "2026-09-07T07:00:00Z"},
-    "act": {"status": "active", "updated_at": "2026-09-07T06:00:00Z"}
+    "ask": {
+      "status": "asking",
+      "updated_at": "2026-09-07T09:00:00Z"
+    },
+    "run": {
+      "status": "running",
+      "updated_at": "2026-09-07T08:00:00Z"
+    },
+    "bg": {
+      "status": "background",
+      "updated_at": "2026-09-07T07:00:00Z"
+    },
+    "act": {
+      "status": "active",
+      "updated_at": "2026-09-07T06:00:00Z"
+    }
   },
   "sessions": [
-    {"id": "ask", "title": "改登录页", "project_name": "Shop", "project_path": "/p/shop", "status": "asking", "alive": true, "deleted": false, "archived": false, "done": 0, "open": 1, "items": [{"done": false, "text": "回答问题"}], "updated_at": "2026-09-07T09:00:00Z"},
-    {"id": "run", "title": "支付流程", "project_name": "Shop", "project_path": "/p/shop", "status": "running", "alive": true, "deleted": false, "archived": false, "done": 1, "open": 1, "items": [{"done": true, "text": "修登录"}, {"done": false, "text": "补测试"}], "updated_at": "2026-09-07T08:00:00Z"},
-    {"id": "bg", "title": "后台编译", "project_name": "Mail", "project_path": "/p/mail", "status": "background", "alive": true, "deleted": false, "archived": false, "done": 0, "open": 0, "items": [], "updated_at": "2026-09-07T07:00:00Z"},
-    {"id": "act", "title": "Mail", "project_name": "Mail", "project_path": "/p/mail", "status": "active", "alive": true, "deleted": false, "archived": false, "done": 2, "open": 0, "items": [{"done": true, "text": "a"}, {"done": true, "text": "b"}], "updated_at": "2026-09-07T06:00:00Z"},
-    {"id": "fin", "title": "写完的", "project_name": "Blog", "project_path": "/p/blog", "status": "paused", "alive": false, "deleted": false, "archived": false, "done": 1, "open": 0, "items": [{"done": true, "text": "完成"}], "updated_at": "2026-09-06T05:00:00Z"},
-    {"id": "old", "title": "老活", "project_name": "Blog", "project_path": "/p/blog", "status": "paused", "alive": false, "deleted": false, "archived": false, "done": 0, "open": 1, "items": [{"done": false, "text": "没做完 测试"}], "updated_at": "2026-09-06T04:00:00Z"},
-    {"id": "arch", "title": "归档了的", "project_name": "Old", "project_path": "/p/old", "status": "paused", "alive": false, "deleted": false, "archived": true, "done": 0, "open": 1, "items": [{"done": false, "text": "归档后不计数"}], "updated_at": "2026-09-06T12:00:00Z"},
-    {"id": "del", "title": "删了的", "project_name": "Gone", "project_path": "/p/gone", "status": "paused", "alive": false, "deleted": true, "archived": false, "done": 0, "open": 1, "items": [{"done": false, "text": "删了"}], "updated_at": "2026-09-06T10:00:00Z"}
+    {
+      "id": "ask",
+      "title": "改登录页",
+      "project_name": "Shop",
+      "project_path": "/p/shop",
+      "status": "asking",
+      "alive": true,
+      "deleted": false,
+      "done": 0,
+      "open": 1,
+      "items": [
+        {
+          "done": false,
+          "text": "回答问题"
+        }
+      ],
+      "updated_at": "2026-09-07T09:00:00Z"
+    },
+    {
+      "id": "run",
+      "title": "支付流程",
+      "project_name": "Shop",
+      "project_path": "/p/shop",
+      "status": "running",
+      "alive": true,
+      "deleted": false,
+      "done": 1,
+      "open": 1,
+      "items": [
+        {
+          "done": true,
+          "text": "修登录"
+        },
+        {
+          "done": false,
+          "text": "补测试"
+        }
+      ],
+      "updated_at": "2026-09-07T08:00:00Z"
+    },
+    {
+      "id": "bg",
+      "title": "后台编译",
+      "project_name": "Mail",
+      "project_path": "/p/mail",
+      "status": "background",
+      "alive": true,
+      "deleted": false,
+      "done": 0,
+      "open": 0,
+      "items": [],
+      "updated_at": "2026-09-07T07:00:00Z"
+    },
+    {
+      "id": "act",
+      "title": "Mail",
+      "project_name": "Mail",
+      "project_path": "/p/mail",
+      "status": "active",
+      "alive": true,
+      "deleted": false,
+      "done": 2,
+      "open": 0,
+      "items": [
+        {
+          "done": true,
+          "text": "a"
+        },
+        {
+          "done": true,
+          "text": "b"
+        }
+      ],
+      "updated_at": "2026-09-07T06:00:00Z"
+    },
+    {
+      "id": "pau",
+      "title": "另一台上的活",
+      "project_name": "Old",
+      "project_path": "/p/old",
+      "status": "paused",
+      "alive": false,
+      "deleted": false,
+      "done": 0,
+      "open": 1,
+      "items": [
+        {
+          "done": false,
+          "text": "没做完"
+        }
+      ],
+      "updated_at": "2026-09-06T12:00:00Z"
+    },
+    {
+      "id": "fin",
+      "title": "写完的",
+      "project_name": "Blog",
+      "project_path": "/p/blog",
+      "status": "paused",
+      "alive": false,
+      "deleted": false,
+      "done": 1,
+      "open": 0,
+      "items": [
+        {
+          "done": true,
+          "text": "完成"
+        }
+      ],
+      "updated_at": "2026-09-06T05:00:00Z"
+    },
+    {
+      "id": "old",
+      "title": "老活",
+      "project_name": "Blog",
+      "project_path": "/p/blog",
+      "status": "paused",
+      "alive": false,
+      "deleted": false,
+      "done": 0,
+      "open": 1,
+      "items": [
+        {
+          "done": false,
+          "text": "没做完 测试"
+        }
+      ],
+      "updated_at": "2026-09-06T04:00:00Z"
+    },
+    {
+      "id": "del",
+      "title": "删了的",
+      "project_name": "Gone",
+      "project_path": "/p/gone",
+      "status": "paused",
+      "alive": false,
+      "deleted": true,
+      "done": 0,
+      "open": 1,
+      "items": [
+        {
+          "done": false,
+          "text": "删了"
+        }
+      ],
+      "updated_at": "2026-09-06T10:00:00Z"
+    }
   ],
   "expect": {
-    "counts": {"asking": 1, "running": 1, "background": 1, "active": 1, "paused": 2, "open_items": 3},
-    "finished": ["fin"],
-    "match_测试": ["run", "old"],
-    "visible_default": ["ask", "run", "bg", "act", "fin", "old"]
+    "counts": {
+      "open_items": 4
+    },
+    "finished": [
+      "fin"
+    ],
+    "match_测试": [
+      "run",
+      "old"
+    ],
+    "visible_default": [
+      "ask",
+      "run",
+      "bg",
+      "act",
+      "pau",
+      "fin",
+      "old"
+    ]
   }
 }

@@ -49,6 +49,19 @@ fun usageSubtitleSegments(usage: SessionUsage?): List<UsageSegment> {
 
 fun usageSubtitle(usage: SessionUsage?): String? = usageSubtitleSegments(usage).takeIf { it.isNotEmpty() }?.joined()
 
+/**
+ * 会话页顶栏那一行的用量：只要**模型**和**上下文占比**（2026-09-08 用户拍板：顶栏从三行
+ * 并成一行，标题之外只留这两样）。缓存命中率和花费搬进详情屏——那是要坐下来看的数字，
+ * 不该在手机顶栏跟标题抢宽度。
+ */
+fun usageHeaderSegments(usage: SessionUsage?): List<UsageSegment> {
+    if (usage == null) return emptyList()
+    return buildList {
+        usage.model?.takeIf { it.isNotBlank() }?.let { add(UsageSegment(it)) }
+        usage.context_pct?.let { add(UsageSegment(pctText(it), pctColorLevel(it))) }
+    }
+}
+
 /** 首页套餐行：`5h 32% · 7d 61% · Fable 40%`；没有任何窗口返回空列表 */
 fun planLineSegments(plan: PlanUsage?): List<UsageSegment> {
     if (plan == null) return emptyList()

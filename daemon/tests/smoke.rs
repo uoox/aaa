@@ -605,7 +605,6 @@ async fn inbox_auto_feed_on_first_waiting() {
     assert_eq!(code, 200);
     assert!(dash["sessions"].as_array().unwrap().is_empty(), "终端不进看板");
     assert_eq!(dash["counts"]["open_items"], 0);
-    assert!(dash["counts"]["paused"].is_number() && dash["counts"]["background"].is_number());
 
     // messages endpoint: shell sessions are unsupported
     let (code, m) = http(
@@ -701,38 +700,6 @@ async fn deleting_a_project_kills_its_live_sessions() {
         .find(|e| e["id"] == sid)
         .expect("history keeps the record");
     assert!(row["deleted_at"].is_string());
-    drop(guard);
-}
-
-/// 归档（v1.15）：不确认、不删任何东西；活着的会话一起结束；列表行带 archived；取消归档就回来
-#[tokio::test(flavor = "multi_thread")]
-async fn archiving_a_project_ends_its_sessions_and_marks_the_row() {
-    let env = setup_env();
-    let guard = spawn_daemon(&env);
-    let port = wait_port(&env);
-    let (_, proj) = http("POST", port, "/api/v1/projects", Some(TOKEN), Some(serde_json::json!({"name": "shelf", "agent": "shell"})));
-    let path = proj["path"].as_str().unwrap().to_string();
-    let (_, sess) = http("POST", port, "/api/v1/sessions", Some(TOKEN), Some(serde_json::json!({"project_path": path, "agent": "shell", "resume": false})));
-    let sid = sess["id"].as_str().unwrap().to_string();
-
-    let (code, resp) = http("POST", port, "/api/v1/projects/archive", Some(TOKEN), Some(serde_json::json!({"path": path, "archived": true})));
-    assert_eq!(code, 200);
-    assert_eq!(resp["killed"].as_array().unwrap().len(), 1, "活着的会话被结束");
-    let (_, list) = http("GET", port, "/api/v1/projects", Some(TOKEN), None);
-    let row = list.as_array().unwrap().iter().find(|p| p["path"] == path).expect("项目还在列表里（客户端自己藏）");
-    assert_eq!(row["archived"], true);
-    assert!(Path::new(&path).is_dir(), "目录不动");
-    let (_, sessions) = http("GET", port, "/api/v1/sessions", Some(TOKEN), None);
-    let s = sessions.as_array().unwrap().iter().find(|s| s["id"] == sid).expect("会话记录还在");
-    assert_eq!(s["state"], "exited");
-    // 看板卡片带 archived
-    let (_, dash) = http("GET", port, "/api/v1/history/dashboard", Some(TOKEN), None);
-    assert!(dash["sessions"].as_array().unwrap().is_empty(), "终端不进看板，但接口形状要齐");
-
-    let (code, _) = http("POST", port, "/api/v1/projects/archive", Some(TOKEN), Some(serde_json::json!({"path": path, "archived": false})));
-    assert_eq!(code, 200);
-    let (_, list) = http("GET", port, "/api/v1/projects", Some(TOKEN), None);
-    assert_eq!(list.as_array().unwrap().iter().find(|p| p["path"] == path).unwrap()["archived"], false);
     drop(guard);
 }
 

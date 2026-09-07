@@ -131,6 +131,9 @@ fun AaaApp(
             composable("home") { HomeScreen(store, nav) }
             composable("settings") { SettingsScreen(store, nav) }
             composable("history") { HistoryScreen(store, nav) }
+            composable("detail/{id}") { entry ->
+                SessionDetailScreen(store, nav, entry.arguments?.getString("id").orEmpty())
+            }
             composable("terminal?focus={focus}", arguments = listOf(androidx.navigation.navArgument("focus") { defaultValue = "" })) { entry ->
                 TerminalScreen(store, nav, focusId = entry.arguments?.getString("focus").orEmpty())
             }
@@ -146,6 +149,11 @@ fun AaaApp(
             }
         }
     }
+}
+
+/** 会话页右上角的详情按钮（顶替了原来的 ⋮） */
+fun NavHostController.openDetail(sessionId: String) {
+    navigate("detail/" + Uri.encode(sessionId)) { launchSingleTop = true }
 }
 
 fun NavHostController.openTerminal(focusId: String? = null) {

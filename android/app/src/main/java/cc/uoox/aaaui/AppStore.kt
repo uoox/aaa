@@ -212,6 +212,23 @@ class AppStore private constructor(context: Context) {
 
     fun markUserKilled(id: String) { userKilled.add(id) }
 
+    /**
+     * 黄点（2026-09-08）：这一轮跑完了、或者在等你回话，而这台设备还没进去看。
+     * 打点的时机和三种通知完全一样——通知响一声、列表上留一个点，是同一件事的两种说法。
+     * 清点在 [seenProject]（进会话就清）。
+     */
+    private fun markUnread(s: Session) {
+        val path = s.project_path
+        if (path.isBlank()) return
+        scope.launch { settings.setProjectUnread(path, true) }
+    }
+
+    /** 进了这个项目的会话：黄点消失。 */
+    fun seenProject(path: String?) {
+        if (path.isNullOrBlank()) return
+        scope.launch { settings.setProjectUnread(path, false) }
+    }
+
     private fun handleFrame(frame: EventFrame) {
         when (frame) {
             is EventFrame.Snapshot -> {
@@ -229,14 +246,20 @@ class AppStore private constructor(context: Context) {
                 _sessions.value = _sessions.value.filter { it.id != s.id } + s
                 if (s.agent == "shell" && s.state == "exited") cleanupExitedShell(s)
                 // 待回复：asking 翻 true（弹着选项 / 授权等你）
-                if (s.agent != "shell" && s.asking && old?.asking != true && s.state != "exited") _notifyEvents.tryEmit(NotifyEvent.Asking(s))
+                if (s.agent != "shell" && s.asking && old?.asking != true && s.state != "exited") {
+                    _notifyEvents.tryEmit(NotifyEvent.Asking(s)); markUnread(s)
+                }
                 // 出错：StopFailure 报的错误（rate limit / 认证…）
                 val err = s.error
-                if (s.agent != "shell" && !err.isNullOrBlank() && old?.error != err) _notifyEvents.tryEmit(NotifyEvent.Error(s, err))
-                if (s.agent != "shell" && s.state == "waiting" && prev == "running") _notifyEvents.tryEmit(NotifyEvent.Done(s, exited = false))
+                if (s.agent != "shell" && !err.isNullOrBlank() && old?.error != err) {
+                    _notifyEvents.tryEmit(NotifyEvent.Error(s, err)); markUnread(s)
+                }
+                if (s.agent != "shell" && s.state == "waiting" && prev == "running") {
+                    _notifyEvents.tryEmit(NotifyEvent.Done(s, exited = false)); markUnread(s)
+                }
                 // 退出：只有非 0 退出码算「出错」；正常退出不弹；本机手动终止的不弹
                 if (s.agent != "shell" && s.state == "exited" && prev == "running" && !userKilled.remove(s.id) && (s.exit_code ?: 0) != 0) {
-                    _notifyEvents.tryEmit(NotifyEvent.Done(s, exited = true))
+                    _notifyEvents.tryEmit(NotifyEvent.Done(s, exited = true)); markUnread(s)
                 }
             }
             is EventFrame.SessionRemoved -> {
@@ -260,6 +283,31 @@ class AppStore private constructor(context: Context) {
         if (shellDeletes.add(s.id)) scope.launch { runCatching { client?.deleteSession(s.id) } }
     }
 
+    /**
+     * 关一个终端：**先从列表里拿掉**，kill + DELETE 在后台跑（2026-09-08）。
+     * daemon 的 `DELETE /sessions/:id` 对还没退出的会话最多要等 3 秒（SIGTERM → 2s → SIGKILL），
+     * 以前 UI 串着 await 这两个请求，手指点下去到行消失中间就是这三秒的空白——「关终端很卡」
+     * 的大头。会话没了 daemon 会广播 session_removed，列表本来就会收敛到同一个结果。
+     */
+    fun closeTerminal(sessionId: String) {
+        _sessions.value = _sessions.value.filter { it.id != sessionId }
+        releaseAttachmentNow(sessionId)
+        shellDeletes.add(sessionId)
+        scope.launch {
+            runCatching { client?.kill(sessionId) }
+            runCatching { client?.deleteSession(sessionId) }
+            refreshSessions()
+        }
+    }
+
+    /**
+     * 提前把 attach 拉起来：点终端那一行的瞬间就开 WS，等屏幕组合完 replay 往往已经到了。
+     * 复用 [attachmentFor] 的注册表，所以随后屏幕里再要一次拿到的是同一个（不会开两条）。
+     */
+    fun prewarmAttachment(sessionId: String) {
+        attachmentFor(sessionId)
+    }
+
     // ---------- 终端 attach 注册表 ----------
 
     /**
@@ -269,6 +317,9 @@ class AppStore private constructor(context: Context) {
      * 每折一次屏就断线重连一次——PTY 在 daemon 上不会丢，但整屏 replay 肉眼可见。
      *
      */
+    /** 已经建好的 attach（有就直接给，没有返回 null，不新建）：首帧就能画上，不闪一下「未连接」。 */
+    fun peekAttachment(sessionId: String): TerminalAttachment? = synchronized(attachments) { attachments[sessionId] }
+
     fun attachmentFor(sessionId: String): TerminalAttachment? {
         val api = client ?: return null
         return synchronized(attachments) {

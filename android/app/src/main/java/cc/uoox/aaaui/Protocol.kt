@@ -106,6 +106,27 @@ fun parseChecklist(md: String): List<ChecklistItem> = md.lines().mapNotNull { ra
 )
 @Serializable data class ArtifactsResponse(val artifacts: List<ArtifactInfo> = emptyList())
 
+// v1.17 详情屏（GET /sessions/:id/detail）：消息流里翻不出来的四样东西
+@Serializable data class Subagent(
+    /** 工具名：Agent（新）/ Task（老） */
+    val tool: String = "",
+    /** 子代理类型（subagent_type），拿不到就空 */
+    val kind: String = "",
+    val summary: String = "",
+    /** running | ok | err */
+    val status: String = "",
+    val ts: String = "",
+)
+@Serializable data class BgTask(val tool: String = "", val summary: String = "", val ts: String = "")
+@Serializable data class UploadInfo(val name: String = "", val path: String = "", val size: Long = 0, val ts: String = "")
+@Serializable data class SkillUse(val name: String = "", val count: Int = 0, val last_ts: String = "")
+@Serializable data class SessionDetail(
+    val subagents: List<Subagent> = emptyList(),
+    val background_tasks: List<BgTask> = emptyList(),
+    val uploads: List<UploadInfo> = emptyList(),
+    val skills: List<SkillUse> = emptyList(),
+)
+
 @Serializable data class Health(
     val version: String = "", val ssd_mounted: Boolean = false, val project_root: String = "", val uptime_s: Long = 0,
     /** 二进制被重新构建过、跑的还是旧进程：设置页亮「需重启」 */
@@ -122,12 +143,9 @@ fun parseChecklist(md: String): List<ChecklistItem> = md.lines().mapNotNull { ra
     val session_title: String? = null,
     /** v1.8：置顶（daemon 侧存，三端一起变） */
     val pinned: Boolean = false,
-    /** v1.15：归档（daemon 侧存）——列表 / 看板默认藏起来，一个开关翻出来 */
-    val archived: Boolean = false,
 )
 /** kind：permission（能替答）| elicitation（MCP 表单，只能去终端） */
 @Serializable data class PermissionPrompt(val kind: String = "permission", val tool_name: String = "", val summary: String = "", val since: String = "")
-@Serializable data class PortInfo(val port: Int, val cmd: String = "")
 @Serializable data class ScreenText(val text: String = "", val alternate_screen: Boolean = false)
 @Serializable data class PurgedAgent(val agent_label: String, val count: Int)
 @Serializable data class ProjectDeleteResult(val path: String, val ok: Boolean, val purged: List<PurgedAgent> = emptyList())
@@ -169,8 +187,7 @@ fun parseChecklist(md: String): List<ChecklistItem> = md.lines().mapNotNull { ra
 @Serializable data class Dashboard(val counts: DashCounts = DashCounts(), val sessions: List<SessionCard>)
 
 @Serializable data class DashCounts(
-    val asking: Int = 0, val running: Int = 0, val background: Int = 0, val active: Int = 0, val paused: Int = 0,
-    /** 未删除会话里没勾的清单项总数 */
+    /** 未删除会话里没勾的清单项总数——看板顶上唯一还留着的数字 */
     val open_items: Int = 0,
 )
 
@@ -185,20 +202,17 @@ fun parseChecklist(md: String): List<ChecklistItem> = md.lines().mapNotNull { ra
     /** 还在池子里（能点开，已退出的回放也算） */
     val alive: Boolean = false,
     val deleted: Boolean = false,
-    /** v1.15：项目已归档 */
-    val archived: Boolean = false,
     val done: Int = 0,
     val open: Int = 0,
     val items: List<ChecklistItem> = emptyList(),
     val updated_at: String = "",
 )
 
-val DASH_STATUSES = listOf("asking", "running", "background", "active", "paused")
-
-/** 状态字（与首页同一套五态） */
-fun statusLabel(status: String): String = when (status) {
-    "asking" -> "待回复"; "running" -> "运行"; "background" -> "后台"; "active" -> "激活"; else -> "暂停"
-}
+/**
+ * 卡片上转不转圈（2026-09-08 用户拍板：看板和项目列表说同一套话——转圈 / 黄点 / 什么都没有，
+ * 五个状态字连同顶上的计数条一起去掉）。`status` 本身还留在协议里，它是排序和这个判断的依据。
+ */
+fun cardSpinning(c: SessionCard): Boolean = !c.deleted && (c.status == "running" || c.status == "background")
 
 /** 看板搜索：标题 / 项目 / 任一清单项含关键字（不分大小写）；空串全匹配 */
 fun cardMatches(c: SessionCard, query: String): Boolean {

@@ -4,6 +4,7 @@ import android.widget.Toast
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -20,6 +21,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
@@ -67,23 +69,26 @@ import kotlinx.coroutines.launch
 const val DEFAULT_AGENT = "claude"
 
 /**
- * 项目行的状态字（2026-09-06 用户拍板，三端一致；不再用色点）：
- * 运行 = 会话在跑；待回复 = 弹着选项等你选，不选就卡住（asking，哪怕屏幕还在变）；
- * 后台 = 停在输入框但后台还有任务没回来（background）；激活 = 会话活着、停在输入框轮到你（waiting）；暂停 = 没有存活会话
- * （退出了 / 只有旧对话 / 从没跑过）。
+ * 项目行的内部状态。**2026-09-08 用户拍板：列表上不再写状态字**（「激活 / 未激活」这类词
+ * 对着一屏项目说不出任何有用的东西）——行首只有两种记号：**在跑就转圈**，**跑完了 / 在等你
+ * 回话且这台设备还没进去看就一个黄点**，其余什么都不画。这个枚举因此只剩两个职责：决定
+ * 转不转圈，以及列表从上往下的顺序。
+ *
  * 一个项目只有一个 agent（建项目时定死，从不切换），项目 ↔ 会话事实上一对一，所以
  * 会话状态直接挂在项目行上，首页不再单开会话页。终端永远不代表项目。全部由客户端把
  * projects × sessions 两个流拼出来。
  */
-enum class ProjectState(val label: String, val rank: Int) {
-    // rank = 列表从上往下的优先级（2026-09-07 用户拍板，两个字）：待回复 > 运行 > 后台 > 激活 > 暂停。
-    // 卡在等你回答的排最上——它不动，别的都还能自己往前跑。
-    NEEDS_REPLY("待回复", 0),
-    RUNNING("运行", 1),
+enum class ProjectState(val rank: Int) {
+    // rank = 同为「没黄点」时列表从上往下的优先级；黄点的一律排在它们之前（见 projectRows）
+    NEEDS_REPLY(0),
+    RUNNING(1),
     /** 停在输入框但后台还有任务（后台 Bash / 异步子代理 / Monitor）没回来，会自己被叫醒 */
-    BACKGROUND("后台", 2),
-    ACTIVE("激活", 3),
-    INACTIVE("暂停", 4),
+    BACKGROUND(2),
+    ACTIVE(3),
+    INACTIVE(4);
+
+    /** 转圈：自己在跑，或后台任务还没回来——都是「它还在动，你不用管」 */
+    val spinning: Boolean get() = this == RUNNING || this == BACKGROUND
 }
 
 /** 首页一行要的全部东西，纯数据，方便单测。 */
@@ -92,6 +97,11 @@ data class ProjectRow(
     /** 该项目的主会话；一个都没有时为 null。 */
     val primary: Session?,
     val state: ProjectState,
+    /**
+     * 黄点：跑完一轮 / 在等你回话，而这台设备还没进去看过（本地状态，见 SettingsStore
+     * 的 unreadProjects）。进会话就没了。
+     */
+    val unread: Boolean = false,
     /**
      * 排序键 = 该项目最近更新的会话的 `updated_at`（状态翻转 / 改名的时刻；老 daemon
      * 没有 → created_at），包括已退出的会话；没有会话的用目录 mtime。ISO 串，字典序即时间序。
@@ -146,45 +156,44 @@ fun projectStateOf(primary: Session?): ProjectState = when {
 }
 
 /**
- * 一项目一行（2026-09-06 用户拍板，单列，不再分「激活 / 未激活」两栏）。
- * 排序：置顶的在最前（自己按的顶，状态不该把它挤下去），组内先按状态
- * **待回复 > 执行中 > 已激活 > 未激活**（2026-09-07 用户拍板），同状态里**最近更新的在前**。
+ * 一项目一行。排序（2026-09-08 用户拍板）：**置顶 > 有黄点 > 在跑 > 其余**，同一档里
+ * **最近更新的在前**。置顶是自己按的，黄点也挤不掉它；黄点排在转圈前面——转圈的还在自己
+ * 往前走，黄点的那个是在等你。
  * 时间看的是 daemon 的 `updated_at`（状态翻转 / 改名），不是每个字节都动的 last_output_at
  * ——几个会话同时在跑时行才不会互相换位。同刻按路径稳住。
  */
-fun projectRows(projects: List<Project>, sessions: List<Session>): List<ProjectRow> = projects.map { p ->
+fun projectRows(projects: List<Project>, sessions: List<Session>, unread: Set<String> = emptySet()): List<ProjectRow> = projects.map { p ->
     val primary = primarySessionFor(p, sessions)
     val latest = sessions
         .filter { it.project_path == p.path && it.agent != "shell" }
         .maxOfOrNull { it.updatedIso() }
         ?.takeIf { it.isNotBlank() }
-    ProjectRow(p, primary, projectStateOf(primary), latest ?: p.mtime)
+    ProjectRow(p, primary, projectStateOf(primary), p.path in unread, latest ?: p.mtime)
 }.sortedWith(
-    compareBy<ProjectRow> { it.project.archived }
-        .thenByDescending { it.project.pinned }
+    compareByDescending<ProjectRow> { it.project.pinned }
+        .thenByDescending { it.unread }
         .thenBy { it.state.rank }
         .thenByDescending { it.updatedIso }
         .thenBy { it.project.path },
 )
 
-private fun ProjectState.color(): Color = when (this) {
-    ProjectState.RUNNING, ProjectState.BACKGROUND -> Tok.Green
-    ProjectState.NEEDS_REPLY -> Tok.Amber
-    ProjectState.ACTIVE -> Tok.Accent
-    ProjectState.INACTIVE -> Tok.Faint
-}
+/** 行首那一格的宽度：转圈 / 黄点 / 什么都没有，三种情况标题都要对得齐 */
+private val INDICATOR_W = 20.dp
 
 /**
- * 状态字做成带边框的小标签：只靠字色分不开「已激活 / 未激活」，边框把它从标题里
- * 框出来，颜色（绿 / 黄 / 强调色 / 淡灰）再把四态拉开。定宽，标题才对得齐。
+ * 行首记号（2026-09-08 用户拍板，替掉了五个状态字）：
+ * **转圈** = 在跑（含后台任务没回来，以及本行正在 resume）；**黄点** = 跑完了 / 在等你回话
+ * 而这台设备还没进去看；**什么都没有** = 没什么要你操心的。
  */
 @Composable
-private fun StateTag(state: ProjectState) {
-    Box(
-        Modifier.width(48.dp).border(1.dp, state.color().copy(alpha = 0.7f), RoundedCornerShape(5.dp)).padding(vertical = 2.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(state.label, color = state.color(), fontSize = 10.5.sp, fontFamily = FontFamily.Monospace, maxLines = 1)
+private fun RowIndicator(state: ProjectState, unread: Boolean, busy: Boolean) {
+    Box(Modifier.width(INDICATOR_W), contentAlignment = Alignment.Center) {
+        when {
+            busy || state.spinning ->
+                CircularProgressIndicator(Modifier.width(12.dp).height(12.dp), strokeWidth = 1.5.dp, color = Tok.Accent)
+            unread ->
+                Box(Modifier.width(8.dp).height(8.dp).background(Tok.Amber, CircleShape))
+        }
     }
 }
 
@@ -254,6 +263,7 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
     val conn by store.connState.collectAsState()
     val health by store.health.collectAsState()
     val plan by store.planUsage.collectAsState()
+    val settings by store.settings.flow.collectAsState(initial = AppSettings())
     var planDialog by remember { mutableStateOf(false) }
     var query by rememberSaveable { mutableStateOf("") }
     var refreshing by remember { mutableStateOf(false) }
@@ -261,23 +271,23 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
     var busy by remember { mutableStateOf(setOf<String>()) }
     var actionsFor by remember { mutableStateOf<Project?>(null) }
     var purgeReport by remember { mutableStateOf<List<ProjectDeleteResult>?>(null) }
-    // 归档的默认藏起来（v1.15），脚注一行「归档 N」翻出来
-    var showArchived by rememberSaveable { mutableStateOf(false) }
     // 正在 POST /projects + /sessions：挡住第二次回车
     var creating by remember { mutableStateOf(false) }
+    var creatingTerminal by remember { mutableStateOf(false) }
+    val root = health?.project_root?.takeIf { it.isNotBlank() } ?: "/Volumes/SSD/project"
+    val terminals = remember(sessions) { terminalSessions(sessions) }
     val focusManager = LocalFocusManager.current
 
     LaunchedEffect(Unit) { store.refreshProjects() }
 
     // 只在输入变化时重算，不跟着 conn 延迟数字的重组一起算
-    val allRows = remember(projects, sessions, query) {
-        projectRows(projects, sessions).filter { r ->
+    val unread = settings.unreadProjects
+    val rows = remember(projects, sessions, query, unread) {
+        projectRows(projects, sessions, unread).filter { r ->
             query.isBlank() || r.project.name.contains(query, true) ||
                 r.project.session_title.orEmpty().contains(query, true)
         }
     }
-    val archivedCount = allRows.count { it.project.archived }
-    val rows = if (showArchived) allRows else allRows.filter { !it.project.archived }
 
     fun toast(msg: String) = Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
 
@@ -295,6 +305,23 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
             } catch (e: Exception) {
                 toast(createErrorText(e))
             } finally { creating = false }
+        }
+    }
+
+    /** 底部「＋ 新增终端」：在项目根开一个 shell，attach 先热起来，再进终端屏 */
+    fun newTerminal() {
+        if (creatingTerminal) return
+        creatingTerminal = true
+        scope.launch {
+            try {
+                val sess = store.client?.createSession(root, "shell", resume = false, fresh = true)
+                    ?: throw IllegalStateException("未连接 daemon")
+                store.refreshSessions()
+                store.prewarmAttachment(sess.id)
+                onBeforeNavigate(); nav.openTerminal(sess.id)
+            } catch (e: Exception) {
+                toast("开终端失败：${e.message}")
+            } finally { creatingTerminal = false }
         }
     }
 
@@ -342,13 +369,6 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
                 Text("SSD ✗", color = Tok.Red, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.width(4.dp))
             }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = { onBeforeNavigate(); nav.openTerminal() }) {
-                    Text(">_", color = Tok.Dim, fontSize = 16.sp, fontFamily = FontFamily.Monospace)
-                }
-                val terminalCount = terminalSessions(sessions).size
-                if (terminalCount > 0) Text(terminalCount.toString(), color = Tok.Accent, fontSize = 10.sp)
-            }
             IconButton(onClick = { onBeforeNavigate(); nav.navigate("history") }) {
                 Text("▦", color = Tok.Dim, fontSize = 17.sp)
             }
@@ -376,17 +396,18 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
             },
             modifier = Modifier.fillMaxSize(),
         ) {
-            if (rows.isEmpty()) {
-                Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                    if (projects.isEmpty()) {
-                        Text("暂无项目", color = Tok.Faint)
-                        Text("在上方输入文件夹名，回车新建", color = Tok.Faint, fontSize = 12.sp)
-                    } else {
-                        Text("没有匹配的项目", color = Tok.Faint)
+            LazyColumn(Modifier.fillMaxSize().padding(top = 6.dp)) {
+                // 空态也是列表里的一项：下面还有终端一节，浮一层居中文字会盖住它
+                if (rows.isEmpty()) item(key = "projects-empty") {
+                    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 28.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                        if (projects.isEmpty()) {
+                            Text("暂无项目", color = Tok.Faint)
+                            Text("在上方输入文件夹名，回车新建", color = Tok.Faint, fontSize = 12.sp)
+                        } else {
+                            Text("没有匹配的项目", color = Tok.Faint)
+                        }
                     }
                 }
-            }
-            LazyColumn(Modifier.fillMaxSize().padding(top = 6.dp)) {
                 items(rows, key = { it.project.path }) { row ->
                     // 顺序随最近更新变：Compose 按 key 做位移过渡，上移/下移都有动画
                     ProjectRowItem(
@@ -398,18 +419,41 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
                         onLongClick = { actionsFor = row.project },
                     )
                 }
-                if (archivedCount > 0) item(key = "archived-toggle") {
-                    Text(
-                        (if (showArchived) "▾" else "▸") + " 归档 $archivedCount",
-                        color = if (showArchived) Tok.Accent else Tok.Dim, fontSize = 12.sp, fontFamily = FontFamily.Monospace,
-                        modifier = Modifier.fillMaxWidth().clickable { showArchived = !showArchived }.padding(horizontal = 16.dp, vertical = 10.dp),
-                    )
-                }
-                item {
+                if (rows.isNotEmpty()) item(key = "projects-hint") {
                     Text(
                         "点一行进入消息流 · 长按查看项目操作",
                         color = Tok.Faint, fontSize = 11.sp,
-                        modifier = Modifier.fillMaxWidth().padding(14.dp),
+                        modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 4.dp),
+                    )
+                }
+                // 终端与会话平级（2026-09-08 用户拍板）：项目列表下面直接是终端列表，
+                // 底部一行「新增终端」。以前它藏在顶栏一个 `>_` 按钮后面，是另一个世界。
+                item(key = "terminals-hdr") {
+                    HorizontalDivider(color = Tok.Edge, thickness = 1.dp, modifier = Modifier.padding(top = 10.dp))
+                    Text(
+                        "终端",
+                        color = Tok.Dim, fontSize = 11.sp, fontFamily = FontFamily.Monospace,
+                        modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 4.dp),
+                    )
+                }
+                itemsIndexed(terminals, key = { _, t -> "term-" + t.id }) { i, t ->
+                    TerminalRowItem(
+                        terminalTabLabel(i, t, root),
+                        modifier = Modifier.animateItem(),
+                        onClick = {
+                            // 点下去就把 attach 拉起来，等屏幕组合完 replay 往往已经到了
+                            store.prewarmAttachment(t.id)
+                            onBeforeNavigate(); nav.openTerminal(t.id)
+                        },
+                        onClose = { store.closeTerminal(t.id) },
+                    )
+                }
+                item(key = "terminal-new") {
+                    Text(
+                        if (creatingTerminal) "＋ 新增终端…" else "＋ 新增终端",
+                        color = if (creatingTerminal) Tok.Faint else Tok.Accent, fontSize = 14.sp,
+                        modifier = Modifier.fillMaxWidth().clickable(enabled = !creatingTerminal) { newTerminal() }
+                            .padding(horizontal = 16.dp, vertical = 13.dp),
                     )
                     Spacer(Modifier.height(80.dp))
                 }
@@ -465,7 +509,7 @@ fun PlanUsageDialog(plan: PlanUsage, onDismiss: () -> Unit) {
     )
 }
 
-/** 一行到底：状态字 + 标题 + 更新时间。不再有第二行——目录大小等细节在长按单里。 */
+/** 一行到底：记号 + 标题 + 更新时间。不再有第二行——目录大小等细节在长按单里。 */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ProjectRowItem(row: ProjectRow, busy: Boolean, current: Boolean = false, onClick: () -> Unit, onLongClick: () -> Unit, modifier: Modifier = Modifier) {
@@ -477,22 +521,42 @@ private fun ProjectRowItem(row: ProjectRow, busy: Boolean, current: Boolean = fa
                 .padding(horizontal = 16.dp, vertical = 11.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            // 正在 resume 的行用转圈顶替标签
-            Box(Modifier.width(48.dp), contentAlignment = Alignment.Center) {
-                if (busy) CircularProgressIndicator(Modifier.width(12.dp).height(12.dp), strokeWidth = 1.5.dp, color = Tok.Accent)
-                else StateTag(row.state)
-            }
-            Spacer(Modifier.width(10.dp))
+            RowIndicator(row.state, row.unread, busy)
+            Spacer(Modifier.width(8.dp))
             if (row.project.pinned) Text("📌", fontSize = 12.sp, modifier = Modifier.padding(end = 4.dp))
             Text(
-                row.title, color = if (row.alive && !row.project.archived) Tok.Ink else Tok.Dim, fontSize = 15.sp, fontWeight = FontWeight.Bold,
+                row.title, color = if (row.alive) Tok.Ink else Tok.Dim, fontSize = 15.sp, fontWeight = FontWeight.Bold,
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
             )
             Spacer(Modifier.width(8.dp))
-            if (row.project.archived) Text("归档", color = Tok.Faint, fontSize = 10.5.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.padding(end = 6.dp))
             Text(relativeTime(row.updatedIso), color = Tok.Faint, fontSize = 11.sp)
         }
-        HorizontalDivider(color = Tok.Edge, thickness = 1.dp, modifier = Modifier.padding(start = 74.dp))
+        HorizontalDivider(color = Tok.Edge, thickness = 1.dp, modifier = Modifier.padding(start = 44.dp))
+    }
+}
+
+/**
+ * 终端一行：`终端 N · 目录名` + 行尾 ×。与项目行同一套排版（左边 48dp 的指示位空着，
+ * 标题才和上面对得齐），但终端不是项目——没有状态、没有长按单。
+ */
+@Composable
+private fun TerminalRowItem(label: String, onClick: () -> Unit, onClose: () -> Unit, modifier: Modifier = Modifier) {
+    Column(modifier) {
+        Row(
+            Modifier.fillMaxWidth().clickable(onClick = onClick).padding(start = 16.dp, end = 8.dp, top = 11.dp, bottom = 11.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(Modifier.width(INDICATOR_W), contentAlignment = Alignment.Center) {
+                Text(">_", color = Tok.Dim, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+            }
+            Spacer(Modifier.width(8.dp))
+            Text(
+                label, color = Tok.Ink, fontSize = 15.sp,
+                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
+            )
+            IconButton(onClick = onClose) { Text("×", color = Tok.Faint, fontSize = 18.sp) }
+        }
+        HorizontalDivider(color = Tok.Edge, thickness = 1.dp, modifier = Modifier.padding(start = 44.dp))
     }
 }
 
@@ -585,13 +649,6 @@ fun ProjectActionsSheet(
             if (primary != null && primary.state == "exited") {
                 // 点行 = resume 新会话；上一条已退出的会话仍留着 transcript 回放入口
                 SheetItem("↺", "上次会话回放", "消息流 · 终端回放") { onDismiss(); onBeforeNavigate(); openSession(primary.id, "") }
-            }
-            SheetItem("🗄", if (p.archived) "取消归档" else "归档", if (p.archived) "回到列表" else "从列表和看板藏起来，什么都不删；活着的会话先结束") {
-                scope.launch {
-                    runCatching { store.client?.setArchived(p.path, !p.archived) }.onFailure { toast("失败：${it.message}") }
-                    store.refreshProjects(); store.refreshSessions()
-                }
-                onDismiss()
             }
             SheetItem("📌", if (p.pinned) "取消置顶" else "置顶", "列表最前") {
                 scope.launch {
