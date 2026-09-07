@@ -293,8 +293,9 @@ fn rewrite_claude_store(paths: &Paths, old: &Path, new: &Path, rep: &mut Report)
         let target = match &cwd {
             Some(c) => {
                 // 自检：我们的 slug 规则算出来必须等于 Claude 起的名，否则说明规则
-                // 猜错了，不动它（改错名比不改更糟）
-                if claude_slug(c) != name {
+                // 猜错了，不动它（改错名比不改更糟）。大小写不比：APFS 不分大小写，
+                // 谁先建的目录用谁的大小写（实测 RapidLine淘气 的目录在磁盘上是 rapidline--）
+                if !claude_slug(c).eq_ignore_ascii_case(&name) {
                     if reroot(c, old, new).is_some() {
                         warn(rep, &format!("Claude 目录 {name}"), format!("slug 规则对不上 cwd {c}，跳过"));
                     }
@@ -318,7 +319,10 @@ fn rewrite_claude_store(paths: &Paths, old: &Path, new: &Path, rep: &mut Report)
         };
         let new_name = claude_slug(&target);
         let dest = root.join(&new_name);
-        if dest.exists() {
+        // 不分大小写的卷上「已存在」可能就是自己（只差大小写）：那是改名不是合并
+        let same_dir = dest.exists()
+            && std::fs::canonicalize(&dest).ok() == std::fs::canonicalize(&dir).ok();
+        if dest.exists() && !same_dir {
             // 撞名（中文目录本来就会撞）：把内容并进去，别覆盖
             if let Err(e) = merge_dir(&dir, &dest) {
                 warn(rep, &format!("Claude 目录 {name} → {new_name} 合并"), e);
@@ -758,6 +762,25 @@ mod tests {
         assert!(std::fs::symlink_metadata(dst.join("memory.migrated")).map(|m| m.file_type().is_symlink()).unwrap_or(false), "链接本身当文件挪到旁边");
         let body = std::fs::read_to_string(dst.join("a.jsonl")).unwrap();
         assert_eq!(body, format!("{{\"cwd\":\"{p_new}\"}}\n{{\"cwd\":\"{p_new}/x\",\"t\":\"{p_old}\"}}"));
+        assert!(rep.warnings.is_empty(), "{:?}", rep.warnings);
+    }
+
+    #[test]
+    fn slug_check_ignores_case() {
+        let base = tempfile::tempdir().unwrap();
+        let home = base.path().join("home");
+        let paths = Paths::new(&home);
+        let old = base.path().join("o");
+        let new = base.path().join("n");
+        std::fs::create_dir_all(old.join("RapidLine")).unwrap();
+        let p_old = old.join("RapidLine").to_string_lossy().into_owned();
+        // 磁盘上的目录名是小写的（别的工具先建的，Claude 在不分大小写的卷上照用）
+        let src = paths.claude_root().join(claude_slug(&p_old).to_lowercase());
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("a.jsonl"), format!("{{\"cwd\":\"{p_old}\"}}\n")).unwrap();
+        let rep = migrate_root(&paths, &old, &new).unwrap();
+        let dst = paths.claude_root().join(claude_slug(&new.join("RapidLine").to_string_lossy()));
+        assert!(dst.join("a.jsonl").is_file(), "大小写不同也要认出来并改名: {:?}", rep.warnings);
         assert!(rep.warnings.is_empty(), "{:?}", rep.warnings);
     }
 
