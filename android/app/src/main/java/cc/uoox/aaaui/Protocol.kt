@@ -120,6 +120,8 @@ fun parseChecklist(md: String): List<ChecklistItem> = md.lines().mapNotNull { ra
     val session_title: String? = null,
     /** v1.8：置顶（daemon 侧存，三端一起变） */
     val pinned: Boolean = false,
+    /** v1.15：归档（daemon 侧存）——列表 / 看板默认藏起来，一个开关翻出来 */
+    val archived: Boolean = false,
 )
 @Serializable data class PortInfo(val port: Int, val cmd: String = "")
 @Serializable data class ScreenText(val text: String = "", val alternate_screen: Boolean = false)
@@ -179,6 +181,8 @@ fun parseChecklist(md: String): List<ChecklistItem> = md.lines().mapNotNull { ra
     /** 还在池子里（能点开，已退出的回放也算） */
     val alive: Boolean = false,
     val deleted: Boolean = false,
+    /** v1.15：项目已归档 */
+    val archived: Boolean = false,
     val done: Int = 0,
     val open: Int = 0,
     val items: List<ChecklistItem> = emptyList(),

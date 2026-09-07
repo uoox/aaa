@@ -41,7 +41,7 @@ class UsageTest {
         assertEquals(listOf(PctLevel.NORMAL, PctLevel.CRIT, PctLevel.NORMAL), segs.map { it.level })
         // 提示缓存命中率排在上下文后面；没有 current_usage 的老 daemon 不出现
         val withCache = usageSubtitleSegments(SessionUsage(model = "M", context_pct = 10.0, cache_hit_pct = 87.0, cost_usd = 1.0))
-        assertEquals(listOf("M", "上下文 10%", "缓存 87%", "$1.00"), withCache.map { it.text })
+        assertEquals(listOf("M", "上下文 10%", "缓存 87.0%", "$1.00"), withCache.map { it.text })
         assertTrue(segs.none { it.text.startsWith("缓存") })
     }
 

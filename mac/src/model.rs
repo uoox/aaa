@@ -135,6 +135,9 @@ pub struct SessionCard {
     pub alive: bool,
     #[serde(default)]
     pub deleted: bool,
+    /// v1.15：项目已归档
+    #[serde(default)]
+    pub archived: bool,
     #[serde(default)]
     pub done: usize,
     #[serde(default)]
@@ -382,6 +385,9 @@ pub struct Project {
     /// v1.8：置顶（daemon 侧存，三端一起变）
     #[serde(default)]
     pub pinned: bool,
+    /// v1.15：归档（daemon 侧存）——侧栏 / 看板默认藏起来，一个开关翻出来
+    #[serde(default)]
+    pub archived: bool,
 }
 
 // ── 其它 REST 响应 ──────────────────────────────────────────────────────────
@@ -793,7 +799,8 @@ mod tests {
         assert_eq!(ids(&|c| card_is_finished(c) && !c.deleted), expect("finished"));
         assert_eq!(ids(&|c| card_matches(c, "测试")), expect("match_测试"));
         // 顺序照 daemon 给的，客户端不重排
-        assert_eq!(d.sessions.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["ask", "run", "bg", "act", "fin", "old", "del"]);
+        assert_eq!(d.sessions.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["ask", "run", "bg", "act", "fin", "old", "arch", "del"]);
+        assert_eq!(ids(&|c| !c.deleted && !c.archived), expect("visible_default"));
     }
 
     #[test]

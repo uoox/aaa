@@ -2,16 +2,16 @@
 //! 数据是 daemon 一次算好的 `GET /history/dashboard`。
 //!
 //! 顶上一条计数（待回复 / 运行 / 后台 / 激活 / 暂停，点一个 = 只看那一组；再点取消）
-//! + 未完成条目数 + 搜索。主体一会话一张卡：状态字 + 标题 + 项目，一根进度条
-//! `done/total`，下面直接列没勾的项，做完的折成一行「已做 N」点开看。已完成的（暂停
-//! 且全勾完）默认收进「已完成 N」一组；已删除的默认不显示，一个开关切出来。
-//! 会话还在就能点开，已退出的只能看。
+//! + 未完成条目数 + 搜索。主体是**瀑布流、全展开**（2026-09-07 第三版，用户要一眼看全）：
+//! 一会话一张卡——状态字 + 标题 + 项目，一根进度条 `done/total`，全部清单项直接列出
+//! （没勾的在前、做完的灰掉），不折叠、不分组；卡片按估算高度塞进最短的一列，列数随
+//! 窗口宽度变。已删除 / 已归档的默认不显示，各一个开关切出来。会话还在就能点开。
 
 use gpui::{Context, SharedString, div, prelude::*, px};
 
 use super::RootView;
 use super::kit::*;
-use crate::model::{Dashboard, SessionCard, card_is_finished, card_matches, status_label};
+use crate::model::{Dashboard, SessionCard, card_matches, status_label};
 use crate::theme;
 
 const STATUSES: [&str; 5] = ["asking", "running", "background", "active", "paused"];
@@ -69,31 +69,29 @@ impl RootView {
             .child(div().font_family("Menlo").text_size(px(13.)).text_color(c(theme::ink())).child(SharedString::from(n.to_string())))
     }
 
-    /// 一张卡
+    /// 一张卡（全展开：所有清单项都列出来）
     fn card(&self, card: &SessionCard, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
         let total = card.done + card.open;
         let frac = if total == 0 { 0. } else { card.done as f32 / total as f32 };
-        let done_open = self.history_expanded.contains(&card.id);
-        let id_toggle = card.id.clone();
         let id_open = card.id.clone();
         let alive = card.alive;
         let color = status_color(&card.status);
+        let dimmed = card.deleted || card.archived;
         let mut el = div()
             .id(SharedString::from(format!("card:{}", card.id)))
             .flex()
             .flex_col()
-            .gap(px(6.))
+            .gap(px(5.))
             .p(px(12.))
             .rounded(px(10.))
             .bg(c(theme::surface()))
             .border_1()
             .border_color(c(theme::edge()))
-            .when(card.deleted, |el| el.opacity(0.6))
-            // 标题行：状态字 + 标题 + 项目 +「打开」
+            .when(dimmed, |el| el.opacity(0.6))
             .child(
                 div()
                     .flex()
-                    .items_center()
+                    .items_start()
                     .gap(px(8.))
                     .child(
                         div()
@@ -106,24 +104,16 @@ impl RootView {
                             .font_family("Menlo")
                             .text_size(px(10.))
                             .text_color(c(color))
-                            .child(if card.deleted { "已删除" } else { status_label(&card.status) }),
+                            .child(if card.deleted { "已删除" } else if card.archived { "归档" } else { status_label(&card.status) }),
                     )
                     .child(
                         div()
                             .flex_1()
                             .min_w(px(0.))
-                            .truncate()
                             .text_size(px(13.))
-                            .text_color(c(if card.deleted { theme::dim() } else { theme::ink() }))
+                            .whitespace_normal()
+                            .text_color(c(if dimmed { theme::dim() } else { theme::ink() }))
                             .child(SharedString::from(card.title.clone())),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .font_family("Menlo")
-                            .text_size(px(10.))
-                            .text_color(c(theme::faint()))
-                            .child(SharedString::from(card.project_name.clone())),
                     )
                     .when(alive, |el| {
                         el.child(
@@ -144,8 +134,14 @@ impl RootView {
                                 .child("打开"),
                         )
                     }),
+            )
+            .child(
+                div()
+                    .font_family("Menlo")
+                    .text_size(px(10.))
+                    .text_color(c(theme::faint()))
+                    .child(SharedString::from(card.project_name.clone())),
             );
-        // 进度条 + 数字
         if total > 0 {
             el = el.child(
                 div()
@@ -172,48 +168,16 @@ impl RootView {
         } else {
             el = el.child(div().text_size(px(11.)).text_color(c(theme::faint())).child("没有进度清单"));
         }
-        // 没勾的项
-        for it in card.items.iter().filter(|i| !i.done) {
+        // 全部清单项：没勾的在前，做完的灰掉
+        for it in card.items.iter().filter(|i| !i.done).chain(card.items.iter().filter(|i| i.done)) {
             el = el.child(
                 div()
                     .flex()
                     .gap(px(6.))
                     .items_start()
-                    .child(div().flex_none().text_size(px(11.5)).text_color(c(theme::amber())).child("☐"))
-                    .child(div().text_size(px(12.)).text_color(c(theme::ink())).whitespace_normal().child(SharedString::from(it.text.clone()))),
+                    .child(div().flex_none().text_size(px(11.5)).text_color(c(if it.done { theme::green() } else { theme::amber() })).child(if it.done { "☑" } else { "☐" }))
+                    .child(div().text_size(px(12.)).text_color(c(if it.done { theme::dim() } else { theme::ink() })).whitespace_normal().child(SharedString::from(it.text.clone()))),
             );
-        }
-        // 做完的折成一行
-        if card.done > 0 {
-            el = el.child(
-                div()
-                    .id(SharedString::from(format!("card-done:{}", card.id)))
-                    .cursor_pointer()
-                    .font_family("Menlo")
-                    .text_size(px(10.5))
-                    .text_color(c(theme::dim()))
-                    .hover(|st| st.text_color(c(theme::ink())))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        cx.stop_propagation();
-                        if !this.history_expanded.remove(&id_toggle) {
-                            this.history_expanded.insert(id_toggle.clone());
-                        }
-                        cx.notify();
-                    }))
-                    .child(SharedString::from(format!("{} 已做 {}", if done_open { "▾" } else { "▸" }, card.done))),
-            );
-            if done_open {
-                for it in card.items.iter().filter(|i| i.done) {
-                    el = el.child(
-                        div()
-                            .flex()
-                            .gap(px(6.))
-                            .items_start()
-                            .child(div().flex_none().text_size(px(11.5)).text_color(c(theme::green())).child("☑"))
-                            .child(div().text_size(px(12.)).text_color(c(theme::dim())).whitespace_normal().child(SharedString::from(it.text.clone()))),
-                    );
-                }
-            }
         }
         el
     }
@@ -222,15 +186,15 @@ impl RootView {
         let query = self.history_input.read(cx).text().to_string();
         let d = &self.dashboard;
 
-        // 过滤：搜索 → 状态组 → 已删除开关
+        // 过滤：搜索 → 状态组 → 已删除 / 已归档开关
         let matched: Vec<&SessionCard> = d
             .sessions
             .iter()
             .filter(|c| card_matches(c, &query))
             .filter(|c| self.dash_filter.as_deref().is_none_or(|f| c.status == f))
             .filter(|c| self.dash_show_deleted || !c.deleted)
+            .filter(|c| self.dash_show_archived || !c.archived)
             .collect();
-        let (finished, active): (Vec<&SessionCard>, Vec<&SessionCard>) = matched.iter().partition(|c| card_is_finished(c) && !c.deleted);
 
         let toggle = |id: &'static str, label: String, on: bool| {
             div()
@@ -246,33 +210,34 @@ impl RootView {
                 .child(SharedString::from(label))
         };
 
-        let mut list = div().flex().flex_col().gap(px(8.));
-        if active.is_empty() && finished.is_empty() {
-            list = list.child(div().text_size(px(12.)).text_color(c(theme::faint())).child(if d.sessions.is_empty() {
+        // 瀑布流：列数随窗口宽度（侧栏约 260px，卡片最窄 300px），卡片按估算高度
+        // （标题 + 进度条 + 每项一行）塞进当前最短的一列，高矮不一才不浪费竖向空间
+        let cols_n = (((self.win_w - 260.) / 320.).floor() as usize).clamp(1, 6);
+        let mut cols: Vec<(f32, Vec<&SessionCard>)> = (0..cols_n).map(|_| (0., Vec::new())).collect();
+        for card in &matched {
+            let h = 70. + 18. * card.items.len() as f32;
+            let (i, _) = cols.iter().enumerate().min_by(|a, b| a.1.0.partial_cmp(&b.1.0).unwrap()).unwrap();
+            cols[i].0 += h;
+            cols[i].1.push(card);
+        }
+        let mut grid = div().flex().items_start().gap(px(8.));
+        for (_, col) in &cols {
+            let mut col_el = div().flex_1().min_w(px(0.)).flex().flex_col().gap(px(8.));
+            for card in col {
+                col_el = col_el.child(self.card(card, cx));
+            }
+            grid = grid.child(col_el);
+        }
+        if matched.is_empty() {
+            grid = grid.child(div().text_size(px(12.)).text_color(c(theme::faint())).child(if d.sessions.is_empty() {
                 "还没有记录（daemon 每秒把会话同步进日志）"
             } else {
                 "没有匹配的会话"
             }));
         }
-        for card in &active {
-            list = list.child(self.card(card, cx));
-        }
-        if !finished.is_empty() {
-            list = list.child(
-                toggle("dash-finished", format!("{} 已完成 {}", if self.dash_show_finished { "▾" } else { "▸" }, finished.len()), self.dash_show_finished)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.dash_show_finished = !this.dash_show_finished;
-                        cx.notify();
-                    })),
-            );
-            if self.dash_show_finished {
-                for card in &finished {
-                    list = list.child(self.card(card, cx));
-                }
-            }
-        }
 
         let deleted_n = d.sessions.iter().filter(|c| c.deleted).count();
+        let archived_n = d.sessions.iter().filter(|c| c.archived && !c.deleted).count();
         let mut chips = div().flex().items_center().gap(px(6.)).flex_wrap();
         for st in STATUSES {
             let n = match st {
@@ -307,6 +272,14 @@ impl RootView {
                     .child(div().text_size(px(14.)).font_weight(gpui::FontWeight::BOLD).text_color(c(theme::ink())).child("看板"))
                     .child(chips)
                     .child(div().flex_1())
+                    .when(archived_n > 0, |el| {
+                        el.child(
+                            toggle("dash-archived", format!("归档 {}", archived_n), self.dash_show_archived).on_click(cx.listener(|this, _, _, cx| {
+                                this.dash_show_archived = !this.dash_show_archived;
+                                cx.notify();
+                            })),
+                        )
+                    })
                     .when(deleted_n > 0, |el| {
                         el.child(
                             toggle("dash-deleted", format!("已删除 {}", deleted_n), self.dash_show_deleted).on_click(cx.listener(|this, _, _, cx| {
@@ -317,6 +290,6 @@ impl RootView {
                     })
                     .child(div().w(px(220.)).child(self.history_input.clone())),
             )
-            .child(div().id("dash-scroll").flex_1().min_h(px(0.)).overflow_y_scroll().child(list))
+            .child(div().id("dash-scroll").flex_1().min_h(px(0.)).overflow_y_scroll().child(grid))
     }
 }

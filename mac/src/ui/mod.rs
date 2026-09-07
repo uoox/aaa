@@ -135,6 +135,8 @@ struct ProjectRow {
     sort_key: String,
     /// 置顶的排在最前（组内仍按 sort_key）
     pinned: bool,
+    /// 归档的默认不显示；显示时沉底
+    archived: bool,
 }
 
 fn session_updated(s: &Session) -> &str {
@@ -185,6 +187,7 @@ fn project_rows(projects: &[Project], sessions: &[Session]) -> Vec<ProjectRow> {
             project: Some(p.clone()),
             sort_key: latest.unwrap_or(p.mtime.as_str()).to_owned(),
             pinned: p.pinned,
+            archived: p.archived,
         });
     }
     for s in sessions.iter().filter(|s| is_active(s)) {
@@ -201,13 +204,15 @@ fn project_rows(projects: &[Project], sessions: &[Session]) -> Vec<ProjectRow> {
             project: None,
             sort_key: latest.unwrap_or("").to_owned(),
             pinned: false,
+            archived: false,
         });
     }
     // 置顶的在最前（自己按的顶，状态不该把它挤下去）；组内先按状态
     // 待回复 > 执行中 > 已激活 > 未激活，同状态再按最近更新，同刻按标题稳住
     rows.sort_by(|a, b| {
-        b.pinned
-            .cmp(&a.pinned)
+        a.archived
+            .cmp(&b.archived)
+            .then_with(|| b.pinned.cmp(&a.pinned))
             .then_with(|| a.status.rank().cmp(&b.status.rank()))
             .then_with(|| b.sort_key.cmp(&a.sort_key))
             .then_with(|| a.title.cmp(&b.title))
@@ -391,15 +396,17 @@ pub struct RootView {
     pub history_expanded: HashSet<String>,
     /// 看板：只看某一状态组（asking/running/background/active/paused）；None = 全部
     pub dash_filter: Option<String>,
-    /// 看板：显示已删除的 / 展开「已完成」组
+    /// 看板：显示已删除的 / 已归档的
     pub dash_show_deleted: bool,
-    pub dash_show_finished: bool,
+    pub dash_show_archived: bool,
+    /// 侧栏：显示归档的项目
+    pub show_archived: bool,
+    /// 窗口宽度（render 开头刷新；看板按它算瀑布流列数）
+    pub win_w: f32,
     /// 每会话的产物 / 改动状态（含各自的拉取节流器）
     detail: HashMap<String, detail_panel::SessionDetail>,
     /// 项目路径 → 收件箱条目
-    inbox: HashMap<String, Vec<InboxItem>>,
     /// 收件箱新增输入框（回车提交，根节点接住）
-    pub inbox_input: Entity<MiniInput>,
 
     // 输入框
     /// 侧栏顶部的新建项目输入框：内容即文件夹名，回车 / ＋ 创建
@@ -472,18 +479,11 @@ impl RootView {
         let port_input = cx.new(|cx| MiniInput::new(cx, "2730"));
         let token_input = cx.new(|cx| MiniInput::new(cx, "aaa_tk_…"));
         let root_input = cx.new(|cx| MiniInput::new(cx, "~/project"));
-        let inbox_input = cx.new(|cx| MiniInput::new(cx, "加一条，Claude 空下来时自动喂给它"));
         let history_input = cx.new(|cx| MiniInput::new(cx, "搜索：标题 / 项目 / 条目"));
         // 输入法送来的回车（见 MiniInput::replace_text_in_range）与键盘回车同一出口
         cx.subscribe(&new_input, |this, _, _: &mini_input::InputEvent, cx| {
             if matches!(this.modal, Modal::None) {
                 this.create_project(cx);
-            }
-        })
-        .detach();
-        cx.subscribe(&inbox_input, |this, _, _: &mini_input::InputEvent, cx| {
-            if matches!(this.modal, Modal::None) {
-                this.inbox_add(cx);
             }
         })
         .detach();
@@ -524,10 +524,10 @@ impl RootView {
             history_expanded: HashSet::new(),
             dash_filter: None,
             dash_show_deleted: false,
-            dash_show_finished: false,
+            dash_show_archived: false,
+            show_archived: false,
+            win_w: 1200.,
             detail: HashMap::new(),
-            inbox: HashMap::new(),
-            inbox_input,
             new_input,
             creating: false,
             name_input,
@@ -633,7 +633,8 @@ impl RootView {
                 self.plan = plan;
                 cx.notify();
             }
-            DaemonEvent::InboxChanged { path } => self.on_inbox_changed(&path, cx),
+            // 收件箱（待发送）由消息流自己管；mac 详情栏 v1.15 起不再画它
+            DaemonEvent::InboxChanged { .. } => {}
             DaemonEvent::Unknown => {}
         }
     }
@@ -931,6 +932,12 @@ impl RootView {
     }
 
     /// 置顶开关：POST /projects/pin；列表靠 projects_changed 帧重拉，这里先乐观改一下
+    /// 归档 / 取消归档：不确认（归档就是「先放一边」，什么都不删）；活着的会话由 daemon 结束
+    fn set_archived(&mut self, path: String, archived: bool, cx: &mut Context<Self>) {
+        let fut = self.net.set_archived(&path, archived);
+        self.spawn_fetch(fut, |r, _: serde_json::Value, cx| r.fetch_projects(cx), true, cx);
+    }
+
     fn set_pinned(&mut self, path: String, pinned: bool, cx: &mut Context<Self>) {
         if let Some(p) = self.projects.iter_mut().find(|p| p.path == path) {
             p.pinned = pinned;
@@ -1036,17 +1043,6 @@ impl RootView {
             cx.stop_propagation();
             return;
         }
-        // 详情面板收件箱输入框里回车 = 加一条
-        if ks.key == "enter"
-            && matches!(self.modal, Modal::None)
-            && self.inbox_input.read(cx).focus_handle.is_focused(window)
-        {
-            if self.inbox_input.read(cx).composing() {
-                return;
-            }
-            self.inbox_add(cx);
-            cx.stop_propagation();
-        }
     }
 
     // ── 侧栏 ───────────────────────────────────────────────────────────
@@ -1072,7 +1068,9 @@ impl RootView {
         //   状态用字说话，不用色点：执行中 / 已激活 / 未激活。问题本身不在侧栏画：
         //   进消息流，表单原生呈现、原地作答。exited 会话不代表项目（标未激活，
         //   点一下 resume）；终端（shell）不在这里（归终端面板）。
-        let rows = project_rows(&self.projects, &self.sessions);
+        let all_rows = project_rows(&self.projects, &self.sessions);
+        let archived_n = all_rows.iter().filter(|r| r.archived).count();
+        let rows: Vec<ProjectRow> = if self.show_archived { all_rows } else { all_rows.into_iter().filter(|r| !r.archived).collect() };
         let mut list_col = div().flex().flex_col().gap(px(1.));
         for row in rows {
             let active = row
@@ -1124,7 +1122,7 @@ impl RootView {
                         .text_ellipsis()
                         .whitespace_nowrap()
                         .text_size(px(12.5))
-                        .text_color(c(if status == RowStatus::Inactive {
+                        .text_color(c(if status == RowStatus::Inactive || row.archived {
                             theme::dim()
                         } else {
                             theme::ink()
@@ -1144,6 +1142,19 @@ impl RootView {
                     .text_color(c(theme::faint()))
                     .when(!active, |el| el.invisible().group_hover("sb-row", |st| st.visible()))
             };
+            // 「归档 / 取消归档」：不确认，daemon 侧存，三端一起变；归档时活着的会话先结束
+            if let Some(p) = row.project.as_ref() {
+                let (arch_path, archived) = (p.path.clone(), p.archived);
+                el = el.child(
+                    hover_btn(SharedString::from(format!("sb-arch:{}", row.path)))
+                        .hover(|st| st.text_color(c(theme::accent())).bg(c(theme::edge_light())))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.set_archived(arch_path.clone(), !archived, cx);
+                        }))
+                        .child(if archived { "取消归档" } else { "归档" }),
+                );
+            }
             if let Some((pin_path, pinned)) = pin {
                 el = el.child(
                     hover_btn(SharedString::from(format!("sb-pin:{}", row.path)))
@@ -1189,6 +1200,24 @@ impl RootView {
                 );
             }
             list_col = list_col.child(el);
+        }
+        if archived_n > 0 {
+            list_col = list_col.child(
+                div()
+                    .id("sb-archived-toggle")
+                    .px(px(10.))
+                    .py(px(6.))
+                    .cursor_pointer()
+                    .font_family("Menlo")
+                    .text_size(px(10.5))
+                    .text_color(c(if self.show_archived { theme::accent() } else { theme::dim() }))
+                    .hover(|st| st.text_color(c(theme::ink())))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.show_archived = !this.show_archived;
+                        cx.notify();
+                    }))
+                    .child(SharedString::from(format!("{} 归档 {}", if self.show_archived { "▾" } else { "▸" }, archived_n))),
+            );
         }
 
         let (conn_color, conn_text) = match self.conn {
@@ -1372,7 +1401,6 @@ impl RootView {
             &self.port_input,
             &self.token_input,
             &self.root_input,
-            &self.inbox_input,
         ] {
             i.update(cx, |_, cx| cx.notify());
         }
@@ -1589,6 +1617,7 @@ impl RootView {
 
 impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.win_w = f32::from(window.viewport_size().width);
         // 挂起的焦点请求（异步流程里无 window，延到这里）
         if let Some(id) = self.pending_focus.take()
             && let Some(t) = self.terminals.get(&id)

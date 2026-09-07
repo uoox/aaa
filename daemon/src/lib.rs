@@ -2,6 +2,7 @@
 
 pub mod agents;
 pub mod answer;
+pub mod archive;
 pub mod api;
 pub mod cache;
 pub mod config;

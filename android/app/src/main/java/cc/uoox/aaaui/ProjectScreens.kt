@@ -160,7 +160,8 @@ fun projectRows(projects: List<Project>, sessions: List<Session>): List<ProjectR
         ?.takeIf { it.isNotBlank() }
     ProjectRow(p, primary, projectStateOf(primary), latest ?: p.mtime)
 }.sortedWith(
-    compareByDescending<ProjectRow> { it.project.pinned }
+    compareBy<ProjectRow> { it.project.archived }
+        .thenByDescending { it.project.pinned }
         .thenBy { it.state.rank }
         .thenByDescending { it.updatedIso }
         .thenBy { it.project.path },
@@ -260,6 +261,8 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
     var busy by remember { mutableStateOf(setOf<String>()) }
     var actionsFor by remember { mutableStateOf<Project?>(null) }
     var purgeReport by remember { mutableStateOf<List<ProjectDeleteResult>?>(null) }
+    // 归档的默认藏起来（v1.15），脚注一行「归档 N」翻出来
+    var showArchived by rememberSaveable { mutableStateOf(false) }
     // 正在 POST /projects + /sessions：挡住第二次回车
     var creating by remember { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
@@ -267,12 +270,14 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
     LaunchedEffect(Unit) { store.refreshProjects() }
 
     // 只在输入变化时重算，不跟着 conn 延迟数字的重组一起算
-    val rows = remember(projects, sessions, query) {
+    val allRows = remember(projects, sessions, query) {
         projectRows(projects, sessions).filter { r ->
             query.isBlank() || r.project.name.contains(query, true) ||
                 r.project.session_title.orEmpty().contains(query, true)
         }
     }
+    val archivedCount = allRows.count { it.project.archived }
+    val rows = if (showArchived) allRows else allRows.filter { !it.project.archived }
 
     fun toast(msg: String) = Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
 
@@ -393,6 +398,13 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
                         onLongClick = { actionsFor = row.project },
                     )
                 }
+                if (archivedCount > 0) item(key = "archived-toggle") {
+                    Text(
+                        (if (showArchived) "▾" else "▸") + " 归档 $archivedCount",
+                        color = if (showArchived) Tok.Accent else Tok.Dim, fontSize = 12.sp, fontFamily = FontFamily.Monospace,
+                        modifier = Modifier.fillMaxWidth().clickable { showArchived = !showArchived }.padding(horizontal = 16.dp, vertical = 10.dp),
+                    )
+                }
                 item {
                     Text(
                         "点一行进入消息流 · 长按查看项目操作",
@@ -473,10 +485,11 @@ private fun ProjectRowItem(row: ProjectRow, busy: Boolean, current: Boolean = fa
             Spacer(Modifier.width(10.dp))
             if (row.project.pinned) Text("📌", fontSize = 12.sp, modifier = Modifier.padding(end = 4.dp))
             Text(
-                row.title, color = if (row.alive) Tok.Ink else Tok.Dim, fontSize = 15.sp, fontWeight = FontWeight.Bold,
+                row.title, color = if (row.alive && !row.project.archived) Tok.Ink else Tok.Dim, fontSize = 15.sp, fontWeight = FontWeight.Bold,
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
             )
             Spacer(Modifier.width(8.dp))
+            if (row.project.archived) Text("归档", color = Tok.Faint, fontSize = 10.5.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.padding(end = 6.dp))
             Text(relativeTime(row.updatedIso), color = Tok.Faint, fontSize = 11.sp)
         }
         HorizontalDivider(color = Tok.Edge, thickness = 1.dp, modifier = Modifier.padding(start = 74.dp))
@@ -572,6 +585,13 @@ fun ProjectActionsSheet(
             if (primary != null && primary.state == "exited") {
                 // 点行 = resume 新会话；上一条已退出的会话仍留着 transcript 回放入口
                 SheetItem("↺", "上次会话回放", "消息流 · 终端回放") { onDismiss(); onBeforeNavigate(); openSession(primary.id, "") }
+            }
+            SheetItem("🗄", if (p.archived) "取消归档" else "归档", if (p.archived) "回到列表" else "从列表和看板藏起来，什么都不删；活着的会话先结束") {
+                scope.launch {
+                    runCatching { store.client?.setArchived(p.path, !p.archived) }.onFailure { toast("失败：${it.message}") }
+                    store.refreshProjects(); store.refreshSessions()
+                }
+                onDismiss()
             }
             SheetItem("📌", if (p.pinned) "取消置顶" else "置顶", "列表最前") {
                 scope.launch {

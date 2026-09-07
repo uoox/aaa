@@ -326,7 +326,9 @@ pub fn session_usage(body: &Value) -> Value {
     let n = |k: &str| cu.and_then(|c| c.get(k)).and_then(Value::as_f64).unwrap_or(0.0);
     let (fresh, created, read) = (n("input_tokens"), n("cache_creation_input_tokens"), n("cache_read_input_tokens"));
     let total = fresh + created + read;
-    let cache_hit_pct = if cu.is_some() && total > 0.0 { json!((read / total * 100.0).round()) } else { Value::Null };
+    // 一位小数：整数四舍五入下 99.6% 显示成 100%，用户以为「全命中了不用 compact」——
+    // 其实命中率只说上一次调用的输入构成，跟要不要 compact（看 context_pct）无关
+    let cache_hit_pct = if cu.is_some() && total > 0.0 { json!((read / total * 1000.0).round() / 10.0) } else { Value::Null };
     json!({
         "model": g(body.get("model"), "display_name"),
         "model_id": g(body.get("model"), "id"),

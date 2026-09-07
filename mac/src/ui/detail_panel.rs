@@ -17,7 +17,7 @@ use gpui::{Context, SharedString, div, prelude::*, px, relative};
 use super::kit::*;
 use super::{Page, RootView};
 use crate::model::{parse_checklist, 
-    Artifact, InboxItem, PlanUsage, Session, SessionUsage, is_muted, toggle_muted,
+    Artifact, PlanUsage, Session, SessionUsage, is_muted, toggle_muted,
 };
 use crate::theme;
 
@@ -267,12 +267,6 @@ impl RootView {
             return;
         }
         self.request_detail_fetch(id, DetailKind::Artifacts, cx);
-        if let Some(path) = self.session(id).map(|s| s.project_path.clone())
-            && !path.is_empty()
-            && !self.inbox.contains_key(&path)
-        {
-            self.fetch_inbox(path, cx);
-        }
     }
 
     /// `messages_changed`：面板正看着它才重拉（不做无谓轮询），节流见模块注释
@@ -349,77 +343,12 @@ impl RootView {
         );
     }
 
-    pub(super) fn fetch_inbox(&mut self, path: String, cx: &mut Context<Self>) {
-        let fut = self.net.inbox(&path);
-        self.spawn_fetch(
-            fut,
-            move |r, items: Vec<InboxItem>, cx| {
-                r.inbox.insert(path, items);
-                cx.notify();
-            },
-            false,
-            cx,
-        );
-    }
-
-    /// `inbox_changed` 帧：正看着这个项目就重拉，否则丢掉缓存等下次打开
-    pub(super) fn on_inbox_changed(&mut self, path: &str, cx: &mut Context<Self>) {
-        let showing = match &self.page {
-            Page::Session(id) => self
-                .session(id)
-                .is_some_and(|s| s.project_path.trim_end_matches('/') == path.trim_end_matches('/')),
-            _ => false,
-        };
-        if showing && self.detail_visible {
-            self.fetch_inbox(path.to_string(), cx);
-        } else {
-            self.inbox.remove(path);
-        }
-    }
-
-    /// 当前会话所属项目的路径（面板的收件箱 / 静音都按它）
+    /// 当前会话所属项目的路径（面板的静音按它）
     fn current_project_path(&self) -> Option<String> {
         let Page::Session(id) = &self.page else { return None };
         self.session(id)
             .map(|s| s.project_path.clone())
             .filter(|p| !p.is_empty())
-    }
-
-    /// 收件箱输入框回车：POST 后清空；列表靠 inbox_changed 帧或这里的乐观重拉对齐
-    pub(super) fn inbox_add(&mut self, cx: &mut Context<Self>) {
-        let text = self.inbox_input.read(cx).text().trim().to_string();
-        if text.is_empty() {
-            return;
-        }
-        let Some(path) = self.current_project_path() else { return };
-        self.inbox_input.update(cx, |i, cx| i.set_text("", cx));
-        let fut = self.net.inbox_add(&path, &text);
-        self.spawn_fetch(
-            fut,
-            move |r, _: serde_json::Value, cx| r.fetch_inbox(path, cx),
-            true,
-            cx,
-        );
-    }
-
-    fn inbox_delete(&mut self, path: String, id: String, cx: &mut Context<Self>) {
-        // 乐观删除，失败再拉回来
-        if let Some(items) = self.inbox.get_mut(&path) {
-            items.retain(|i| i.id != id);
-        }
-        let fut = self.net.inbox_delete(&id);
-        let path2 = path.clone();
-        cx.spawn(async move |this, cx| {
-            let res = fut.await;
-            let _ = this.update(cx, |r, cx| {
-                if let Err(e) = res {
-                    r.set_error(format!("删除收件箱条目失败: {e}"), cx);
-                }
-                r.fetch_inbox(path2, cx);
-            });
-        })
-        .detach();
-        cx.notify();
     }
 
     fn toggle_mute_current(&mut self, cx: &mut Context<Self>) {
@@ -520,7 +449,6 @@ impl RootView {
             .child(Self::section("会话", Self::render_usage_section(s.usage.as_ref())))
             .child(Self::section("进度", Self::render_checklist_section(s)))
             .child(Self::section("产物", self.render_artifacts_section(d, &now, cx)))
-            .child(Self::section("收件箱", self.render_inbox_section(s, cx)))
             .child(Self::section("通知", self.render_notify_section(s, cx)));
 
         Some(
@@ -681,9 +609,9 @@ impl RootView {
                     .child(div().text_size(px(11.)).text_color(c(theme::dim())).child("缓存"))
                     .child(mono(
                         format!(
-                            "{} · 命中 {}% · 读 {} 写 {} 新 {}",
+                            "{} · 命中 {:.1}% · 读 {} 写 {} 新 {}",
                             if alive { "在" } else { "无" },
-                            hit.round() as i64,
+                            hit,
                             k(u.cache_read_tokens),
                             k(u.cache_creation_tokens),
                             k(u.fresh_input_tokens)
@@ -774,60 +702,6 @@ impl RootView {
                                 .child(SharedString::from(a.description.clone())),
                         )
                     }),
-            );
-        }
-        col
-    }
-
-    fn render_inbox_section(&self, s: &Session, cx: &mut Context<Self>) -> gpui::Div {
-        let path = s.project_path.clone();
-        let items: &[InboxItem] = self.inbox.get(&path).map(|v| v.as_slice()).unwrap_or(&[]);
-        let mut col = div()
-            .flex()
-            .flex_col()
-            .gap(px(6.))
-            .child(self.inbox_input.clone());
-        if items.is_empty() {
-            col = col.child(Self::empty_hint("收件箱是空的"));
-        }
-        for (ix, it) in items.iter().enumerate() {
-            let (p, id) = (path.clone(), it.id.clone());
-            col = col.child(
-                div()
-                    .id(("inbox", ix))
-                    .group("inbox-row")
-                    .flex()
-                    .items_start()
-                    .gap(px(6.))
-                    .px(px(8.))
-                    .py(px(4.))
-                    .mx(px(-8.))
-                    .rounded(px(5.))
-                    .hover(|st| st.bg(c(theme::surface_raised())))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .text_size(px(12.))
-                            .text_color(c(theme::ink()))
-                            .child(SharedString::from(it.text.clone())),
-                    )
-                    .child(
-                        div()
-                            .id(("inbox-del", ix))
-                            .flex_none()
-                            .px(px(3.))
-                            .rounded(px(4.))
-                            .text_size(px(10.))
-                            .text_color(c(theme::faint()))
-                            .cursor_pointer()
-                            .hover(|st| st.text_color(c(theme::red())).bg(c(theme::edge_light())))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.inbox_delete(p.clone(), id.clone(), cx);
-                            }))
-                            .child("✕"),
-                    ),
             );
         }
         col

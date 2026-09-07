@@ -15,7 +15,10 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.staggeredgrid.LazyVerticalStaggeredGrid
+import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridCells
+import androidx.compose.foundation.lazy.staggeredgrid.items
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -57,8 +60,7 @@ fun HistoryScreen(store: AppStore, nav: NavHostController) {
     var query by rememberSaveable { mutableStateOf("") }
     var filter by rememberSaveable { mutableStateOf<String?>(null) }
     var showDeleted by rememberSaveable { mutableStateOf(false) }
-    var showFinished by rememberSaveable { mutableStateOf(false) }
-    var doneOpen by remember { mutableStateOf(setOf<String>()) }
+    var showArchived by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(Unit) {
         try { dash = store.client?.historyDashboard(); error = null }
         catch (e: DaemonHttpException) { error = if (e.code == 404) "daemon 版本不支持看板（需 v1.13）" else e.message }
@@ -66,14 +68,16 @@ fun HistoryScreen(store: AppStore, nav: NavHostController) {
         catch (e: Exception) { error = e.message }
     }
     val d = dash
-    val matched = remember(d, query, filter, showDeleted) {
+    // 2026-09-07 第三版：瀑布流、全展开——一眼看全，不折叠、不分组
+    val matched = remember(d, query, filter, showDeleted, showArchived) {
         d?.sessions.orEmpty()
             .filter { cardMatches(it, query) }
             .filter { filter == null || it.status == filter }
             .filter { showDeleted || !it.deleted }
+            .filter { showArchived || !it.archived }
     }
-    val (finished, active) = remember(matched) { matched.partition { cardIsFinished(it) && !it.deleted } }
     val deletedN = d?.sessions.orEmpty().count { it.deleted }
+    val archivedN = d?.sessions.orEmpty().count { it.archived && !it.deleted }
 
     Column(Modifier.fillMaxSize().background(Tok.Bg).navigationBarsPadding()) {
         Row(Modifier.fillMaxWidth().padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -110,6 +114,13 @@ fun HistoryScreen(store: AppStore, nav: NavHostController) {
                         Text("$n", color = Tok.Ink, fontSize = 13.sp, fontFamily = FontFamily.Monospace)
                     }
                 }
+                if (archivedN > 0) item {
+                    Text(
+                        "归档 $archivedN", color = if (showArchived) Tok.Accent else Tok.Dim, fontSize = 11.5.sp,
+                        modifier = Modifier.background(if (showArchived) Tok.Accent.copy(alpha = 0.14f) else Color.Transparent, RoundedCornerShape(8.dp))
+                            .clickable { showArchived = !showArchived }.padding(horizontal = 10.dp, vertical = 6.dp),
+                    )
+                }
                 if (deletedN > 0) item {
                     Text(
                         "已删除 $deletedN", color = if (showDeleted) Tok.Accent else Tok.Dim, fontSize = 11.5.sp,
@@ -120,34 +131,24 @@ fun HistoryScreen(store: AppStore, nav: NavHostController) {
             }
         }
 
-        LazyColumn(Modifier.fillMaxSize(), contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 24.dp)) {
-            if (d == null) {
-                if (error == null) item { Text("加载中…", color = Tok.Faint, modifier = Modifier.padding(16.dp)) }
-                return@LazyColumn
-            }
-            if (active.isEmpty() && finished.isEmpty()) item {
-                Text(
-                    if (d.sessions.isEmpty()) "还没有记录（daemon 每秒把会话同步进日志）" else "没有匹配的会话",
-                    color = Tok.Faint, fontSize = 13.sp, modifier = Modifier.padding(16.dp),
-                )
-            }
-            items(active, key = { "card-${it.id}" }) { c ->
-                SessionCardView(c, doneOpen = c.id in doneOpen,
-                    onToggleDone = { doneOpen = if (c.id in doneOpen) doneOpen - c.id else doneOpen + c.id },
-                    onOpen = { if (c.alive) openSession(c.id, "") })
-            }
-            if (finished.isNotEmpty()) {
-                item(key = "finished-hdr") {
-                    Text(
-                        (if (showFinished) "▾" else "▸") + " 已完成 ${finished.size}",
-                        color = Tok.Dim, fontSize = 12.sp, fontFamily = FontFamily.Monospace,
-                        modifier = Modifier.fillMaxWidth().clickable { showFinished = !showFinished }.padding(horizontal = 16.dp, vertical = 10.dp),
-                    )
-                }
-                if (showFinished) items(finished, key = { "card-${it.id}" }) { c ->
-                    SessionCardView(c, doneOpen = c.id in doneOpen,
-                        onToggleDone = { doneOpen = if (c.id in doneOpen) doneOpen - c.id else doneOpen + c.id },
-                        onOpen = { if (c.alive) openSession(c.id, "") })
+        if (d == null) {
+            if (error == null) Text("加载中…", color = Tok.Faint, modifier = Modifier.padding(16.dp))
+        } else if (matched.isEmpty()) {
+            Text(
+                if (d.sessions.isEmpty()) "还没有记录（daemon 每秒把会话同步进日志）" else "没有匹配的会话",
+                color = Tok.Faint, fontSize = 13.sp, modifier = Modifier.padding(16.dp),
+            )
+        } else {
+            // 瀑布流：卡片高矮不一（清单长短不同），交错网格才不浪费竖向空间；宽屏 / 折叠屏内屏自动多列
+            LazyVerticalStaggeredGrid(
+                columns = StaggeredGridCells.Adaptive(300.dp),
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(start = 8.dp, end = 8.dp, bottom = 24.dp),
+                verticalItemSpacing = 8.dp,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                items(matched, key = { "card-${it.id}" }) { c ->
+                    SessionCardView(c, onOpen = { if (c.alive) openSession(c.id, "") })
                 }
             }
         }
@@ -161,29 +162,28 @@ private fun statusColor(status: String): Color = when (status) {
     else -> Tok.Faint
 }
 
-/** 一张卡：状态字 + 标题 + 项目 → 进度条 → 没勾的项 →「已做 N」可展开。会话还在才可点开 */
+/** 一张卡：状态字 + 标题 + 项目 → 进度条 → 全部清单项（没勾的在前、做完的灰掉）。全展开，一眼看全。会话还在才可点开 */
 @Composable
-private fun SessionCardView(c: SessionCard, doneOpen: Boolean, onToggleDone: () -> Unit, onOpen: () -> Unit) {
+private fun SessionCardView(c: SessionCard, onOpen: () -> Unit) {
     val total = c.done + c.open
     val color = statusColor(c.status)
     Column(
-        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
+        Modifier.fillMaxWidth()
             .background(Tok.Surface, RoundedCornerShape(10.dp)).border(1.dp, Tok.Edge, RoundedCornerShape(10.dp))
             .clickable(enabled = c.alive, onClick = onOpen).padding(12.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.border(1.dp, color.copy(alpha = 0.7f), RoundedCornerShape(5.dp)).padding(horizontal = 5.dp, vertical = 1.dp)) {
-                Text(if (c.deleted) "已删除" else statusLabel(c.status), color = color, fontSize = 10.5.sp, fontFamily = FontFamily.Monospace)
+                Text(when { c.deleted -> "已删除"; c.archived -> "归档"; else -> statusLabel(c.status) }, color = color, fontSize = 10.5.sp, fontFamily = FontFamily.Monospace)
             }
             Spacer(Modifier.width(8.dp))
             Text(
-                c.title, color = if (c.deleted) Tok.Dim else Tok.Ink, fontSize = 14.sp, fontWeight = FontWeight.Medium,
-                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
+                c.title, color = if (c.deleted || c.archived) Tok.Dim else Tok.Ink, fontSize = 14.sp, fontWeight = FontWeight.Medium,
+                maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
             )
-            Spacer(Modifier.width(8.dp))
-            Text(c.project_name, color = Tok.Faint, fontSize = 10.5.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            if (c.alive) Text("打开", color = Tok.Accent, fontSize = 12.sp, modifier = Modifier.padding(start = 10.dp))
+            if (c.alive) Text("打开", color = Tok.Accent, fontSize = 12.sp, modifier = Modifier.padding(start = 8.dp))
         }
+        Text(c.project_name, color = Tok.Faint, fontSize = 10.5.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
         if (total > 0) {
             Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.weight(1f).height(4.dp).background(Tok.Edge, RoundedCornerShape(2.dp))) {
@@ -198,23 +198,10 @@ private fun SessionCardView(c: SessionCard, doneOpen: Boolean, onToggleDone: () 
         } else {
             Text("没有进度清单", color = Tok.Faint, fontSize = 11.5.sp, modifier = Modifier.padding(top = 6.dp))
         }
-        c.items.filter { !it.done }.forEach { it ->
+        (c.items.filter { !it.done } + c.items.filter { it.done }).forEach { it ->
             Row(Modifier.padding(top = 5.dp), verticalAlignment = Alignment.Top) {
-                Text("☐", color = Tok.Amber, fontSize = 13.sp, modifier = Modifier.width(20.dp))
-                Text(it.text, color = Tok.Ink, fontSize = 13.sp, lineHeight = 18.sp)
-            }
-        }
-        if (c.done > 0) {
-            Text(
-                (if (doneOpen) "▾" else "▸") + " 已做 ${c.done}",
-                color = Tok.Dim, fontSize = 11.5.sp, fontFamily = FontFamily.Monospace,
-                modifier = Modifier.clickable(onClick = onToggleDone).padding(top = 8.dp, bottom = 2.dp),
-            )
-            if (doneOpen) c.items.filter { it.done }.forEach { it ->
-                Row(Modifier.padding(top = 4.dp), verticalAlignment = Alignment.Top) {
-                    Text("☑", color = Tok.Green, fontSize = 13.sp, modifier = Modifier.width(20.dp))
-                    Text(it.text, color = Tok.Dim, fontSize = 13.sp, lineHeight = 18.sp)
-                }
+                Text(if (it.done) "☑" else "☐", color = if (it.done) Tok.Green else Tok.Amber, fontSize = 13.sp, modifier = Modifier.width(20.dp))
+                Text(it.text, color = if (it.done) Tok.Dim else Tok.Ink, fontSize = 13.sp, lineHeight = 18.sp)
             }
         }
     }

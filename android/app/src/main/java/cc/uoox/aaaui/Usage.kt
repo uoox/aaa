@@ -40,8 +40,9 @@ fun usageSubtitleSegments(usage: SessionUsage?): List<UsageSegment> {
     return buildList {
         usage.model?.takeIf { it.isNotBlank() }?.let { add(UsageSegment(it)) }
         usage.context_pct?.let { add(UsageSegment("上下文 " + pctText(it), pctColorLevel(it))) }
-        // 提示缓存命中率（最近一次调用：缓存读 ÷ 全部输入）；读为 0 = 缓存已失效
-        usage.cache_hit_pct?.let { add(UsageSegment("缓存 " + pctText(it))) }
+        // 提示缓存命中率（最近一次调用：缓存读 ÷ 全部输入）；读为 0 = 缓存已失效。
+        // 一位小数：99.6% 四舍五入成 100% 会让人以为「全命中了」；它跟要不要 compact 无关（看上下文那格）
+        usage.cache_hit_pct?.let { add(UsageSegment("缓存 " + String.format(Locale.US, "%.1f%%", it))) }
         usage.cost_usd?.let { add(UsageSegment(String.format(Locale.US, "$%.2f", it))) }
     }
 }

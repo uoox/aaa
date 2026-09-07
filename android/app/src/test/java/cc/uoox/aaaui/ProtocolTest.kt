@@ -166,6 +166,7 @@ class ProtocolTest {
         fun expect(k: String) = fx["expect"]!!.jsonObject[k]!!.jsonArray.map { it.jsonPrimitive.content }
         assertEquals(expect("finished"), d.sessions.filter { cardIsFinished(it) && !it.deleted }.map { it.id })
         assertEquals(expect("match_测试"), d.sessions.filter { cardMatches(it, "测试") }.map { it.id })
-        assertEquals(listOf("ask", "run", "bg", "act", "fin", "old", "del"), d.sessions.map { it.id })
+        assertEquals(listOf("ask", "run", "bg", "act", "fin", "old", "arch", "del"), d.sessions.map { it.id })
+        assertEquals(expect("visible_default"), d.sessions.filter { !it.deleted && !it.archived }.map { it.id })
     }
 }

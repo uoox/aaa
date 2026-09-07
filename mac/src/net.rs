@@ -176,6 +176,10 @@ impl Net {
         self.post_json("/projects", serde_json::json!({"name": name, "agent": agent}))
     }
     /// 置顶 / 取消置顶（daemon 侧存；随后 projects_changed 帧会让列表重拉）
+    /// 归档 / 取消归档（v1.15）：daemon 侧存；归档时活着的会话被结束（不确认）
+    pub fn set_archived(&self, path: &str, archived: bool) -> impl Future<Output = Result<serde_json::Value>> + use<> {
+        self.post_json("/projects/archive", serde_json::json!({ "path": path, "archived": archived }))
+    }
     pub fn set_pinned(&self, path: &str, pinned: bool) -> impl Future<Output = Result<serde_json::Value>> + use<> {
         self.post_json("/projects/pin", serde_json::json!({ "path": path, "pinned": pinned }))
     }

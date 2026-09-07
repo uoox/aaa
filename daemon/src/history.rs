@@ -287,6 +287,8 @@ pub struct SessionCard {
     /// 还在池子里（能点开，已退出的回放也算）
     pub alive: bool,
     pub deleted: bool,
+    /// v1.15：项目已归档（客户端默认藏起来，不计数）
+    pub archived: bool,
     pub done: usize,
     pub open: usize,
     pub items: Vec<ChecklistItem>,
@@ -313,7 +315,11 @@ pub struct Dashboard {
 
 /// `live`：池子里的会话 id → 此刻状态；不在池子里的一律 paused（不能点开）。
 /// 终端不进看板；已删除的进（`deleted:true`，客户端默认藏起来），但不计数。
-pub fn dashboard(entries: &[Entry], live: &std::collections::HashMap<String, LiveStatus>) -> Dashboard {
+pub fn dashboard(
+    entries: &[Entry],
+    live: &std::collections::HashMap<String, LiveStatus>,
+    archived: &std::collections::HashSet<String>,
+) -> Dashboard {
     let mut cards: Vec<SessionCard> = entries
         .iter()
         .filter(|e| e.agent != "shell")
@@ -331,6 +337,7 @@ pub fn dashboard(entries: &[Entry], live: &std::collections::HashMap<String, Liv
                 status,
                 alive,
                 deleted: e.deleted_at.is_some(),
+                archived: archived.contains(&e.project_path),
                 done: items.iter().filter(|i| i.done).count(),
                 open: items.iter().filter(|i| !i.done).count(),
                 items,
@@ -338,16 +345,16 @@ pub fn dashboard(entries: &[Entry], live: &std::collections::HashMap<String, Liv
             }
         })
         .collect();
-    // 状态 → 已删除的沉到组尾 → 最近更新在前
+    // 状态 → 已删除 / 已归档的沉到组尾 → 最近更新在前
     cards.sort_by(|a, b| {
         status_rank(&a.status)
             .cmp(&status_rank(&b.status))
-            .then_with(|| a.deleted.cmp(&b.deleted))
+            .then_with(|| (a.deleted || a.archived).cmp(&(b.deleted || b.archived)))
             .then_with(|| b.updated_at.cmp(&a.updated_at))
             .then_with(|| a.id.cmp(&b.id))
     });
     let mut counts = Counts::default();
-    for c in cards.iter().filter(|c| !c.deleted) {
+    for c in cards.iter().filter(|c| !c.deleted && !c.archived) {
         match c.status.as_str() {
             "asking" => counts.asking += 1,
             "running" => counts.running += 1,
@@ -381,7 +388,8 @@ mod dashboard_tests {
                 (id.clone(), LiveStatus { status, updated_at: v["updated_at"].as_str().unwrap().to_string() })
             })
             .collect();
-        let d = dashboard(&entries, &live);
+        let archived: std::collections::HashSet<String> = fx["archived"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default();
+        let d = dashboard(&entries, &live, &archived);
         assert_eq!(serde_json::to_value(&d.sessions).unwrap(), fx["sessions"], "卡片（含顺序）与共享向量不一致");
         assert_eq!(serde_json::to_value(&d.counts).unwrap(), fx["expect"]["counts"]);
     }
@@ -436,7 +444,7 @@ mod dashboard_tests {
             del,
             shell,
         ];
-        let d = dashboard(&entries, &live);
+        let d = dashboard(&entries, &live, &Default::default());
         let order: Vec<(&str, &str)> = d.sessions.iter().map(|c| (c.id.as_str(), c.status.as_str())).collect();
         assert_eq!(
             order,

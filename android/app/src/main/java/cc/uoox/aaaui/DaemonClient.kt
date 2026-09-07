@@ -101,6 +101,9 @@ class DaemonClient(
     }
 
     /** 置顶 / 取消置顶；列表靠随后的 projects_changed 帧重拉 */
+    suspend fun setArchived(path: String, archived: Boolean) {
+        post("/projects/archive", buildJsonObject { put("path", path); put("archived", archived) }.toString())
+    }
     suspend fun setPinned(path: String, pinned: Boolean) {
         post("/projects/pin", buildJsonObject { put("path", path); put("pinned", pinned) }.toString())
     }
