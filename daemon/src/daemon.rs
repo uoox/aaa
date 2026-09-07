@@ -58,18 +58,31 @@ pub fn main_entry() {
     }
 }
 
-/// Apply-by-restart for the config API: `exec` keeps the PID, so a
-/// launchd-supervised daemon stays supervised, and an orphan process (no
-/// launchd) keeps running too — either way `run()` re-reads the config.
-/// Callers guarantee no live sessions (exec tears down every PTY).
+/// 重启 daemon：
+/// - launchd (macOS) 或 systemd (Linux) 托管环境下：KeepAlive / Restart=always 会在进程退出后
+///   立即拉起全新的干净实例。直接 exit(0) 是最可靠的方式——在 macOS 多线程/Tokio 运行时中
+///   直接调用 `execvp` 容易遭遇 malloc/GCD 内部锁死锁，且无法平滑重载刚被重新签名的二进制。
+/// - 游离/终端手动运行环境下：使用 `posix_spawn` (`Command::spawn`) 拉起新进程后再退出当前进程。
 pub fn restart_self_after_ms(ms: u64) {
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(ms));
-        use std::os::unix::process::CommandExt;
+        let is_supervised = std::env::var("XPC_SERVICE_NAME").is_ok()
+            || std::env::var("INVOCATION_ID").is_ok();
+        if is_supervised {
+            eprintln!("restart: supervised exit, daemon manager will respawn clean instance");
+            std::process::exit(0);
+        }
         let exe = std::env::current_exe().unwrap_or_else(|_| "aaa-daemon".into());
-        let err = std::process::Command::new(exe).arg("run").exec();
-        eprintln!("re-exec failed: {err}");
-        std::process::exit(1); // launchd KeepAlive 会拉起来；游离进程只能到此为止
+        match std::process::Command::new(&exe).arg("run").spawn() {
+            Ok(_) => {
+                eprintln!("restart: spawned new instance, exiting current process");
+                std::process::exit(0);
+            }
+            Err(err) => {
+                eprintln!("restart: spawn failed: {err}");
+                std::process::exit(1);
+            }
+        }
     });
 }
 
