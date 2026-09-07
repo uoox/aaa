@@ -365,6 +365,27 @@ mod dashboard_tests {
     use super::*;
     use std::collections::HashMap;
 
+    /// 三端共享向量 fixtures/dashboard.json：daemon 的输出必须逐字段等于 `sessions`
+    #[test]
+    fn shared_fixture_matches_daemon_output() {
+        let fx: serde_json::Value = serde_json::from_str(include_str!("../../fixtures/dashboard.json")).unwrap();
+        let entries: Vec<Entry> = serde_json::from_value(fx["entries"].clone()).unwrap();
+        let live: HashMap<String, LiveStatus> = fx["live"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(id, v)| {
+                let status = match v["status"].as_str().unwrap() {
+                    "asking" => "asking", "running" => "running", "background" => "background", "active" => "active", _ => "paused",
+                };
+                (id.clone(), LiveStatus { status, updated_at: v["updated_at"].as_str().unwrap().to_string() })
+            })
+            .collect();
+        let d = dashboard(&entries, &live);
+        assert_eq!(serde_json::to_value(&d.sessions).unwrap(), fx["sessions"], "卡片（含顺序）与共享向量不一致");
+        assert_eq!(serde_json::to_value(&d.counts).unwrap(), fx["expect"]["counts"]);
+    }
+
     fn e(id: &str, created: &str, title: &str, summary: &str) -> Entry {
         Entry {
             id: id.into(),

@@ -366,6 +366,10 @@ async fn agents_list(State(app): State<SharedApp>) -> Json<Value> {
 }
 
 async fn projects_list(State(app): State<SharedApp>) -> ApiResult<Json<Value>> {
+    if app.restarting.load(std::sync::atomic::Ordering::SeqCst) {
+        // 迁根 / 重启窗口里别扫：目录可能正在搬，cwd 缓存正在改写（gpt-6 审阅指出这条路没上锁）
+        return Err(ApiError::conflict("daemon 正在重启，稍候重试"));
+    }
     let app2 = Arc::clone(&app);
     let rows = blocking(move || {
         // No store_lock here: naming may call haiku (up to 60s) and the cache

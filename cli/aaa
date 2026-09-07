@@ -1,97 +1,31 @@
-#!/usr/bin/env bash
-# aaa — AAA daemon 的命令行前端（bash + curl + python3，无需构建）
+#!/usr/bin/env python3
+# aaa — AAA daemon 的工具箱（2026-09-07 用户拍板：CLI 只做授权 / 重启 / 配置 / 迁移这类
+# 工具性的事，不再做项目与会话管理——那是 Mac App 和手机的事）。
 #
-# 这是 daemon 的终端客户端，不拥有任何会话：列表、新建、结束、回答全部走
-# daemon 的 REST/WS API，所以这里开的会话在 Mac App 和手机上同样可见、可接管。
-#
-# 依赖：bash ≥ 3.2（macOS 自带的 /bin/bash 即可）、curl、python3（仅标准库）。
-# 结构：bash 负责参数解析、配置发现、curl 调用和流程；渲染 / 目标解析 /
-# WebSocket attach 客户端放在下面同一个文件里的 python 源码里（$PY_SRC），
-# 每条命令只起一次 python。
+# 纯 python3 标准库，不再有 bash 3.2 的坑（变量名吞多字节字符、set -e 静默退出）。
+# 连接：默认读 ~/.config/aaa-daemon/config.toml 连本机；AAA_HOST=主机:2730 AAA_TOKEN=… 指向远端。
+# token 只走请求头，永远不进 argv。
+import json, os, re, signal, subprocess, sys, time, urllib.error, urllib.request
 
-VERSION="1.2.0"
+VERSION = "2.0.0"
+HELP = """aaa — AAA daemon 的工具箱
 
-HELP="aaa — AAA daemon 的命令行前端
-
-  aaa                      交互菜单（待回复 / 运行 / 后台 / 激活 / 暂停 分组；数字接入会话，p 项目 m 权限 n 新建）
-  aaa ls [-a] [--json]     会话列表（-a 含已退出）
-  aaa ps [--json]          项目列表
-  aaa new [名字]            新建项目目录 + 开一个 Claude Code 会话并接入
-  aaa open <目标> [--fresh]   进入项目（有活会话就接回，否则 resume；--fresh 强制再开一个并行会话）
-  aaa attach <目标>         接入会话（Ctrl-] 脱离，会话继续跑）
-  aaa say <目标> <文本…>     把一句话写进会话并回车（回答提问用）
-  aaa kill <目标>           结束会话
-  aaa rm <目标>             删除会话记录
-  aaa rename <目标> <标题>   重命名会话
-  aaa wait [--json]         只列有表单等你回答的会话 (asking)
-  aaa status [--json]       daemon 状态
-  aaa perms [--json]        macOS 权限状态
-  aaa perms all | <id…>     申请权限（弹窗出现在 Mac 上）
-  aaa help
-
-目标可以是：会话 id 或其前缀、aaa ls 里的序号、项目名（取最近的活会话）、
-或 \`.\` 表示当前目录所属的项目。
+  aaa [status] [--json]          daemon 状态（版本、项目根、会话五态计数）
+  aaa ls [-a] [--json]           会话列表，按 待回复 / 运行 / 后台 / 激活 / 暂停 分组（-a 含暂停）
+  aaa wait [--json]              只列有表单等你回答的会话
+  aaa perms [--json]             macOS 权限状态
+  aaa perms all | <id…>          申请权限（弹窗出现在 Mac 上）
+  aaa restart [--force]          重启 daemon（有活会话需 --force：先结束、起来后自动 resume）
+  aaa config                     看配置（端口 / token / 项目根）
+  aaa config port <n> | token <t>  改配置并重启（有活会话需 --force）
+  aaa config root <path> [--migrate] [--force]   改项目根；--migrate 整根搬过去并改所有指向
+  aaa migrate-root <新根> [--yes] 一键迁根：检查 → 换新 daemon → 迁移 → 验证（推荐用这个）
+  aaa service install|uninstall|status   launchd 常驻服务（转调 aaa-daemon service）
+  aaa version | help
 
 连接：默认读 ~/.config/aaa-daemon/config.toml 连本机 daemon；
       设 AAA_HOST=主机:2730 AAA_TOKEN=… 可指向另一台机器的 daemon。
-"
-
-# ---------------------------------------------------------------------------
-# colours: ANSI only when stdout is a tty and NO_COLOR is unset
-# ---------------------------------------------------------------------------
-if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
-  AAA_COLOR=1
-  RESET=$'\033[0m' BOLD=$'\033[1m' DIM=$'\033[2m' CYAN=$'\033[36m'
-  YELLOW=$'\033[33m' GREY=$'\033[90m'
-else
-  AAA_COLOR=0
-  RESET='' BOLD='' DIM='' CYAN='' YELLOW='' GREY=''
-fi
-export AAA_COLOR
-
-HOST='' PORT='' TOKEN='' BASE='' LOCAL=0 CONNECT_TIMEOUT=2
-ERRFILE='' MAPFILE='' HDRFILE='' SAVED_STTY='' IN_MENU=''
-KEY='' PICKED='' REPLY_LINE='' MENU_STATUS=''
-R_ID='' R_CERT='' R_PROJECT='' R_STATE='' R_PATH='' R_AGENT='' R_TITLE=''
-# field separator between python and bash: US (0x1f) is not IFS whitespace,
-# so an empty middle field (blank project_name, agent) does not collapse
-US=$'\037'
-
-cleanup() {
-  [ -n "$SAVED_STTY" ] && stty "$SAVED_STTY" 2>/dev/null
-  [ -n "$IN_MENU" ] && printf '\033[0m'
-  [ -n "$ERRFILE" ] && rm -f "$ERRFILE"
-  [ -n "$MAPFILE" ] && rm -f "$MAPFILE"
-  [ -n "$HDRFILE" ] && rm -f "$HDRFILE"
-  return 0
-}
-trap cleanup EXIT
-
-die() {
-  printf '%saaa:%s %s\n' "$GREY" "$RESET" "$*" >&2
-  exit 1
-}
-die_api() { die "$(cat "$ERRFILE" 2>/dev/null)"; }
-
-is_tty() { [ -t 0 ] && [ -t 1 ]; }
-clear_screen() { printf '\033[2J\033[H'; }
-
-# JSON string literal (with quotes) from arbitrary text
-json_str() {
-  local s=$1
-  s=${s//\\/\\\\}
-  s=${s//\"/\\\"}
-  s=${s//$'\n'/\\n}
-  s=${s//$'\r'/\\r}
-  s=${s//$'\t'/\\t}
-  printf '"%s"' "$s"
-}
-
-# ---------------------------------------------------------------------------
-# the python half: rendering, target resolution, menu frames, WebSocket attach
-# ---------------------------------------------------------------------------
-IFS= read -r -d '' PY_SRC <<'PY' || true
-import calendar, json, os, re, signal, sys, time, unicodedata
+"""
 
 signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 try:
@@ -100,1271 +34,464 @@ try:
 except Exception:
     pass
 
-COLOR = os.environ.get("AAA_COLOR") == "1"
+COLOR = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
 def C(code): return code if COLOR else ""
 RESET, BOLD, DIM = C("\x1b[0m"), C("\x1b[1m"), C("\x1b[2m")
-CYAN, GREEN, YELLOW = C("\x1b[36m"), C("\x1b[32m"), C("\x1b[33m")
-RED, MAGENTA, GREY = C("\x1b[31m"), C("\x1b[35m"), C("\x1b[90m")
-EOL = "\x1b[K"   # erase to end of line: menu frames only (always a tty)
+CYAN, GREEN, YELLOW, RED, GREY = C("\x1b[36m"), C("\x1b[32m"), C("\x1b[33m"), C("\x1b[31m"), C("\x1b[90m")
 
-def out(s=""):
-    sys.stdout.write(s + "\n")
-
+def out(s=""): sys.stdout.write(s + "\n")
+def say(s): out("%s==> %s%s" % (CYAN + BOLD, s, RESET))
 def die(msg, code=1):
-    # code 2 = "nothing matched" (callers may fall back); 1 = a real error
-    # such as ambiguity or an out-of-range row, which must never be guessed
-    # past. AAA_BARE=1: bash captures stderr and adds the prefix itself.
     sys.stdout.flush()
-    prefix = "" if os.environ.get("AAA_BARE") == "1" else "%saaa:%s " % (GREY, RESET)
-    sys.stderr.write(prefix + msg + "\n")
+    sys.stderr.write("%saaa:%s %s\n" % (GREY, RESET, msg))
     sys.exit(code)
-
-def load():
-    raw = sys.stdin.buffer.read().decode("utf-8", "replace")
-    try:
-        return json.loads(raw)
-    except ValueError as e:
-        die("响应解析失败: %s" % e)
-
-def pretty(v):
-    return json.dumps(v, ensure_ascii=False, indent=2)
-
-def term_size():
-    try:
-        sz = os.get_terminal_size(1)
-        if sz.columns > 0:
-            return sz.columns, max(sz.lines, 10)
-    except OSError:
-        pass
-    return 120, 40
-
-SEP = "\x1f"   # unit separator: bash reads it with IFS=$'\037', empty fields survive
-
-def clean(s):
-    return str(s).replace(SEP, " ").replace("\t", " ").replace("\n", " ").replace("\r", " ")
-
-# ---- cells: CJK and full-width forms take two columns ----
-def cw(ch):
-    o = ord(ch)
-    if o < 0x20 or o == 0x7F:
-        return 0
-    if unicodedata.combining(ch):
-        return 0
-    return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
-
-def width(s): return sum(cw(c) for c in s)
-
-def truncate(s, w):
-    if width(s) <= w:
-        return s
-    if w <= 0:
-        return ""
-    acc, used = [], 0
-    for c in s:
-        k = cw(c)
-        if used + k > w - 1:
-            break
-        acc.append(c); used += k
-    return "".join(acc) + "…"
-
-def cell(s, w):
-    t = truncate(s, w)
-    return t + " " * max(0, w - width(t))
-
-# ---- time ----
-ISO = re.compile(r"^(\d{4})-(\d\d)-(\d\d)[T ](\d\d):(\d\d):(\d\d)(?:\.\d+)?(Z|[+-]\d\d:?\d\d)?$")
-def parse_iso(s):
-    m = ISO.match(s or "")
-    if not m:
-        return None
-    y, mo, d, h, mi, se = (int(x) for x in m.groups()[:6])
-    t = calendar.timegm((y, mo, d, h, mi, se, 0, 0, 0))
-    tz = m.group(7)
-    if tz and tz != "Z":
-        sign = 1 if tz[0] == "+" else -1
-        t -= sign * (int(tz[1:3]) * 3600 + int(tz[-2:]) * 60)
-    return t
-
-def ago(iso):
-    t = parse_iso(iso)
-    if t is None:
-        return ""
-    secs = int(time.time() - t)
-    if secs < 0: return "刚刚"
-    if secs < 60: return "%d秒" % secs
-    if secs < 3600: return "%d分" % (secs // 60)
-    if secs < 86400: return "%d小时" % (secs // 3600)
-    return "%d天" % (secs // 86400)
-
-def uptime(secs):
-    d, h, m = secs // 86400, (secs % 86400) // 3600, (secs % 3600) // 60
-    if d > 0: return "%d天 %d小时" % (d, h)
-    if h > 0: return "%d小时 %d分" % (h, m)
-    return "%d分" % m
-
-def human_size(n):
-    units = ["B", "K", "M", "G", "T"]
-    v, i = float(n), 0
-    while v >= 1024.0 and i < len(units) - 1:
-        v /= 1024.0; i += 1
-    if i == 0: return "%d%s" % (n, units[0])
-    if v < 10.0: return "%.1f%s" % (v, units[i])
-    return "%.0f%s" % (v, units[i])
-
-# ---- sessions ----
+def pretty(v): return json.dumps(v, ensure_ascii=False, indent=2)
 def S(o, k, d=""):
     v = o.get(k) if isinstance(o, dict) else None
     return d if v is None else v
 
-def is_live(s): return S(s, "state") != "exited"
-def is_asking(s): return bool(s.get("asking"))
+HOME = os.environ.get("AAA_HOME") or os.environ.get("HOME") or "/"
+CFG = os.path.join(HOME, ".config", "aaa-daemon", "config.toml")
+STATE = os.path.join(HOME, ".local", "state", "aaa-daemon")
 
-def headline(s):
-    return S(s, "title")
-
-# 五态（2026-09-07 用户拍板，三端一致，两个字）：待回复 > 运行 > 后台 > 激活 > 暂停
-GROUP_NAMES = ["待回复", "运行", "后台", "激活", "暂停"]
-GROUP_COLORS = [YELLOW, GREEN, GREEN, CYAN, GREY]
-
-def group_of(s):
-    st = S(s, "state")
-    if st == "exited": return 4
-    if is_asking(s): return 0
-    if st == "running": return 1
-    if s.get("background"): return 2
-    return 3
-
-def sort_for_listing(sessions):
-    # stable sorts: most recent output first, then by group, exited last overall
-    v = sorted(sessions, key=lambda s: S(s, "last_output_at"), reverse=True)
-    return sorted(v, key=lambda s: (group_of(s), 0 if is_live(s) else 1))
-
-def state_color(state):
-    return {"running": GREEN, "waiting": YELLOW, "exited": RED}.get(state, GREY)
-
-def state_label(s):
-    st = S(s, "state")
-    if st == "running": return "运行"
-    if st == "waiting": return "待回复" if is_asking(s) else ("后台" if s.get("background") else "激活")
-    if st == "exited":
-        code = s.get("exit_code")
-        return "暂停" if code in (None, 0) else "暂停 (%s)" % code
-    return st
-
-def perm_status(status):
-    return {"granted": (GREEN, "已授权"), "denied": (RED, "已拒绝"),
-            "undetermined": (YELLOW, "未申请"),
-            "needs_settings": (CYAN, "需手动开")}.get(status, (GREY, "未知"))
-
-def session_row(s, w):
-    st = S(s, "state")
-    dot = state_color(st) + "●" + RESET
-    name = BOLD + cell(S(s, "project_name"), 14) + RESET
-    state = state_color(st) + cell(state_label(s), 9) + RESET
-    when = DIM + cell(ago(S(s, "last_output_at")), 5) + RESET
-    head = truncate(headline(s), max(w - 33, 10))   # 1+1+14+1+9+1+5+1 = 33
-    return "%s %s %s %s %s%s%s" % (dot, name, state, when, DIM, head, RESET)
-
-def project_row(p, w):
-    name = BOLD + cell(S(p, "name"), 18) + RESET
-    size = cell(human_size(int(S(p, "dir_size", 0) or 0)), 6)
-    c = S(p, "ctx_size", 0) or 0
-    ctx = cell(human_size(int(c)), 6) if c > 0 else cell("-", 6)
-    when = cell(ago(S(p, "mtime")), 5)
-    title = truncate(S(p, "session_title"), max(w - 39, 10))  # 18+1+6+1+6+1+5+1
-    return "%s %s%s %s %s%s %s%s%s" % (name, DIM, size, ctx, when, RESET, CYAN, title, RESET)
-
-def display_key(k):
-    if not k: return "·"
-    if k.startswith("\x1b"): return "↓" * k.count("\x1b")
-    return k
-
-def root_state(h):
-    rs = S(h, "root_state")
-    if rs: return rs
-    return "ok" if h.get("ssd_mounted") else "unmounted"
-
-def err_message(raw):
+# ---------------------------------------------------------------------------
+# 连接
+# ---------------------------------------------------------------------------
+def toml_top(path, key):
+    """顶层 `key = value`（第一个 [section] 之前）"""
     try:
-        v = json.loads(raw)
-    except ValueError:
-        return raw.strip()
-    if isinstance(v, dict):
-        if isinstance(v.get("message"), str): return v["message"]
-        e = v.get("error")
-        if isinstance(e, str): return e
-        if isinstance(e, dict) and isinstance(e.get("message"), str): return e["message"]
-    return raw.strip()
-
-def summarize_request(v):
-    def lst(k):
-        a = v.get(k) if isinstance(v, dict) else None
-        return " ".join(x for x in a if isinstance(x, str)) if isinstance(a, list) else ""
-    parts = []
-    if lst("triggered"): parts.append("已弹窗: " + lst("triggered"))
-    if lst("opened_settings"): parts.append("已打开设置面板（需手动开）: " + lst("opened_settings"))
-    return " · ".join(parts) if parts else "没有需要申请的项"
-
-# ---- verbs ----
-def cmd_ls(args):
-    ordered = sort_for_listing(load())
-    show_all = "-a" in args
-    cols, _ = term_size()
-    rows = [(i + 1, s) for i, s in enumerate(ordered) if show_all or is_live(s)]
-    if not rows:
-        out(DIM + "没有会话" + RESET); return
-    cur = None
-    for n, s in rows:
-        g = group_of(s)
-        if g != cur:
-            cur = g
-            out("%s%s%s" % (GROUP_COLORS[g], GROUP_NAMES[g], RESET))
-        out("%s%2d%s %s" % (DIM, n, RESET, session_row(s, max(cols - 4, 0))))
-
-def cmd_ps(args):
-    cols, _ = term_size()
-    for i, p in enumerate(load()):
-        out("%s%2d%s %s" % (DIM, i + 1, RESET, project_row(p, max(cols - 4, 0))))
-
-def waiting_only(sessions):
-    return [s for s in sort_for_listing(sessions) if is_asking(s)]
-
-def cmd_wait(args):
-    sessions = waiting_only(load())
-    if "--json" in args:
-        v = []
-        for s in sessions:
-            v.append({"id": S(s, "id"), "project": S(s, "project_name"), "path": S(s, "project_path"),
-                      "agent": S(s, "agent"), "title": S(s, "title")})
-        out(pretty(v)); return
-    if not sessions:
-        out(DIM + "没有会话在等你回答" + RESET); return
-    for s in sessions:
-        out("%s●%s %s%s%s  %s%s%s" % (YELLOW, RESET, BOLD, S(s, "project_name"), RESET, DIM, S(s, "id"), RESET))
-        out("   " + S(s, "title"))
-
-def cmd_status(args):
-    host, port = args[0], args[1]
-    data = load()
-    h = data[0] if isinstance(data[0], dict) else {}
-    sessions = data[1] if isinstance(data[1], list) else []
-    live = sum(1 for s in sessions if is_live(s))
-    waiting = sum(1 for s in sessions if group_of(s) == 1)
-    rs = root_state(h)
-    if "--json" in args:
-        out(pretty({"host": host, "port": int(port), "version": S(h, "version"),
-                    "ssd_mounted": bool(h.get("ssd_mounted")), "root_state": rs,
-                    "project_root": S(h, "project_root"), "uptime_s": S(h, "uptime_s", 0),
-                    "sessions": live, "waiting": waiting}))
-        return
-    note = {"ok": "", "denied": RED + "(读不了 · 缺完全磁盘访问权限)" + RESET}.get(rs, RED + "(未挂载!)" + RESET)
-    out("%saaa-daemon%s v%s  %s%s:%s%s" % (BOLD, RESET, S(h, "version"), DIM, host, port, RESET))
-    out("  项目根   %s %s" % (S(h, "project_root"), note))
-    out("  运行时长 %s" % uptime(int(S(h, "uptime_s", 0) or 0)))
-    out("  会话     %d 活跃 · %d 待回复 · %d 总计" % (live, waiting, len(sessions)))
-    if rs == "denied":
-        out("\n%s项目根读不了%s：launchd 起的 daemon 没有可移动卷访问权。\n  "
-            "系统设置 → 隐私与安全性 → 完全磁盘访问权限，加入 %s~/.local/bin/aaa-daemon%s，\n  "
-            "然后 %saaa-daemon service uninstall && aaa-daemon service install%s"
-            % (YELLOW, RESET, DIM, RESET, BOLD, RESET))
-
-def cmd_perms(args):
-    for p in load():
-        color, label = perm_status(S(p, "status"))
-        line = "  %s %s%s%s  %s%s%s" % (cell(S(p, "label"), 22), color, cell(label, 8), RESET,
-                                          DIM, cell(S(p, "id"), 26), RESET)
-        hint = S(p, "hint")
-        if hint:
-            line += "  %s%s%s" % (DIM, hint, RESET)
-        out(line.rstrip())
-
-def cmd_perm_summary(args):
-    out(summarize_request(load()))
-
-def cmd_purge_summary(args):
-    v = load()
-    parts = ["已删除 %s" % args[0]]
-    for r in (v.get("results") or []) if isinstance(v, dict) else []:
-        for p in (r.get("purged") or []) if isinstance(r, dict) else []:
-            if isinstance(p, dict) and (p.get("count") or 0) > 0:
-                parts.append("%s %s 条" % (S(p, "agent_label"), p.get("count")))
-    out(" · ".join(parts))
-
-def cmd_fields(args):
-    v = load()
-    vals = []
-    for k in args:
-        x = v.get(k) if isinstance(v, dict) else None
-        if x is None: vals.append("")
-        elif isinstance(x, str): vals.append(clean(x))
-        else: vals.append(clean(json.dumps(x, ensure_ascii=False)))
-    out(SEP.join(vals))
-
-# ---- target resolution (= the Rust cmds::resolve_in) ----
-def normalize(target, cwd, health):
-    if target != ".":
-        return target
-    root = S(health, "project_root")
-    if not root:
-        die("daemon 没有报告项目根，无法解析 .")
-    rootp = root.rstrip("/") or "/"
-    cwdp = cwd.rstrip("/") or "/"
-    if cwdp == rootp:
-        die("当前目录就是项目根")
-    prefix = rootp if rootp.endswith("/") else rootp + "/"
-    if not cwdp.startswith(prefix):
-        die("当前目录不在项目根 %s 下" % root)
-    return cwdp[len(prefix):].split("/")[0]
-
-def resolve_in(ordered, target):
-    for s in ordered:
-        if S(s, "id") == target:
-            return s, True
-    if target.isdigit():
-        n = int(target)
-        if 1 <= n <= len(ordered):
-            return ordered[n - 1], False
-        die("序号 %d 超出范围（当前 %d 个会话）" % (n, len(ordered)))
-    pref = [s for s in ordered if S(s, "id").startswith(target)]
-    if len(pref) == 1:
-        return pref[0], True
-    if len(pref) > 1:
-        die("%s 匹配到 %d 个会话，请写全 id" % (target, len(pref)))
-    lower = target.lower()
-    for s in ordered:
-        if S(s, "project_name").lower() == lower or S(s, "project_path") == target:
-            return s, False
-    fuzzy = [s for s in ordered if lower in S(s, "project_name").lower()]
-    if len(fuzzy) == 1:
-        return fuzzy[0], False
-    if len(fuzzy) > 1:
-        die("%s 模糊匹配到 %d 个会话（%s），写全项目名或 id"
-            % (target, len(fuzzy), " ".join(S(s, "project_name") for s in fuzzy)))
-    die("没有匹配 %s 的会话（aaa ls -a 看看）" % target, 2)
-
-def cmd_resolve(args):
-    target, cwd = args[0], args[1]
-    health = json.loads(args[2]) if len(args) > 2 and args[2] else {}
-    live_only = "--live" in args[3:]
-    target = normalize(target, cwd, health)
-    ordered = sort_for_listing(load())
-    s, exact = resolve_in(ordered, target)
-    if live_only and not is_live(s):
-        die("没有匹配 %s 的活会话" % target, 2)
-    out(SEP.join([S(s, "id"), "exact" if exact else "positional", clean(S(s, "project_name")),
-                   state_label(s), clean(S(s, "project_path")), clean(S(s, "agent")), clean(S(s, "title"))]))
-
-def cmd_find_project(args):
-    target, cwd = args[0], args[1]
-    health = json.loads(args[2]) if len(args) > 2 and args[2] else {}
-    want = normalize(target, cwd, health)
-    projects = load()
-    # an exact name or path wins; a substring must be unique — picking the
-    # first of several would silently resume the wrong project
-    hit = None
-    for p in projects:
-        if S(p, "path") == want or S(p, "name") == want:
-            hit = p; break
-    if hit is None:
-        fuzzy = [p for p in projects if want.lower() in S(p, "name").lower()]
-        if len(fuzzy) == 1:
-            hit = fuzzy[0]
-        elif len(fuzzy) > 1:
-            die("%s 模糊匹配到 %d 个项目（%s），写全项目名"
-                % (target, len(fuzzy), " ".join(S(p, "name") for p in fuzzy)))
-    if hit is None:
-        die("没有匹配 %s 的项目" % target, 2)
-    out(SEP.join([clean(S(hit, "path")), clean(S(hit, "agent")), clean(S(hit, "name"))]))
-
-def cmd_live_for_path(args):
-    path = args[0]
-    live = [s for s in load() if is_live(s) and S(s, "project_path") == path]
-    if live:
-        s = max(live, key=lambda s: S(s, "last_output_at"))
-        out(SEP.join([S(s, "id"), clean(S(s, "title"))]))
-
-# ---- menu frames: write the frame to stdout, the row map to a file ----
-def frame(lines):
-    sys.stdout.write("\x1b[H" + "\n".join(lines) + "\x1b[J")
-    sys.stdout.flush()
-
-def marker(sel): return BOLD + CYAN + "▶" + RESET if sel else " "
-
-def cmd_menu(args):
-    mapf, host, port = args[0], args[1], args[2]
-    status = args[3] if len(args) > 3 else ""
-    data = load()
-    h = data.get("health") or {}
-    ordered = sort_for_listing(data.get("sessions") or [])
-    cols, rows = term_size()
-    rs = root_state(h)
-    root = {"ok": "SSD 已挂载", "unmounted": "SSD 未挂载"}.get(rs, "项目根读不了 · 缺完全磁盘访问权限")
-    lines = [
-        "%s%s   ░█▀█░█▀█░█▀█%s%s" % (BOLD, MAGENTA, RESET, EOL),
-        "%s%s   ░█▀█░█▀█░█▀█%s%s    %s:%s · v%s · %s%s%s" % (BOLD, MAGENTA, RESET, DIM, host, port, S(h, "version"), root, RESET, EOL),
-        "%s%s   ░▀░▀░▀░▀░▀░▀%s%s" % (BOLD, MAGENTA, RESET, EOL),
-        EOL,
-    ]
-    numbered = [(i + 1, s) for i, s in enumerate(ordered) if is_live(s)]
-    with open(mapf, "w", encoding="utf-8") as f:
-        for n, s in numbered:
-            f.write(SEP.join([str(n), S(s, "id"), clean(S(s, "project_name")), clean(S(s, "title"))]) + "\n")
-    if not numbered:
-        lines.append("   %s没有会话 · n 新建项目%s%s" % (DIM, RESET, EOL))
-    else:
-        cap = max(rows - 12, 3)
-        shown, hidden, cur = 0, 0, None
-        for n, s in numbered:
-            if shown >= cap:
-                hidden += 1; continue
-            g = group_of(s)
-            if g != cur:
-                cur = g
-                lines.append("  %s%s%s%s" % (GROUP_COLORS[g], GROUP_NAMES[g], RESET, EOL))
-            lines.append("  %s%2d%s %s%s" % (DIM, n, RESET, session_row(s, max(cols - 6, 0)), EOL))
-            shown += 1
-        if hidden:
-            lines.append("  %s… 还有 %d 个（aaa ls 看全部）%s%s" % (DIM, hidden, RESET, EOL))
-    lines.append(EOL)
-    if status:
-        lines.append("  %s%s%s%s" % (CYAN, truncate(status, max(cols - 4, 10)), RESET, EOL))
-    lines.append("  %s数字 接入会话 · p 项目管理 · m macOS 权限 · n 新建项目 · r 刷新 · q 退出%s%s" % (DIM, RESET, EOL))
-    frame(lines)
-
-def cmd_menu_projects(args):
-    mapf, idx = args[0], int(args[1])
-    status = args[2] if len(args) > 2 else ""
-    projects = load()
-    cols, rows = term_size()
-    with open(mapf, "w", encoding="utf-8") as f:
-        for i, p in enumerate(projects):
-            f.write(SEP.join([str(i + 1), clean(S(p, "path")), clean(S(p, "agent")), clean(S(p, "name"))]) + "\n")
-    if not projects:
-        frame(["  %s还没有项目。n 新建，q 返回%s%s" % (DIM, RESET, EOL)]); return
-    idx = min(max(idx, 0), len(projects) - 1)
-    lines = ["  %s项目管理%s  %s共 %d 个%s%s" % (BOLD, RESET, DIM, len(projects), RESET, EOL), EOL]
-    cap = max(rows - 8, 5)
-    start = max(idx - (cap - 1), 0)
-    for n, p in list(enumerate(projects))[start:start + cap]:
-        num = "%s%d%s" % (DIM, n + 1, RESET) if n < 9 else " "
-        lines.append(" %s %s %s%s" % (marker(n == idx), num, project_row(p, max(cols - 6, 0)), EOL))
-    lines.append(EOL)
-    if status:
-        lines.append("  %s%s%s%s" % (CYAN, truncate(status, max(cols - 4, 10)), RESET, EOL))
-    lines.append("  %sEnter 进入 · n 新建 · d 删除 · r 刷新 · q 返回%s%s" % (DIM, RESET, EOL))
-    frame(lines)
-
-def cmd_menu_perms(args):
-    mapf, idx = args[0], int(args[1])
-    status = args[2] if len(args) > 2 else ""
-    perms = load()
-    cols, _ = term_size()
-    with open(mapf, "w", encoding="utf-8") as f:
-        for i, p in enumerate(perms):
-            f.write(SEP.join([str(i + 1), clean(S(p, "id")), clean(S(p, "label"))]) + "\n")
-    idx = min(max(idx, 0), max(len(perms) - 1, 0))
-    lines = ["  %smacOS 权限授予%s%s" % (BOLD, RESET, EOL),
-             "  %s下表归责到 daemon（agent 都是它的子进程）；改完系统设置要重启 daemon 才读得到%s%s" % (DIM, RESET, EOL), EOL]
-    for n, p in enumerate(perms):
-        color, label = perm_status(S(p, "status"))
-        line = " %s %s%d%s %s  %s%s%s" % (marker(n == idx), DIM, n + 1, RESET, cell(S(p, "label"), 22), color, cell(label, 8), RESET)
-        hint = S(p, "hint")
-        if hint:
-            line += "  %s%s%s" % (DIM, truncate(hint, max(cols - 40, 10)), RESET)
-        lines.append(line + EOL)
-    lines.append(EOL)
-    if status:
-        lines.append("  %s%s%s%s" % (CYAN, truncate(status, max(cols - 4, 10)), RESET, EOL))
-    lines.append("  %sEnter 申请这一项 · a 一键全授 · r 刷新 · q 返回%s%s" % (DIM, RESET, EOL))
-    frame(lines)
-
-# ---- attach: a minimal WebSocket client over the raw tty ----
-def cmd_attach(args):
-    import base64, hashlib, select, socket, struct, termios, tty
-    sid = args[0]
-    title = args[1] if len(args) > 1 else sid
-    if not (os.isatty(0) and os.isatty(1)):
-        die("attach 需要交互式终端")
-    host = os.environ.get("AAA_WS_HOST", "127.0.0.1")
-    port = int(os.environ.get("AAA_WS_PORT", "2730"))
-    token = os.environ.get("AAA_TOKEN", "")
-    local = os.environ.get("AAA_LOCAL") == "1"
-    authority = ("[%s]" % host if ":" in host and not host.startswith("[") else host) + ":%d" % port
-
-    try:
-        sock = socket.create_connection((host, port), timeout=2 if local else 6)
-    except OSError as e:
-        die("连接 %s 失败: %s" % (authority, e))
-    try:
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                if re.match(r"^\s*\[", line): break
+                m = re.match(r"^\s*%s\s*=\s*(.*)$" % re.escape(key), line)
+                if m:
+                    v = m.group(1).strip()
+                    if v.startswith('"'):
+                        return re.match(r'^"([^"]*)"', v).group(1)
+                    return re.split(r"[\s#]", v, maxsplit=1)[0]
     except OSError:
-        pass
+        return None
+    return None
 
-    key = base64.b64encode(os.urandom(16)).decode()
-    req = ("GET /api/v1/sessions/%s/attach HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\n"
-           "Connection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n"
-           "Authorization: Bearer %s\r\n\r\n" % (sid, authority, key, token))
-    try:
-        sock.sendall(req.encode())
-        buf = b""
-        while b"\r\n\r\n" not in buf:
-            chunk = sock.recv(4096)
-            if not chunk:
-                die("WebSocket 握手失败: 连接被关闭")
-            buf += chunk
-            if len(buf) > 65536:
-                die("WebSocket 握手失败: 响应头过大")
-    except socket.timeout:
-        die("WebSocket 握手超时（%s）" % authority)
-    except OSError as e:
-        die("WebSocket 握手失败: %s" % e)
-    head, buf = buf.split(b"\r\n\r\n", 1)
-    lines = head.decode("latin-1").split("\r\n")
-    status = lines[0].split(" ")
-    hdrs = {}
-    for l in lines[1:]:
-        if ":" in l:
-            k, v = l.split(":", 1)
-            hdrs[k.strip().lower()] = v.strip()
-    if len(status) < 2 or status[1] != "101":
-        # an ordinary HTTP error: collect the body for its message
-        try:
-            want = int(hdrs.get("content-length", "0"))
-            while len(buf) < want:
-                chunk = sock.recv(4096)
-                if not chunk:
-                    break
-                buf += chunk
-        except (OSError, ValueError):
-            pass
-        msg = err_message(buf.decode("utf-8", "replace")) or lines[0]
-        die("HTTP %s: %s" % (status[1] if len(status) > 1 else "?", msg))
-    expect = base64.b64encode(hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest()).decode()
-    if hdrs.get("sec-websocket-accept") != expect:
-        die("WebSocket 握手失败: Sec-WebSocket-Accept 不匹配")
-    sock.settimeout(None)
-
-    def mask_bytes(k, data):
-        n = len(data)
-        if n == 0:
-            return data
-        full = (k * (n // 4 + 1))[:n]
-        return (int.from_bytes(data, "big") ^ int.from_bytes(full, "big")).to_bytes(n, "big")
-
-    def build(opcode, payload):
-        k = os.urandom(4)
-        hdr = bytearray([0x80 | opcode])
-        n = len(payload)
-        if n < 126:
-            hdr.append(0x80 | n)
-        elif n < 65536:
-            hdr.append(0x80 | 126); hdr += struct.pack(">H", n)
+class Conn:
+    def __init__(self):
+        host = os.environ.get("AAA_HOST")
+        if host:
+            self.token = os.environ.get("AAA_TOKEN") or die("AAA_HOST 已设置但缺少 AAA_TOKEN")
+            host = re.sub(r"^(https?|ws)://", "", host).rstrip("/")
+            m = re.match(r"^\[(.+)\](?::(\d+))?$", host) or re.match(r"^([^:]+)(?::(\d+))?$", host)
+            self.host, self.port = (m.group(1), int(m.group(2) or 2730)) if m else (host, 2730)
         else:
-            hdr.append(0x80 | 127); hdr += struct.pack(">Q", n)
-        return bytes(hdr) + k + mask_bytes(k, payload)
+            if not os.path.exists(CFG):
+                die("读不到 %s\n先在本机跑一次 aaa-daemon run，或设置 AAA_HOST/AAA_TOKEN 指向远端" % CFG)
+            self.host = "127.0.0.1"
+            self.port = int(toml_top(CFG, "port") or 2730)
+            self.token = toml_top(CFG, "token") or die("%s: 缺少 token" % CFG)
+        self.local = self.host in ("127.0.0.1", "localhost", "::1")
+        h = "[%s]" % self.host if ":" in self.host else self.host
+        self.base = "http://%s:%d" % (h, self.port)
 
-    def parse(b):
-        if len(b) < 2:
-            return None
-        fin, op = b[0] & 0x80, b[0] & 0x0F
-        masked, ln, pos = b[1] & 0x80, b[1] & 0x7F, 2
-        if ln == 126:
-            if len(b) < 4: return None
-            ln, pos = struct.unpack(">H", b[2:4])[0], 4
-        elif ln == 127:
-            if len(b) < 10: return None
-            ln, pos = struct.unpack(">Q", b[2:10])[0], 10
-        k = None
-        if masked:
-            if len(b) < pos + 4: return None
-            k, pos = b[pos:pos + 4], pos + 4
-        if len(b) < pos + ln:
-            return None
-        payload = b[pos:pos + ln]
-        if k:
-            payload = mask_bytes(k, payload)
-        return fin, op, payload, pos + ln
-
-    def write_all(fd, data):
-        while data:
-            try:
-                n = os.write(fd, data)
-            except BlockingIOError:
-                select.select([], [fd], [])
-                continue
-            data = data[n:]
-
-    def send(data):
+    def api(self, method, path, body=None, timeout=90):
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(self.base + path, data=data, method=method,
+                                     headers={"Authorization": "Bearer " + self.token,
+                                              **({"Content-Type": "application/json"} if data else {})})
         try:
-            sock.sendall(data); return True
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                raw = r.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as e:
+            raw = e.read().decode("utf-8", "replace")
+            try:
+                v = json.loads(raw); err = v.get("error", v)
+                msg = err.get("message") if isinstance(err, dict) else err
+            except ValueError:
+                msg = raw.strip()
+            raise ApiError("HTTP %s: %s" % (e.code, msg), e.code)
+        except urllib.error.URLError as e:
+            raise ApiError("连接 %s 失败: %s" % (self.base, e.reason), 0)
+        return json.loads(raw) if raw.strip() else {}
+
+    def wake_local(self):
+        """launchd 装了但没在跑的本机 daemon 推一下；对跑着的 job 是空操作"""
+        if not self.local: return False
+        try:
+            subprocess.run(["launchctl", "kickstart", "gui/%d/com.aaa.daemon" % os.getuid()],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
         except OSError:
             return False
+        for _ in range(30):
+            time.sleep(0.1)
+            try:
+                self.api("GET", "/api/v1/health", timeout=2); return True
+            except ApiError:
+                pass
+        return False
 
-    def size():
+    def probe(self):
         try:
-            sz = os.get_terminal_size(1)
-            return sz.columns, sz.lines
-        except OSError:
-            return 120, 40
+            return self.api("GET", "/api/v1/health", timeout=3)
+        except ApiError as e:
+            if e.code: die(str(e))  # daemon 在但拒绝我们（token 错）
+            if self.wake_local():
+                return self.api("GET", "/api/v1/health", timeout=3)
+            die("连不上 daemon %s:%d\n  本机：launchctl kickstart -k gui/%d/com.aaa.daemon（未安装则 aaa service install，或前台 aaa-daemon run）\n  远端：检查 AAA_HOST / tailscale"
+                % (self.host, self.port, os.getuid()))
 
-    winch = [True]
-    wake_r, wake_w = os.pipe()
-    os.set_blocking(wake_r, False); os.set_blocking(wake_w, False)
-    signal.set_wakeup_fd(wake_w)
-    signal.signal(signal.SIGWINCH, lambda *_: winch.__setitem__(0, True))
-    def on_term(*_): raise SystemExit(1)
-    for sg in (signal.SIGTERM, signal.SIGHUP):
-        signal.signal(sg, on_term)
+    def wait_back(self, secs=90):
+        """等重启后的 daemon 回来（/health 可达且不在 restarting）"""
+        for _ in range(secs):
+            try:
+                h = self.api("GET", "/api/v1/health", timeout=2)
+                if not h.get("restarting"): return h
+            except ApiError:
+                pass
+            time.sleep(1)
+        return None
 
-    saved = termios.tcgetattr(0)
-    outcome = 3   # 0 = detached (Ctrl-]), 3 = the session or the socket ended
-    # full raw: the remote PTY already did its own output processing
-    tty.setraw(0, termios.TCSANOW)
+class ApiError(Exception):
+    def __init__(self, msg, code): super().__init__(msg); self.code = code
+
+def call(conn, method, path, body=None, timeout=90):
     try:
-        write_all(1, b"\x1b[2J\x1b[H" + ("%s── %s%s%s%s · Ctrl-] 脱离（会话继续运行）──%s\r\n"
-                                          % (DIM, BOLD, title, RESET, DIM, RESET)).encode("utf-8"))
-        frag_binary = False
-        while True:
-            if winch[0]:
-                winch[0] = False
-                c, r = size()
-                if not send(build(0x1, json.dumps({"t": "resize", "cols": c, "rows": r}).encode())):
-                    break
-            rl, _, _ = select.select([0, sock, wake_r], [], [])
-            if wake_r in rl:
-                try:
-                    os.read(wake_r, 4096)
-                except OSError:
-                    pass
-            if 0 in rl:
-                try:
-                    data = os.read(0, 4096)
-                except OSError:
-                    data = b""
-                if not data:
-                    outcome = 0; break
-                i = data.find(b"\x1d")
-                if i >= 0:
-                    if i > 0:
-                        send(build(0x2, data[:i]))
-                    send(build(0x8, b"\x03\xe8"))
-                    outcome = 0; break
-                if not send(build(0x2, data)):
-                    break
-            if sock in rl:
-                try:
-                    chunk = sock.recv(65536)
-                except OSError:
-                    chunk = b""
-                if not chunk:
-                    break
-                buf += chunk
-                closed = False
-                while True:
-                    fr = parse(buf)
-                    if fr is None:
-                        break
-                    fin, op, payload, used = fr
-                    buf = buf[used:]
-                    if op == 0x2:
-                        frag_binary = not fin
-                        write_all(1, payload)
-                    elif op == 0x0:
-                        if frag_binary:
-                            write_all(1, payload)
-                        if fin:
-                            frag_binary = False
-                    elif op == 0x1:
-                        frag_binary = False      # hello / control JSON: nothing to show
-                    elif op == 0x9:
-                        send(build(0xA, payload))
-                    elif op == 0x8:
-                        send(build(0x8, payload[:2]))
-                        closed = True; break
-                if closed:
-                    break
-    finally:
-        termios.tcsetattr(0, termios.TCSANOW, saved)
-        write_all(1, RESET.encode() + b"\r\n")
-        try:
-            sock.close()
-        except OSError:
-            pass
-    sys.exit(outcome)
-
-COMMANDS = {
-    "ls": cmd_ls, "ps": cmd_ps, "wait": cmd_wait, "status": cmd_status, "perms": cmd_perms,
-    "perm-summary": cmd_perm_summary, "purge-summary": cmd_purge_summary, "fields": cmd_fields,
-    "resolve": cmd_resolve, "find-project": cmd_find_project, "live-for-path": cmd_live_for_path,
-    "menu": cmd_menu, "menu-projects": cmd_menu_projects, "menu-perms": cmd_menu_perms,
-    "attach": cmd_attach,
-    "json": lambda args: out(pretty(load())),
-    "errmsg": lambda args: out(err_message(sys.stdin.buffer.read().decode("utf-8", "replace"))),
-}
-COMMANDS[sys.argv[1]](sys.argv[2:])
-PY
-
-py() { python3 -c "$PY_SRC" "$@"; }
+        return conn.api(method, path, body, timeout)
+    except ApiError as e:
+        die(str(e))
 
 # ---------------------------------------------------------------------------
-# connection discovery
+# 会话五态（与 App 同一口径，PROTOCOL「GUI 列表口径」）
 # ---------------------------------------------------------------------------
-# `key = value` at the top level of a toml file (before the first [section])
-toml_top() {
-  awk -v k="$1" '
-    /^[[:space:]]*\[/ { exit }
-    $0 ~ "^[[:space:]]*" k "[[:space:]]*=" {
-      v = $0; sub(/^[^=]*=[[:space:]]*/, "", v)
-      if (substr(v, 1, 1) == "\"") { match(v, /^"[^"]*"/); v = substr(v, 2, RLENGTH - 2) }
-      else { sub(/[[:space:]#].*$/, "", v) }
-      print v; exit
-    }' "$2"
-}
+STATES = ["asking", "running", "background", "active", "paused"]
+LABELS = {"asking": "待回复", "running": "运行", "background": "后台", "active": "激活", "paused": "暂停"}
+COLORS = {"asking": YELLOW, "running": GREEN, "background": GREEN, "active": CYAN, "paused": GREY}
 
-# host[:port] with bracketed IPv6 literals kept intact
-split_host() {
-  local s=$1 tail h
-  s=${s#http://}; s=${s#ws://}
-  while case $s in */) true;; *) false;; esac; do s=${s%/}; done
-  case $s in
-    \[*\]*)
-      HOST=${s#\[}; HOST=${HOST%%\]*}
-      tail=${s#*\]}
-      case $tail in :*) PORT=${tail#:};; *) PORT=2730;; esac ;;
-    *:*)
-      h=${s%:*}
-      case $h in
-        *:*) HOST=$s; PORT=2730 ;;        # a bare v6 literal: several colons, no port
-        *)   HOST=$h; PORT=${s##*:} ;;
-      esac ;;
-    *) HOST=$s; PORT=2730 ;;
-  esac
-  case $PORT in ''|*[!0-9]*) PORT=2730;; esac
-}
+def status_of(s):
+    st = S(s, "state")
+    if st == "exited": return "paused"
+    if s.get("asking"): return "asking"
+    if st == "running": return "running"
+    if s.get("background"): return "background"
+    return "active"
 
-discover() {
-  local cfg home
-  if [ -n "${AAA_HOST:-}" ]; then
-    [ -n "${AAA_TOKEN:-}" ] || die "AAA_HOST 已设置但缺少 AAA_TOKEN"
-    TOKEN=$AAA_TOKEN
-    split_host "$AAA_HOST"
-  else
-    home=${AAA_HOME:-}; [ -n "$home" ] || home=${HOME:-/}
-    cfg="$home/.config/aaa-daemon/config.toml"
-    [ -r "$cfg" ] || die "读不到 $cfg
-先在本机跑一次 aaa-daemon run，或设置 AAA_HOST/AAA_TOKEN 指向远端"
-    HOST=127.0.0.1
-    PORT=$(toml_top port "$cfg"); TOKEN=$(toml_top token "$cfg")
-    case $PORT in ''|*[!0-9]*) PORT=2730;; esac
-    [ -n "$TOKEN" ] || die "$cfg: 缺少 token"
-  fi
-  case $HOST in 127.0.0.1|localhost|::1) LOCAL=1; CONNECT_TIMEOUT=2;; *) LOCAL=0; CONNECT_TIMEOUT=6;; esac
-  case $HOST in *:*) BASE="http://[$HOST]:$PORT";; *) BASE="http://$HOST:$PORT";; esac
-}
+def ago(iso):
+    m = re.match(r"^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)", iso or "")
+    if not m: return ""
+    import calendar
+    t = calendar.timegm(tuple(int(x) for x in m.groups()) + (0, 0, 0))
+    secs = int(time.time() - t)
+    if secs < 60: return "%d秒" % max(secs, 0)
+    if secs < 3600: return "%d分" % (secs // 60)
+    if secs < 86400: return "%d小时" % (secs // 3600)
+    return "%d天" % (secs // 86400)
 
-# ---------------------------------------------------------------------------
-# HTTP: api METHOD PATH [JSON-BODY] → body on stdout; on failure the message
-# goes to $ERRFILE and the return code is 1. The bearer token reaches curl
-# through $HDRFILE (0600), never through argv — argv is visible to every user
-# on the host via ps for the life of the request.
-# ---------------------------------------------------------------------------
-api() {
-  local method=$1 path=$2 out rc code body
-  if [ $# -ge 3 ]; then
-    out=$(curl -s --connect-timeout "$CONNECT_TIMEOUT" --max-time 90 -X "$method" \
-      -K "$HDRFILE" -H 'Content-Type: application/json' \
-      --data-binary "$3" -w '\n%{http_code}' "$BASE$path" 2>/dev/null)
-  else
-    out=$(curl -s --connect-timeout "$CONNECT_TIMEOUT" --max-time 90 -X "$method" \
-      -K "$HDRFILE" -w '\n%{http_code}' "$BASE$path" 2>/dev/null)
-  fi
-  rc=$?
-  if [ $rc -ne 0 ]; then
-    case $rc in
-      6) printf '连接 %s 失败: 无法解析主机\n' "$BASE" ;;
-      7) printf '连接 %s 失败: 连接被拒绝\n' "$BASE" ;;
-      28) printf '连接 %s 失败: 超时\n' "$BASE" ;;
-      *) printf '连接 %s 失败 (curl exit %s)\n' "$BASE" "$rc" ;;
-    esac >"$ERRFILE"
-    return 1
-  fi
-  code=${out##*$'\n'}; body=${out%$'\n'*}
-  case $code in
-    2*) printf '%s' "$body"; return 0 ;;
-  esac
-  printf 'HTTP %s: %s\n' "$code" "$(printf '%s' "$body" | py errmsg)" >"$ERRFILE"
-  return 1
-}
+def wid(s):
+    import unicodedata
+    return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in s)
 
-# a launchd-managed local daemon that is installed but not running gets one
-# nudge; kickstart on a running job is a no-op, so this is safe to try
-wake_local() {
-  [ "$LOCAL" = 1 ] || return 1
-  command -v launchctl >/dev/null 2>&1 || return 1
-  launchctl kickstart "gui/$(id -u)/com.aaa.daemon" >/dev/null 2>&1 || return 1
-  local i=0
-  while [ $i -lt 30 ]; do
-    sleep 0.1
-    api GET /api/v1/health >/dev/null 2>&1 && return 0
-    i=$((i + 1))
-  done
-  return 1
-}
+def cell(s, w):
+    """按显示宽度截断 / 补齐（中文两格），列才对得齐"""
+    outp, n = "", 0
+    for ch in s:
+        cw = wid(ch)
+        if n + cw > w: break
+        outp += ch; n += cw
+    return outp + " " * (w - n)
 
-probe() {
-  api GET /api/v1/health >/dev/null 2>&1 && return 0
-  # the daemon answered but refused us (bad token): that is not "unreachable"
-  case $(cat "$ERRFILE" 2>/dev/null) in HTTP*) die_api ;; esac
-  wake_local && return 0
-  die "连不上 daemon $HOST:$PORT
-  本机：launchctl kickstart -k gui/$(id -u)/com.aaa.daemon（未安装则 aaa-daemon service install，或前台 aaa-daemon run）
-  远端：检查 AAA_HOST / tailscale"
-}
+def uptime(secs):
+    d, h, m = secs // 86400, (secs % 86400) // 3600, (secs % 3600) // 60
+    if d: return "%d天 %d小时" % (d, h)
+    if h: return "%d小时 %d分" % (h, m)
+    return "%d分" % m
+
+def sorted_sessions(sessions):
+    """五态优先级 → 同状态里最近更新在前；终端不算"""
+    return sorted((s for s in sessions if S(s, "agent") != "shell"),
+                  key=lambda s: (STATES.index(status_of(s)), -_ts(s)))
+
+def _ts(s):
+    import calendar
+    m = re.match(r"^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)", S(s, "updated_at") or S(s, "created_at") or "")
+    return calendar.timegm(tuple(int(x) for x in m.groups()) + (0, 0, 0)) if m else 0
 
 # ---------------------------------------------------------------------------
-# shared pieces
+# 命令
 # ---------------------------------------------------------------------------
-# resolve TARGET [--live] → R_*. Returns 0, or 2 when nothing matched, or 1
-# for an error that must not be guessed past (ambiguous prefix/name, row out
-# of range, `.` outside the project root); the message is in $ERRFILE.
-resolve() {
-  local target=$1 live=${2:-} health='{}' sessions line rc
-  if [ "$target" = . ]; then health=$(api GET /api/v1/health) || die_api; fi
-  sessions=$(api GET /api/v1/sessions) || die_api
-  line=$(printf '%s' "$sessions" | AAA_BARE=1 py resolve "$target" "$(pwd -P)" "$health" $live 2>"$ERRFILE"); rc=$?
-  [ $rc -eq 0 ] || return $rc
-  IFS=$US read -r R_ID R_CERT R_PROJECT R_STATE R_PATH R_AGENT R_TITLE <<<"$line"
-}
+def cmd_status(conn, args):
+    h = conn.probe()
+    sessions = call(conn, "GET", "/api/v1/sessions")
+    counts = {k: 0 for k in STATES}
+    for s in sessions:
+        if S(s, "agent") != "shell": counts[status_of(s)] += 1
+    rs = S(h, "root_state") or ("ok" if h.get("ssd_mounted") else "unmounted")
+    if "--json" in args:
+        out(pretty({"host": conn.host, "port": conn.port, "version": S(h, "version"), "root_state": rs,
+                    "project_root": S(h, "project_root"), "uptime_s": S(h, "uptime_s", 0),
+                    "update_pending": bool(h.get("update_pending")), "counts": counts})); return
+    note = {"ok": "", "denied": RED + "(读不了 · 缺完全磁盘访问权限)" + RESET}.get(rs, RED + "(未挂载!)" + RESET)
+    out("%saaa-daemon%s v%s  %s%s:%d%s%s" % (BOLD, RESET, S(h, "version"), DIM, conn.host, conn.port, RESET,
+                                           "  " + YELLOW + "新二进制已装好，等重启" + RESET if h.get("update_pending") else ""))
+    out("  项目根   %s %s" % (S(h, "project_root"), note))
+    out("  运行时长 %s" % uptime(int(S(h, "uptime_s", 0) or 0)))
+    out("  会话     " + " · ".join("%s%s %d%s" % (COLORS[k], LABELS[k], counts[k], RESET) for k in STATES))
+    if rs == "denied":
+        out("\n%s项目根读不了%s：launchd 起的 daemon 没有可移动卷访问权。\n  系统设置 → 隐私与安全性 → 完全磁盘访问权限，加入 %s~/.local/bin/aaa-daemon%s，\n  然后 %saaa service uninstall && aaa service install%s"
+            % (YELLOW, RESET, DIM, RESET, BOLD, RESET))
 
-# aaa kill 2 resolves against a list that reshuffles whenever an agent prints,
-# so a positional target is echoed and confirmed; an id goes straight through;
-# non-interactive callers never get a prompt
-confirm_destructive() {
-  local ans
-  [ "$R_CERT" = exact ] && return 0
-  is_tty || return 0
-  printf '%s %s%s%s · %s %s%s%s [y/N]: ' "$1" "$BOLD" "$R_PROJECT" "$RESET" "$R_STATE" "$DIM" "$R_ID" "$RESET"
-  read -r ans || return 1
-  case $ans in y|Y|yes) return 0;; *) return 1;; esac
-}
+def cmd_ls(conn, args):
+    conn.probe()
+    sessions = call(conn, "GET", "/api/v1/sessions")
+    if "--json" in args: out(pretty(sessions)); return
+    show_all = "-a" in args or "--all" in args
+    rows = [s for s in sorted_sessions(sessions) if show_all or status_of(s) != "paused"]
+    if not rows: out(DIM + "没有会话" + RESET); return
+    cur = None
+    for s in rows:
+        st = status_of(s)
+        if st != cur:
+            cur = st; out("%s%s%s" % (COLORS[st], LABELS[st], RESET))
+        out("  %s%s%s %s%s%s %s  %s%s%s" % (DIM, cell(S(s, "id"), 11), RESET, BOLD, cell(S(s, "project_name"), 18), RESET,
+                                          S(s, "title"), DIM, ago(S(s, "updated_at") or S(s, "created_at")), RESET))
 
-# attach_raw ID TITLE → 0 detached, 3 ended, 1 error (message already printed)
-attach_raw() {
-  AAA_TOKEN="$TOKEN" AAA_WS_HOST="$HOST" AAA_WS_PORT="$PORT" AAA_LOCAL="$LOCAL" \
-    python3 -c "$PY_SRC" attach "$1" "$2"
-}
+def cmd_wait(conn, args):
+    conn.probe()
+    sessions = [s for s in sorted_sessions(call(conn, "GET", "/api/v1/sessions")) if status_of(s) == "asking"]
+    if "--json" in args:
+        out(pretty([{"id": S(s, "id"), "project": S(s, "project_name"), "path": S(s, "project_path"), "title": S(s, "title")} for s in sessions])); return
+    if not sessions: out(DIM + "没有会话在等你回答" + RESET); return
+    for s in sessions:
+        out("%s●%s %s%s%s  %s%s%s\n   %s" % (YELLOW, RESET, BOLD, S(s, "project_name"), RESET, DIM, S(s, "id"), RESET, S(s, "title")))
 
-do_attach() {
-  is_tty || die "attach 需要交互式终端"
-  attach_raw "$1" "$2"
-  case $? in
-    0) printf '%s已脱离 %s（仍在运行）%s\n' "$DIM" "$1" "$RESET" ;;
-    3) printf '%s%s 已结束%s\n' "$DIM" "$1" "$RESET" ;;
-    *) exit 1 ;;
-  esac
-}
+def cmd_perms(conn, args):
+    conn.probe()
+    ids = [a for a in args if not a.startswith("-")]
+    if ids:
+        body = {"ids": ["all"] if ids == ["all"] else ids}
+        v = call(conn, "POST", "/api/v1/mac/permissions/request", body)
+        out(pretty(v) if "--json" in args else "已发起：%s" % (", ".join(S(x, "id") if isinstance(x, dict) else str(x) for x in (v.get("requested") or v.get("ids") or [])) or json.dumps(v, ensure_ascii=False)))
+        out(DIM + "弹窗出现在 Mac 上；辅助功能 / 屏幕录制 / 完全磁盘访问 要在系统设置里勾上 aaa-daemon，改完重启 daemon 才能读到" + RESET)
+        return
+    v = call(conn, "GET", "/api/v1/mac/permissions")
+    if "--json" in args: out(pretty(v)); return
+    lab = {"granted": (GREEN, "已授权"), "denied": (RED, "已拒绝"), "undetermined": (YELLOW, "未申请"), "needs_settings": (CYAN, "需手动开")}
+    for p in v:
+        color, label = lab.get(S(p, "status"), (GREY, "未知"))
+        line = "  %-22s %s%-8s%s  %s%-26s%s" % (S(p, "label"), color, label, RESET, DIM, S(p, "id"), RESET)
+        if S(p, "hint"): line += "  %s%s%s" % (DIM, S(p, "hint"), RESET)
+        out(line.rstrip())
 
-create_session() { # PATH AGENT RESUME FRESH → response JSON on stdout
-  api POST /api/v1/sessions "$(printf '{"project_path":%s,"agent":%s,"resume":%s,"fresh":%s}' \
-    "$(json_str "$1")" "$(json_str "$2")" "$3" "$4")"
-}
+def live_titles(conn):
+    return [S(s, "title") or S(s, "id") for s in call(conn, "GET", "/api/v1/sessions") if S(s, "state") != "exited"]
 
-# ---------------------------------------------------------------------------
-# verbs
-# ---------------------------------------------------------------------------
-cmd_ls() {
-  local v
-  v=$(api GET /api/v1/sessions) || die_api
-  if [ "$JSON" = 1 ]; then printf '%s' "$v" | py json; return; fi
-  if [ "$ALL" = 1 ]; then printf '%s' "$v" | py ls -a; else printf '%s' "$v" | py ls; fi
-}
+def cmd_restart(conn, args):
+    h = conn.probe()
+    force = "--force" in args or "-f" in args
+    live = live_titles(conn)
+    if live and not force:
+        die("有 %d 个活会话（%s）。加 --force：先结束它们，daemon 起来后自动 resume" % (len(live), "、".join(live[:5]) + ("…" if len(live) > 5 else "")))
+    say("重启 daemon v%s%s" % (S(h, "version"), "（新二进制已装好）" if h.get("update_pending") else ""))
+    v = call(conn, "POST", "/api/v1/restart", {"force": force})
+    if v.get("killed"): out("  结束了：" + "、".join(v["killed"]))
+    time.sleep(2)
+    h2 = conn.wait_back()
+    if not h2: die("90 秒内没回来，看 %s/daemon.err.log" % STATE)
+    say("回来了：v%s，项目根 %s" % (S(h2, "version"), S(h2, "project_root")))
 
-cmd_ps() {
-  local v
-  v=$(api GET /api/v1/projects) || die_api
-  if [ "$JSON" = 1 ]; then printf '%s' "$v" | py json; else printf '%s' "$v" | py ps; fi
-}
+def cmd_config(conn, args):
+    conn.probe()
+    if not args:
+        c = call(conn, "GET", "/api/v1/config")
+        tok = S(c, "token"); shown = tok if "--show-token" in args else (tok[:10] + "…" if len(tok) > 10 else tok)
+        out("端口     %s\ntoken    %s%s\n项目根   %s\n配置文件 %s" % (S(c, "port"), shown, "" if "--show-token" in args else DIM + "  （--show-token 看全）" + RESET, S(c, "project_root"), CFG)); return
+    key = args[0]; rest = [a for a in args[1:] if not a.startswith("--")]
+    force = "--force" in args
+    body = {"force": force}
+    if key == "port" and rest: body["port"] = int(rest[0])
+    elif key == "token" and rest: body["token"] = rest[0]
+    elif key == "root" and rest:
+        body["project_root"] = os.path.abspath(rest[0]); body["migrate"] = "--migrate" in args
+    else:
+        die("用法：aaa config | config port <n> | config token <t> | config root <path> [--migrate] [--force]")
+    live = live_titles(conn)
+    if live and not force:
+        die("有 %d 个活会话（%s）。改配置要重启 daemon；加 --force 先结束它们、起来后自动 resume" % (len(live), "、".join(live[:5])))
+    v = call(conn, "PUT", "/api/v1/config", body)
+    report_migration(v)
+    time.sleep(2)
+    h = conn.wait_back()
+    if not h: die("90 秒内没回来，看 %s/daemon.err.log" % STATE)
+    say("daemon v%s 回来了，项目根 %s" % (S(h, "version"), S(h, "project_root")))
 
-cmd_wait() {
-  local v
-  v=$(api GET /api/v1/sessions) || die_api
-  if [ "$JSON" = 1 ]; then printf '%s' "$v" | py wait --json; else printf '%s' "$v" | py wait; fi
-}
-
-cmd_status() {
-  local h s
-  h=$(api GET /api/v1/health) || die_api
-  s=$(api GET /api/v1/sessions) || s='[]'
-  if [ "$JSON" = 1 ]; then printf '[%s,%s]' "$h" "$s" | py status "$HOST" "$PORT" --json
-  else printf '[%s,%s]' "$h" "$s" | py status "$HOST" "$PORT"; fi
-}
-
-cmd_perms() {
-  local v
-  v=$(api GET /api/v1/mac/permissions) || die_api
-  if [ "$JSON" = 1 ]; then printf '%s' "$v" | py json; else printf '%s' "$v" | py perms; fi
-}
-
-# ids: "all" or a list. The dialogs open on the Mac in the daemon's name —
-# agents are its children, so one round of clicking covers every session.
-cmd_perms_request() {
-  local ids='' id v
-  if [ "$1" = all ] && [ $# -eq 1 ]; then
-    ids='["all"]'
-  else
-    for id in "$@"; do ids="$ids${ids:+,}$(json_str "$id")"; done
-    ids="[$ids]"
-  fi
-  v=$(api POST /api/v1/mac/permissions/request "{\"ids\":$ids}") || die_api
-  printf '%s' "$v" | py perm-summary
-  printf '%s弹窗出现在 Mac 上；辅助功能/屏幕录制/完全磁盘访问 要在系统设置里勾上 aaa-daemon，改完重启 daemon 才能读到%s\n' "$DIM" "$RESET"
-}
-
-cmd_new() {
-  local name=$1 agent=$2 p ppath pname s sid
-  p=$(api POST /api/v1/projects "$(printf '{"name":%s,"agent":%s}' "$(json_str "$name")" "$(json_str "$agent")")") || die_api
-  IFS=$US read -r ppath pname <<<"$(printf '%s' "$p" | py fields path name)"
-  s=$(create_session "$ppath" "$agent" false false) || die_api
-  sid=$(printf '%s' "$s" | py fields id)
-  if is_tty; then
-    attach_raw "$sid" "$pname · 新会话"
-    printf '%s%s · %s%s\n' "$DIM" "$ppath" "$sid" "$RESET"
-  else
-    printf '%s\n' "$sid"
-  fi
-}
-
-# an existing live session wins; otherwise resume the project's agent.
-# --fresh skips the reuse and asks for a parallel session in that project.
-cmd_open() {
-  local t=$1 ppath pagent pname projects health='{}' line s sid sproject stitle fresh=false rc
-  if [ "$FRESH" = 1 ]; then
-    fresh=true
-    resolve "$t"; rc=$?
-    case $rc in
-      0) ppath=$R_PATH; pagent=$R_AGENT; pname=$R_PROJECT ;;
-      2) ;;            # no session by that name: look the project up below
-      *) die_api ;;    # ambiguous / out of range: never guess
-    esac
-  else
-    resolve "$t" --live; rc=$?
-    case $rc in
-      0) do_attach "$R_ID" "$R_PROJECT · $R_TITLE"; return ;;
-      2) ;;
-      *) die_api ;;
-    esac
-  fi
-  if [ -z "$ppath" ]; then
-    projects=$(api GET /api/v1/projects) || die_api
-    if [ "$t" = . ]; then health=$(api GET /api/v1/health) || die_api; fi
-    line=$(printf '%s' "$projects" | AAA_BARE=1 py find-project "$t" "$(pwd -P)" "$health" 2>"$ERRFILE") || die_api
-    IFS=$US read -r ppath pagent pname <<<"$line"
-  fi
-  s=$(create_session "$ppath" "$pagent" true "$fresh") || die_api
-  IFS=$US read -r sid sproject stitle <<<"$(printf '%s' "$s" | py fields id project_name title)"
-  do_attach "$sid" "${sproject:-$pname} · $stitle"
-}
-
-cmd_attach() {
-  resolve "$1" || die_api
-  do_attach "$R_ID" "$R_PROJECT · $R_TITLE"
-}
-
-cmd_say() {
-  resolve "$1" || die_api
-  api POST "/api/v1/sessions/$R_ID/input" "{\"text\":$(json_str "$2"),\"enter\":true}" >/dev/null || die_api
-  printf '%s→ %s · %s%s\n' "$DIM" "$R_PROJECT" "$R_ID" "$RESET"
-}
-
-cmd_kill() {
-  resolve "$1" || die_api
-  confirm_destructive "结束" || { printf '%s已取消%s\n' "$DIM" "$RESET"; return; }
-  api POST "/api/v1/sessions/$R_ID/kill" '{}' >/dev/null || die_api
-  printf '已结束 %s · %s\n' "$R_PROJECT" "$R_ID"
-}
-
-cmd_rm() {
-  resolve "$1" || die_api
-  confirm_destructive "删除记录" || { printf '%s已取消%s\n' "$DIM" "$RESET"; return; }
-  api DELETE "/api/v1/sessions/$R_ID" >/dev/null || die_api
-  printf '已删除记录 %s · %s\n' "$R_PROJECT" "$R_ID"
-}
-
-cmd_rename() {
-  resolve "$1" || die_api
-  api POST "/api/v1/sessions/$R_ID/rename" "{\"title\":$(json_str "$2")}" >/dev/null || die_api
-  printf '%s → %s\n' "$R_ID" "$2"
-}
+def report_migration(v):
+    if v.get("killed"): out("  结束的会话：" + "、".join(v["killed"]))
+    r = v.get("report")
+    if r:
+        out("  改写：会话元数据 %s · 历史 %s · 置顶 %s · cwd 缓存 %s · Claude 目录 %s · transcript %s · ~/.claude.json 键 %s"
+            % tuple(r.get(k) for k in ("session_metas", "history", "pins", "cwd_cache", "claude_dirs", "claude_files", "claude_json")))
+        w = r.get("warnings") or []
+        out("  warnings：%d" % len(w))
+        for x in w: out("    - " + x)
 
 # ---------------------------------------------------------------------------
-# the interactive menu
+# migrate-root：一键迁根（以前是 ~/aaa-migrate-root.sh）
 # ---------------------------------------------------------------------------
-# read_key [TIMEOUT] → KEY ∈ up down enter esc ctrl-c eof timeout | the char
-read_key() {
-  local c rest rc
-  if [ -n "${1:-}" ]; then IFS= read -rsn1 -t "$1" c; rc=$?
-  else IFS= read -rsn1 c; rc=$?; fi
-  if [ $rc -ne 0 ]; then
-    if [ -n "${1:-}" ]; then KEY=timeout; else KEY=eof; fi
-    return
-  fi
-  case $c in
-    $'\033')
-      if IFS= read -rsn2 -t 1 rest; then
-        case $rest in '[A'|'OA') KEY=up;; '[B'|'OB') KEY=down;; *) KEY=other;; esac
-      else
-        KEY=esc
-      fi ;;
-    ''|$'\r'|$'\n') KEY=enter ;;
-    $'\003') KEY=ctrl-c ;;
-    *) KEY=$c ;;
-  esac
-}
+NEED_VER = (1, 12, 1)
 
-# a row number typed as one or two digits; the second digit has a second to arrive
-read_number() { # FIRST-DIGIT COUNT → prints n
-  local n=$1 d
-  if [ "$2" -gt 9 ]; then
-    if IFS= read -rsn1 -t 1 d && [ -n "$d" ]; then
-      case $d in [0-9]) [ $((n * 10 + d)) -le "$2" ] && n=$((n * 10 + d)) ;; esac
-    fi
-  fi
-  printf '%s' "$n"
-}
+def ver_tuple(v):
+    try: return tuple(int(x) for x in v.split("."))
+    except ValueError: return (0,)
 
-map_row() { awk -F "$US" -v n="$1" '$1 == n { print; exit }' "$MAPFILE"; }
-map_count() { wc -l <"$MAPFILE" | tr -d ' '; }
+def confirm(q, yes):
+    if yes: return True
+    if not sys.stdin.isatty(): return False
+    try: a = input("%s [y/N] " % q)
+    except EOFError: return False
+    return a.strip().lower() in ("y", "yes")
 
-prompt() { # LABEL → REPLY_LINE (cooked line input: IME and editing come free)
-  clear_screen
-  printf '  %s%s%s: ' "$BOLD" "$1" "$RESET"
-  IFS= read -r REPLY_LINE
-}
+def ppid_of(pid):
+    o = subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)], capture_output=True, text=True, check=False).stdout.strip()
+    return int(o) if o.isdigit() else 0
 
-confirm() {
-  local ans
-  printf '\n  %s%s%s [y/N]: ' "$YELLOW" "$1" "$RESET"
-  read -r ans || return 1
-  case $ans in y|Y|yes) return 0;; *) return 1;; esac
-}
+def under_daemon(pid, daemon_pids):
+    """祖先链里有 aaa-daemon（会话里 Bash 起的子进程环境可能读不到，祖先链兜底）"""
+    for _ in range(25):
+        if pid <= 1: return False
+        if pid in daemon_pids: return True
+        pid = ppid_of(pid)
+    return False
 
-menu_new_project() { # AGENT
-  local p ppath pname s sid
-  prompt "项目名（留空=时间戳）" || { MENU_STATUS=''; return; }
-  p=$(api POST /api/v1/projects "$(printf '{"name":%s,"agent":%s}' "$(json_str "$REPLY_LINE")" "$(json_str "$1")")") \
-    || { MENU_STATUS=$(cat "$ERRFILE"); return; }
-  IFS=$US read -r ppath pname <<<"$(printf '%s' "$p" | py fields path name)"
-  s=$(create_session "$ppath" "$1" false false) || { MENU_STATUS=$(cat "$ERRFILE"); return; }
-  sid=$(printf '%s' "$s" | py fields id)
-  clear_screen
-  attach_raw "$sid" "$pname · 新会话"
-  case $? in
-    0) MENU_STATUS="已建 $pname 并脱离（仍在运行）" ;;
-    3) MENU_STATUS="$pname 会话已结束" ;;
-    *) MENU_STATUS="attach 失败" ;;
-  esac
-}
+def procs_in(root, daemon_pids):
+    """cwd 在 root 下的进程 [(pid, comm, cwd, is_aaa)]；is_aaa = 环境里有 AAA_SESSION 或祖先是 aaa-daemon"""
+    try:
+        outp = subprocess.run(["lsof", "-a", "-d", "cwd", "-Fpn"], capture_output=True, text=True, check=False).stdout
+    except OSError:
+        return []
+    res, pid = [], None
+    me = os.getpid()
+    for line in outp.splitlines():
+        if line.startswith("p"): pid = int(line[1:])
+        elif line.startswith("n") and pid:
+            cwd = line[1:]
+            if cwd == root or cwd.startswith(root + "/"):
+                if pid == me or under_daemon(pid, {me}) : continue
+                ps = subprocess.run(["ps", "-E", "-o", "comm=,command=", "-p", str(pid)], capture_output=True, text=True, check=False).stdout
+                if not ps.strip(): continue  # 扫完就没了
+                comm = ps.split()[0]
+                res.append((pid, comm, cwd, "AAA_SESSION=" in ps or under_daemon(pid, daemon_pids)))
+    return res
 
-menu_projects() {
-  local idx=0 status='' projects new count line ppath pagent pname resp
-  printf '\033[2J\033[H  %s读取项目…%s' "$DIM" "$RESET"
-  projects=$(api GET /api/v1/projects) || { MENU_STATUS=$(cat "$ERRFILE"); return; }
-  clear_screen
-  while :; do
-    printf '%s' "$projects" | py menu-projects "$MAPFILE" "$idx" "$status"
-    count=$(map_count)
-    [ "$count" -gt 0 ] && [ "$idx" -ge "$count" ] && idx=$((count - 1))
-    read_key
-    case $KEY in
-      up) [ "$count" -gt 0 ] && idx=$(( (idx + count - 1) % count )) ;;
-      down) [ "$count" -gt 0 ] && idx=$(( (idx + 1) % count )) ;;
-      [1-9]|enter)
-        if [ "$KEY" != enter ]; then
-          [ "$KEY" -le "$count" ] || continue
-          idx=$((KEY - 1))
-        fi
-        [ "$count" -gt 0 ] || continue
-        line=$(map_row $((idx + 1))); IFS=$US read -r _ ppath pagent pname <<<"$line"
-        menu_open_project "$ppath" "$pagent" "$pname"; status=$MENU_STATUS
-        new=$(api GET /api/v1/projects) && projects=$new
-        clear_screen ;;
-      d)
-        [ "$count" -gt 0 ] || continue
-        line=$(map_row $((idx + 1))); IFS=$US read -r _ ppath pagent pname <<<"$line"
-        if confirm "删除 $pname 及其全部 agent 会话记录?"; then
-          if resp=$(api POST /api/v1/projects/delete "{\"paths\":[$(json_str "$ppath")]}"); then
-            status=$(printf '%s' "$resp" | py purge-summary "$pname")
-            new=$(api GET /api/v1/projects) && projects=$new
-          else
-            status=$(cat "$ERRFILE")
-          fi
-        fi
-        clear_screen ;;
-      n)
-        menu_new_project claude; status=$MENU_STATUS
-        new=$(api GET /api/v1/projects) && projects=$new
-        clear_screen ;;
-      r) new=$(api GET /api/v1/projects) && projects=$new; status='' ;;
-      q|esc|ctrl-c|eof) break ;;
-    esac
-  done
-  MENU_STATUS=$status
-  clear_screen
-}
+def daemon_pids():
+    """所有 aaa-daemon 进程。不用 pgrep -x：launchd 起的那个 comm 是完整路径，pgrep 认不出来（实测只抓到游离的旧实例）"""
+    outp = subprocess.run(["ps", "-axo", "pid=,comm="], capture_output=True, text=True, check=False).stdout
+    res = set()
+    for line in outp.splitlines():
+        parts = line.split(None, 1)
+        if len(parts) == 2 and os.path.basename(parts[1].strip()) == "aaa-daemon":
+            res.add(int(parts[0]))
+    return res
 
-menu_request_perms() { # IDS-JSON → prints summary or error
-  local v
-  if v=$(api POST /api/v1/mac/permissions/request "{\"ids\":$1}"); then
-    printf '%s' "$v" | py perm-summary
-  else
-    cat "$ERRFILE"
-  fi
-}
+def stray_daemons(conn):
+    """除了正在监听端口的那个之外的 aaa-daemon 进程（旧目录起的游离实例）"""
+    try:
+        listening = subprocess.run(["lsof", "-nP", "-iTCP:%d" % conn.port, "-sTCP:LISTEN", "-Fp"], capture_output=True, text=True, check=False).stdout
+        serving = {int(l[1:]) for l in listening.splitlines() if l.startswith("p")}
+    except OSError:
+        return []
+    res = []
+    for p in sorted(daemon_pids()):
+        if p in serving: continue
+        cmd = subprocess.run(["ps", "-o", "command=", "-p", str(p)], capture_output=True, text=True, check=False).stdout.strip()
+        res.append((p, cmd))
+    return res
 
-menu_perms() {
-  local idx=0 status='' perms new count line pid
-  perms=$(api GET /api/v1/mac/permissions) || { MENU_STATUS=$(cat "$ERRFILE"); return; }
-  clear_screen
-  while :; do
-    printf '%s' "$perms" | py menu-perms "$MAPFILE" "$idx" "$status"
-    count=$(map_count)
-    [ "$count" -gt 0 ] && [ "$idx" -ge "$count" ] && idx=$((count - 1))
-    read_key
-    case $KEY in
-      up) [ "$count" -gt 0 ] && idx=$(( (idx + count - 1) % count )) ;;
-      down) [ "$count" -gt 0 ] && idx=$(( (idx + 1) % count )) ;;
-      enter)
-        [ "$count" -gt 0 ] || continue
-        line=$(map_row $((idx + 1))); IFS=$US read -r _ pid _ <<<"$line"
-        status=$(menu_request_perms "[$(json_str "$pid")]")
-        new=$(api GET /api/v1/mac/permissions) && perms=$new ;;
-      a)
-        if confirm "弹窗会出现在这台 Mac 上，逐个允许。开始?"; then
-          status=$(menu_request_perms '["all"]')
-          new=$(api GET /api/v1/mac/permissions) && perms=$new
-        fi
-        clear_screen ;;
-      r) new=$(api GET /api/v1/mac/permissions) && perms=$new; status='' ;;
-      q|esc|ctrl-c|eof) break ;;
-    esac
-  done
-  MENU_STATUS=$status
-  clear_screen
-}
+def cmd_migrate_root(conn, args):
+    if os.getuid() == 0: die("不要用 sudo：脚本只跟 daemon 说话，用你自己的账号跑")
+    if not conn.local: die("迁根只能在 daemon 所在的机器上做")
+    rest = [a for a in args if not a.startswith("-")]
+    if not rest: die("用法：aaa migrate-root <新根> [--yes]")
+    yes = "--yes" in args or "-y" in args
+    new_root = os.path.abspath(rest[0])
+    h = conn.probe()
+    old_root = S(h, "project_root")
+    if not os.path.isdir(old_root): die("旧根不存在：%s（是不是已经迁过了？）" % old_root)
+    if os.path.exists(new_root) and os.listdir(new_root): die("目标已存在且非空：%s" % new_root)
+    say("daemon 当前 v%s，update_pending=%s，项目根 %s → %s" % (S(h, "version"), bool(h.get("update_pending")), old_root, new_root))
 
-menu() {
-  is_tty || die "交互菜单需要终端；试试 aaa ls / aaa help"
-  local status='' sessions health new count n line sid sproject stitle
-  IN_MENU=1
-  SAVED_STTY=$(stty -g 2>/dev/null)
-  health=$(api GET /api/v1/health) || die_api
-  sessions=$(api GET /api/v1/sessions) || sessions='[]'
-  clear_screen
-  while :; do
-    printf '{"health":%s,"sessions":%s}' "$health" "$sessions" | py menu "$MAPFILE" "$HOST" "$PORT" "$status"
-    count=$(map_count)
-    read_key 2
-    case $KEY in
-      timeout)
-        # idle refresh: a grant landing or a session flipping to 待回复 should
-        # show up without a keypress
-        new=$(api GET /api/v1/sessions) && sessions=$new
-        new=$(api GET /api/v1/health) && health=$new ;;
-      [1-9])
-        n=$(read_number "$KEY" "$count")
-        line=$(map_row "$n")
-        if [ -n "$line" ]; then
-          IFS=$US read -r _ sid sproject stitle <<<"$line"
-          menu_attach "$sid" "$sproject · $stitle" "$sproject"; status=$MENU_STATUS
-          new=$(api GET /api/v1/sessions) && sessions=$new
-          clear_screen
-        fi ;;
-      p) menu_projects; status=$MENU_STATUS
-         new=$(api GET /api/v1/sessions) && sessions=$new ;;
-      m) menu_perms; status=$MENU_STATUS ;;
-      n) menu_new_project claude; status=$MENU_STATUS
-         new=$(api GET /api/v1/sessions) && sessions=$new
-         clear_screen ;;
-      r) new=$(api GET /api/v1/sessions) && sessions=$new
-         new=$(api GET /api/v1/health) && health=$new
-         status='' ;;
-      q|esc|ctrl-c|eof) break ;;
-    esac
-  done
-  clear_screen
-}
+    # 1) 游离的旧 daemon
+    for pid, cmd in stray_daemons(conn):
+        out("%s发现不在服务的 aaa-daemon 进程%s：pid %d  %s" % (YELLOW, RESET, pid, cmd))
+        if confirm("结束它？", yes):
+            try: os.kill(pid, signal.SIGTERM); out("  已发 TERM")
+            except OSError as e: out("  失败：%s" % e)
 
-# ---------------------------------------------------------------------------
-# argument parsing and dispatch
-# ---------------------------------------------------------------------------
-cmd=${1:-}
-[ $# -gt 0 ] && shift
+    # 2) 旧根里还有谁在跑（不是 daemon 起的）
+    say("检查还在 %s 里跑的进程（AAA 自己的会话会被收掉再按新路径 resume，不用管）" % old_root)
+    foreign = [p for p in procs_in(old_root, daemon_pids()) if not p[3]]
+    if foreign:
+        out("这些进程的 cwd 在旧根里、不是 daemon 起的（其它 agent 会继续往旧目录写 transcript；你的终端 shell 在这里也会列出来，无碍）：")
+        for pid, comm, cwd, _ in foreign: out("  pid %-6d %-10s cwd=%s" % (pid, comm, cwd))
+        if not confirm("继续？", yes): die("先把它们关掉再来")
+    else:
+        out("  没有")
 
-case $cmd in
-  help|-h|--help) printf '%s' "$HELP"; exit 0 ;;
-  -V|--version|version) printf 'aaa %s\n' "$VERSION"; exit 0 ;;
-  ''|ls|ps|projects|wait|status|st|perms|permissions|new|n|open|o|attach|a|kill|k|rm|say|answer|rename) ;;
-  *) printf '%saaa:%s 未知命令 %s；aaa help 看用法\n\n%s' "$GREY" "$RESET" "$cmd" "$HELP" >&2; exit 1 ;;
-esac
+    # 3) 让 ≥NEED_VER 的 daemon 跑起来
+    if ver_tuple(S(h, "version")) < NEED_VER or h.get("update_pending"):
+        say("重启 daemon 换上新二进制（会话会自动 resume）")
+        if not confirm("会先结束所有会话，继续？", yes): die("取消")
+        call(conn, "POST", "/api/v1/restart", {"force": True})
+        time.sleep(2)
+        h = conn.wait_back() or die("daemon 重启后 90 秒内没回来，看 %s/daemon.err.log" % STATE)
+        say("回来了：v%s" % S(h, "version"))
+        if ver_tuple(S(h, "version")) < NEED_VER:
+            die("跑起来的还是 v%s，~/.local/bin/aaa-daemon 不是 ≥%s？" % (S(h, "version"), ".".join(map(str, NEED_VER))))
+        say("等会话自动 resume 收尾")
+        last, stable = -1, 0
+        for _ in range(40):
+            try: n = len(call(conn, "GET", "/api/v1/sessions"))
+            except SystemExit: n = 0
+            stable = stable + 1 if n == last else 0; last = n
+            if stable >= 3: break
+            time.sleep(1)
+        out("  会话 %d 条" % last)
 
-command -v curl >/dev/null 2>&1 || die "需要 curl"
-command -v python3 >/dev/null 2>&1 || die "需要 python3"
-ERRFILE=$(mktemp "${TMPDIR:-/tmp}/aaa.err.XXXXXX") || die "mktemp 失败"
-MAPFILE=$(mktemp "${TMPDIR:-/tmp}/aaa.map.XXXXXX") || die "mktemp 失败"
-HDRFILE=$(umask 077 && mktemp "${TMPDIR:-/tmp}/aaa.hdr.XXXXXX") || die "mktemp 失败"
-chmod 600 "$HDRFILE"
+    # 4) 迁移
+    say("迁移：%s → %s（收会话 → 搬目录 → 改所有指向 → daemon 重启 → 按新路径 resume）" % (old_root, new_root))
+    if not confirm("开始？", yes): die("取消")
+    v = call(conn, "PUT", "/api/v1/config", {"project_root": new_root, "migrate": True, "force": True})
+    report_migration(v)
+    time.sleep(2)
+    h = conn.wait_back() or die("迁移后 daemon 90 秒内没回来，看 %s/daemon.err.log；目录应已在 %s，配置已写" % (STATE, new_root))
+    if S(h, "project_root") != new_root: die("daemon 回来了但项目根是 %s" % S(h, "project_root"))
+    say("daemon v%s 已在 %s 上运行" % (S(h, "version"), new_root))
 
-# flags belong to verbs: ls takes -a/--all/--json, the other listings --json,
-# open --fresh (new -a/--agent is accepted for compatibility but only claude is
-# allowed: this app runs Claude Code only). Nothing else is a flag — `aaa say 2 yes
-# -v` sends "yes -v" — `--` ends flag parsing, and for say/rename parsing
-# stops at the target so the rest of the line is verbatim text.
-POS=(); AGENT_FLAG=''; JSON=0; ALL=0; FRESH=0
-skip=0; flags_done=0
-for a in "$@"; do
-  if [ $skip = 1 ]; then AGENT_FLAG=$a; skip=0; continue; fi
-  if [ $flags_done = 0 ]; then
-    case "$cmd:$a" in
-      *:--) flags_done=1; continue ;;
-      ls:-a|ls:--all) ALL=1; continue ;;
-      ls:--json|ps:--json|projects:--json|wait:--json|status:--json|st:--json|perms:--json|permissions:--json) JSON=1; continue ;;
-      new:-a|new:--agent|n:-a|n:--agent) skip=1; continue ;;
-      open:--fresh|o:--fresh) FRESH=1; continue ;;
-    esac
-  fi
-  POS+=("$a")
-  case $cmd in say|answer|rename) flags_done=1 ;; esac
-done
-npos=${#POS[@]}
-target=''; [ "$npos" -gt 0 ] && target=${POS[0]}
-need_target() { [ -n "$target" ] || die "缺少目标；aaa ls 看有哪些会话"; }
+    # 5) mac 客户端本机偏好里的静音路径
+    ui = os.path.join(HOME, ".config", "aaa-ui", "ui.toml")
+    if os.path.isfile(ui):
+        body = open(ui, encoding="utf-8").read()
+        if old_root in body:
+            open(ui + ".bak-migrate", "w", encoding="utf-8").write(body)
+            open(ui, "w", encoding="utf-8").write(body.replace(old_root, new_root))
+            out("  ui.toml 里的静音路径已改（备份 %s.bak-migrate）" % ui)
+    say("完成。%d 个条目在 %s" % (len(os.listdir(new_root)), new_root))
+    out("  · 终端里的 shell 若还站在旧路径，cd 一下：cd %s\n  · 会话正在按新路径自动 resume，几秒后在 AAA 里能看到\n  · 手机上的「静音项目」会在下次连上时自动改成新路径" % new_root)
 
-discover
-# curl config syntax; the token is the only secret and it never enters argv
-printf 'header = "Authorization: Bearer %s"\n' "$(printf '%s' "$TOKEN" | sed 's/[\\"]/\\&/g')" >"$HDRFILE"
-probe
+def cmd_service(conn, args):
+    sub = args[0] if args else "status"
+    if sub not in ("install", "uninstall", "status"): die("用法：aaa service install|uninstall|status")
+    os.execvp("aaa-daemon", ["aaa-daemon", "service", sub])
 
-case $cmd in
-  '') menu ;;
-  ls) cmd_ls ;;
-  ps|projects) cmd_ps ;;
-  wait) cmd_wait ;;
-  status|st) cmd_status ;;
-  perms|permissions)
-    if [ "$npos" -eq 0 ]; then cmd_perms; else cmd_perms_request "${POS[@]}"; fi ;;
-  new|n)
-    case "${AGENT_FLAG:-claude}" in
-      claude) cmd_new "$target" claude ;;
-      *) die "只支持 Claude Code（-a ${AGENT_FLAG} 不再可用）" ;;
-    esac ;;
-  open|o) need_target; cmd_open "$target" ;;
-  attach|a) need_target; cmd_attach "$target" ;;
-  kill|k) need_target; cmd_kill "$target" ;;
-  rm) need_target; cmd_rm "$target" ;;
-  say|answer)
-    [ "$npos" -ge 2 ] || die "用法: aaa say <目标> <文本…>"
-    cmd_say "$target" "${POS[*]:1}" ;;
-  rename)
-    [ "$npos" -ge 2 ] || die "用法: aaa rename <目标> <标题>"
-    cmd_rename "$target" "${POS[*]:1}" ;;
-esac
+COMMANDS = {"status": cmd_status, "st": cmd_status, "ls": cmd_ls, "wait": cmd_wait, "perms": cmd_perms,
+            "permissions": cmd_perms, "restart": cmd_restart, "config": cmd_config, "migrate-root": cmd_migrate_root,
+            "service": cmd_service}
+
+def main():
+    argv = sys.argv[1:]
+    cmd = argv[0] if argv and not argv[0].startswith("-") else "status"
+    args = argv[1:] if argv and not argv[0].startswith("-") else argv
+    if cmd in ("help", "-h", "--help"): sys.stdout.write(HELP); return
+    if cmd in ("version", "-V", "--version"): out("aaa %s" % VERSION); return
+    if cmd not in COMMANDS:
+        sys.stderr.write("%saaa:%s 未知命令 %s（项目 / 会话管理请用 Mac App 或手机）\n\n%s" % (GREY, RESET, cmd, HELP)); sys.exit(1)
+    if cmd == "service": cmd_service(None, args); return
+    COMMANDS[cmd](Conn(), args)
+
+if __name__ == "__main__":
+    main()

@@ -4,6 +4,9 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Test
 
 class ProtocolTest {
@@ -147,5 +150,22 @@ class ProtocolTest {
 
         assertTrue(EventFrame.parse("""{"t":"future_frame","x":1}""") is EventFrame.Unknown)
         assertTrue(EventFrame.parse("not json") is EventFrame.Unknown)
+    }
+
+    @Test fun rerootKeepsRelativePathAndLeavesOthersAlone() {
+        assertEquals("/Volumes/SSD/Agents/aaaproject/x", rerootPath("/Volumes/SSD/project/x", "/Volumes/SSD/project", "/Volumes/SSD/Agents/aaaproject"))
+        assertEquals("/Volumes/SSD/Agents/aaaproject", rerootPath("/Volumes/SSD/project", "/Volumes/SSD/project/", "/Volumes/SSD/Agents/aaaproject"))
+        assertEquals("同前缀不同目录不算", "/Volumes/SSD/projectX/y", rerootPath("/Volumes/SSD/projectX/y", "/Volumes/SSD/project", "/new"))
+        assertEquals("/elsewhere", rerootPath("/elsewhere", "/Volumes/SSD/project", "/new"))
+    }
+
+    /** 三端共享向量 fixtures/dashboard.json：客户端的过滤口径（已完成 / 搜索）必须得到 expect */
+    @Test fun sharedFixtureFilters() {
+        val fx = json.parseToJsonElement(java.io.File("../../fixtures/dashboard.json").readText()).jsonObject
+        val d = json.decodeFromString<Dashboard>("""{"sessions":${fx["sessions"]}}""")
+        fun expect(k: String) = fx["expect"]!!.jsonObject[k]!!.jsonArray.map { it.jsonPrimitive.content }
+        assertEquals(expect("finished"), d.sessions.filter { cardIsFinished(it) && !it.deleted }.map { it.id })
+        assertEquals(expect("match_测试"), d.sessions.filter { cardMatches(it, "测试") }.map { it.id })
+        assertEquals(listOf("ask", "run", "bg", "act", "fin", "old", "del"), d.sessions.map { it.id })
     }
 }

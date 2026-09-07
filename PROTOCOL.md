@@ -282,21 +282,20 @@ Claude 以 `--dangerously-skip-permissions` 运行，`PermissionRequest` 不会�
 
 **2026-09-02：** Watchdog（`session_stalled` 事件 + 空转告警）、ntfy 推送、waiting 推送去重与冷却、通知渠道分级、快捷短语 chips、Claude hooks——这一整层「监测 + 推送」都拆掉了。理由：读屏猜问题误报不断，去重/冷却掩盖不了根因；用户真正要的只是「跑完了告诉我一声」，而问题本身由消息流按结构化数据原生呈现。
 
-## aaa CLI（第三个客户端）
+## aaa CLI（工具箱，v2.0 / 2026-09-07 用户拍板）
 
-`aaa` 是 daemon 的终端前端，**不复制任何业务逻辑**：列表、新建、结束全部走上面的 API（`say` 走 `/input`；表单作答请 `attach` 进 TUI），因此
-CLI 开的会话在 Mac App 和手机上同样可见、可接管。
+`aaa` 不再是「第三个客户端」：项目与会话管理是 Mac App 和手机的事，CLI 只做**工具性**的事——授权、重启、配置、迁根、看状态。
+`cli/aaa` 是纯 python3 标准库脚本（无需构建，不再依赖 bash——macOS 自带 bash 3.2 会把紧跟中文的变量名吞掉、`set -e` 下命令替换失败静默退出，都踩过）。token 只走请求头，永远不进 argv。
 
-`aaa` 现在是 `cli/aaa` bash 脚本，依赖 bash ≥3.2、curl、python3，无需构建。CLI 动词保持不变；
-`ls` 与交互菜单按「执行中 / 待回复 / 已完成」顺序分组会话（待回复 = `asking`）；`wait` 只列 `asking` 的会话；`perms` 会在每个权限的状态旁打印 `hint` 提示文本。
-
-- 连接：默认读 `~/.config/aaa-daemon/config.toml` 取 port + token 连本机；`AAA_HOST=主机:2730`
-  + `AAA_TOKEN=…` 指向另一台机器的 daemon。本机连不上时尝试 `launchctl kickstart` 唤醒一次。
-- 无参数 = 交互菜单：会话按「执行中 / 待回复 / 已完成」三组列出（序号贯通三组，与 `aaa ls` 一致），其次「项目管理 / macOS 权限 / 新建项目」。
-- 动词：`ls` `ps` `wait` `status` `perms` `new` `open` `attach` `say` `kill` `rm` `rename`，
-  列表类均有 `--json`。目标可写会话 id / id 前缀 / `ls` 序号 / 项目名 / `.`（当前目录所属项目）。
-- `attach` = 直接连 `/sessions/:id/attach`：本地终端进 raw 模式，stdin 原样转发为二进制帧，
-  窗口大小变化发 `{"t":"resize"}`。**Ctrl-]** 脱离，会话继续留在 daemon 里。
+- 连接：默认读 `~/.config/aaa-daemon/config.toml` 取 port + token 连本机；`AAA_HOST=主机:2730` + `AAA_TOKEN=…` 指向另一台机器的 daemon。本机连不上时 `launchctl kickstart` 唤醒一次。
+- `aaa` / `aaa status [--json]`：版本、项目根、运行时长、会话五态计数（终端不算）；新二进制装好没重启会提示。
+- `aaa ls [-a] [--json]`：会话按 待回复 / 运行 / 后台 / 激活 / 暂停 分组（与 App 同口径，`-a` 含暂停）；`aaa wait [--json]` 只列 `asking` 的。
+- `aaa perms [--json]` / `aaa perms all | <id…>`：`GET /mac/permissions` / `POST /mac/permissions/request`。
+- `aaa restart [--force]`：`POST /restart`；有活会话必须 `--force`（先结束、起来后自动 resume），然后等 `/health` 回来并报版本。
+- `aaa config`（token 默认打码，`--show-token` 看全）/ `aaa config port <n> | token <t> | root <path> [--migrate] [--force]`：`PUT /config`。
+- `aaa migrate-root <新根> [--yes]`：一键迁根——检查旧根 / 目标空 → 发现不在服务的游离 aaa-daemon 进程先问再清 → 列出 cwd 在旧根里、**不是 daemon 起的**进程（环境里没有 `AAA_SESSION` 且祖先链里没有 aaa-daemon）让你确认 → daemon 版本 < 1.12.1 或 `update_pending` 就 `POST /restart {force}` 并等自动 resume 收尾 → `PUT /config {project_root, migrate:true, force:true}` 打印 `report` 与 warnings → 等 daemon 回来验证项目根 → 顺手把 `~/.config/aaa-ui/ui.toml` 里的静音路径改成新根。禁止 sudo。
+- `aaa service install|uninstall|status`：转调 `aaa-daemon service …`。
+- 已移除（v2.0）：交互菜单、`ps` `new` `open` `attach` `say` `kill` `rm` `rename`。
 
 > **主题（2026-09-03）**：两端各有三套主题——黑暗（下表的原始令牌）、明亮（#F6F7F9 底 / #1B2229 墨 / 强调 #0F8A9E）、Claude 橙（Anthropic 象牙 #FAF9F5 底 / #141413 墨 / 强调 #D97757，终端暖白 #FFFDF7 底 / 墨字，ANSI 走 gruvbox-light）。三套里只有黑暗是暗底终端；两套浅色主题的终端 ANSI 16 色各自带一套亮底可读的（明亮 one-light、Claude gruvbox-light），两端逐色相同。令牌是**角色**（bg / surface / ink / dim / faint / edge / accent / term_bg …），下表数值是黑暗主题的取值；原「CYAN」角色改叫 accent。设置里切换，mac 存 `~/.config/aaa-ui/ui.toml`，Android 存 DataStore `theme`。消息流里用户消息是右对齐的强调色气泡，Claude 的回复是整宽正文 + 「✻ Claude」小字标题。
 

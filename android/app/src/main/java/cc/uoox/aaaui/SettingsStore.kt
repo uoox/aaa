@@ -42,6 +42,8 @@ class SettingsStore(private val context: Context) {
         /** 会话 id → 输入框草稿（JSON 对象）。切出去 / 被系统杀掉再回来，字还在。 */
         val DRAFTS = stringPreferencesKey("drafts_json")
         val LAST_SESSION = stringPreferencesKey("last_session")
+        /** 上次见到的 daemon 项目根：变了就把静音路径的前缀跟着改 */
+        val PROJECT_ROOT = stringPreferencesKey("project_root")
     }
 
     private val json = ProtocolJson.instance
@@ -88,8 +90,37 @@ class SettingsStore(private val context: Context) {
         else p[K.DRAFTS] = json.encodeToString(DraftMap, drafts)
     }
 
+    /**
+     * daemon 报的项目根变了（迁根）：静音项目按路径存，前缀跟着换，用户不用重新点。
+     * 第一次见到的根只记下来。返回是否改写过。
+     */
+    suspend fun noteProjectRoot(root: String): Boolean {
+        if (root.isBlank()) return false
+        var changed = false
+        context.dataStore.edit { p ->
+            val old = p[K.PROJECT_ROOT]
+            if (old != null && old != root) {
+                val cur = p[K.MUTED_PROJECTS] ?: emptySet()
+                val next = cur.map { rerootPath(it, old, root) }.toSet()
+                if (next != cur) { p[K.MUTED_PROJECTS] = next; changed = true }
+            }
+            p[K.PROJECT_ROOT] = root
+        }
+        return changed
+    }
+
     suspend fun setProjectMuted(path: String, muted: Boolean) = context.dataStore.edit { p ->
         val cur = p[K.MUTED_PROJECTS] ?: emptySet()
         p[K.MUTED_PROJECTS] = if (muted) cur + path else cur - path
+    }
+}
+
+/** `p` 在旧根下 → 换成新根下的同一相对路径；不在 → 原样（与 daemon migrate::reroot 同口径） */
+fun rerootPath(p: String, oldRoot: String, newRoot: String): String {
+    val o = oldRoot.trimEnd('/'); val n = newRoot.trimEnd('/')
+    return when {
+        p == o -> n
+        p.startsWith("$o/") -> n + p.substring(o.length)
+        else -> p
     }
 }

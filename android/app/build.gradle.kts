@@ -5,7 +5,7 @@ plugins {
 }
 
 android { namespace = "cc.uoox.aaaui"; compileSdk = 36
-    defaultConfig { applicationId = "cc.uoox.aaaui"; minSdk = 29; targetSdk = 36; versionCode = 29; versionName = "1.13.1" }
+    defaultConfig { applicationId = "cc.uoox.aaaui"; minSdk = 29; targetSdk = 36; versionCode = 30; versionName = "1.14.0" }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlin { compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) } }
     lint { abortOnError = true; checkReleaseBuilds = false }

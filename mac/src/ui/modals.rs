@@ -407,7 +407,7 @@ impl RootView {
 
     /// 关闭确认只在会话还在执行时弹（等你的直接关，见 `request_kill`），提示语只有这一种
     fn kill_warning(&self, _id: &str) -> String {
-        "会话仍在执行中（可能还有后台任务）。关闭会终止整个进程树（TERM，2 秒后 KILL），项目回到下方未激活栏，下次双击可 resume。".into()
+        "会话还在运行（可能还有后台任务）。关闭会终止整个进程树（TERM，2 秒后 KILL），项目变为暂停，点一下即可 resume。".into()
     }
 
     fn render_confirm_kill(&self, id: String, cx: &mut Context<Self>) -> gpui::Div {

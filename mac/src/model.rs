@@ -783,6 +783,19 @@ mod tests {
         assert!(!s.is_terminal());
     }
 
+    /// 三端共享向量 fixtures/dashboard.json：客户端的过滤口径（已完成 / 搜索）必须得到 expect
+    #[test]
+    fn shared_fixture_filters() {
+        let fx: serde_json::Value = serde_json::from_str(include_str!("../../fixtures/dashboard.json")).unwrap();
+        let d: Dashboard = serde_json::from_value(serde_json::json!({"sessions": fx["sessions"]})).unwrap();
+        let ids = |f: &dyn Fn(&SessionCard) -> bool| d.sessions.iter().filter(|c| f(c)).map(|c| c.id.clone()).collect::<Vec<_>>();
+        let expect = |k: &str| fx["expect"][k].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect::<Vec<_>>();
+        assert_eq!(ids(&|c| card_is_finished(c) && !c.deleted), expect("finished"));
+        assert_eq!(ids(&|c| card_matches(c, "测试")), expect("match_测试"));
+        // 顺序照 daemon 给的，客户端不重排
+        assert_eq!(d.sessions.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["ask", "run", "bg", "act", "fin", "old", "del"]);
+    }
+
     #[test]
     fn dashboard_cards_search_labels_and_finished() {
         let c = SessionCard {

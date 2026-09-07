@@ -160,7 +160,7 @@ class AppStore private constructor(context: Context) {
             _connState.value = ConnState.Connected(host, latency)
             settings.setPreferredHost(host)
             backoffMs = 1000L
-            scope.launch { runCatching { _health.value = api.health() } }
+            scope.launch { runCatching { api.health() }.onSuccess { h -> _health.value = h; settings.noteProjectRoot(h.project_root) } }
             scope.launch { refreshProjects() }
             scope.launch { refreshUsage() }
             runEventsUntilClosed(api) // suspends while WS is healthy
@@ -322,7 +322,7 @@ class AppStore private constructor(context: Context) {
 
     suspend fun refreshHealth() {
         val api = client ?: return
-        runCatching { api.health() }.onSuccess { _health.value = it }
+        runCatching { api.health() }.onSuccess { _health.value = it; settings.noteProjectRoot(it.project_root) }
     }
 }
 
