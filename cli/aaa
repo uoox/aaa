@@ -7,7 +7,7 @@
 # token 只走请求头，永远不进 argv。
 import json, os, re, signal, subprocess, sys, time, urllib.error, urllib.request
 
-VERSION = "2.0.0"
+VERSION = "2.0.1"
 HELP = """aaa — AAA daemon 的工具箱
 
   aaa [status] [--json]          daemon 状态（版本、项目根、会话五态计数）
