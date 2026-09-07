@@ -21,6 +21,7 @@ HELP = """aaa — AAA daemon 的工具箱
   aaa config port <n> | token <t>  改配置并重启（有活会话需 --force）
   aaa config root <path> [--migrate] [--force]   改项目根；--migrate 整根搬过去并改所有指向
   aaa migrate-root <新根> [--yes] 一键迁根：检查 → 换新 daemon → 迁移 → 验证（推荐用这个）
+  aaa backfill                   给看板里没有进度清单的会话补清单（haiku 按 transcript 生成）
   aaa service install|uninstall|status   launchd 常驻服务（转调 aaa-daemon service）
   aaa version | help
 
@@ -486,12 +487,18 @@ def cmd_migrate_root(conn, args):
     say("完成。%d 个条目在 %s" % (len(os.listdir(new_root)), new_root))
     out("  · 终端里的 shell 若还站在旧路径，cd 一下：cd %s\n  · 会话正在按新路径自动 resume，几秒后在 AAA 里能看到\n  · 手机上的「静音项目」会在下次连上时自动改成新路径" % new_root)
 
+def cmd_backfill(conn, args):
+    """给看板里没有进度清单的会话补清单（daemon 后台按 transcript 用 haiku 生成）"""
+    conn.probe()
+    v = call(conn, "POST", "/api/v1/history/backfill")
+    say("已开始：%d 个会话没有清单，daemon 在后台逐个补（每条几秒，看板会陆续出现）" % v.get("missing", 0))
+
 def cmd_service(conn, args):
     sub = args[0] if args else "status"
     if sub not in ("install", "uninstall", "status"): die("用法：aaa service install|uninstall|status")
     os.execvp("aaa-daemon", ["aaa-daemon", "service", sub])
 
-COMMANDS = {"status": cmd_status, "st": cmd_status, "ls": cmd_ls, "wait": cmd_wait, "perms": cmd_perms,
+COMMANDS = {"backfill": cmd_backfill, "status": cmd_status, "st": cmd_status, "ls": cmd_ls, "wait": cmd_wait, "perms": cmd_perms,
             "permissions": cmd_perms, "restart": cmd_restart, "config": cmd_config, "migrate-root": cmd_migrate_root,
             "service": cmd_service}
 

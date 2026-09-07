@@ -567,6 +567,22 @@ async fn history_list(
     Ok(Json(json!({"entries": list})))
 }
 
+/// v1.16.2：给没有清单的会话补清单（后台跑，立刻返回）
+async fn history_backfill(State(app): State<SharedApp>) -> ApiResult<Json<Value>> {
+    let missing = app
+        .pool
+        .all()
+        .iter()
+        .filter(|s| {
+            let m = s.meta.lock().unwrap();
+            m.agent == "claude" && m.summary.trim().is_empty()
+        })
+        .count();
+    let app2 = Arc::clone(&app);
+    tokio::task::spawn_blocking(move || crate::summary::backfill(&app2, 500));
+    Ok(Json(json!({"ok": true, "started": true, "missing": missing})))
+}
+
 /// 看板：所有会话的进度（daemon 一次算好，两端只画）
 async fn history_dashboard(State(app): State<SharedApp>) -> ApiResult<Json<Value>> {
     let entries = app.history.lock().unwrap().list(crate::history::KEEP);
@@ -1798,6 +1814,7 @@ pub fn router(app: SharedApp) -> Router {
         .route("/api/v1/projects/delete", post(projects_delete))
         .route("/api/v1/projects/pin", post(projects_pin))
         .route("/api/v1/projects/archive", post(projects_archive))
+        .route("/api/v1/history/backfill", post(history_backfill))
         .route("/api/v1/sessions/{id}/permission", post(session_permission))
         .route("/api/v1/sessions/{id}/checklist", post(session_checklist))
         .route("/api/v1/history", get(history_list))

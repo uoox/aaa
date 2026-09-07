@@ -202,6 +202,144 @@ pub fn on_turn_done(app: &SharedApp, sess: Arc<Session>) {
     done();
 }
 
+// ── 补清单（2026-09-07 用户：看板里没显示进度的那些对话，让它们显示进度）─────────
+//
+// 清单只在 Stop 时写；这个功能之前的会话、resume 进来还没跑过一轮的、daemon 重启前
+// 结束的，都没有清单。补法：找到 transcript，按整段对话生成一次（与首次一样）。
+// transcript 先按 resume_id 找（文件名就是 id）；找不到（/clear 过、GC 了）就按项目
+// 目录 + 时间窗口：同 cwd 的 transcript 里，落在这条会话 [created_at, last_output_at]
+// 里的记录最多的那个。
+
+/// 找 transcript：先按 id，再按 cwd + 时间窗口
+pub fn locate_transcript(
+    paths: &crate::paths::Paths,
+    resume_id: Option<&str>,
+    project_path: &str,
+    created_at: &str,
+    last_output_at: &str,
+) -> Option<std::path::PathBuf> {
+    if let Some(id) = resume_id.filter(|i| !i.is_empty() && !i.contains('/') && !i.contains("..")) {
+        let name = format!("{id}.jsonl");
+        if let Ok(rd) = std::fs::read_dir(paths.claude_root()) {
+            for e in rd.flatten() {
+                let f = e.path().join(&name);
+                if f.is_file() {
+                    return Some(f);
+                }
+            }
+        }
+    }
+    let target = crate::stores::realpath(project_path);
+    let mut cache = crate::cache::CwdCache::load(&paths.cwd_cache());
+    let candidates: Vec<std::path::PathBuf> = crate::stores::claude_sessions(paths, &mut cache)
+        .into_iter()
+        .filter(|r| crate::stores::realpath(&r.cwd) == target)
+        .map(|r| r.path)
+        .collect();
+    if candidates.len() == 1 {
+        return candidates.into_iter().next();
+    }
+    // 时间窗口：会话开始到最后输出（再宽 5 分钟）里记录最多的
+    let lo = created_at.get(..19).unwrap_or("").to_string();
+    let hi = last_output_at.get(..19).unwrap_or("9999").to_string();
+    let mut best: Option<(usize, std::path::PathBuf)> = None;
+    for f in candidates {
+        let n = count_records_in_window(&f, &lo, &hi);
+        if n > 0 && best.as_ref().is_none_or(|b| n > b.0) {
+            best = Some((n, f));
+        }
+    }
+    best.map(|b| b.1)
+}
+
+/// jsonl 里 `"timestamp":"…"` 落在 [lo, hi] 的记录数（字典序比较 ISO 前 19 位）
+fn count_records_in_window(file: &std::path::Path, lo: &str, hi: &str) -> usize {
+    use std::io::BufRead;
+    let Ok(f) = std::fs::File::open(file) else { return 0 };
+    let mut n = 0;
+    for line in std::io::BufReader::new(f).lines().map_while(Result::ok) {
+        if let Some(i) = line.find("\"timestamp\":\"") {
+            let ts = &line[i + 13..];
+            if let Some(t) = ts.get(..19) {
+                if t >= lo && t <= hi {
+                    n += 1;
+                }
+            }
+        }
+    }
+    n
+}
+
+/// 按整段 transcript 生成一份清单（haiku）；读不到 / 太短 / haiku 没出东西 → None
+pub fn summarize_transcript(home: &std::path::Path, file: &std::path::Path) -> Option<String> {
+    let mut store = MsgStore::for_agent("claude");
+    store.file = Some(file.to_path_buf());
+    // poll_file 一次最多读 4MB：大 transcript 多读几轮
+    for _ in 0..64 {
+        let before = store.offset;
+        crate::messages::poll_file(&mut store);
+        if store.offset == before {
+            break;
+        }
+    }
+    let excerpt = conversation_excerpt(&store)?;
+    let prompt = format!("{PROMPT_PREFIX}目前的清单：\n（空）\n\n刚结束的这一轮：\n{}", take_chars(&excerpt, 9000));
+    let exe = crate::agents::which("claude", home)?;
+    crate::namer::run_haiku(&exe, &prompt).as_deref().and_then(clean)
+}
+
+/// 给池子里（含已退出的回放）没有清单的 claude 会话补清单；最多 `max` 条，顺序做。
+/// 返回补上的条数。namer 关着就什么都不做
+pub fn backfill(app: &SharedApp, max: usize) -> usize {
+    if !app.cfg.namer {
+        return 0;
+    }
+    let mut done = 0;
+    for sess in app.pool.all() {
+        if done >= max {
+            break;
+        }
+        let (agent, summary, rid, path, created, last) = {
+            let m = sess.meta.lock().unwrap();
+            (
+                m.agent.clone(),
+                m.summary.clone(),
+                m.resume_id.clone(),
+                m.project_path.clone(),
+                m.created_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                m.last_output_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            )
+        };
+        if agent != "claude" || !summary.trim().is_empty() {
+            continue;
+        }
+        if sess.summarizing.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            continue;
+        }
+        let Some(file) = locate_transcript(&app.paths, rid.as_deref(), &path, &created, &last) else {
+            sess.summarizing.store(false, std::sync::atomic::Ordering::Release);
+            continue;
+        };
+        if let Some(text) = summarize_transcript(&app.paths.home, &file) {
+            {
+                let mut m = sess.meta.lock().unwrap();
+                if m.summary.trim().is_empty() {
+                    m.summary = text;
+                }
+            }
+            sess.mark_dirty();
+            if sess.state() == crate::pool::State::Exited {
+                sess.persist(&app.pool.ctx);
+            }
+            done += 1;
+            eprintln!("backfill: {} 补上了清单（{}）", sess.id, file.file_name().and_then(|n| n.to_str()).unwrap_or("?"));
+        }
+        sess.summarizing.store(false, std::sync::atomic::Ordering::Release);
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    done
+}
+
 /// 把清单里文字等于 `item` 的那一行改成 done / 未 done；没有这一项就原样返回
 pub fn set_item(summary: &str, item: &str, done: bool) -> String {
     summary
@@ -223,6 +361,27 @@ pub fn set_item(summary: &str, item: &str, done: bool) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn locate_by_cwd_picks_the_transcript_active_in_the_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = crate::paths::Paths::new(dir.path());
+        let proj = dir.path().join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        let cwd = crate::stores::realpath(&proj.to_string_lossy());
+        let slug = paths.claude_root().join("-x");
+        std::fs::create_dir_all(&slug).unwrap();
+        let line = |ts: &str| format!("{{\"type\":\"user\",\"cwd\":\"{cwd}\",\"timestamp\":\"{ts}\",\"message\":{{\"role\":\"user\",\"content\":\"hi\"}}}}\n");
+        std::fs::write(slug.join("a.jsonl"), line("2026-09-01T10:00:00.000Z") + &line("2026-09-01T10:05:00.000Z")).unwrap();
+        std::fs::write(slug.join("b.jsonl"), line("2026-09-03T10:00:00.000Z") + &line("2026-09-03T10:05:00.000Z") + &line("2026-09-03T10:06:00.000Z")).unwrap();
+        // 按 id 直接命中
+        assert_eq!(super::locate_transcript(&paths, Some("b"), &cwd, "", ""), Some(slug.join("b.jsonl")));
+        // id 找不到 → 按 cwd + 窗口：9-03 的会话落在 b
+        assert_eq!(super::locate_transcript(&paths, Some("gone"), &cwd, "2026-09-03T09:59:00Z", "2026-09-03T10:10:00Z"), Some(slug.join("b.jsonl")));
+        assert_eq!(super::locate_transcript(&paths, None, &cwd, "2026-09-01T09:59:00Z", "2026-09-01T10:10:00Z"), Some(slug.join("a.jsonl")));
+        // 窗口里谁都没记录 → None
+        assert_eq!(super::locate_transcript(&paths, None, &cwd, "2026-09-02T00:00:00Z", "2026-09-02T01:00:00Z"), None);
+    }
+
     #[test]
     fn set_item_flips_only_the_matching_line() {
         let s = "- [ ] 补测试\n- [x] 修登录\n* [ ] 发版";

@@ -251,6 +251,19 @@ fn run() {
                 }
             });
         }
+        // v1.16.2 补清单：池子里没有清单的会话（功能之前的、resume 进来的）起来 90s 后补一轮，
+        // 之后每小时补 20 条（summary::backfill）
+        if app.cfg.namer {
+            let app = Arc::clone(&app);
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(90)).await;
+                loop {
+                    let app2 = Arc::clone(&app);
+                    let _ = tokio::task::spawn_blocking(move || crate::summary::backfill(&app2, 20)).await;
+                    tokio::time::sleep(Duration::from_secs(3600)).await;
+                }
+            });
+        }
         // v1.16 自动归档：暂停超过 N 天、清单全勾完的项目每小时扫一次（autoarchive.rs）
         if app.cfg.auto_archive_days > 0 {
             let app = Arc::clone(&app);

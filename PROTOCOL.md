@@ -141,6 +141,7 @@ CLI 的 `ls` / 交互菜单按同一五组打印（v1.13 起；以前是「执�
 | POST | `/sessions/:id/answer` | `{answers:[{selected:[0,2], other:"自填文本"|null}, …]}`：回答当前待答的 AskUserQuestion 表单，一项对应一个问题（顺序同 `question.questions`），`selected` 是 0 起的选项下标，`other` 是「其它」自填。daemon 负责把选择翻译成 Claude Code 对话框的按键并确认对话框已关闭（见「回答表单」）。无待答问题 / 非 claude 会话 / 对话框没吃下 → 409；答案形状不对 → 400 |
 | POST | `/sessions/:id/permission` | v1.16 `{behavior: "allow"|"deny"}`：替用户答权限对话框。allow = 按对话框第 1 项（Yes，数字键即选中）再补一个 Return 兜底；deny = Esc（No，回到输入框让用户说要怎么改）。答完等 `permission` 被清掉（PostToolUse / Stop），2 秒还在 → 409「去终端里看一眼」。没有对话框在等 → 409。**根因**：以前 daemon 不订阅 `PermissionRequest`，Bash 授权 / ExitPlanMode 批准弹在终端里，消息流一无所知，用户切到终端才发现在等（2026-09-07 反馈） |
 | POST | `/sessions/:id/checklist` | v1.16 `{text, done}`：看板上直接勾 / 取消勾清单项（按文字匹配）。改 `summary` 里那一行并记进 `checklist_overrides`——haiku 下一轮重写清单时按它盖回去，手工勾的不会被冲掉；会话日志同步 |
+| POST | `/history/backfill` | v1.16.2：给池子里没有清单的 claude 会话补清单（后台跑，立刻返回 `{missing}`）。transcript 先按 `resume_id` 找，找不到（/clear 过、GC 了）就按项目目录 + 时间窗口（同 cwd 的 transcript 里落在这条会话 [created_at, last_output_at] 的记录最多的那个），按整段对话 haiku 生成一次。daemon 起来 90s 后自动补一轮、之后每小时补 20 条；`aaa backfill` 手动触发。用户 2026-09-07：看板里没显示进度的那些对话要显示进度 |
 | POST | `/sessions/:id/kill` | TERM，2s 后 KILL；记录保留为 exited |
 | DELETE | `/sessions/:id` | 删除记录与回放（活着先 kill） |
 | POST | `/sessions/:id/rename` | `{title}` |
