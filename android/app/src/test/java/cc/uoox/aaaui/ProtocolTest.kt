@@ -116,6 +116,13 @@ class ProtocolTest {
         assertTrue(dayCardMatches(day, "") && dayCardMatches(day, "修好") && dayCardMatches(day, "shop"))
         assertTrue(!dayCardMatches(day, "支付"))
 
+        // 同一会话里两条一模一样的未勾项（haiku 完全写得出来）：都要留着，
+        // 列表 key 因此不能用文字（HistoryScreen 用 itemsIndexed 带序号）
+        val dup = listOf(d.open[0], d.open[0])
+        assertEquals(2, groupOpenByProject(dup).single().second.size)
+        assertEquals(1, dup.map { "todo-${it.session_id}-${it.text}" }.toSet().size)
+        assertEquals(2, dup.mapIndexed { i, it -> "todo-${it.session_id}-$i" }.toSet().size)
+
         // 按项目归并，项目内保持原序；项目按首次出现排
         val groups = groupOpenByProject(d.open)
         assertEquals(listOf("Shop", "Mail"), groups.map { it.first })

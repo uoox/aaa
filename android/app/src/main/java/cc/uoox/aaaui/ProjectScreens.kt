@@ -75,11 +75,13 @@ const val DEFAULT_AGENT = "claude"
  * 会话状态直接挂在项目行上，首页不再单开会话页。终端永远不代表项目。全部由客户端把
  * projects × sessions 两个流拼出来。
  */
-enum class ProjectState(val label: String) {
-    RUNNING("执行中"),
-    NEEDS_REPLY("待回复"),
-    ACTIVE("已激活"),
-    INACTIVE("未激活"),
+enum class ProjectState(val label: String, val rank: Int) {
+    // rank = 列表从上往下的优先级（2026-09-07 用户拍板）：待回复 > 执行中 > 已激活 > 未激活。
+    // 卡在等你回答的排最上——它不动，别的都还能自己往前跑。
+    NEEDS_REPLY("待回复", 0),
+    RUNNING("执行中", 1),
+    ACTIVE("已激活", 2),
+    INACTIVE("未激活", 3),
 }
 
 /** 首页一行要的全部东西，纯数据，方便单测。 */
@@ -141,9 +143,11 @@ fun projectStateOf(primary: Session?): ProjectState = when {
 }
 
 /**
- * 一项目一行，**最近更新的会话在前**（2026-09-06 用户拍板，单列，不再分「激活 / 未激活」
- * 两栏）。排序看的是 daemon 的 `updated_at`（状态翻转 / 改名），不是每个字节都动的
- * last_output_at——几个会话同时在跑时行才不会互相换位。同刻按路径稳住。
+ * 一项目一行（2026-09-06 用户拍板，单列，不再分「激活 / 未激活」两栏）。
+ * 排序：置顶的在最前（自己按的顶，状态不该把它挤下去），组内先按状态
+ * **待回复 > 执行中 > 已激活 > 未激活**（2026-09-07 用户拍板），同状态里**最近更新的在前**。
+ * 时间看的是 daemon 的 `updated_at`（状态翻转 / 改名），不是每个字节都动的 last_output_at
+ * ——几个会话同时在跑时行才不会互相换位。同刻按路径稳住。
  */
 fun projectRows(projects: List<Project>, sessions: List<Session>): List<ProjectRow> = projects.map { p ->
     val primary = primarySessionFor(p, sessions)
@@ -152,7 +156,12 @@ fun projectRows(projects: List<Project>, sessions: List<Session>): List<ProjectR
         .maxOfOrNull { it.updatedIso() }
         ?.takeIf { it.isNotBlank() }
     ProjectRow(p, primary, projectStateOf(primary), latest ?: p.mtime)
-}.sortedWith(compareByDescending<ProjectRow> { it.project.pinned }.thenByDescending { it.updatedIso }.thenBy { it.project.path })
+}.sortedWith(
+    compareByDescending<ProjectRow> { it.project.pinned }
+        .thenBy { it.state.rank }
+        .thenByDescending { it.updatedIso }
+        .thenBy { it.project.path },
+)
 
 private fun ProjectState.color(): Color = when (this) {
     ProjectState.RUNNING -> Tok.Green
@@ -674,7 +683,8 @@ fun ProjectActionsSheet(
         // A8 删除确认
         ConfirmDialog(
             "删除项目 ${p.name}？",
-            "将删除目录（${humanBytes(p.dir_size)}）并清除所有 agent 的会话存储。与 aaa CLI 的 d 行为一致，不可恢复。",
+            "将删除目录（${humanBytes(p.dir_size)}）并清除所有 agent 的会话存储。与 aaa CLI 的 d 行为一致，不可恢复。" +
+                if (alive) "\n\n该项目还有会话在跑，daemon 会先结束它——否则目录没了、进程还活着。" else "",
             "删除",
             onConfirm = {
                 deleteConfirm = false

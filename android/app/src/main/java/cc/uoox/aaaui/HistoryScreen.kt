@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.Text
@@ -37,7 +38,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavHostController
-import java.time.LocalDate
 
 /**
  * 看板（2026-09-07 用户拍板，取代原来的历史两 tab）：一眼看出**最近做了什么**、
@@ -63,7 +63,8 @@ fun HistoryScreen(store: AppStore, nav: NavHostController) {
     val openItems = remember(d, query) { d?.open.orEmpty().filter { openItemMatches(it, query) } }
     val groups = remember(openItems) { groupOpenByProject(openItems) }
     val days = remember(d, query) { d?.days.orEmpty().filter { dayCardMatches(it, query) } }
-    val today = remember { LocalDate.now().toString() }
+    // 「（今天）」按 daemon 的日期画：手机与 Mac 不在一个时区时才不会标错天
+    val today = d?.date.orEmpty()
 
     Column(Modifier.fillMaxSize().background(Tok.Bg).navigationBarsPadding()) {
         Row(Modifier.fillMaxWidth().padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -111,7 +112,9 @@ fun HistoryScreen(store: AppStore, nav: NavHostController) {
                         Text("${items.size}", color = Tok.Faint, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
                     }
                 }
-                items(items, key = { "todo-${it.session_id}-${it.text}" }) { it2 ->
+                // key 里必须带序号：haiku 写的清单完全可能出现两条一模一样的未勾项，
+                // 用 text 做 key 会撞（Compose 抛 Key was already used，整页崩）
+                itemsIndexed(items, key = { i, it -> "todo-${it.session_id}-$i" }) { _, it2 ->
                     TodoRow(it2) { if (it2.alive) openSession(it2.session_id, "") }
                 }
             }

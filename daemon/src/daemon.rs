@@ -358,12 +358,23 @@ fn run() {
             });
         }
 
+        // 端口被占着就重试 5s：重启时上一个实例可能还没退干净（游离模式下新实例
+        // 是老实例 spawn 出来的，那一刻老的还握着监听套接字），一次 bind 失败就
+        // exit(1) 会让「重启」变成「没有 daemon」。
         let addr = SocketAddr::from(([0, 0, 0, 0], app.cfg.port));
-        let listener = match tokio::net::TcpListener::bind(addr).await {
-            Ok(l) => l,
-            Err(e) => {
-                eprintln!("bind {addr}: {e}");
-                std::process::exit(1);
+        let listener = {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                match tokio::net::TcpListener::bind(addr).await {
+                    Ok(l) => break l,
+                    Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && std::time::Instant::now() < deadline => {
+                        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                    }
+                    Err(e) => {
+                        eprintln!("bind {addr}: {e}");
+                        std::process::exit(1);
+                    }
+                }
             }
         };
         let local = listener.local_addr().expect("local_addr");

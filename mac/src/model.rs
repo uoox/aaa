@@ -90,6 +90,9 @@ pub struct Session {
 /// 仪表盘（GET /history/dashboard）：daemon 一次算好的「做了什么 / 还没做」
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
 pub struct Dashboard {
+    /// daemon 本机时区的今天（YYYY-MM-DD）；画「（今天）」用它，不用客户端自己的日期
+    #[serde(default)]
+    pub date: String,
     #[serde(default)]
     pub today: DashStats,
     #[serde(default)]

@@ -270,9 +270,11 @@ pub fn restart_blockers(alive: &[String], force: bool) -> Result<(), String> {
     }
 }
 
-/// `POST /restart`：exec 自身（PID 不变，launchd 不受影响）。所有 PTY 都是本进程的
-/// 子进程，重启 = 全部终止；所以有存活会话时要 `force`，并且先把它们正经 kill 掉
-/// （屏幕回放留着），不让它们在 exec 时无声消失。
+/// `POST /restart`：托管环境（launchd / systemd）下退出让服务管理器拉起干净实例，
+/// 游离运行时 spawn 新进程再退出（v1.11.1 起；此前是多线程里 execvp，在 macOS 上会
+/// 撞进 malloc/GCD 的内部锁卡死）。所有 PTY 都是本进程的子进程，重启 = 全部终止；
+/// 所以有存活会话时要 `force`，并且先把它们正经 kill 掉（屏幕回放留着），不让它们
+/// 在进程退出时无声消失。
 async fn restart(
     State(app): State<SharedApp>,
     body: Option<Json<RestartBody>>,
@@ -534,6 +536,51 @@ async fn projects_delete(
     ssd_guard(&app)?;
     let app2 = Arc::clone(&app);
     let deleted_paths: Vec<String> = body.paths.iter().map(|p| stores::realpath(p)).collect();
+    // 「删除项目 = 目录 + 全部会话」（手机上的删除入口一直是这么写的）：先把这些目录下
+    // 的会话结束并摘出池子，再删目录。否则目录没了、PTY 还活着——cwd 成了幽灵，会话在
+    // /sessions 里赖着，mac 侧栏还会为「有会话但没登记」的目录补一行，点进去无处可去。
+    // 终端也一起收：它的 cwd 同样跟着目录消失。
+    let victims: Vec<Arc<crate::pool::Session>> = app
+        .pool
+        .all()
+        .into_iter()
+        .filter(|s| {
+            let path = s.meta.lock().unwrap().project_path.clone();
+            deleted_paths.contains(&stores::realpath(&path))
+        })
+        .collect();
+    let killed: Vec<String> = victims
+        .iter()
+        .map(|s| {
+            let m = s.meta.lock().unwrap();
+            if m.title.is_empty() { s.id.clone() } else { m.title.clone() }
+        })
+        .collect();
+    for s in &victims {
+        // 用户自己动的手：随后的 exited 不该弹通知
+        s.meta.lock().unwrap().user_killed = true;
+    }
+    // 一起终止、并行等退出（与 /restart 同一套：总耗时 = 最慢那一个）
+    let waits: Vec<_> = victims
+        .iter()
+        .cloned()
+        .map(|s| tokio::spawn(async move { kill_and_wait(&s, 25, 120).await }))
+        .collect();
+    for w in waits {
+        let _ = w.await;
+    }
+    for s in &victims {
+        app.pool.remove(&s.id);
+        s.remove_persisted(&app.pool.ctx);
+        {
+            // 日志里留着：先把最后一版同步进去，再盖删除戳
+            let mut h = app.history.lock().unwrap();
+            h.upsert(crate::history::entry_from(s));
+            h.mark_deleted(&s.id);
+            h.save_if_dirty();
+        }
+        app.hub.session_removed(&s.id);
+    }
     let results = blocking(move || {
         // deletion stays fully serialized (no LLM work in here, cost is small)
         let _g = app2.store_lock.lock().unwrap();
@@ -598,7 +645,7 @@ async fn projects_delete(
         h.save_if_dirty();
     }
     app.hub.projects_changed();
-    Ok(Json(json!({"results": results})))
+    Ok(Json(json!({"results": results, "killed": killed})))
 }
 
 async fn sessions_list(State(app): State<SharedApp>) -> Json<Value> {

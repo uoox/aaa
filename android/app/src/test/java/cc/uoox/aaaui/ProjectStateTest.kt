@@ -72,7 +72,29 @@ class ProjectStateTest {
         assertNull(primarySessionFor(p, listOf(s("z", "running", "2026-09-02T12:00:00Z", path = "/r/other"))))
     }
 
-    @Test fun orderFollowsLatestUpdatedSessionNotOutputOrState() {
+    @Test fun statusDecidesTheOrderBeforeTime() {
+        // 2026-09-07 用户拍板的从上往下：待回复 > 执行中 > 已激活 > 未激活
+        val pAsk = p.copy(path = "/r/ask", name = "ask", mtime = "2026-09-01T00:00:00Z")
+        val pRun = p.copy(path = "/r/run", name = "run", mtime = "2026-09-02T00:00:00Z")
+        val pAct = p.copy(path = "/r/act", name = "act", mtime = "2026-09-03T00:00:00Z")
+        val pIdle = p.copy(path = "/r/idle", name = "idle", mtime = "2026-09-04T00:00:00Z")
+        // 时间故意与状态反着来：只按时间排的话顺序正好倒过来
+        val ask = s("s1", "waiting", "2026-09-01T00:00:00Z", path = pAsk.path, asking = true, updated = "2026-09-01T00:00:00Z")
+        val run = s("s2", "running", "2026-09-02T00:00:00Z", path = pRun.path, updated = "2026-09-02T00:00:00Z")
+        val act = s("s3", "waiting", "2026-09-03T00:00:00Z", path = pAct.path, updated = "2026-09-03T00:00:00Z")
+        val rows = projectRows(listOf(pAsk, pRun, pAct, pIdle), listOf(ask, run, act))
+        assertEquals(listOf("ask", "run", "act", "idle"), rows.map { it.project.name })
+        assertEquals(
+            listOf(ProjectState.NEEDS_REPLY, ProjectState.RUNNING, ProjectState.ACTIVE, ProjectState.INACTIVE),
+            rows.map { it.state },
+        )
+        // 同状态里仍是最近更新的在前
+        val r1 = s("r1", "running", "2026-09-08T00:00:00Z", path = pAsk.path, updated = "2026-09-08T00:00:00Z")
+        val r2 = s("r2", "running", "2026-09-09T00:00:00Z", path = pRun.path, updated = "2026-09-09T00:00:00Z")
+        assertEquals(listOf("run", "ask"), projectRows(listOf(pAsk, pRun), listOf(r1, r2)).map { it.project.name })
+    }
+
+    @Test fun withinTheSameStatusTheLatestUpdatedSessionWins() {
         val p2 = p.copy(path = "/r/c", name = "c")
         val p3 = p.copy(path = "/r/d", name = "d")
         // 最近输出、状态故意和 updated_at 反着来：只看 updated_at
@@ -80,27 +102,34 @@ class ProjectStateTest {
         val c1 = s("c1", "waiting", "2026-09-02T08:00:00Z", path = p2.path, updated = "2026-09-02T11:00:00Z")
         val d1 = s("d1", "waiting", "2026-09-02T12:00:00Z", path = p3.path, asking = true, updated = "2026-09-02T10:00:00Z")
         val rows = projectRows(listOf(p, p2, p3), listOf(a1, c1, d1))
-        assertEquals(listOf("c", "d", "a"), rows.map { it.project.name })
-        assertEquals(listOf(ProjectState.ACTIVE, ProjectState.NEEDS_REPLY, ProjectState.RUNNING), rows.map { it.state })
-        // 输出再多、状态再翻，updated_at 不变顺序就不变
+        // 状态先分组（待回复 d > 执行中 a > 已激活 c），时间只在同组里比
+        assertEquals(listOf("d", "a", "c"), rows.map { it.project.name })
+        assertEquals(listOf(ProjectState.NEEDS_REPLY, ProjectState.RUNNING, ProjectState.ACTIVE), rows.map { it.state })
+        // 输出再多，updated_at 不变、状态不变，顺序就不变
         val churn = listOf(a1.copy(last_output_at = "2026-09-09T00:00:00Z", state = "waiting"), c1.copy(state = "running"), d1)
-        assertEquals(listOf("c", "d", "a"), projectRows(listOf(p, p2, p3), churn).map { it.project.name })
-        // 退出的会话也算「更新」：刚关掉会话的项目排第一，但行是未激活
+        assertEquals(listOf("d", "c", "a"), projectRows(listOf(p, p2, p3), churn).map { it.project.name })
+        // 退出的会话也算「更新」，但它是未激活，排在还活着的后面
         val x = s("x", "exited", "2026-09-02T00:00:00Z", updated = "2026-09-03T00:00:00Z")
         val rows2 = projectRows(listOf(p, p2), listOf(x, c1))
-        assertEquals(listOf("a", "c"), rows2.map { it.project.name })
-        assertEquals(ProjectState.INACTIVE, rows2[0].state)
+        assertEquals(listOf("c", "a"), rows2.map { it.project.name })
+        assertEquals(ProjectState.INACTIVE, rows2[1].state)
     }
 
     @Test fun pinnedProjectsComeFirst() {
         val old = p.copy(path = "/r/old", name = "old", mtime = "2026-01-01T00:00:00Z", pinned = true)
         val fresh = p.copy(path = "/r/new", name = "new", mtime = "2026-09-01T00:00:00Z")
         assertEquals(listOf("old", "new"), projectRows(listOf(fresh, old), emptyList()).map { it.project.name })
+        // 置顶是自己按的，待回复也挤不掉它
+        val ask = s("n1", "waiting", "2026-09-09T00:00:00Z", path = fresh.path, asking = true, updated = "2026-09-09T00:00:00Z")
+        val rows = projectRows(listOf(fresh, old), listOf(ask))
+        assertEquals(listOf("old", "new"), rows.map { it.project.name })
+        assertEquals(ProjectState.NEEDS_REPLY, rows[1].state)
     }
 
     @Test fun oldDaemonWithoutUpdatedAtFallsBackToCreatedAt() {
         val p2 = p.copy(path = "/r/c", name = "c", mtime = "2026-09-05T00:00:00Z")
-        val early = s("a1", "waiting", "2026-09-02T00:00:00Z").copy(created_at = "2026-09-02T00:00:00Z")
+        // 两边都是未激活，时间才说了算：a 的会话已退出，只贡献 created_at
+        val early = s("a1", "exited", "2026-09-02T00:00:00Z").copy(created_at = "2026-09-02T00:00:00Z")
         // c 没有会话：按目录 mtime（09-05）排在 a（09-02）前面
         assertEquals(listOf("c", "a"), projectRows(listOf(p, p2), listOf(early)).map { it.project.name })
         // 都没有时间就按路径稳住

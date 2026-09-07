@@ -157,6 +157,8 @@ fun parseChecklist(md: String): List<ChecklistItem> = md.lines().mapNotNull { ra
  * daemon 一次算好「最近做了什么 / 还有什么没做」，两端只负责画。
  */
 @Serializable data class Dashboard(
+    /** daemon 本机时区的今天（YYYY-MM-DD）；画「（今天）」用它，不用手机自己的日期 */
+    val date: String = "",
     val today: DashStats = DashStats(),
     val week: DashStats = DashStats(),
     /** 此刻进程还没退出的会话数（running / waiting） */

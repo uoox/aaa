@@ -219,10 +219,12 @@ pub fn live_label(steps: &[&ChatMessage], tail: Option<&ChatMessage>) -> String 
     format!("{base} · 最近：{what}")
 }
 
-/// 尾部是否「进行中」：会话活着，且最后一条消息不是回答。回答之后又来了工具调用
-/// 说明这一轮还在往下做（回答本来就可以分段），此时仍然是进行中。
-pub fn tail_is_live(messages: &[ChatMessage], alive: bool) -> bool {
-    alive && messages.last().map(|m| !is_assistant_text(m)).unwrap_or(false)
+/// 尾部是否「进行中」：会话**在跑**（`running`，与 Android 的 `live = state == "running"`
+/// 同一口径，不是「进程还在」），且最后一条消息不是回答。回答之后又来了工具调用说明
+/// 这一轮还在往下做（回答本来就可以分段），此时仍然是进行中；`waiting` 的会话（被
+/// 打断、或工具报错后停下）末尾哪怕是 tool_result 也不画「进行中」。
+pub fn tail_is_live(messages: &[ChatMessage], running: bool) -> bool {
+    running && messages.last().map(|m| !is_assistant_text(m)).unwrap_or(false)
 }
 
 /// 消息集变化后要不要滚到底：首批数据总是到底；之后只有变化**前**就在底部才跟——
@@ -485,6 +487,9 @@ mod tests {
         assert!(tail_is_live(&[user(1), say(2), use_(3, "Bash")], true));
         assert!(tail_is_live(&[user(1), say(2), user(3), think(4)], true));
         assert!(!tail_is_live(&[], true));
+        // 口径是 running，不是「进程还在」：waiting 的会话（Esc 打断 / 工具报错后停下）
+        // 末尾是 tool_result 也不该一直脉动——调用方传的就是 state == running
+        assert!(!tail_is_live(&[user(1), use_(2, "Bash"), result(3)], false));
     }
 
     // 滚动判定：首批数据到底；之后只有变化前在底部才跟

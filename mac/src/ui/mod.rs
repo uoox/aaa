@@ -94,6 +94,17 @@ impl RowStatus {
         }
     }
 
+    /// 侧栏排序的优先级（2026-09-07 用户拍板）：待回复 > 执行中 > 已激活 > 未激活。
+    /// 卡在等你回答的排最上——它不动，别的都还能自己往前跑。
+    fn rank(self) -> u8 {
+        match self {
+            RowStatus::Asking => 0,
+            RowStatus::Running => 1,
+            RowStatus::Active => 2,
+            RowStatus::Inactive => 3,
+        }
+    }
+
     fn color(self) -> u32 {
         match self {
             RowStatus::Running => theme::green(),
@@ -131,7 +142,8 @@ fn session_updated(s: &Session) -> &str {
     }
 }
 
-/// 项目 × 会话 → 侧栏行，按最近更新的会话在前（同刻按名字稳住）。一个项目一行：
+/// 项目 × 会话 → 侧栏行，按状态排（待回复 > 执行中 > 已激活 > 未激活），同状态里
+/// 最近更新的在前（同刻按名字稳住）。一个项目一行：
 /// 存活的项目会话代表它（几个同时活着取最近更新的）；退出的会话只贡献排序时间。
 /// 有存活会话但注册表里没有的目录也给一行（别处 `aaa open` 开的），否则它无处可点。
 fn project_rows(projects: &[Project], sessions: &[Session]) -> Vec<ProjectRow> {
@@ -186,10 +198,12 @@ fn project_rows(projects: &[Project], sessions: &[Session]) -> Vec<ProjectRow> {
             pinned: false,
         });
     }
-    // 置顶的在最前，其余按最近更新；同刻按标题稳住
+    // 置顶的在最前（自己按的顶，状态不该把它挤下去）；组内先按状态
+    // 待回复 > 执行中 > 已激活 > 未激活，同状态再按最近更新，同刻按标题稳住
     rows.sort_by(|a, b| {
         b.pinned
             .cmp(&a.pinned)
+            .then_with(|| a.status.rank().cmp(&b.status.rank()))
             .then_with(|| b.sort_key.cmp(&a.sort_key))
             .then_with(|| a.title.cmp(&b.title))
     });
@@ -624,17 +638,17 @@ impl RootView {
             let sid = id.clone();
             // 新建的视图默认当会话活着；这里立刻用真实状态校准，已退出的会话
             // 里悬着的表单不能是可交互的
-            let (alive, created) = self
+            let (alive, running, created) = self
                 .session(&id)
-                .map(|s| (s.state != SessionState::Exited, s.created_at.clone()))
-                .unwrap_or((false, String::new()));
+                .map(|s| (s.state != SessionState::Exited, s.state == SessionState::Running, s.created_at.clone()))
+                .unwrap_or((false, false, String::new()));
             let project_path = self.session(&id).map(|s| s.project_path.clone()).unwrap_or_default();
             self.msg_views
                 .entry(id.clone())
                 .or_insert_with(|| cx.new(|cx| MessagesView::new(sid, net, cx)))
                 .update(cx, |v, cx| {
                     v.set_project_path(project_path);
-                    v.set_session(alive, Some(&created), cx);
+                    v.set_session(alive, running, Some(&created), cx);
                     v.fetch(cx);
                     v.request_focus(cx);
                 });
@@ -698,6 +712,7 @@ impl RootView {
     fn upsert_session(&mut self, session: Session, cx: &mut Context<Self>) {
         let id = session.id.clone();
         let alive = session.state != SessionState::Exited;
+        let running = session.state == SessionState::Running;
         let created = session.created_at.clone();
         match self.sessions.iter_mut().find(|s| s.id == session.id) {
             Some(slot) => *slot = session,
@@ -705,7 +720,7 @@ impl RootView {
         }
         self.sort_sessions();
         if let Some(v) = self.msg_views.get(&id) {
-            v.update(cx, |v, cx| v.set_session(alive, Some(&created), cx));
+            v.update(cx, |v, cx| v.set_session(alive, running, Some(&created), cx));
         }
         self.sessions_changed(cx);
         cx.notify();
@@ -715,13 +730,13 @@ impl RootView {
     /// 列表里没有的会话按已死处理（对话框随进程一起没了）
     fn sync_msg_alive_all(&self, cx: &mut Context<Self>) {
         for (id, view) in &self.msg_views {
-            let (alive, created) = self
+            let (alive, running, created) = self
                 .sessions
                 .iter()
                 .find(|s| &s.id == id)
-                .map(|s| (s.state != SessionState::Exited, s.created_at.clone()))
-                .unwrap_or((false, String::new()));
-            view.update(cx, |v, cx| v.set_session(alive, Some(&created), cx));
+                .map(|s| (s.state != SessionState::Exited, s.state == SessionState::Running, s.created_at.clone()))
+                .unwrap_or((false, false, String::new()));
+            view.update(cx, |v, cx| v.set_session(alive, running, Some(&created), cx));
         }
     }
 
@@ -1816,7 +1831,7 @@ mod tests {
     }
 
     #[test]
-    fn rows_are_one_per_project_ordered_by_latest_update() {
+    fn rows_are_one_per_project_ordered_by_status_then_update() {
         use SessionState::*;
         let projects = vec![
             proj("/p/a", "a", "2026-09-01T00:00:00Z", Some("旧对话")),
@@ -1839,16 +1854,17 @@ mod tests {
         assert_eq!(
             got,
             vec![
-                // a：最新一条会话（退出的那条）06 更新，排第一；活着的会话代表它
+                // 2026-09-07 用户拍板：待回复 > 执行中 > 已激活 > 未激活，时间只在同状态里比
+                // c：在问 = 待回复（不选就卡住），哪怕它 03 最旧也排第一
+                ("/p/c", RowStatus::Asking, "c"),
+                // a：最新一条会话（退出的那条）06 更新；活着的会话代表它
                 ("/p/a", RowStatus::Running, "改登录页"),
                 // b：只有终端——终端不算，按目录 mtime 05
                 ("/p/b", RowStatus::Inactive, "b"),
-                // c：在问 = 待回复（不选就卡住），03
-                ("/p/c", RowStatus::Asking, "c"),
             ]
         );
-        assert_eq!(rows[0].session.as_ref().map(|s| s.id.as_str()), Some("a1"));
-        assert!(rows[1].session.is_none(), "终端不代表项目");
+        assert_eq!(rows[1].session.as_ref().map(|s| s.id.as_str()), Some("a1"));
+        assert!(rows[2].session.is_none(), "终端不代表项目");
         // ⌃Tab 只在存活的项目会话里转，顺序跟侧栏
         assert_eq!(cyclable_ids(&projects, &[run, ]), ids(&["a1"]));
     }
@@ -1873,13 +1889,48 @@ mod tests {
         let rows = project_rows(&[proj("/p/z", "z", "", Some("上次聊的"))], &[]);
         assert_eq!(rows[0].title, "上次聊的");
         assert_eq!(rows[0].status, RowStatus::Inactive);
-        // 置顶的排最前，哪怕它最久没动
+        // 置顶的排最前，哪怕它最久没动、状态还更靠后
         let mut old = proj("/p/old", "old", "2026-01-01T00:00:00Z", None);
         old.pinned = true;
         let fresh = proj("/p/new", "new", "2026-09-01T00:00:00Z", None);
-        let rows = project_rows(&[fresh, old], &[]);
+        let ask = tsess("n1", "claude", Waiting, "/p/new", "2026-09-09T00:00:00Z");
+        let mut ask = ask;
+        ask.asking = true;
+        let rows = project_rows(&[fresh, old], &[ask]);
         assert_eq!(rows.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(), ["/p/old", "/p/new"]);
         assert!(rows[0].pinned && !rows[1].pinned);
+        assert_eq!(rows[1].status, RowStatus::Asking, "置顶是自己按的，待回复也挤不掉它");
+    }
+
+    /// 2026-09-07 用户拍板的从上往下：待回复 > 执行中 > 已激活 > 未激活
+    #[test]
+    fn status_decides_the_order_before_time() {
+        use SessionState::*;
+        let projects: Vec<Project> = ["ask", "run", "act", "idle"]
+            .iter()
+            .enumerate()
+            // 目录 mtime 递增：只按时间排的话顺序会正好反过来
+            .map(|(i, n)| proj(&format!("/p/{n}"), n, &format!("2026-09-0{}T00:00:00Z", i + 1), None))
+            .collect();
+        let mut ask = tsess("s_ask", "claude", Waiting, "/p/ask", "2026-09-01T00:00:00Z");
+        ask.asking = true;
+        let run = tsess("s_run", "claude", Running, "/p/run", "2026-09-02T00:00:00Z");
+        let act = tsess("s_act", "claude", Waiting, "/p/act", "2026-09-03T00:00:00Z");
+        let rows = project_rows(&projects, &[ask, run, act]);
+        assert_eq!(
+            rows.iter().map(|r| (r.status, r.path.as_str())).collect::<Vec<_>>(),
+            vec![
+                (RowStatus::Asking, "/p/ask"),
+                (RowStatus::Running, "/p/run"),
+                (RowStatus::Active, "/p/act"),
+                (RowStatus::Inactive, "/p/idle"),
+            ]
+        );
+        // 同状态里仍是最近更新的在前
+        let a = tsess("s_a", "claude", Running, "/p/ask", "2026-09-08T00:00:00Z");
+        let b = tsess("s_b", "claude", Running, "/p/run", "2026-09-09T00:00:00Z");
+        let rows = project_rows(&projects[..2], &[a, b]);
+        assert_eq!(rows.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(), ["/p/run", "/p/ask"]);
     }
 
     #[test]

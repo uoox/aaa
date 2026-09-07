@@ -525,6 +525,9 @@ pub struct Stats {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Dashboard {
+    /// daemon 本机时区的今天（YYYY-MM-DD）。客户端画「（今天）」用它，别用自己的
+    /// `LocalDate.now()`——手机和 Mac 不在一个时区时会标错天。
+    pub date: String,
     pub today: Stats,
     pub week: Stats,
     /// 此刻进程还没退出的会话数（running / waiting）
@@ -633,6 +636,7 @@ pub fn dashboard(
         .collect();
 
     Dashboard {
+        date: today.to_string(),
         today: stats_of(&today_rows),
         week: stats_of(&week_rows),
         active: entries.iter().filter(|e| running.contains(&e.id)).count(),
@@ -710,6 +714,7 @@ mod dashboard_tests {
         let running: std::collections::HashSet<String> = ["a".to_string()].into_iter().collect();
         let d = dashboard(&entries, &days, &alive, &running, &today);
 
+        assert_eq!(d.date, today, "客户端按 daemon 的今天画「（今天）」，不按自己的时区");
         assert_eq!(d.today.sessions, 2, "今天：a + 已删除的 c（终端不进日历）");
         assert_eq!((d.today.done, d.today.open), (1, 2));
         assert_eq!(d.week.sessions, 3, "近 7 天含前天的 b");

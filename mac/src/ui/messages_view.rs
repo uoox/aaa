@@ -164,6 +164,10 @@ pub struct MessagesView {
     sending: bool,
     /// 会话进程是否还活着（上层按 session 事件同步）；退出后表单一律只读
     alive: bool,
+    /// 会话进程在跑（`running`）——与 Android 的 `live = state == "running"` 同一口径。
+    /// 「进行中」的过程行按它画：`waiting` 的会话（被 Esc 打断、工具报错后停下）末尾
+    /// 哪怕是 tool_result，也不该一直脉动。
+    running: bool,
     /// 项目目录：附件上传的去处（`_inbox/`）
     project_path: String,
     uploading: bool,
@@ -199,6 +203,7 @@ impl MessagesView {
             wants_focus: true,
             sending: false,
             alive: true,
+            running: false,
             project_path: String::new(),
             uploading: false,
             since: None,
@@ -277,12 +282,13 @@ impl MessagesView {
         .detach();
     }
 
-    pub fn set_session(&mut self, alive: bool, created_at: Option<&str>, cx: &mut Context<Self>) {
+    pub fn set_session(&mut self, alive: bool, running: bool, created_at: Option<&str>, cx: &mut Context<Self>) {
         let since = created_at.filter(|s| !s.is_empty()).map(str::to_string);
-        if self.alive == alive && self.since == since {
+        if self.alive == alive && self.running == running && self.since == since {
             return;
         }
         self.alive = alive;
+        self.running = running;
         self.since = since;
         self.ensure_form_state(cx);
         cx.notify();
@@ -1432,7 +1438,7 @@ impl Render for MessagesView {
             let pending = pending_question_seq(&self.msgs, self.alive, self.since.as_deref());
             // live = 会话活着且最后一轮还没有回复：过程行画成「进行中」
             let msgs = self.msgs.clone();
-            let live = stream_fold::tail_is_live(&msgs, self.alive);
+            let live = stream_fold::tail_is_live(&msgs, self.running);
             let turns = stream_fold::fold_turns(&msgs, live);
             let items = stream_fold::flatten(&turns, &self.fold_open);
             let rows: Vec<gpui::AnyElement> = items

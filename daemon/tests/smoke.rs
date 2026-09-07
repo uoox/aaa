@@ -633,6 +633,79 @@ async fn inbox_auto_feed_on_first_waiting() {
     drop(guard);
 }
 
+/// 删项目 = 目录 + 全部会话：还活着的会话必须先被结束并摘出池子，否则目录没了、
+/// PTY 还在，cwd 成幽灵（手机上的删除入口一直允许对活着的项目按下去）。
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_a_project_kills_its_live_sessions() {
+    let env = setup_env();
+    let guard = spawn_daemon(&env);
+    let port = wait_port(&env);
+
+    let (code, proj) = http(
+        "POST",
+        port,
+        "/api/v1/projects",
+        Some(TOKEN),
+        Some(serde_json::json!({"name": "doomed", "agent": "shell"})),
+    );
+    assert_eq!(code, 200);
+    let path = proj["path"].as_str().unwrap().to_string();
+    let (code, sess) = http(
+        "POST",
+        port,
+        "/api/v1/sessions",
+        Some(TOKEN),
+        Some(serde_json::json!({"project_path": path, "agent": "shell", "resume": false})),
+    );
+    assert_eq!(code, 200);
+    let sid = sess["id"].as_str().unwrap().to_string();
+    let (_, list) = http("GET", port, "/api/v1/sessions", Some(TOKEN), None);
+    assert!(list.as_array().unwrap().iter().any(|s| s["id"] == sid), "会话应在池子里");
+
+    // 同目录再来一个会话并让它先退出：混着已退出的回放和活着的会话一起删
+    let (code, gone) = http(
+        "POST",
+        port,
+        "/api/v1/sessions",
+        Some(TOKEN),
+        Some(serde_json::json!({"project_path": path, "agent": "shell", "resume": false, "fresh": true})),
+    );
+    assert_eq!(code, 200);
+    let gone_id = gone["id"].as_str().unwrap().to_string();
+    let (code, _) = http("POST", port, &format!("/api/v1/sessions/{gone_id}/kill"), Some(TOKEN), None);
+    assert_eq!(code, 200);
+
+    let (code, resp) = http(
+        "POST",
+        port,
+        "/api/v1/projects/delete",
+        Some(TOKEN),
+        Some(serde_json::json!({"paths": [path]})),
+    );
+    assert_eq!(code, 200);
+    assert_eq!(resp["results"][0]["ok"], true);
+    assert_eq!(resp["killed"].as_array().unwrap().len(), 2, "活的和已退出的回放都要收走");
+    assert!(!Path::new(&path).exists(), "目录应已删除");
+
+    let (_, list) = http("GET", port, "/api/v1/sessions", Some(TOKEN), None);
+    for id in [&sid, &gone_id] {
+        assert!(
+            !list.as_array().unwrap().iter().any(|s| &s["id"] == id),
+            "会话必须一起消失（含已退出的回放），否则 mac 侧栏会为「有会话但没登记」的目录补一行: {list}"
+        );
+    }
+    // 日志里留着，并盖了删除戳
+    let (_, hist) = http("GET", port, "/api/v1/history?limit=50", Some(TOKEN), None);
+    let row = hist["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["id"] == sid)
+        .expect("history keeps the record");
+    assert!(row["deleted_at"].is_string());
+    drop(guard);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn ssd_guard_returns_503_and_never_mkdirs() {
     let env = setup_env();
