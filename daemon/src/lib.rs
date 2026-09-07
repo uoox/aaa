@@ -3,6 +3,7 @@
 pub mod agents;
 pub mod answer;
 pub mod archive;
+pub mod autoarchive;
 pub mod api;
 pub mod cache;
 pub mod config;

@@ -51,7 +51,7 @@ object Notifier {
 
     private fun createChannels(context: Context) {
         val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        nm.createNotificationChannel(NotificationChannel(CH_DONE, "任务完成", NotificationManager.IMPORTANCE_DEFAULT).apply { description = "会话完成或结束时通知" })
+        nm.createNotificationChannel(NotificationChannel(CH_DONE, "会话", NotificationManager.IMPORTANCE_DEFAULT).apply { description = "待回复 / 运行结束 / 出错" })
         nm.createNotificationChannel(NotificationChannel(CH_SERVICE, "后台连接", NotificationManager.IMPORTANCE_MIN).apply { description = "维持与 daemon 的连接" })
     }
 
@@ -62,12 +62,21 @@ object Notifier {
                 val session = ev.session
                 if (!NotifyFilter.shouldNotify(session.project_path, settings)) return
                 val title = if (ev.exited) {
-                    "✓ 会话结束 · "+session.project_name + (session.exit_code?.let { if (it != 0) " · exit $it" else "" } ?: "")
+                    "✗ 出错 · " + session.project_name + " · 退出码 ${session.exit_code ?: 0}"
                 } else {
-                    "✓ 完成 · "+session.project_name
+                    "✓ 运行结束 · " + session.project_name
                 }
-                val text = title.ifBlank { session.project_name }
-                notifySimple(context, CH_DONE, session.id, title, text)
+                notifySimple(context, CH_DONE, session.id, title, session.title.ifBlank { session.project_name })
+            }
+            is NotifyEvent.Asking -> {
+                val session = ev.session
+                if (!NotifyFilter.shouldNotify(session.project_path, settings)) return
+                notifySimple(context, CH_DONE, session.id, "? 待回复 · " + session.project_name, session.title.ifBlank { "弹着选项等你选" })
+            }
+            is NotifyEvent.Error -> {
+                val session = ev.session
+                if (!NotifyFilter.shouldNotify(session.project_path, settings)) return
+                notifySimple(context, CH_DONE, session.id, "✗ 出错 · " + session.project_name, ev.error)
             }
         }
     }

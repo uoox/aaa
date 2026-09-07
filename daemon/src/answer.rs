@@ -50,6 +50,17 @@ fn key(s: &str, pause: u64) -> Step {
     (s.as_bytes().to_vec(), pause)
 }
 
+/// 权限对话框（Bash 授权 / ExitPlanMode 批准…，Ink 的单选列表，与 AskUserQuestion 同款）：
+/// allow = 第 1 项的数字（Yes；数字键即选中，与表单一致）再补一个 Return 兜底——
+/// 对话框已经没了的话 Return 只是在空输入框上回车，无害；deny = Esc（No / 打断，回到输入框）。
+pub fn permission_steps(behavior: &str) -> Result<Vec<Step>, String> {
+    match behavior {
+        "allow" => Ok(vec![key("1", 250), key("\r", BEAT)]),
+        "deny" => Ok(vec![key("\x1b", BEAT)]),
+        other => Err(format!("behavior 只能是 allow / deny，不是 {other}")),
+    }
+}
+
 /// Validate answers against the form. Returns a message for the client.
 pub fn validate(spec: &QuestionSpec, answers: &[Answer]) -> Result<(), String> {
     if answers.len() != spec.questions.len() {

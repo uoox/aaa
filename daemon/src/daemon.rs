@@ -142,6 +142,7 @@ fn run() {
         plan_usage: std::sync::Mutex::new(None),
         root_state: std::sync::atomic::AtomicU8::new(root_state.as_u8()),
         restarting: std::sync::atomic::AtomicBool::new(false),
+        restart_when_idle: std::sync::atomic::AtomicBool::new(false),
         exe_mtime_at_start: crate::api::exe_mtime(),
     });
 
@@ -171,6 +172,14 @@ fn run() {
                     // （空着 + 有条目 + 门槛放行就喂）——信任对话框刚被接受、
                     // 表单刚答完这类没有状态翻转的时刻也能把排着的话发出去
                     let _ = app.pool.tick_states();
+                    // v1.16：约好的「空闲时重启」——没有会话在跑就走 /restart {force} 那条路
+                    if app.restart_when_idle.load(std::sync::atomic::Ordering::SeqCst)
+                        && !app.restarting.load(std::sync::atomic::Ordering::SeqCst)
+                        && app.pool.all().iter().all(|s| s.state() != State::Running)
+                    {
+                        let app2 = Arc::clone(&app);
+                        tokio::spawn(async move { crate::api::restart_now(app2).await });
+                    }
                     {
                         let app2 = Arc::clone(&app);
                         let _ = tokio::task::spawn_blocking(move || {
@@ -242,6 +251,18 @@ fn run() {
                 }
             });
         }
+        // v1.16 自动归档：暂停超过 N 天、清单全勾完的项目每小时扫一次（autoarchive.rs）
+        if app.cfg.auto_archive_days > 0 {
+            let app = Arc::clone(&app);
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(120)).await;
+                loop {
+                    let app2 = Arc::clone(&app);
+                    let _ = tokio::task::spawn_blocking(move || crate::api::auto_archive_sweep(&app2)).await;
+                    tokio::time::sleep(Duration::from_secs(3600)).await;
+                }
+            });
+        }
         // v1.1 message stream tail (1s; the cadence itself is the >=500ms
         // throttle for messages_changed)
         {
@@ -287,7 +308,9 @@ fn run() {
                                 .asking_hint_inst
                                 .map(|t| t.elapsed().as_secs() < 10)
                                 .unwrap_or(false);
-                            let asking = asking || (hinted && meta.state != State::Exited);
+                            // v1.16：权限对话框在等 = 待回复（hook 记的，跟 transcript 无关）
+                            let asking = (asking || (hinted && meta.state != State::Exited) || meta.permission.is_some())
+                                && meta.state != State::Exited;
                             if meta.asking != asking {
                                 meta.asking = asking;
                                 drop(meta);

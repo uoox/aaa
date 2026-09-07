@@ -175,6 +175,13 @@ impl MsgStore {
     /// 用户侧消息里的 `<task-notification>…<tool-use-id>X</tool-use-id>`：X 的后台任务回来了。
     /// 只认包在 task-notification 里的，别的用户文本里出现这串字不算
     fn settle_background(&mut self, text: &str) {
+        self.settle_background_at("", text);
+    }
+
+    /// 同上，并在真的销掉一个挂着的任务时往消息流塞一行 system：「后台任务完成：<summary>」
+    /// （v1.16 用户要求：不然「后台」→「运行」的翻转看不出是什么触发的）。同一个任务的
+    /// enqueue / remove / attachment 三条记录只会有第一条真的销掉，天然去重
+    fn settle_background_at(&mut self, ts: &str, text: &str) {
         if !text.contains("<task-notification") {
             return;
         }
@@ -182,7 +189,11 @@ impl MsgStore {
         while let Some(i) = rest.find("<tool-use-id>") {
             let after = &rest[i + "<tool-use-id>".len()..];
             let Some(j) = after.find("</tool-use-id>") else { break };
-            self.bg_pending.remove(after[..j].trim());
+            if self.bg_pending.remove(after[..j].trim()).is_some() {
+                let summary = between(text, "<summary>", "</summary>").unwrap_or("");
+                let line = if summary.is_empty() { "后台任务完成".to_string() } else { format!("后台任务完成：{}", cap(summary.trim(), 300)) };
+                self.push(ts, "system", "text", line, None);
+            }
             rest = &after[j..];
         }
     }
@@ -391,14 +402,16 @@ pub fn parse_claude_line(store: &mut MsgStore, v: &Value) {
     // 并进这一轮——实测 Bash run_in_background 回来就是这条路，只认 user 消息会漏销
     match ty {
         "queue-operation" => {
+            let ts = v.get("timestamp").and_then(|t| t.as_str()).unwrap_or("");
             if let Some(c) = v.get("content").and_then(|c| c.as_str()) {
-                store.settle_background(c);
+                store.settle_background_at(ts, c);
             }
             return;
         }
         "attachment" => {
+            let ts = v.get("timestamp").and_then(|t| t.as_str()).or_else(|| v.pointer("/attachment/timestamp").and_then(|t| t.as_str())).unwrap_or("");
             if let Some(p) = v.pointer("/attachment/prompt").and_then(|c| c.as_str()) {
-                store.settle_background(p);
+                store.settle_background_at(ts, p);
             }
             return;
         }
@@ -418,7 +431,7 @@ pub fn parse_claude_line(store: &mut MsgStore, v: &Value) {
     match ty {
         "user" => match content {
             Some(Value::String(s)) => {
-                store.settle_background(s);
+                store.settle_background_at(ts, s);
                 if usable_user_text(s) {
                     store.push(ts, "user", "text", cap(s.trim(), TEXT_CAP), None);
                 }
@@ -487,7 +500,7 @@ pub fn parse_claude_line(store: &mut MsgStore, v: &Value) {
                         }
                         Some("text") | None => {
                             if let Some(t) = item.get("text").and_then(|t| t.as_str()) {
-                                store.settle_background(t);
+                                store.settle_background_at(ts, t);
                                 if usable_user_text(t) {
                                     store.push(ts, "user", "text", cap(t.trim(), TEXT_CAP), None);
                                 }
@@ -589,6 +602,12 @@ fn is_background_launch(name: &str, input: Option<&Value>) -> bool {
         .and_then(|i| i.get("run_in_background"))
         .and_then(|b| b.as_bool())
         .unwrap_or(false)
+}
+
+fn between<'a>(s: &'a str, open: &str, close: &str) -> Option<&'a str> {
+    let i = s.find(open)? + open.len();
+    let j = s[i..].find(close)? + i;
+    Some(&s[i..j])
 }
 
 /// tool_result 的文案说它去后台了（没在 tool_use 入参里看出来的兜底，比如
@@ -1001,6 +1020,9 @@ mod tests {
         // 通知回来（user 字符串消息，带 tool-use-id）
         parse_claude_line(&mut store, &json!({"type":"user","message":{"role":"user","content":"<task-notification>\n<task-id>b1</task-id>\n<tool-use-id>tu_bg</tool-use-id>\n<status>completed</status>\n</task-notification>"},"timestamp":"2026-09-07T01:05:00.000Z"}));
         assert_eq!(store.pending_background(None), 1);
+        let sys: Vec<&Msg> = store.msgs.iter().filter(|m| m.role == "system").collect();
+        assert_eq!(sys.len(), 1, "销掉一个任务就一行 system");
+        assert_eq!(sys[0].text, "后台任务完成");
         // 早于 since 的不算（上一个进程发起的，进程一死任务就没了）
         assert_eq!(store.pending_background(Some("2026-09-07T01:00:02.500Z")), 1);
         assert_eq!(store.pending_background(Some("2026-09-07T01:00:03.500Z")), 0);
@@ -1010,8 +1032,12 @@ mod tests {
         parse_claude_line(&mut store, &json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_q","name":"Bash","input":{"command":"sleep 5","run_in_background":true}}]},"timestamp":"2026-09-07T01:05:10.000Z"}));
         parse_claude_line(&mut store, &json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_q","content":"Command running in background with ID: q1"}]},"timestamp":"2026-09-07T01:05:11.000Z"}));
         assert_eq!(store.pending_background(None), 2);
-        parse_claude_line(&mut store, &json!({"type":"queue-operation","operation":"enqueue","timestamp":"2026-09-07T01:05:20.000Z","content":"<task-notification>\n<task-id>q1</task-id>\n<tool-use-id>tu_q</tool-use-id>\n<status>completed</status>\n</task-notification>"}));
+        parse_claude_line(&mut store, &json!({"type":"queue-operation","operation":"enqueue","timestamp":"2026-09-07T01:05:20.000Z","content":"<task-notification>\n<task-id>q1</task-id>\n<tool-use-id>tu_q</tool-use-id>\n<status>completed</status>\n<summary>Background command \"sleep\" completed (exit code 0)</summary>\n</task-notification>"}));
         assert_eq!(store.pending_background(None), 1, "queue-operation 也能销掉");
+        assert!(store.msgs.iter().any(|m| m.role == "system" && m.text.contains("后台任务完成：Background command")), "带 summary 的系统行");
+        // 同一任务的 remove 记录不再重复出一行
+        parse_claude_line(&mut store, &json!({"type":"queue-operation","operation":"remove","timestamp":"2026-09-07T01:05:21.000Z","content":"<task-notification>\n<tool-use-id>tu_q</tool-use-id>\n</task-notification>"}));
+        assert_eq!(store.msgs.iter().filter(|m| m.role == "system").count(), 2);
         parse_claude_line(&mut store, &json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_a","name":"Bash","input":{"command":"x","run_in_background":true}}]},"timestamp":"2026-09-07T01:05:30.000Z"}));
         parse_claude_line(&mut store, &json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_a","content":"Command running in background with ID: a1"}]},"timestamp":"2026-09-07T01:05:31.000Z"}));
         parse_claude_line(&mut store, &json!({"type":"attachment","attachment":{"type":"queued_command","commandMode":"task-notification","prompt":"<task-notification>\n<task-id>a1</task-id>\n<tool-use-id>tu_a</tool-use-id>\n</task-notification>"},"timestamp":"2026-09-07T01:05:40.000Z"}));

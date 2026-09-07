@@ -248,6 +248,14 @@ impl Net {
     /// 回答当前待答的 AskUserQuestion 表单：一项对应一题，顺序同 `question.questions`。
     /// daemon 负责翻译成对话框按键并确认对话框关闭。409（`ApiFailure::status`）=
     /// 没有待答问题 / 非 claude 会话 / 对话框没吃下——调用方提示用户去终端收尾。
+    /// v1.16：替用户答权限对话框（allow / deny）
+    pub fn session_permission(&self, id: &str, behavior: &str) -> impl Future<Output = Result<serde_json::Value>> + use<> {
+        self.post_json(&format!("/sessions/{id}/permission"), serde_json::json!({ "behavior": behavior }))
+    }
+    /// v1.16：看板上勾 / 取消勾清单项
+    pub fn session_checklist(&self, id: &str, text: &str, done: bool) -> impl Future<Output = Result<serde_json::Value>> + use<> {
+        self.post_json(&format!("/sessions/{id}/checklist"), serde_json::json!({ "text": text, "done": done }))
+    }
     pub fn session_answer(
         &self,
         id: &str,

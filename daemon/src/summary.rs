@@ -187,6 +187,12 @@ pub fn on_turn_done(app: &SharedApp, sess: Arc<Session>) {
     };
     {
         let mut meta = sess.meta.lock().unwrap();
+        // 看板上手工勾过的项按用户的来，haiku 重写不许翻回去
+        let overrides = meta.checklist_overrides.clone();
+        let mut text = text;
+        for (item, done) in &overrides {
+            text = set_item(&text, item, *done);
+        }
         meta.summary = text;
     }
     sess.mark_dirty();
@@ -196,8 +202,35 @@ pub fn on_turn_done(app: &SharedApp, sess: Arc<Session>) {
     done();
 }
 
+/// 把清单里文字等于 `item` 的那一行改成 done / 未 done；没有这一项就原样返回
+pub fn set_item(summary: &str, item: &str, done: bool) -> String {
+    summary
+        .lines()
+        .map(|raw| {
+            let l = raw.trim().trim_start_matches(['-', '*']).trim_start();
+            let rest = l
+                .strip_prefix("[x]")
+                .or_else(|| l.strip_prefix("[X]"))
+                .or_else(|| l.strip_prefix("[ ]"));
+            match rest {
+                Some(r) if r.trim() == item => format!("- [{}] {}", if done { 'x' } else { ' ' }, item),
+                _ => raw.to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn set_item_flips_only_the_matching_line() {
+        let s = "- [ ] 补测试\n- [x] 修登录\n* [ ] 发版";
+        assert_eq!(super::set_item(s, "补测试", true), "- [x] 补测试\n- [x] 修登录\n* [ ] 发版");
+        assert_eq!(super::set_item(s, "修登录", false), "- [ ] 补测试\n- [ ] 修登录\n* [ ] 发版");
+        assert_eq!(super::set_item(s, "没有的", true), s);
+    }
+
     use super::*;
     use crate::messages::ToolInfo;
 

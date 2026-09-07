@@ -27,8 +27,11 @@ sealed class ConnState {
     data class Failed(val message: String) : ConnState()
 }
 
+/** 系统通知只有三种（2026-09-07 用户拍板）：待回复 / 运行结束 / 出错 */
 sealed class NotifyEvent {
     data class Done(val session: Session, val exited: Boolean) : NotifyEvent()
+    data class Asking(val session: Session) : NotifyEvent()
+    data class Error(val session: Session, val error: String) : NotifyEvent()
 }
 
 /** Process-wide repository: settings, connection loop, /events WS → StateFlows. */
@@ -222,11 +225,17 @@ class AppStore private constructor(context: Context) {
             is EventFrame.SessionUpdate -> {
                 val s = frame.session
                 val prev = synchronized(prevStates) { val p = prevStates[s.id]; prevStates[s.id] = s.state; p }
+                val old = _sessions.value.find { it.id == s.id }
                 _sessions.value = _sessions.value.filter { it.id != s.id } + s
                 if (s.agent == "shell" && s.state == "exited") cleanupExitedShell(s)
+                // 待回复：asking 翻 true（弹着选项 / 授权等你）
+                if (s.agent != "shell" && s.asking && old?.asking != true && s.state != "exited") _notifyEvents.tryEmit(NotifyEvent.Asking(s))
+                // 出错：StopFailure 报的错误（rate limit / 认证…）
+                val err = s.error
+                if (s.agent != "shell" && !err.isNullOrBlank() && old?.error != err) _notifyEvents.tryEmit(NotifyEvent.Error(s, err))
                 if (s.agent != "shell" && s.state == "waiting" && prev == "running") _notifyEvents.tryEmit(NotifyEvent.Done(s, exited = false))
-                // 本机手动终止的会话不弹「会话结束」——自己动的手不用报告
-                if (s.agent != "shell" && s.state == "exited" && prev == "running" && !userKilled.remove(s.id)) {
+                // 退出：只有非 0 退出码算「出错」；正常退出不弹；本机手动终止的不弹
+                if (s.agent != "shell" && s.state == "exited" && prev == "running" && !userKilled.remove(s.id) && (s.exit_code ?: 0) != 0) {
                     _notifyEvents.tryEmit(NotifyEvent.Done(s, exited = true))
                 }
             }

@@ -652,17 +652,17 @@ impl RootView {
             let sid = id.clone();
             // 新建的视图默认当会话活着；这里立刻用真实状态校准，已退出的会话
             // 里悬着的表单不能是可交互的
-            let (alive, running, created) = self
+            let (alive, running, perm, created) = self
                 .session(&id)
-                .map(|s| (s.state != SessionState::Exited, s.state == SessionState::Running, s.created_at.clone()))
-                .unwrap_or((false, false, String::new()));
+                .map(|s| (s.state != SessionState::Exited, s.state == SessionState::Running, s.permission.clone(), s.created_at.clone()))
+                .unwrap_or((false, false, None, String::new()));
             let project_path = self.session(&id).map(|s| s.project_path.clone()).unwrap_or_default();
             self.msg_views
                 .entry(id.clone())
                 .or_insert_with(|| cx.new(|cx| MessagesView::new(sid, net, cx)))
                 .update(cx, |v, cx| {
                     v.set_project_path(project_path);
-                    v.set_session(alive, running, Some(&created), cx);
+                    v.set_session(alive, running, perm, Some(&created), cx);
                     v.fetch(cx);
                     v.request_focus(cx);
                 });
@@ -680,43 +680,46 @@ impl RootView {
                 .is_some_and(|v| v.read(cx).supported != Some(false))
     }
 
-    /// 系统通知：只有一种——「完成」（2026-09-02 用户拍板，PROTOCOL「WS」通知策略）。
-    /// running→waiting（这轮干完了）与 running→exited（非本机手动 kill）各弹一条。
-    /// 不识别里面在问什么、不按问题去重、没有冷却、没有空转告警；问题本身由
-    /// 消息流按结构化数据原生呈现。终端不通知：shell 退出不是「完成」。
+    /// 系统通知只有三种（2026-09-07 用户拍板，PROTOCOL「WS」通知策略）：
+    /// **待回复**（asking 翻 true：弹着选项 / 授权等你）、**运行结束**（running→waiting，
+    /// 这轮干完了）、**出错**（StopFailure 报的错误，或非 0 退出）。正常退出、自己在
+    /// app 里 kill 的、正盯着看的、静音的项目都不弹。终端不通知。
     fn maybe_notify(&mut self, new: &Session, cx: &Context<Self>) {
         if new.is_terminal() {
             return;
         }
-        let old_state = self
-            .sessions
-            .iter()
-            .find(|s| s.id == new.id)
-            .map(|s| s.state);
+        let old = self.sessions.iter().find(|s| s.id == new.id);
+        let (old_state, old_asking, old_error) = old
+            .map(|s| (Some(s.state), s.asking, s.error.clone()))
+            .unwrap_or((None, false, None));
+        // 用户正盯着这个会话（窗口前台 + 当前页就是它）就别弹通知——
+        // 眼皮底下跑完的东西再弹一条只是噪音
+        let watching = self.page == Page::Session(new.id.clone()) && cx.active_window().is_some();
+        // 详情面板里静音了这个项目：一条都不弹
+        let muted = is_muted(&self.muted_projects, &new.project_path);
+        // 标记无论如何都要消耗掉
+        let killed_here = self.user_killed.remove(&new.id);
+        if watching || muted {
+            return;
+        }
+        if new.asking && !old_asking && new.state != SessionState::Exited {
+            crate::notify::send(&new.display_title(), "待回复 · 等你选一个", &new.id);
+            return;
+        }
+        if let Some(err) = new.error.as_deref().filter(|e| !e.is_empty())
+            && old_error.as_deref() != Some(err)
+        {
+            crate::notify::send(&new.display_title(), &format!("出错 · {err}"), &new.id);
+            return;
+        }
         if old_state != Some(SessionState::Running) {
             return;
         }
-        // 用户正盯着这个会话（窗口前台 + 当前页就是它）就别弹通知——
-        // 眼皮底下跑完的东西再弹一条只是噪音
-        let watching =
-            self.page == Page::Session(new.id.clone()) && cx.active_window().is_some();
-        // 详情面板里静音了这个项目：一条都不弹
-        let muted = is_muted(&self.muted_projects, &new.project_path);
         match new.state {
-            SessionState::Waiting => {
-                if !watching && !muted {
-                    crate::notify::send(&new.display_title(), "完成 · 等你下一步", &new.id);
-                }
-            }
+            SessionState::Waiting => crate::notify::send(&new.display_title(), "运行结束 · 等你下一步", &new.id),
             SessionState::Exited => {
-                // 自己在 app 里 kill 的不弹；标记无论如何都要消耗掉
-                let killed_here = self.user_killed.remove(&new.id);
-                if !watching && !killed_here && !muted {
-                    let body = match new.exit_code {
-                        Some(code) => format!("已退出 (exit {code})"),
-                        None => "已退出".to_string(),
-                    };
-                    crate::notify::send(&new.display_title(), &body, &new.id);
+                if !killed_here && new.exit_code.is_some_and(|c| c != 0) {
+                    crate::notify::send(&new.display_title(), &format!("出错 · 退出码 {}", new.exit_code.unwrap_or(0)), &new.id);
                 }
             }
             SessionState::Running => {}
@@ -727,6 +730,7 @@ impl RootView {
         let id = session.id.clone();
         let alive = session.state != SessionState::Exited;
         let running = session.state == SessionState::Running;
+        let perm = session.permission.clone();
         let created = session.created_at.clone();
         match self.sessions.iter_mut().find(|s| s.id == session.id) {
             Some(slot) => *slot = session,
@@ -734,7 +738,7 @@ impl RootView {
         }
         self.sort_sessions();
         if let Some(v) = self.msg_views.get(&id) {
-            v.update(cx, |v, cx| v.set_session(alive, running, Some(&created), cx));
+            v.update(cx, |v, cx| v.set_session(alive, running, perm, Some(&created), cx));
         }
         self.sessions_changed(cx);
         cx.notify();
@@ -744,13 +748,13 @@ impl RootView {
     /// 列表里没有的会话按已死处理（对话框随进程一起没了）
     fn sync_msg_alive_all(&self, cx: &mut Context<Self>) {
         for (id, view) in &self.msg_views {
-            let (alive, running, created) = self
+            let (alive, running, perm, created) = self
                 .sessions
                 .iter()
                 .find(|s| &s.id == id)
-                .map(|s| (s.state != SessionState::Exited, s.state == SessionState::Running, s.created_at.clone()))
-                .unwrap_or((false, false, String::new()));
-            view.update(cx, |v, cx| v.set_session(alive, running, Some(&created), cx));
+                .map(|s| (s.state != SessionState::Exited, s.state == SessionState::Running, s.permission.clone(), s.created_at.clone()))
+                .unwrap_or((false, false, None, String::new()));
+            view.update(cx, |v, cx| v.set_session(alive, running, perm, Some(&created), cx));
         }
     }
 

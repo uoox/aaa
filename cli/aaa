@@ -16,6 +16,7 @@ HELP = """aaa — AAA daemon 的工具箱
   aaa perms [--json]             macOS 权限状态
   aaa perms all | <id…>          申请权限（弹窗出现在 Mac 上）
   aaa restart [--force]          重启 daemon（有活会话需 --force：先结束、起来后自动 resume）
+  aaa restart --when-idle        等所有会话都停在输入框再重启（不用挑时间）
   aaa config                     看配置（端口 / token / 项目根）
   aaa config port <n> | token <t>  改配置并重启（有活会话需 --force）
   aaa config root <path> [--migrate] [--force]   改项目根；--migrate 整根搬过去并改所有指向
@@ -227,8 +228,11 @@ def cmd_status(conn, args):
                     "project_root": S(h, "project_root"), "uptime_s": S(h, "uptime_s", 0),
                     "update_pending": bool(h.get("update_pending")), "counts": counts})); return
     note = {"ok": "", "denied": RED + "(读不了 · 缺完全磁盘访问权限)" + RESET}.get(rs, RED + "(未挂载!)" + RESET)
+    flags = []
+    if h.get("update_pending"): flags.append("新二进制已装好，等重启")
+    if h.get("restart_scheduled"): flags.append("等空闲重启")
     out("%saaa-daemon%s v%s  %s%s:%d%s%s" % (BOLD, RESET, S(h, "version"), DIM, conn.host, conn.port, RESET,
-                                           "  " + YELLOW + "新二进制已装好，等重启" + RESET if h.get("update_pending") else ""))
+                                           ("  " + YELLOW + " · ".join(flags) + RESET) if flags else ""))
     out("  项目根   %s %s" % (S(h, "project_root"), note))
     out("  运行时长 %s" % uptime(int(S(h, "uptime_s", 0) or 0)))
     out("  会话     " + " · ".join("%s%s %d%s" % (COLORS[k], LABELS[k], counts[k], RESET) for k in STATES))
@@ -284,6 +288,15 @@ def live_titles(conn):
 def cmd_restart(conn, args):
     h = conn.probe()
     force = "--force" in args or "-f" in args
+    if "--when-idle" in args or "--idle" in args:
+        # 等所有会话都停在输入框再重启：daemon 记下约定，tick 里兑现；不用你挑时间
+        v = call(conn, "POST", "/api/v1/restart", {"when_idle": True})
+        if v.get("scheduled"):
+            say("已约好：%d 个会话还在跑，等它们都停下再重启（aaa status 能看到「等空闲重启」）" % v.get("running", 0)); return
+        say("此刻没有在跑的会话，直接重启" + ("（结束了：%s）" % "、".join(v["killed"]) if v.get("killed") else ""))
+        time.sleep(2)
+        h2 = conn.wait_back() or die("90 秒内没回来，看 %s/daemon.err.log" % STATE)
+        say("回来了：v%s" % S(h2, "version")); return
     live = live_titles(conn)
     if live and not force:
         die("有 %d 个活会话（%s）。加 --force：先结束它们，daemon 起来后自动 resume" % (len(live), "、".join(live[:5]) + ("…" if len(live) > 5 else "")))

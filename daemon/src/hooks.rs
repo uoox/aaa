@@ -42,6 +42,8 @@ pub const EVENTS: &[&str] = &[
     "SessionStart",
     "UserPromptSubmit",
     "PreToolUse",
+    "PermissionRequest",
+    "PostToolUse",
     "Stop",
     "StopFailure",
     "Notification",
@@ -227,6 +229,7 @@ pub fn apply(sess: &Session, event: &str, body: &Value, now: Instant) -> Applied
                 meta.touch();
             }
             meta.running_by_transcript = false;
+            meta.permission = None;
             meta.error = None;
             meta.compacting = false;
             out.dirty = true;
@@ -239,6 +242,7 @@ pub fn apply(sess: &Session, event: &str, body: &Value, now: Instant) -> Applied
             }
             meta.last_stop_at = Some(chrono::Utc::now());
             meta.running_by_transcript = false;
+            meta.permission = None;
             meta.compacting = false;
             out.dirty = true;
         }
@@ -276,6 +280,31 @@ pub fn apply(sess: &Session, event: &str, body: &Value, now: Instant) -> Applied
                 meta.running_by_transcript = false;
             }
         }
+        "PermissionRequest" => {
+            // 权限对话框要弹了（Bash 授权、ExitPlanMode 批准…）：记下来 = 待回复。
+            // 我们不在 hook 里决定（async，返回被忽略，对话框照常弹）；客户端按钮通过
+            // POST /sessions/:id/permission 驱动 PTY 作答，终端里手动答也一样
+            let tool = body.get("tool_name").and_then(Value::as_str).unwrap_or("").to_string();
+            let input = body.get("tool_input").cloned().unwrap_or(Value::Null);
+            meta.permission = Some(json!({
+                "tool_name": tool,
+                "summary": permission_summary(&tool, &input),
+                "tool_input": input,
+                "tool_use_id": body.get("tool_use_id").cloned().unwrap_or(Value::Null),
+                "since": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            }));
+            meta.asking_hint_inst = Some(now);
+            if !meta.asking {
+                meta.asking = true;
+            }
+            out.dirty = true;
+        }
+        "PostToolUse" => {
+            // 工具跑完了：对话框肯定没了（允许了）；拒绝的路径靠 Stop / UserPromptSubmit 清
+            if meta.permission.take().is_some() {
+                out.dirty = true;
+            }
+        }
         "PreToolUse" => {
             if body.get("tool_name").and_then(Value::as_str) == Some("AskUserQuestion") {
                 meta.asking_hint_inst = Some(now);
@@ -300,6 +329,20 @@ pub fn apply(sess: &Session, event: &str, body: &Value, now: Instant) -> Applied
         _ => {}
     }
     out
+}
+
+/// 权限对话框的一行摘要：Bash 给命令，文件类给路径，ExitPlanMode 给「批准计划」，其它给工具名
+pub fn permission_summary(tool: &str, input: &Value) -> String {
+    let s = |k: &str| input.get(k).and_then(Value::as_str).unwrap_or("");
+    let cap = |t: &str| -> String { let t: String = t.chars().take(160).collect(); t.replace('\n', " ") };
+    match tool {
+        "Bash" => cap(s("command")),
+        "Edit" | "Write" | "Read" | "NotebookEdit" | "MultiEdit" => cap(s("file_path")),
+        "ExitPlanMode" => "批准计划并退出计划模式".to_string(),
+        "WebFetch" => cap(s("url")),
+        "Agent" | "Task" => cap(s("description")),
+        _ => String::new(),
+    }
 }
 
 /// 本会话用量：statusLine JSON 里与这一个会话有关的部分，压成客户端直接能画的形状。
@@ -489,6 +532,29 @@ mod tests {
             }
         }
         v
+    }
+
+    /// v1.16：PermissionRequest → 待回复 + permission 摘要；PostToolUse / UserPromptSubmit 清掉
+    #[test]
+    fn permission_request_marks_asking_until_the_tool_runs_or_a_new_prompt() {
+        let sess = Session::for_test("claude", "/p");
+        let now = Instant::now();
+        let a = apply(&sess, "PermissionRequest", &body("PermissionRequest", json!({"tool_name": "Bash", "tool_input": {"command": "rm -rf build\n&& ls"}, "tool_use_id": "tu1"})), now);
+        assert!(a.dirty);
+        {
+            let m = sess.meta.lock().unwrap();
+            assert!(m.asking);
+            let p = m.permission.as_ref().unwrap();
+            assert_eq!(p["tool_name"], "Bash");
+            assert_eq!(p["summary"], "rm -rf build && ls");
+            assert_eq!(p["tool_use_id"], "tu1");
+        }
+        apply(&sess, "PostToolUse", &body("PostToolUse", json!({"tool_name": "Bash"})), now);
+        assert!(sess.meta.lock().unwrap().permission.is_none(), "工具跑完 = 对话框没了");
+        apply(&sess, "PermissionRequest", &body("PermissionRequest", json!({"tool_name": "ExitPlanMode", "tool_input": {}})), now);
+        assert_eq!(sess.meta.lock().unwrap().permission.as_ref().unwrap()["summary"], "批准计划并退出计划模式");
+        apply(&sess, "UserPromptSubmit", &body("UserPromptSubmit", json!({})), now);
+        assert!(sess.meta.lock().unwrap().permission.is_none(), "用户又发言了 = 拒绝路径走完了");
     }
 
     #[test]

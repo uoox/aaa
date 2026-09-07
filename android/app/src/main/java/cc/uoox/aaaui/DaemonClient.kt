@@ -135,6 +135,14 @@ class DaemonClient(
     suspend fun messages(id: String, after: Long = 0, limit: Int = 200): MessagesResponse =
         json.decodeFromString(get("/sessions/$id/messages?after=$after&limit=$limit"))
 
+    /** v1.16：替用户答权限对话框（allow / deny） */
+    suspend fun permission(sessionId: String, behavior: String) {
+        post("/sessions/$sessionId/permission", buildJsonObject { put("behavior", behavior) }.toString())
+    }
+    /** v1.16：看板上勾 / 取消勾清单项 */
+    suspend fun checklist(sessionId: String, text: String, done: Boolean) {
+        post("/sessions/$sessionId/checklist", buildJsonObject { put("text", text); put("done", done) }.toString())
+    }
     suspend fun answer(sessionId: String, answers: List<AnswerItem>) {
         val body = buildJsonObject {
             put("answers", kotlinx.serialization.json.JsonArray(answers.map { a ->

@@ -45,6 +45,10 @@ pub struct Session {
     /// 读屏猜的）。其它 agent 没有这种信号，恒为 false。三态口径里的「待回复」。
     #[serde(default)]
     pub asking: bool,
+    /// v1.16：正在等的权限对话框（Bash 授权 / ExitPlanMode 批准…）；有它就是待回复，
+    /// 消息流画成「允许 / 拒绝」卡片
+    #[serde(default)]
+    pub permission: Option<PermissionPrompt>,
     /// v1.13：waiting 且后台还有任务（后台 Bash / 异步子代理 / Monitor）没回来——
     /// 主对话停在输入框，但它会自己被叫醒。行首标「后台」，排在运行之后
     #[serde(default)]
@@ -89,6 +93,17 @@ pub struct Session {
     /// daemon 让 haiku 重写；详情面板「进度」
     #[serde(default)]
     pub summary: String,
+}
+
+/// 权限对话框（会话 JSON 的 `permission`）
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct PermissionPrompt {
+    #[serde(default)]
+    pub tool_name: String,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub since: String,
 }
 
 /// 看板（GET /history/dashboard，2026-09-07 第二版：所有会话的进度，没有时间维度）

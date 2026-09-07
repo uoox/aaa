@@ -104,6 +104,14 @@ pub struct Meta {
     /// asking 又压回 false
     #[serde(skip)]
     pub asking_hint_inst: Option<Instant>,
+    /// v1.16：Claude Code 正在等的**权限对话框**（PermissionRequest hook 报来的：工具名、
+    /// 入参摘要、tool_use_id、时刻）。有它就是「待回复」——以前 daemon 不订阅这个 hook，
+    /// Bash 授权 / ExitPlanMode 批准弹在终端里，消息流一无所知，用户切到终端才发现在等
+    #[serde(skip)]
+    pub permission: Option<serde_json::Value>,
+    /// v1.16：看板上手工勾 / 取消勾的清单项（文字 → done），haiku 重写清单后按它盖回去
+    #[serde(default)]
+    pub checklist_overrides: std::collections::BTreeMap<String, bool>,
     /// v1.13：还没回来的后台任务数（transcript 里的 run_in_background / 异步子代理 /
     /// Monitor 减去回来的 task-notification）。waiting 且 >0 = 「后台」
     #[serde(skip)]
@@ -212,6 +220,8 @@ impl Session {
                 background: 0,
                 last_stop_at: None,
                 running_by_transcript: false,
+                permission: None,
+                checklist_overrides: Default::default(),
                 usage: None,
                 summary: String::new(),
             }),
@@ -242,6 +252,8 @@ impl Session {
             "agent": meta.agent,
             "state": meta.state,
             "asking": meta.asking,
+            // v1.16：正在等的权限对话框（null = 没有）；客户端画成「允许 / 拒绝」卡片
+            "permission": meta.permission,
             "preview": meta.preview,
             "rows": meta.rows,
             "cols": meta.cols,
@@ -646,6 +658,8 @@ impl SessionPool {
             background: 0,
             last_stop_at: None,
             running_by_transcript: false,
+            permission: None,
+            checklist_overrides: Default::default(),
             usage: None,
             summary: String::new(),
         };

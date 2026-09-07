@@ -29,6 +29,8 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import kotlinx.coroutines.launch
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -55,6 +57,7 @@ import androidx.navigation.NavHostController
 @Composable
 fun HistoryScreen(store: AppStore, nav: NavHostController) {
     val openSession = LocalOpenSession.current
+    val scope = rememberCoroutineScope()
     var dash by remember { mutableStateOf<Dashboard?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var query by rememberSaveable { mutableStateOf("") }
@@ -148,7 +151,15 @@ fun HistoryScreen(store: AppStore, nav: NavHostController) {
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 items(matched, key = { "card-${it.id}" }) { c ->
-                    SessionCardView(c, onOpen = { if (c.alive) openSession(c.id, "") })
+                    SessionCardView(
+                        c, onOpen = { if (c.alive) openSession(c.id, "") },
+                        onToggle = { it ->
+                            if (c.alive) scope.launch {
+                                runCatching { store.client?.checklist(c.id, it.text, !it.done); dash = store.client?.historyDashboard() }
+                                    .onFailure { e -> error = e.message }
+                            }
+                        },
+                    )
                 }
             }
         }
@@ -164,7 +175,7 @@ private fun statusColor(status: String): Color = when (status) {
 
 /** 一张卡：状态字 + 标题 + 项目 → 进度条 → 全部清单项（没勾的在前、做完的灰掉）。全展开，一眼看全。会话还在才可点开 */
 @Composable
-private fun SessionCardView(c: SessionCard, onOpen: () -> Unit) {
+private fun SessionCardView(c: SessionCard, onOpen: () -> Unit, onToggle: (ChecklistItem) -> Unit = {}) {
     val total = c.done + c.open
     val color = statusColor(c.status)
     Column(
@@ -199,7 +210,8 @@ private fun SessionCardView(c: SessionCard, onOpen: () -> Unit) {
             Text("没有进度清单", color = Tok.Faint, fontSize = 11.5.sp, modifier = Modifier.padding(top = 6.dp))
         }
         (c.items.filter { !it.done } + c.items.filter { it.done }).forEach { it ->
-            Row(Modifier.padding(top = 5.dp), verticalAlignment = Alignment.Top) {
+            // 会话还在池子里就能点着勾 / 取消勾（POST /sessions/:id/checklist）
+            Row(Modifier.fillMaxWidth().clickable(enabled = c.alive) { onToggle(it) }.padding(top = 5.dp), verticalAlignment = Alignment.Top) {
                 Text(if (it.done) "☑" else "☐", color = if (it.done) Tok.Green else Tok.Amber, fontSize = 13.sp, modifier = Modifier.width(20.dp))
                 Text(it.text, color = if (it.done) Tok.Dim else Tok.Ink, fontSize = 13.sp, lineHeight = 18.sp)
             }

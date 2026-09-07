@@ -24,7 +24,7 @@ use super::kit::{c, ca};
 use super::mini_input::MiniInput;
 use super::stream_fold::{self, StreamItem};
 use crate::markdown::{self, Block, Span};
-use crate::model::{AnswerItem, ChatMessage, QuestionItem, QuestionSpec};
+use crate::model::{AnswerItem, ChatMessage, PermissionPrompt, QuestionItem, QuestionSpec};
 use crate::net::Net;
 use crate::theme;
 
@@ -167,6 +167,10 @@ pub struct MessagesView {
     /// 窗口的排版系统：Markdown 表格按实际排版量列宽。render 开头刷新（元素树是在
     /// render 里建的，那时才有 window）
     text_sys: Option<std::sync::Arc<gpui::WindowTextSystem>>,
+    /// v1.16：正在等的权限对话框；画成「允许 / 拒绝」卡片挂在流末尾
+    permission: Option<PermissionPrompt>,
+    perm_busy: bool,
+    perm_error: Option<String>,
     /// 会话进程在跑（`running`）——与 Android 的 `live = state == "running"` 同一口径。
     /// 「进行中」的过程行按它画：`waiting` 的会话（被 Esc 打断、工具报错后停下）末尾
     /// 哪怕是 tool_result，也不该一直脉动。
@@ -207,6 +211,9 @@ impl MessagesView {
             sending: false,
             alive: true,
             text_sys: None,
+            permission: None,
+            perm_busy: false,
+            perm_error: None,
             running: false,
             project_path: String::new(),
             uploading: false,
@@ -286,11 +293,17 @@ impl MessagesView {
         .detach();
     }
 
-    pub fn set_session(&mut self, alive: bool, running: bool, created_at: Option<&str>, cx: &mut Context<Self>) {
+    pub fn set_session(&mut self, alive: bool, running: bool, permission: Option<PermissionPrompt>, created_at: Option<&str>, cx: &mut Context<Self>) {
         let since = created_at.filter(|s| !s.is_empty()).map(str::to_string);
-        if self.alive == alive && self.running == running && self.since == since {
+        if self.alive == alive && self.running == running && self.since == since && self.permission == permission {
             return;
         }
+        if self.permission != permission {
+            // 对话框换了 / 没了：上一次的忙碌与错误都作废
+            self.perm_busy = false;
+            self.perm_error = None;
+        }
+        self.permission = permission;
         self.alive = alive;
         self.running = running;
         self.since = since;
@@ -537,6 +550,87 @@ impl MessagesView {
         }
         self.errors.remove(&seq);
         cx.notify();
+    }
+
+    /// 权限对话框：允许 / 拒绝 → daemon 驱动 PTY 作答；失败（对话框还在）把话留在卡片上
+    fn decide_permission(&mut self, behavior: &'static str, cx: &mut Context<Self>) {
+        if self.perm_busy {
+            return;
+        }
+        self.perm_busy = true;
+        self.perm_error = None;
+        let fut = self.net.session_permission(&self.sid, behavior);
+        cx.spawn(async move |this, cx| {
+            let res = fut.await;
+            let _ = this.update(cx, |v: &mut MessagesView, cx| {
+                v.perm_busy = false;
+                match res {
+                    Ok(_) => v.fetch(cx),
+                    Err(e) => v.perm_error = Some(describe_submit_error(&e)),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn permission_card(&self, p: &PermissionPrompt, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let btn = |id: &'static str, label: &'static str, color: u32, cx: &mut Context<Self>, behavior: &'static str| {
+            div()
+                .id(id)
+                .px(px(12.))
+                .py(px(5.))
+                .rounded(px(6.))
+                .text_size(px(12.))
+                .text_color(c(theme::ink()))
+                .bg(ca(color, 0.18))
+                .border_1()
+                .border_color(ca(color, 0.6))
+                .cursor_pointer()
+                .hover(|st| st.bg(ca(color, 0.3)))
+                .on_click(cx.listener(move |this, _, _, cx| this.decide_permission(behavior, cx)))
+                .child(label)
+        };
+        div()
+            .w_full()
+            .mt(px(10.))
+            .p(px(12.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(ca(theme::amber(), 0.7))
+            .bg(ca(theme::amber(), 0.08))
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(
+                div()
+                    .text_size(px(12.5))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(c(theme::amber()))
+                    .child(SharedString::from(format!("⚠ Claude 请求授权 · {}", if p.tool_name.is_empty() { "工具" } else { p.tool_name.as_str() }))),
+            )
+            .when(!p.summary.is_empty(), |el| {
+                el.child(
+                    div()
+                        .font_family("Menlo")
+                        .text_size(px(11.5))
+                        .text_color(c(theme::ink()))
+                        .whitespace_normal()
+                        .child(SharedString::from(p.summary.clone())),
+                )
+            })
+            .child(
+                div()
+                    .flex()
+                    .gap(px(8.))
+                    .items_center()
+                    .child(btn("perm-allow", "允许", theme::green(), cx, "allow"))
+                    .child(btn("perm-deny", "拒绝", theme::red(), cx, "deny"))
+                    .when(self.perm_busy, |el| el.child(div().text_size(px(11.)).text_color(c(theme::dim())).child("…")))
+                    .child(div().text_size(px(10.5)).text_color(c(theme::faint())).child("在终端里作答也一样")),
+            )
+            .when_some(self.perm_error.clone(), |el, e| el.child(div().text_size(px(11.)).text_color(c(theme::red())).child(SharedString::from(e))))
+            .into_any_element()
     }
 
     fn submit(&mut self, seq: u64, cx: &mut Context<Self>) {
@@ -1518,7 +1612,7 @@ impl Render for MessagesView {
             let live = stream_fold::tail_is_live(&msgs, self.running);
             let turns = stream_fold::fold_turns(&msgs, live);
             let items = stream_fold::flatten(&turns, &self.fold_open);
-            let rows: Vec<gpui::AnyElement> = items
+            let mut rows: Vec<gpui::AnyElement> = items
                 .iter()
                 .enumerate()
                 .map(|(i, item)| {
@@ -1538,6 +1632,10 @@ impl Render for MessagesView {
                     div().w_full().mt(px(item_gap(i, item))).child(el).into_any_element()
                 })
                 .collect();
+            // v1.16：权限对话框挂在流末尾——以前它只弹在终端里，消息流一无所知
+            if let Some(p) = self.permission.clone().filter(|_| self.alive) {
+                rows.push(self.permission_card(&p, cx));
+            }
             let list = div()
                 .id("msgs-scroll")
                 .size_full()

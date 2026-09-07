@@ -24,6 +24,8 @@ import java.net.URLDecoder
     val asking: Boolean = false,
     /** v1.13：waiting 且后台还有任务（后台 Bash / 异步子代理 / Monitor）没回来，会自己被叫醒 → 「后台」 */
     val background: Boolean = false,
+    /** v1.16：正在等的权限对话框（Bash 授权 / ExitPlanMode 批准…）；消息流画成「允许 / 拒绝」卡片 */
+    val permission: PermissionPrompt? = null,
     val preview: String = "",
     val rows: Int = 24,
     val cols: Int = 80,
@@ -123,6 +125,7 @@ fun parseChecklist(md: String): List<ChecklistItem> = md.lines().mapNotNull { ra
     /** v1.15：归档（daemon 侧存）——列表 / 看板默认藏起来，一个开关翻出来 */
     val archived: Boolean = false,
 )
+@Serializable data class PermissionPrompt(val tool_name: String = "", val summary: String = "", val since: String = "")
 @Serializable data class PortInfo(val port: Int, val cmd: String = "")
 @Serializable data class ScreenText(val text: String = "", val alternate_screen: Boolean = false)
 @Serializable data class PurgedAgent(val agent_label: String, val count: Int)

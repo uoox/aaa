@@ -21,6 +21,7 @@ fn build_app(root: &Path, home: &Path) -> aaa_daemon::api::SharedApp {
         namer: true, // naming enabled, as in production
         remote_control_name: true,
         auto_trust: true,
+        auto_archive_days: 14,
     };
     let paths = aaa_daemon::paths::Paths::new(home);
     let hub = aaa_daemon::events::EventHub::new();
@@ -47,6 +48,7 @@ fn build_app(root: &Path, home: &Path) -> aaa_daemon::api::SharedApp {
         plan_usage: std::sync::Mutex::new(None),
         root_state: std::sync::atomic::AtomicU8::new(aaa_daemon::rootcheck::RootState::Ok.as_u8()),
         restarting: std::sync::atomic::AtomicBool::new(false),
+        restart_when_idle: std::sync::atomic::AtomicBool::new(false),
         exe_mtime_at_start: None,
     })
 }

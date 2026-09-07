@@ -58,6 +58,8 @@ pub struct App {
     /// `PUT /config` 已受理、self-exec 在倒计时：期间拒绝新建会话和第二个
     /// 配置写——409 检查到 exec 之间开出来的 PTY 会被无声杀掉。
     pub restarting: std::sync::atomic::AtomicBool,
+    /// v1.16：约好了「没有会话在跑时重启」（POST /restart {when_idle}），tick 里兑现
+    pub restart_when_idle: std::sync::atomic::AtomicBool,
     /// 启动时本二进制的 mtime。/health 拿它和磁盘上现在的比：不一样 = 有新构建
     /// 还没跑起来，客户端据此提示「需重启」。
     pub exe_mtime_at_start: Option<std::time::SystemTime>,
@@ -247,6 +249,8 @@ async fn health(State(app): State<SharedApp>) -> Json<Value> {
         "uptime_s": app.started.elapsed().as_secs(),
         // 二进制被重新构建过、进程还是旧的：设置页据此亮「需重启」
         "update_pending": app.exe_mtime_at_start.is_some() && exe_mtime() != app.exe_mtime_at_start,
+        // v1.16：约好了空闲时重启，还在等会话都停下
+        "restart_scheduled": app.restart_when_idle.load(std::sync::atomic::Ordering::SeqCst),
         "restarting": app.restarting.load(std::sync::atomic::Ordering::SeqCst),
     }))
 }
@@ -255,6 +259,10 @@ async fn health(State(app): State<SharedApp>) -> Json<Value> {
 struct RestartBody {
     #[serde(default)]
     force: bool,
+    /// v1.16：不是现在——等到没有会话在跑（都 waiting / exited）再重启；期间 /health
+    /// 报 restart_scheduled。有活会话也不需要 force：等到它们都停在输入框再收
+    #[serde(default)]
+    when_idle: bool,
 }
 
 /// 有存活会话时能不能重启：不 force 一律拒绝并把它们的名字报出来，
@@ -268,6 +276,54 @@ pub fn restart_blockers(alive: &[String], force: bool) -> Result<(), String> {
             alive.len(),
             alive.join("、")
         ))
+    }
+}
+
+/// 「空闲时重启」兑现：没有会话在跑时由 tick 调用，等价于 /restart {force}
+pub async fn restart_now(app: SharedApp) -> ApiResult<Value> {
+    if app
+        .restarting
+        .compare_exchange(false, true, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst)
+        .is_err()
+    {
+        return Err(ApiError::conflict("daemon 已在重启"));
+    }
+    app.restart_when_idle.store(false, std::sync::atomic::Ordering::SeqCst);
+    let alive: Vec<Arc<crate::pool::Session>> = app.pool.list().into_iter().filter(|s| s.state() != SState::Exited).collect();
+    let titles: Vec<String> = alive.iter().map(|s| s.meta.lock().unwrap().title.clone()).collect();
+    eprintln!("restart: idle window reached, restarting ({} session(s) to resume)", alive.len());
+    terminate_for_restart(&app, &alive, |p| p.to_string()).await;
+    crate::daemon::restart_self_after_ms(600);
+    Ok(json!({"ok": true, "restarting": true, "killed": titles, "note": "daemon 将在 1 秒内重启，客户端会自动重连"}))
+}
+
+/// v1.16 自动归档扫描（每小时）：暂停超过 N 天、清单全勾完的项目自动进归档
+pub fn auto_archive_sweep(app: &SharedApp) {
+    let days = app.cfg.auto_archive_days;
+    let entries = app.history.lock().unwrap().list(crate::history::KEEP);
+    let live: std::collections::HashSet<String> = app
+        .pool
+        .all()
+        .iter()
+        .filter(|s| s.state() != SState::Exited)
+        .map(|s| s.meta.lock().unwrap().project_path.clone())
+        .collect();
+    let wanted = crate::autoarchive::candidates(&entries, &live, chrono::Utc::now(), days);
+    let mut changed = false;
+    {
+        let mut a = app.archived.lock().unwrap();
+        for p in &wanted {
+            if !std::path::Path::new(p).is_dir() {
+                continue;
+            }
+            if a.set_archived(&stores::realpath(p), true) {
+                eprintln!("auto-archive: {p}（暂停超过 {days} 天且清单全勾完）");
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        app.hub.projects_changed();
     }
 }
 
@@ -314,7 +370,16 @@ async fn restart(
     State(app): State<SharedApp>,
     body: Option<Json<RestartBody>>,
 ) -> ApiResult<Json<Value>> {
-    let force = body.map(|b| b.force).unwrap_or(false);
+    let (force, when_idle) = body.map(|b| (b.force, b.when_idle)).unwrap_or((false, false));
+    if when_idle {
+        let running = app.pool.all().iter().filter(|s| s.state() == SState::Running).count();
+        if running > 0 {
+            app.restart_when_idle.store(true, std::sync::atomic::Ordering::SeqCst);
+            return Ok(Json(json!({"ok": true, "scheduled": true, "running": running, "note": "等这些会话都停在输入框再重启（/health 的 restart_scheduled）"})));
+        }
+        // 此刻就没有在跑的：直接走 force 路径（waiting 的会话收掉、起来后自动 resume）
+        return restart_now(app).await.map(Json);
+    }
     if app
         .restarting
         .compare_exchange(
@@ -1122,6 +1187,81 @@ async fn session_delete(
 }
 
 #[derive(Deserialize)]
+struct PermissionBody {
+    /// allow | deny
+    behavior: String,
+}
+
+/// v1.16：替用户答权限对话框。allow = 按对话框的第 1 项（Yes），deny = Esc（No，回到输入框
+/// 让用户说要怎么改）。答完等对话框消失（PostToolUse / Stop 会清掉 meta.permission）；
+/// 2 秒还没消失就报冲突，让用户去终端里看
+async fn session_permission(
+    State(app): State<SharedApp>,
+    UrlPath(id): UrlPath<String>,
+    Json(body): Json<PermissionBody>,
+) -> ApiResult<Json<Value>> {
+    let sess = get_session(&app, &id)?;
+    if sess.state() == SState::Exited {
+        return Err(ApiError::conflict("session already exited"));
+    }
+    if sess.meta.lock().unwrap().permission.is_none() {
+        return Err(ApiError::conflict("没有权限对话框在等（可能已经在终端里答过了）"));
+    }
+    let steps = crate::answer::permission_steps(&body.behavior).map_err(ApiError::bad_request)?;
+    for (bytes, pause) in steps {
+        sess.write_input(&bytes).map_err(|e| ApiError::internal(e.to_string()))?;
+        tokio::time::sleep(std::time::Duration::from_millis(pause)).await;
+    }
+    for _ in 0..20 {
+        if sess.meta.lock().unwrap().permission.is_none() {
+            return Ok(Json(json!({"ok": true})));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    Err(ApiError::conflict("对话框还在：去终端里看一眼"))
+}
+
+#[derive(Deserialize)]
+struct ChecklistBody {
+    /// 清单项的文字（看板卡片里那一行；按文字匹配，客户端把没勾的排前面也不怕）
+    text: String,
+    done: bool,
+}
+
+/// v1.16：看板上直接勾 / 取消勾。改 summary 里那一行，并记进 checklist_overrides：
+/// haiku 下一轮重写清单时按它盖回去，手工勾的不会被重写冲掉
+async fn session_checklist(
+    State(app): State<SharedApp>,
+    UrlPath(id): UrlPath<String>,
+    Json(body): Json<ChecklistBody>,
+) -> ApiResult<Json<Value>> {
+    let sess = get_session(&app, &id)?;
+    let text = body.text.trim().to_string();
+    if text.is_empty() {
+        return Err(ApiError::bad_request("text 不能为空"));
+    }
+    {
+        let mut meta = sess.meta.lock().unwrap();
+        let next = crate::summary::set_item(&meta.summary, &text, body.done);
+        if next == meta.summary && !meta.summary.contains(&text) {
+            return Err(ApiError::not_found("清单里没有这一项"));
+        }
+        meta.summary = next;
+        meta.checklist_overrides.insert(text.clone(), body.done);
+    }
+    sess.mark_dirty();
+    if sess.state() == SState::Exited {
+        sess.persist(&app.pool.ctx);
+    }
+    {
+        let mut h = app.history.lock().unwrap();
+        h.upsert(crate::history::entry_from(&sess));
+        h.save_if_dirty();
+    }
+    Ok(Json(json!({"ok": true, "text": text, "done": body.done})))
+}
+
+#[derive(Deserialize)]
 struct RenameBody {
     title: String,
 }
@@ -1658,6 +1798,8 @@ pub fn router(app: SharedApp) -> Router {
         .route("/api/v1/projects/delete", post(projects_delete))
         .route("/api/v1/projects/pin", post(projects_pin))
         .route("/api/v1/projects/archive", post(projects_archive))
+        .route("/api/v1/sessions/{id}/permission", post(session_permission))
+        .route("/api/v1/sessions/{id}/checklist", post(session_checklist))
         .route("/api/v1/history", get(history_list))
         .route("/api/v1/history/dashboard", get(history_dashboard))
         .route("/api/v1/sessions", get(sessions_list).post(sessions_create))

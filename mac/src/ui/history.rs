@@ -32,6 +32,12 @@ impl RootView {
         cx.notify();
     }
 
+    /// 看板上点清单项 = 勾 / 取消勾：POST /sessions/:id/checklist，然后重拉看板
+    pub(super) fn toggle_checklist(&mut self, id: String, text: String, done: bool, cx: &mut Context<Self>) {
+        let fut = self.net.session_checklist(&id, &text, done);
+        self.spawn_fetch(fut, |r, _: serde_json::Value, cx| r.fetch_history(cx), true, cx);
+    }
+
     pub(super) fn fetch_history(&mut self, cx: &mut Context<Self>) {
         let fut = self.net.history_dashboard();
         self.spawn_fetch(
@@ -168,13 +174,23 @@ impl RootView {
         } else {
             el = el.child(div().text_size(px(11.)).text_color(c(theme::faint())).child("没有进度清单"));
         }
-        // 全部清单项：没勾的在前，做完的灰掉
-        for it in card.items.iter().filter(|i| !i.done).chain(card.items.iter().filter(|i| i.done)) {
+        // 全部清单项：没勾的在前，做完的灰掉；会话还在池子里就能点着勾 / 取消勾
+        for (i, it) in card.items.iter().filter(|i| !i.done).chain(card.items.iter().filter(|i| i.done)).enumerate() {
+            let (sid, text, done) = (card.id.clone(), it.text.clone(), it.done);
             el = el.child(
                 div()
+                    .id(SharedString::from(format!("card-item:{}:{i}", card.id)))
                     .flex()
                     .gap(px(6.))
                     .items_start()
+                    .when(alive, |row| {
+                        row.cursor_pointer()
+                            .hover(|st| st.bg(ca(theme::accent(), 0.08)))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.toggle_checklist(sid.clone(), text.clone(), !done, cx);
+                            }))
+                    })
                     .child(div().flex_none().text_size(px(11.5)).text_color(c(if it.done { theme::green() } else { theme::amber() })).child(if it.done { "☑" } else { "☐" }))
                     .child(div().text_size(px(12.)).text_color(c(if it.done { theme::dim() } else { theme::ink() })).whitespace_normal().child(SharedString::from(it.text.clone()))),
             );

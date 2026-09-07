@@ -73,6 +73,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
@@ -375,6 +376,8 @@ fun SessionScreen(
                     sessionCreatedAt = s?.created_at,
                     pending = pending.value,
                     onDeletePending = { deletePending(it) },
+                    permission = s?.permission,
+                    onPermission = { b -> store.client?.permission(sessionId, b) },
                     onAnswer = { _, answers ->
                         try {
                             store.client?.answer(sessionId, answers)
@@ -589,6 +592,9 @@ fun MessagesView(
     /** 待发送（项目收件箱），画在末尾；✕ 撤回 */
     pending: List<InboxItem> = emptyList(),
     onDeletePending: (InboxItem) -> Unit = {},
+    /** v1.16：正在等的权限对话框；浮在列表底部，允许 / 拒绝直接答 */
+    permission: PermissionPrompt? = null,
+    onPermission: suspend (behavior: String) -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
@@ -636,6 +642,10 @@ fun MessagesView(
         return
     }
     Box(Modifier.fillMaxSize()) {
+        // v1.16：权限对话框（Bash 授权 / ExitPlanMode 批准…）浮在底部——以前它只弹在终端里，消息流一无所知
+        if (permission != null && sessionAlive) {
+            PermissionCard(permission, onPermission, Modifier.align(Alignment.BottomCenter).zIndex(2f))
+        }
         LazyColumn(state = listState, modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp)) {
             itemsIndexed(items, key = { _, it -> it.key }, contentType = { _, it -> it::class }) { i, item ->
                 // 轮与轮之间 14dp（新一轮从用户消息开始），同轮内 User→Fold→Reply 8dp，展开的步骤间 3dp
@@ -1265,4 +1275,36 @@ fun readUri(context: Context, uri: Uri): Pair<String, ByteArray> {
         ?: throw IllegalStateException("无法读取文件")
     require(bytes.size <= 50 * 1024 * 1024) { "文件超过 50MB 限制" }
     return name to bytes
+}
+
+/** 权限对话框卡片：工具名 + 命令摘要 + 允许 / 拒绝；失败（对话框还在）把话留在卡片上 */
+@Composable
+private fun PermissionCard(p: PermissionPrompt, onDecide: suspend (String) -> Unit, modifier: Modifier = Modifier) {
+    val scope = rememberCoroutineScope()
+    var busy by remember(p) { mutableStateOf(false) }
+    var error by remember(p) { mutableStateOf<String?>(null) }
+    fun decide(b: String) {
+        if (busy) return
+        busy = true; error = null
+        scope.launch {
+            try { onDecide(b) } catch (e: Exception) { error = e.message ?: "失败" } finally { busy = false }
+        }
+    }
+    Column(
+        modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp)
+            .background(Tok.Amber.copy(alpha = 0.10f), RoundedCornerShape(10.dp))
+            .border(1.dp, Tok.Amber.copy(alpha = 0.7f), RoundedCornerShape(10.dp))
+            .padding(12.dp),
+    ) {
+        Text("⚠ Claude 请求授权 · " + p.tool_name.ifBlank { "工具" }, color = Tok.Amber, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+        if (p.summary.isNotBlank()) Text(p.summary, color = Tok.Ink, fontSize = 12.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.padding(top = 4.dp), maxLines = 4, overflow = TextOverflow.Ellipsis)
+        Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("允许", color = Tok.Ink, fontSize = 13.sp, modifier = Modifier.background(Tok.Green.copy(alpha = 0.2f), RoundedCornerShape(6.dp)).border(1.dp, Tok.Green.copy(alpha = 0.6f), RoundedCornerShape(6.dp)).clickable(enabled = !busy) { decide("allow") }.padding(horizontal = 14.dp, vertical = 6.dp))
+            Spacer(Modifier.width(8.dp))
+            Text("拒绝", color = Tok.Ink, fontSize = 13.sp, modifier = Modifier.background(Tok.Red.copy(alpha = 0.2f), RoundedCornerShape(6.dp)).border(1.dp, Tok.Red.copy(alpha = 0.6f), RoundedCornerShape(6.dp)).clickable(enabled = !busy) { decide("deny") }.padding(horizontal = 14.dp, vertical = 6.dp))
+            Spacer(Modifier.width(10.dp))
+            Text(if (busy) "…" else "在终端里作答也一样", color = Tok.Faint, fontSize = 11.sp)
+        }
+        error?.let { Text(it, color = Tok.Red, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp)) }
+    }
 }
