@@ -237,8 +237,14 @@ fun NewProjectField(
  * 长按出项目操作单。顶部输入框既过滤列表也新建项目（与 mac 侧栏一致）；设置入口在顶栏。
  */
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
+/**
+ * 项目面板 = 以前的首页整块（2026-09-07 用户拍板：☰ 抽屉要有首页所有按钮和功能，首页就没
+ * 必要单独存在了）。会话页的 ☰ 抽屉和「一个会话都没打开」时的落地页画的都是它：顶栏
+ * （连接状态 / SSD / 终端 / 看板 / 设置）、套餐用量、新建项目框、项目列表（点开、长按操作）、
+ * 下拉刷新。`currentPath` 高亮当前会话的项目；`onBeforeNavigate` 在抽屉里就是「先关抽屉」。
+ */
 @Composable
-fun ProjectsHome(store: AppStore, nav: NavHostController) {
+fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? = null, onBeforeNavigate: () -> Unit = {}) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val openSession = LocalOpenSession.current
@@ -280,7 +286,7 @@ fun ProjectsHome(store: AppStore, nav: NavHostController) {
                 val sess = createProjectSession(store, name)
                 query = ""
                 focusManager.clearFocus()
-                openSession(sess.id, "")
+                onBeforeNavigate(); openSession(sess.id, "")
             } catch (e: Exception) {
                 toast(createErrorText(e))
             } finally { creating = false }
@@ -290,7 +296,7 @@ fun ProjectsHome(store: AppStore, nav: NavHostController) {
     fun open(row: ProjectRow) {
         val p = row.project
         val primary = row.primary
-        if (primary != null && primary.state != "exited") { openSession(primary.id, ""); return }
+        if (primary != null && primary.state != "exited") { onBeforeNavigate(); openSession(primary.id, ""); return }
         // 注册表里登记了什么就跑什么（旧项目可能还是别的 agent，daemon 那头照样认）；
         // 没登记的一律 claude——这个 app 只跑 Claude Code，没有别的可选
         val agent = p.agent ?: primary?.agent ?: DEFAULT_AGENT
@@ -303,7 +309,7 @@ fun ProjectsHome(store: AppStore, nav: NavHostController) {
                 // 模板，天然开新）。exited 会话被 daemon 重启清掉后列表里没有它，但
                 // agent 存储里的对话还在，按 primary != null 判会把续聊变成开新对话。
                 val sess = api.createSession(p.path, agent, resume = true)
-                openSession(sess.id, "")
+                onBeforeNavigate(); openSession(sess.id, "")
             } catch (e: Exception) {
                 toast("启动失败：${e.message}")
             } finally { busy = busy - p.path }
@@ -332,16 +338,16 @@ fun ProjectsHome(store: AppStore, nav: NavHostController) {
                 Spacer(Modifier.width(4.dp))
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = { nav.openTerminal() }) {
+                IconButton(onClick = { onBeforeNavigate(); nav.openTerminal() }) {
                     Text(">_", color = Tok.Dim, fontSize = 16.sp, fontFamily = FontFamily.Monospace)
                 }
                 val terminalCount = terminalSessions(sessions).size
                 if (terminalCount > 0) Text(terminalCount.toString(), color = Tok.Accent, fontSize = 10.sp)
             }
-            IconButton(onClick = { nav.navigate("history") }) {
+            IconButton(onClick = { onBeforeNavigate(); nav.navigate("history") }) {
                 Text("▦", color = Tok.Dim, fontSize = 17.sp)
             }
-            IconButton(onClick = { nav.navigate("settings") }) {
+            IconButton(onClick = { onBeforeNavigate(); nav.navigate("settings") }) {
                 Text("⚙", color = Tok.Dim, fontSize = 20.sp)
             }
         }
@@ -382,6 +388,7 @@ fun ProjectsHome(store: AppStore, nav: NavHostController) {
                         row,
                         modifier = Modifier.animateItem(),
                         busy = row.project.path in busy,
+                        current = row.project.path == currentPath,
                         onClick = { open(row) },
                         onLongClick = { actionsFor = row.project },
                     )
@@ -399,96 +406,16 @@ fun ProjectsHome(store: AppStore, nav: NavHostController) {
     }
 
     actionsFor?.let { p ->
-        ProjectActionsSheet(store, nav, p, onDismiss = { actionsFor = null }, onPurged = { purgeReport = it })
+        ProjectActionsSheet(store, nav, p, onDismiss = { actionsFor = null }, onPurged = { purgeReport = it }, onBeforeNavigate = onBeforeNavigate)
     }
     purgeReport?.let { results -> PurgeReportDialog(results) { purgeReport = null } }
     if (planDialog) plan?.let { PlanUsageDialog(it) { planDialog = false } }
 }
 
-/**
- * 会话页 ☰ 抽屉里的项目列表：与首页同一份行（同一排序、同一状态字），点一行切过去——
- * 会话活着直接进，退出了 / 没有就 `POST /sessions` resume 再进。当前项目高亮。
- */
+/** 会话页 ☰ 抽屉：就是 [ProjectPanel]（首页整块），当前项目高亮；任何跳转前先关抽屉。 */
 @Composable
-fun ProjectSwitcher(store: AppStore, currentPath: String?, onHome: () -> Unit, onOpened: () -> Unit) {
-    val scope = rememberCoroutineScope()
-    val context = LocalContext.current
-    val openSession = LocalOpenSession.current
-    val projects by store.projects.collectAsState()
-    val sessions by store.sessions.collectAsState()
-    var busy by remember { mutableStateOf<String?>(null) }
-    val rows = remember(projects, sessions) { projectRows(projects, sessions) }
-    LaunchedEffect(Unit) { store.refreshProjects() }
-
-    fun open(row: ProjectRow) {
-        val primary = row.primary
-        if (primary != null && primary.state != "exited") { onOpened(); openSession(primary.id, ""); return }
-        if (busy != null) return
-        busy = row.project.path
-        scope.launch {
-            try {
-                val api = store.client ?: throw IllegalStateException("未连接 daemon")
-                val sess = api.createSession(row.project.path, row.project.agent ?: DEFAULT_AGENT, resume = true)
-                onOpened(); openSession(sess.id, "")
-            } catch (e: Exception) {
-                Toast.makeText(context, "启动失败：${e.message}", Toast.LENGTH_LONG).show()
-            } finally { busy = null }
-        }
-    }
-
-    // 抽屉里也能直接新建项目：建完关抽屉、进新会话
-    var newName by remember { mutableStateOf("") }
-    var creating by remember { mutableStateOf(false) }
-    fun create() {
-        if (creating) return
-        creating = true
-        val name = newName.trim().ifBlank { null }
-        scope.launch {
-            try {
-                val sess = createProjectSession(store, name)
-                newName = ""
-                onOpened(); openSession(sess.id, "")
-            } catch (e: Exception) {
-                Toast.makeText(context, createErrorText(e), Toast.LENGTH_LONG).show()
-            } finally { creating = false }
-        }
-    }
-
-    Column(Modifier.fillMaxSize().navigationBarsPadding()) {
-        Row(
-            Modifier.fillMaxWidth().padding(start = 18.dp, end = 8.dp, top = 14.dp, bottom = 2.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text("项目", color = Tok.Ink, fontSize = 16.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-            TextButton(onClick = onHome) { Text("首页", color = Tok.Accent, fontSize = 13.sp) }
-        }
-        NewProjectField(newName, { newName = it }, creating, onCreate = { create() }, modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp))
-        LazyColumn(Modifier.weight(1f).fillMaxWidth()) {
-            items(rows, key = { it.project.path }) { row ->
-                val current = row.project.path == currentPath
-                Row(
-                    Modifier.fillMaxWidth()
-                        .background(if (current) Tok.Raised else Color.Transparent)
-                        .clickable { open(row) }
-                        .padding(horizontal = 18.dp, vertical = 11.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Box(Modifier.width(48.dp), contentAlignment = Alignment.Center) {
-                        if (busy == row.project.path) CircularProgressIndicator(Modifier.width(12.dp).height(12.dp), strokeWidth = 1.5.dp, color = Tok.Accent)
-                        else StateTag(row.state)
-                    }
-                    Spacer(Modifier.width(10.dp))
-                    if (row.project.pinned) Text("📌", fontSize = 11.sp, modifier = Modifier.padding(end = 4.dp))
-                    Text(
-                        row.title, color = if (row.alive || current) Tok.Ink else Tok.Dim, fontSize = 14.sp,
-                        fontWeight = if (current) FontWeight.Bold else FontWeight.Medium,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
-                    )
-                }
-            }
-            if (rows.isEmpty()) item { Text("暂无项目", color = Tok.Faint, modifier = Modifier.padding(18.dp)) }
-        }
-    }
+fun ProjectSwitcher(store: AppStore, nav: NavHostController, currentPath: String?, onOpened: () -> Unit) {
+    ProjectPanel(store, nav, currentPath = currentPath, onBeforeNavigate = onOpened)
 }
 
 /** 每个窗口一行：名称 + 百分比（按级别着色）+ 重置时间 */
@@ -529,10 +456,11 @@ fun PlanUsageDialog(plan: PlanUsage, onDismiss: () -> Unit) {
 /** 一行到底：状态字 + 标题 + 更新时间。不再有第二行——目录大小等细节在长按单里。 */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ProjectRowItem(row: ProjectRow, busy: Boolean, onClick: () -> Unit, onLongClick: () -> Unit, modifier: Modifier = Modifier) {
+private fun ProjectRowItem(row: ProjectRow, busy: Boolean, current: Boolean = false, onClick: () -> Unit, onLongClick: () -> Unit, modifier: Modifier = Modifier) {
     Column(modifier) {
         Row(
             Modifier.fillMaxWidth()
+                .background(if (current) Tok.Raised else Color.Transparent)
                 .combinedClickable(onClick = onClick, onLongClick = onLongClick)
                 .padding(horizontal = 16.dp, vertical = 11.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -592,6 +520,7 @@ fun ProjectActionsSheet(
     p: Project,
     onDismiss: () -> Unit,
     onPurged: (List<ProjectDeleteResult>) -> Unit,
+    onBeforeNavigate: () -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -636,13 +565,13 @@ fun ProjectActionsSheet(
                 scope.launch {
                     try {
                         val sess = store.client?.createSession(p.path, agent, resume = true) ?: return@launch
-                        onDismiss(); openSession(sess.id, "")
+                        onDismiss(); onBeforeNavigate(); openSession(sess.id, "")
                     } catch (e: Exception) { toast("失败：${e.message}") }
                 }
             }
             if (primary != null && primary.state == "exited") {
                 // 点行 = resume 新会话；上一条已退出的会话仍留着 transcript 回放入口
-                SheetItem("↺", "上次会话回放", "消息流 · 终端回放") { onDismiss(); openSession(primary.id, "") }
+                SheetItem("↺", "上次会话回放", "消息流 · 终端回放") { onDismiss(); onBeforeNavigate(); openSession(primary.id, "") }
             }
             SheetItem("📌", if (p.pinned) "取消置顶" else "置顶", "列表最前") {
                 scope.launch {
@@ -655,7 +584,7 @@ fun ProjectActionsSheet(
                 scope.launch {
                     try {
                         val sess = store.client?.createSession(p.path, "shell", resume = false, fresh = true) ?: return@launch
-                        onDismiss(); nav.openTerminal(sess.id)
+                        onDismiss(); onBeforeNavigate(); nav.openTerminal(sess.id)
                     } catch (e: Exception) { toast("失败：${e.message}") }
                 }
             }

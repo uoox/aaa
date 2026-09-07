@@ -65,6 +65,9 @@ import org.commonmark.node.StrongEmphasis
 import org.commonmark.node.Text as CommonText
 import org.commonmark.node.ThematicBreak
 import org.commonmark.parser.Parser
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.rememberTextMeasurer
 
 data class MdSpan(val text: String, val bold: Boolean = false, val italic: Boolean = false, val code: Boolean = false, val strike: Boolean = false, val link: String? = null)
 
@@ -203,7 +206,7 @@ private fun MarkdownBlock(block: MdBlock, size: TextUnit, color: Color, mono: Fo
             Column(Modifier.padding(start = 10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) { block.blocks.forEach { MarkdownBlock(it, size, Tok.Dim, mono, onLink) } }
         }
         MdBlock.Rule -> Box(Modifier.fillMaxWidth().padding(vertical = 4.dp).height(1.dp).background(Tok.Edge2))
-        is MdBlock.Table -> MarkdownTable(block, size, mono)
+        is MdBlock.Table -> MarkdownTable(block, size, mono, onLink)
     }
 }
 
@@ -232,25 +235,45 @@ private fun styled(spans: List<MdSpan>, mono: FontFamily, onLink: (String) -> Un
     }
 }
 
-/** 表格画成等宽文本块：列宽取最宽单元格，表头下一条横线；横向可滚。 */
+/**
+ * 表格：真正的网格，列宽 = 该列最宽单元格**按实际排版测出来的像素**（+ 内边距）。
+ * 以前是拼成等宽文本靠空格对齐——中文落到备用字体时并不是等宽字体的两倍宽，列就漂了
+ * （2026-09-07 用户反馈「表格不太整齐」）。单元格里的粗体 / 行内代码 / 链接照常渲染；
+ * 表头加粗、下加一条线；整体比消息宽时横向滚动。
+ */
 @Composable
-private fun MarkdownTable(table: MdBlock.Table, size: TextUnit, mono: FontFamily) {
+private fun MarkdownTable(table: MdBlock.Table, size: TextUnit, mono: FontFamily, onLink: (String) -> Unit) {
+    val measurer = rememberTextMeasurer()
+    val density = LocalDensity.current
+    val cellSize = size.plus(-1.5f)
+    val style = TextStyle(fontSize = cellSize, fontFamily = mono)
     val all = listOf(table.header) + table.rows
-    val widths = (0 until (all.maxOfOrNull { it.size } ?: 0)).map { c -> all.maxOfOrNull { it.getOrNull(c)?.let { cell -> cellWidth(cell) } ?: 0 } ?: 0 }
-    fun render(row: List<List<MdSpan>>) = widths.indices.joinToString(" | ") { i ->
-        val cell = row.getOrNull(i) ?: emptyList()
-        cellText(cell) + " ".repeat((widths[i] - cellWidth(cell)).coerceAtLeast(0))
+    val cols = all.maxOfOrNull { it.size } ?: 0
+    if (cols == 0) return
+    val pad = 8.dp
+    val widths = remember(table, size) {
+        (0 until cols).map { c ->
+            val maxPx = all.maxOf { row -> row.getOrNull(c)?.let { measurer.measure(styled(it, mono, onLink), style).size.width } ?: 0 }
+            with(density) { maxPx.toDp() } + pad * 2
+        }
     }
-    val output = buildString {
-        append(render(table.header)); append('\n')
-        append(widths.joinToString("─┼─") { "─".repeat(it) })
-        table.rows.forEach { append('\n'); append(render(it)) }
+    @Composable
+    fun line(row: List<List<MdSpan>>, head: Boolean, zebra: Boolean) {
+        Row(Modifier.background(if (zebra) Tok.Edge.copy(alpha = 0.25f) else Color.Transparent)) {
+            widths.forEachIndexed { i, w ->
+                Box(Modifier.width(w).padding(horizontal = pad, vertical = 4.dp)) {
+                    Text(
+                        styled(row.getOrNull(i).orEmpty(), mono, onLink), color = Tok.Ink, fontFamily = mono,
+                        fontSize = cellSize, lineHeight = cellSize.times(1.4f), softWrap = false,
+                        fontWeight = if (head) FontWeight.Bold else null,
+                    )
+                }
+            }
+        }
     }
-    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).background(Tok.Inset, RoundedCornerShape(8.dp)).padding(horizontal = 10.dp, vertical = 8.dp)) {
-        Text(output, color = Tok.Ink, fontFamily = mono, fontSize = size.plus(-1.5f), lineHeight = size.plus(-1.5f).times(1.4f), softWrap = false)
+    Column(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).background(Tok.Inset, RoundedCornerShape(8.dp)).padding(vertical = 4.dp)) {
+        line(table.header, head = true, zebra = false)
+        Box(Modifier.width(widths.fold(0.dp) { a, b -> a + b }).height(1.dp).background(Tok.Edge2))
+        table.rows.forEachIndexed { i, r -> line(r, head = false, zebra = i % 2 == 1) }
     }
 }
-
-private fun cellText(cell: List<MdSpan>) = cell.joinToString("") { it.text }
-// 中文、日文、韩文等非拉丁字符按双宽估算，让终端风格表格保持列对齐。
-private fun cellWidth(cell: List<MdSpan>): Int { val t = cellText(cell); return t.length + t.count { it.code >= 0x1100 } }

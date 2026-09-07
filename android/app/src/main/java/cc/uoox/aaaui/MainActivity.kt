@@ -95,7 +95,11 @@ fun AaaApp(
 
     // 一个入口：会话卡片、通知深链、项目页「继续会话」、会话页 ☰ 切换都走这里，行为不会各走各的。
     // 回退栈始终是 home → 当前会话：从一个会话切到另一个不叠页，返回键直接回首页
+    val scope = rememberCoroutineScope()
     val openSession: (String, String) -> Unit = { id, prefill ->
+        // 记住：下次 app 起来直接回这个会话（没有首页了）
+        autoOpenedLastSession = true
+        scope.launch { store.settings.setLastSession(id) }
         nav.navigate("session/$id?prefill=${Uri.encode(prefill)}") {
             launchSingleTop = true
             popUpTo("home")
@@ -250,6 +254,16 @@ fun PairScreen(store: AppStore, onConnected: () -> Unit) {
  * 首页只有一屏：项目列表（含每个项目的会话三态），右上角齿轮进设置，顶部输入框
  * 既过滤列表也新建项目（输入文件夹名回车，与 mac 侧栏一致）。原来的「会话 / 项目 /
  * 设置」三 tab 和右下角 ＋ 都收掉了——一个项目一个 agent，项目即会话。
+ * 2026-09-07：连这一屏也不再独立存在，见下面 HomeScreen。
+ */
+
+/** 进程内只自动回一次最近的会话：之后用户按返回回到落地页，不再被弹回去 */
+private var autoOpenedLastSession = false
+
+/**
+ * 落地页：没有独立的首页了（2026-09-07 用户拍板），这里画的就是 ☰ 抽屉那块项目面板——
+ * 只在「一个会话都没打开」时出现（首次进入、按返回退出会话）。app 起来时若记着上次的
+ * 会话且它还在，直接进去。
  */
 @Composable
 fun HomeScreen(store: AppStore, nav: NavHostController) {
@@ -258,6 +272,16 @@ fun HomeScreen(store: AppStore, nav: NavHostController) {
     LaunchedEffect(Unit) {
         if (Build.VERSION.SDK_INT >= 33) permLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
-    Box(Modifier.fillMaxSize().background(Tok.Bg)) { ProjectsHome(store, nav) }
+    val openSession = LocalOpenSession.current
+    val sessions by store.sessions.collectAsState()
+    val settings by store.settings.flow.collectAsState(initial = null)
+    LaunchedEffect(sessions, settings) {
+        val last = settings?.lastSession ?: return@LaunchedEffect
+        if (!autoOpenedLastSession && sessions.any { it.id == last }) {
+            autoOpenedLastSession = true
+            openSession(last, "")
+        }
+    }
+    Box(Modifier.fillMaxSize().background(Tok.Bg)) { ProjectPanel(store, nav) }
 }
 

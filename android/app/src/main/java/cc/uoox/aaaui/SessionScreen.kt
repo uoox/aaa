@@ -264,17 +264,17 @@ fun SessionScreen(
         }
     }
 
-    // 左上角 ☰：拉出项目列表直接切会话（2026-09-06 用户拍板，代替返回键；系统返回仍回首页）
+    // 左上角 ☰：拉出项目面板（= 以前的首页整块：连接状态 / 终端 / 看板 / 设置 / 用量 / 新建 /
+    // 项目列表与长按操作），点一行直接切会话（2026-09-07 用户拍板：抽屉有首页全部功能，首页去掉）
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     ModalNavigationDrawer(
         drawerState = drawerState,
         drawerContent = {
-            ModalDrawerSheet(drawerContainerColor = Tok.Surface, drawerContentColor = Tok.Ink) {
-                ProjectSwitcher(
-                    store, currentPath = s?.project_path,
-                    onHome = { scope.launch { drawerState.close() }; onClose() },
-                    onOpened = { scope.launch { drawerState.close() } },
-                )
+            ModalDrawerSheet(
+                modifier = Modifier.fillMaxWidth(0.92f),
+                drawerContainerColor = Tok.Surface, drawerContentColor = Tok.Ink,
+            ) {
+                ProjectSwitcher(store, nav, currentPath = s?.project_path, onOpened = { scope.launch { drawerState.close() } })
             }
         },
     ) {

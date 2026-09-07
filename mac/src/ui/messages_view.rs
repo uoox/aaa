@@ -164,6 +164,9 @@ pub struct MessagesView {
     sending: bool,
     /// 会话进程是否还活着（上层按 session 事件同步）；退出后表单一律只读
     alive: bool,
+    /// 窗口的排版系统：Markdown 表格按实际排版量列宽。render 开头刷新（元素树是在
+    /// render 里建的，那时才有 window）
+    text_sys: Option<std::sync::Arc<gpui::WindowTextSystem>>,
     /// 会话进程在跑（`running`）——与 Android 的 `live = state == "running"` 同一口径。
     /// 「进行中」的过程行按它画：`waiting` 的会话（被 Esc 打断、工具报错后停下）末尾
     /// 哪怕是 tool_result，也不该一直脉动。
@@ -203,6 +206,7 @@ impl MessagesView {
             wants_focus: true,
             sending: false,
             alive: true,
+            text_sys: None,
             running: false,
             project_path: String::new(),
             uploading: false,
@@ -767,7 +771,7 @@ impl MessagesView {
             .flex()
             .flex_col()
             .gap(px(6.))
-            .children(md_blocks(blocks, &mut ids))
+            .children(md_blocks(blocks, &mut ids, self.text_sys.as_deref()))
             .into_any_element()
     }
 
@@ -1214,11 +1218,11 @@ impl MdIds {
     }
 }
 
-fn md_blocks(blocks: &[Block], ids: &mut MdIds) -> Vec<AnyElement> {
-    blocks.iter().map(|b| md_block(b, ids)).collect()
+fn md_blocks(blocks: &[Block], ids: &mut MdIds, ts: Option<&gpui::WindowTextSystem>) -> Vec<AnyElement> {
+    blocks.iter().map(|b| md_block(b, ids, ts)).collect()
 }
 
-fn md_block(b: &Block, ids: &mut MdIds) -> AnyElement {
+fn md_block(b: &Block, ids: &mut MdIds, ts: Option<&gpui::WindowTextSystem>) -> AnyElement {
     match b {
         Block::Heading { level, spans } => {
             let size = match level {
@@ -1237,9 +1241,11 @@ fn md_block(b: &Block, ids: &mut MdIds) -> AnyElement {
             .child(md_inline(spans, ids))
             .into_any_element(),
         Block::Code { lang, text } => md_mono_block(ids, "code", text, 11.5, lang),
-        Block::Table { header, rows } => {
-            md_mono_block(ids, "table", &markdown::table_text(header, rows), 11., "")
-        }
+        Block::Table { header, rows } => match ts {
+            Some(ts) => md_table(header, rows, ids, ts),
+            // 还没拿到窗口排版系统（理论上只有 render 之外）：退回等宽文本
+            None => md_mono_block(ids, "table", &markdown::table_text(header, rows), 11., ""),
+        },
         Block::List {
             ordered,
             start,
@@ -1275,7 +1281,7 @@ fn md_block(b: &Block, ids: &mut MdIds) -> AnyElement {
                                 .flex()
                                 .flex_col()
                                 .gap(px(4.))
-                                .children(md_blocks(item, ids)),
+                                .children(md_blocks(item, ids, ts)),
                         )
                 }))
                 .into_any_element()
@@ -1288,7 +1294,7 @@ fn md_block(b: &Block, ids: &mut MdIds) -> AnyElement {
             .flex()
             .flex_col()
             .gap(px(6.))
-            .children(md_blocks(children, ids))
+            .children(md_blocks(children, ids, ts))
             .into_any_element(),
         Block::Rule => div()
             .w_full()
@@ -1368,6 +1374,76 @@ fn md_inline(spans: &[Span], ids: &mut MdIds) -> AnyElement {
     }
 }
 
+/// 表格：真正的网格，列宽 = 该列最宽单元格**按实际排版测出来的像素**（+ 内边距）。
+/// 以前是把表格拼成等宽文本靠空格对齐——中文落到备用字体时并不是 Menlo 的两倍宽，
+/// 列就漂了（2026-09-07 用户反馈「表格不太整齐」）。单元格里的粗体 / 行内代码 / 链接
+/// 照常渲染；表头加粗、下加一条线；整体比消息宽时横向滚动。
+fn md_table(header: &[Vec<Span>], rows: &[Vec<Vec<Span>>], ids: &mut MdIds, ts: &gpui::WindowTextSystem) -> AnyElement {
+    const SIZE: f32 = 11.5;
+    const PAD: f32 = 8.;
+    let cols = rows.iter().map(Vec::len).chain(std::iter::once(header.len())).max().unwrap_or(0);
+    if cols == 0 {
+        return div().into_any_element();
+    }
+    let measure = |spans: &[Span]| -> f32 {
+        let text = markdown::spans_plain(spans).replace('\n', " ");
+        if text.is_empty() {
+            return 0.;
+        }
+        let run = gpui::TextRun {
+            len: text.len(),
+            font: gpui::font("Menlo"),
+            color: gpui::black(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        f32::from(ts.layout_line(&text, px(SIZE), &[run], None).width)
+    };
+    let empty: Vec<Span> = Vec::new();
+    let mut widths = vec![0f32; cols];
+    for row in std::iter::once(header).chain(rows.iter().map(Vec::as_slice)) {
+        for (i, w) in widths.iter_mut().enumerate() {
+            *w = w.max(measure(row.get(i).unwrap_or(&empty)));
+        }
+    }
+    let line = |row: &[Vec<Span>], ids: &mut MdIds, head: bool| -> gpui::Div {
+        let mut r = div().flex().items_start();
+        for (i, w) in widths.iter().enumerate() {
+            r = r.child(
+                div()
+                    .flex_none()
+                    .w(px(w + PAD * 2.))
+                    .px(px(PAD))
+                    .py(px(4.))
+                    .font_family("Menlo")
+                    .text_size(px(SIZE))
+                    .when(head, |el| el.font_weight(FontWeight::BOLD))
+                    .child(md_inline(row.get(i).unwrap_or(&empty), ids)),
+            );
+        }
+        r
+    };
+    let mut table = div().flex().flex_col().child(
+        line(header, ids, true)
+            .border_b_1()
+            .border_color(c(theme::edge_light())),
+    );
+    for (i, row) in rows.iter().enumerate() {
+        table = table.child(line(row, ids, false).when(i % 2 == 1, |el| el.bg(ca(theme::edge(), 0.25))));
+    }
+    div()
+        .id(ids.next("table"))
+        .w_full()
+        .overflow_x_scroll()
+        .rounded(px(8.))
+        .bg(c(theme::term_bg()))
+        .when(!theme::palette().is_dark, |el| el.border_1().border_color(c(theme::edge())))
+        .text_color(c(theme::term_fg()))
+        .child(table)
+        .into_any_element()
+}
+
 /// 等宽块（代码 / 表格）：TERM_BG 圆角底、横向滚动、每个源行一行不折行；
 /// `lang` 非空时右上角浮一个 FAINT 语言标签（不随内容横向滚动）。
 fn md_mono_block(ids: &mut MdIds, kind: &str, text: &str, size: f32, lang: &str) -> AnyElement {
@@ -1412,6 +1488,7 @@ fn md_mono_block(ids: &mut MdIds, kind: &str, text: &str, size: f32, lang: &str)
 
 impl Render for MessagesView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.text_sys = Some(window.text_system().clone());
         if self.wants_focus && self.supported != Some(false) {
             self.wants_focus = false;
             let fh = self.input.read(cx).focus_handle.clone();

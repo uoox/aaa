@@ -73,7 +73,9 @@ pub fn plain(blocks: &[Block]) -> String {
 }
 
 /// 表格 → 等宽对齐文本：列宽取该列最宽单元格（CJK 记 2 格），表头下加一条分隔线。
-/// 渲染层直接把结果丢进 Menlo 块里横向滚动，不做真正的表格布局。
+/// 2026-09-07 起渲染层不再用它画表（CJK 落到备用字体时并不是等宽字体的两倍宽，
+/// 列会漂）——改成按实际排版测量列宽的网格（messages_view::md_table）；这里留作
+/// `plain()` 与测试的纯文本形式。
 pub fn table_text(header: &[Vec<Span>], rows: &[Vec<Vec<Span>>]) -> String {
     let cols = rows
         .iter()
@@ -147,7 +149,7 @@ fn pad(s: &str, width: usize) -> String {
     out
 }
 
-fn spans_plain(spans: &[Span]) -> String {
+pub fn spans_plain(spans: &[Span]) -> String {
     spans.iter().map(|s| s.text.as_str()).collect()
 }
 
