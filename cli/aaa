@@ -16,7 +16,7 @@ HELP = """aaa — AAA daemon 的工具箱
   aaa perms [--json]             macOS 权限状态
   aaa perms all | <id…>          申请权限（弹窗出现在 Mac 上）
   aaa restart [--force]          重启 daemon（有活会话需 --force：先结束、起来后自动 resume）
-  aaa restart --when-idle        等所有会话都停在输入框再重启（不用挑时间）
+  aaa restart --when-idle        等所有会话都停在输入框再重启（不用挑时间；--cancel 取消）
   aaa config                     看配置（端口 / token / 项目根）
   aaa config port <n> | token <t>  改配置并重启（有活会话需 --force）
   aaa config root <path> [--migrate] [--force]   改项目根；--migrate 整根搬过去并改所有指向
@@ -232,6 +232,7 @@ def cmd_status(conn, args):
     flags = []
     if h.get("update_pending"): flags.append("新二进制已装好，等重启")
     if h.get("restart_scheduled"): flags.append("等空闲重启")
+    elif idle_watch_pid(): flags.append("等空闲重启（CLI 守望 %d）" % idle_watch_pid())
     out("%saaa-daemon%s v%s  %s%s:%d%s%s" % (BOLD, RESET, S(h, "version"), DIM, conn.host, conn.port, RESET,
                                            ("  " + YELLOW + " · ".join(flags) + RESET) if flags else ""))
     out("  项目根   %s %s" % (S(h, "project_root"), note))
@@ -289,8 +290,14 @@ def live_titles(conn):
 def cmd_restart(conn, args):
     h = conn.probe()
     force = "--force" in args or "-f" in args
+    if "--cancel" in args:
+        cancel_idle_watch(); return
     if "--when-idle" in args or "--idle" in args:
-        # 等所有会话都停在输入框再重启：daemon 记下约定，tick 里兑现；不用你挑时间
+        # 等所有会话都停在输入框再重启：daemon 记下约定，tick 里兑现；不用你挑时间。
+        # 1.15 之前的 daemon 不认 when_idle（会按普通 restart 处理、有活会话就 409），
+        # 那就由 CLI 起一个后台守望进程替它盯着：没有会话在「运行」就 --force 重启
+        if version_tuple(S(h, "version")) < (1, 15, 0):
+            start_idle_watch(conn, h); return
         v = call(conn, "POST", "/api/v1/restart", {"when_idle": True})
         if v.get("scheduled"):
             say("已约好：%d 个会话还在跑，等它们都停下再重启（aaa status 能看到「等空闲重启」）" % v.get("running", 0)); return
@@ -308,6 +315,74 @@ def cmd_restart(conn, args):
     h2 = conn.wait_back()
     if not h2: die("90 秒内没回来，看 %s/daemon.err.log" % STATE)
     say("回来了：v%s，项目根 %s" % (S(h2, "version"), S(h2, "project_root")))
+
+def version_tuple(v):
+    return tuple(int(x) for x in re.findall(r"\d+", v or "0")[:3]) or (0,)
+
+IDLE_PID = os.path.join(STATE, "idle-restart.pid")
+IDLE_LOG = os.path.join(STATE, "idle-restart.log")
+
+def idle_watch_pid():
+    """守望进程还在就返回 pid，否则清掉陈旧 pidfile 返回 None"""
+    try: pid = int(open(IDLE_PID).read().strip())
+    except (OSError, ValueError): return None
+    try: os.kill(pid, 0); return pid
+    except OSError:
+        try: os.remove(IDLE_PID)
+        except OSError: pass
+        return None
+
+def start_idle_watch(conn, h):
+    pid = idle_watch_pid()
+    if pid: say("已经在等空闲重启了（守望进程 %d，日志 %s；aaa restart --cancel 取消）" % (pid, IDLE_LOG)); return
+    os.makedirs(STATE, exist_ok=True)
+    log = open(IDLE_LOG, "ab")
+    child = subprocess.Popen([sys.executable, os.path.abspath(__file__), "_idle-watch"], stdin=subprocess.DEVNULL,
+                             stdout=log, stderr=log, start_new_session=True, close_fds=True)
+    open(IDLE_PID, "w").write(str(child.pid))
+    running = sum(1 for s in call(conn, "GET", "/api/v1/sessions") if S(s, "state") == "running")
+    say("已约好：daemon v%s 还不会自己等空闲，由守望进程 %d 盯着——%d 个会话还在跑，等它们都停下就重启（日志 %s；aaa restart --cancel 取消）"
+        % (S(h, "version"), child.pid, running, IDLE_LOG))
+
+def cancel_idle_watch():
+    pid = idle_watch_pid()
+    if not pid: say("没有在等的空闲重启"); return
+    try: os.kill(pid, signal.SIGTERM)
+    except OSError: pass
+    try: os.remove(IDLE_PID)
+    except OSError: pass
+    say("取消了空闲重启（守望进程 %d）" % pid)
+
+def cmd_idle_watch(conn, args):
+    """后台守望：每 20 秒看一眼，连续 3 次没有会话在「运行」（也没有后台任务）就 --force 重启"""
+    def log(m): sys.stdout.write("%s %s\n" % (time.strftime("%m-%d %H:%M:%S"), m)); sys.stdout.flush()
+    log("开始等空闲（pid %d）" % os.getpid())
+    quiet = 0
+    while True:
+        try:
+            ss = conn.api("GET", "/api/v1/sessions", timeout=10)
+            busy = [S(s, "title") or S(s, "id") for s in ss if S(s, "state") == "running" or s.get("background")]
+        except Exception as e:
+            log("看不到 daemon：%s" % e); busy = None
+        if busy is None: quiet = 0
+        elif busy:
+            if quiet: log("又忙起来了：%s" % "、".join(busy[:5]))
+            quiet = 0
+        else:
+            quiet += 1
+            if quiet >= 3:
+                try:
+                    v = conn.api("POST", "/api/v1/restart", {"force": True}, timeout=60)
+                    log("空闲了，重启 daemon" + ("（结束了：%s）" % "、".join(v.get("killed", [])) if v.get("killed") else ""))
+                    time.sleep(3)
+                    h2 = conn.wait_back()
+                    log("回来了：v%s" % S(h2, "version") if h2 else "90 秒内没回来，看 daemon.err.log")
+                except Exception as e:
+                    log("重启失败：%s" % e)
+                try: os.remove(IDLE_PID)
+                except OSError: pass
+                return
+        time.sleep(20)
 
 def cmd_config(conn, args):
     conn.probe()
@@ -499,7 +574,7 @@ def cmd_service(conn, args):
     os.execvp("aaa-daemon", ["aaa-daemon", "service", sub])
 
 COMMANDS = {"backfill": cmd_backfill, "status": cmd_status, "st": cmd_status, "ls": cmd_ls, "wait": cmd_wait, "perms": cmd_perms,
-            "permissions": cmd_perms, "restart": cmd_restart, "config": cmd_config, "migrate-root": cmd_migrate_root,
+            "permissions": cmd_perms, "restart": cmd_restart, "_idle-watch": cmd_idle_watch, "config": cmd_config, "migrate-root": cmd_migrate_root,
             "service": cmd_service}
 
 def main():
