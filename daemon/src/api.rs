@@ -1736,6 +1736,10 @@ async fn attach_loop(app: SharedApp, sess: Arc<crate::pool::Session>, mut socket
     if socket.send(Message::Binary(replay.into())).await.is_err() {
         return;
     }
+    // v1.23：这条连接自己占一个尺寸位。PTY 多大按**所有连着的客户端里最小的那个**算，
+    // 不再是「最后 resize 的说了算」——手机在后台连着时一帧 resize 就把桌面那扇窗户按成
+    // 手机宽，桌面上正在看的输出当场重排。断开时这一位要还回去（下面每条 break 都走 detach）。
+    let attach_id = sess.attach_size_slot();
     loop {
         tokio::select! {
             out = rx.recv() => match out {
@@ -1764,7 +1768,7 @@ async fn attach_loop(app: SharedApp, sess: Arc<crate::pool::Session>, mut socket
                             let cols = v.get("cols").and_then(|c| c.as_u64()).unwrap_or(0) as u16;
                             let rows = v.get("rows").and_then(|r| r.as_u64()).unwrap_or(0) as u16;
                             if cols >= 20 && rows >= 5 && cols <= 1000 && rows <= 500 {
-                                sess.resize(cols, rows);
+                                sess.attach_resize(attach_id, cols, rows);
                             }
                         }
                     }
@@ -1775,6 +1779,7 @@ async fn attach_loop(app: SharedApp, sess: Arc<crate::pool::Session>, mut socket
             },
         }
     }
+    sess.detach(attach_id);
 }
 
 async fn ws_events(State(app): State<SharedApp>, ws: WebSocketUpgrade) -> Response {

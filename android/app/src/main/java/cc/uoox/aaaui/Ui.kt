@@ -103,6 +103,14 @@ data class Palette(
             accent = Color(0xFF53C6DD), onAccent = Color(0xFF08252C), magenta = Color(0xFFC583E0),
             green = Color(0xFF5ECB8F), amber = Color(0xFFE3B45C), red = Color(0xFFE57373), blue = Color(0xFF6C9EF8),
             inset = Color(0xFF0A0E12), termBg = Color(0xFF0A0E12), termFg = Color(0xFFC9D4DE),
+            // 深色主题的终端 16 色，与 mac `theme.rs::ANSI` 逐色相同（v1.23 统一）：1/2/3/5/6/8/15
+            // 号刻意与界面令牌同值——终端里的红绿黄和界面上的同一个意思长一个样。此前这里是
+            // null、落到 xterm/termux 出厂色，同一段输出在两端颜色完全不一样，而「两端 UI 必须
+            // 一致」是写在协议里的。共享向量 fixtures/tokens.json 现在两套主题都钉着。
+            ansi = listOf(
+                0xFF1C242E, 0xFFE57373, 0xFF5ECB8F, 0xFFE3B45C, 0xFF6FA8DC, 0xFFC583E0, 0xFF53C6DD, 0xFFC9D4DE,
+                0xFF5F6D7C, 0xFFEF9A9A, 0xFF81E2AC, 0xFFF0C987, 0xFF8FC3F0, 0xFFD9A8EF, 0xFF7FDBEF, 0xFFE3EBF3,
+            ).map(::Color),
         )
         val Claude = Palette(
             name = "claude", label = "Claude 橙", isDark = false,
@@ -205,16 +213,12 @@ fun Palette.materialScheme(): ColorScheme {
     )
 }
 
-/** 暗色主题的 ANSI 16 色：xterm 默认表（termux 出厂同一套），为黑底设计。 */
-internal val XTERM_ANSI: IntArray = intArrayOf(
-    0xFF000000.toInt(), 0xFFCD0000.toInt(), 0xFF00CD00.toInt(), 0xFFCDCD00.toInt(),
-    0xFF0000EE.toInt(), 0xFFCD00CD.toInt(), 0xFF00CDCD.toInt(), 0xFFE5E5E5.toInt(),
-    0xFF7F7F7F.toInt(), 0xFFFF0000.toInt(), 0xFF00FF00.toInt(), 0xFFFFFF00.toInt(),
-    0xFF5C5CFF.toInt(), 0xFFFF00FF.toInt(), 0xFF00FFFF.toInt(), 0xFFFFFFFF.toInt(),
-)
-
-/** 主题里 libvterm 实际会用的 16 色：主题没自带 ANSI 表的用 xterm 默认。 */
-fun terminalAnsi(p: Palette): IntArray = IntArray(16) { i -> p.ansi?.get(i)?.toArgb() ?: XTERM_ANSI[i] }
+/**
+ * 主题里 libvterm 实际会用的 16 色。v1.23 起**两套主题都自带一套**（深色与 mac 逐色相同，
+ * Claude 橙是 gruvbox-light），xterm/termux 出厂表那条回退就此拿掉——它是「两端长得不一样」
+ * 的唯一来源，而且没有哪套主题该拿别人的默认色当自己的脸。
+ */
+fun terminalAnsi(p: Palette): IntArray = IntArray(16) { i -> (p.ansi?.get(i) ?: p.termFg).toArgb() }
 
 /** 配色喂给 libvterm：16 色 + 默认前景/背景。 */
 fun applyTerminalPalette(p: Palette, emulator: org.connectbot.terminal.TerminalEmulator) {

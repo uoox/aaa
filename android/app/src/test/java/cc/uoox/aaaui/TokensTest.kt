@@ -40,14 +40,13 @@ class TokensTest {
 
     @Test fun claude主题逐色对上共享向量() = assertRoles("claude", Palette.Claude)
 
-    /**
-     * Claude 主题的终端 16 色（gruvbox-light）两端逐色相同——PROTOCOL 明写的。
-     * 深色主题的那 16 色两端**故意不同**（mac 调了一套与令牌协调的，Android 沿用 xterm /
-     * termux 默认），所以不在这份向量里，见 fixture 里的 `ansi_note`。
-     */
-    @Test fun claude主题的终端16色两端逐色相同() {
-        val want = theme("claude")["ansi"]!!.jsonArray.map { it.jsonPrimitive.content }
-        val got = terminalAnsi(Palette.Claude).map { "#%06x".format(it and 0xFFFFFF) }
-        assertEquals(want, got)
+    /** v1.23：**两套**主题的终端 16 色都两端逐色相同（深色那套以前 Android 用的是 xterm 默认）。 */
+    @Test fun 两套主题的终端16色两端逐色相同() {
+        for (name in listOf("dark", "claude")) {
+            val want = theme(name)["ansi"]!!.jsonArray.map { it.jsonPrimitive.content }
+            val p = Palette.all.first { it.name == name }
+            val got = terminalAnsi(p).map { "#%06x".format(it and 0xFFFFFF) }
+            assertEquals(name, want, got)
+        }
     }
 }

@@ -199,7 +199,7 @@ CLI 的 `ls` / 交互菜单按五组打印（v1.13 起；以前是「执行中 /
 - 连接后 server 先发一个文本帧 `{"t":"hello","session":{…},"rows":R,"cols":C}`。
 - 随后 server 发二进制帧：先是**整屏重绘**（回滚缓冲尾部若干行 + 若在备用屏则 `?1049h` + ANSI 清屏 + vt100 `state_formatted()`：当前屏幕**加终端状态**——鼠标上报 1000/1006、括号粘贴、应用光标键、光标显隐），之后持续转发 PTY 原始输出字节。状态必须随重绘下发：claude code 一启动就开鼠标上报，晚于它 attach 的客户端若不知道，点击/滚轮就会被当成本地选区（2026-09-03 修）。
 - client → server：二进制帧 = 原样写入 PTY 的输入字节；文本帧 = 控制消息 `{"t":"resize","cols":C,"rows":R}`。
-- 多客户端可同时 attach 同一会话（尺寸取最后 resize 者）。
+- 多客户端可同时 attach 同一会话。**PTY 的尺寸每一维取所有连着的客户端里最小的那个**（v1.23，tmux 的老规矩；`pool::effective_size`）：大的那扇窗户右边 / 下边空一条，总好过小的那扇看不全——看不全的那个连滚动都救不回来，超出的列根本没画出来过。此前是「最后 resize 的说了算」，手机在后台连着时一帧 resize 就把桌面那扇窗户按成手机宽，桌面上正在看的输出当场重排。断开的那一位立刻从计算里去掉；一个都不剩就保持现状（没人看的时候把 PTY 抖一下没有意义，还让 TUI 白白重排一次）。
 
 ### `/api/v1/events`
 
@@ -213,6 +213,8 @@ server → client JSON 文本帧：
 {"t":"health","ssd_mounted":true}
 {"t":"usage","plan":{…}}                        // v1.4：plan 配额变化，形状同 GET /usage 的 plan
 ```
+
+**补齐机制只有一个：`snapshot`，而且它是权威的。** 客户端收到 snapshot 就**整表替换**自己那份会话列表（不是合并）。daemon 在两种情形下补发它：**连上来**时；以及这条连接**掉帧**时（broadcast 落后于 512 帧的缓冲区——手机被系统冻住、网络卡一阵都会）。所以事件流**不需要 revision / seq 号**（2026-09-08 两位外部评审都提过这条，核过代码后判定不需要）：WS 之上是 TCP，帧不会乱序也不会静默丢；能丢的只有「客户端跟不上」这一种，而那一种的出口就是一份新的全量 snapshot。`session_removed` 也不必补——整表替换本身就带着删除。`projects_changed` / `messages_changed` / `health` 是通知不是状态，客户端收到自己去拉。钉住这条的是 `smoke.rs::events_reconnect_snapshot_is_authoritative`。
 
 通知策略（客户端行为，2026-09-07 用户拍板，**三种**）：**待回复**（`asking` 翻 true：表单 / 权限对话框等你）、**运行结束**（`running→waiting`）、**出错**（`error` 出现，或非 0 退出码）；正常退出、自己在 app 里 kill 的都不弹。此前（2026-09-02）只有一种「完成」：`running→waiting` 与 `running→exited`（非本机用户手动 kill）各弹一条，标题带项目名，正文是会话标题。不识别「里面要回什么」、不按问题去重、没有高低优先级、没有空转告警；daemon 侧不推送（ntfy 已移除）。按项目静音是客户端本地配置（两端各存各的）。用户正盯着的会话（窗口前台且当前页就是它）不弹。mac（2026-09-06）：装成 .app 时走 UserNotifications，以 AAA 自己的名义发、点一下回到 App 打开那条会话（`userInfo.session`）；首次会弹系统的通知授权；`cargo run` 没有 bundle 时退回 `osascript`（发件人是脚本编辑器，点了不跳）。
 
@@ -380,5 +382,7 @@ Claude 以 `--dangerously-skip-permissions` 运行，`PermissionRequest` 不会�
 
 项目列表的记号（2026-09-08 第四版）：一根 2px/2.5dp 宽、14px/16dp 高的竖线，**在行尾**，**蓝** = 在跑、**黄** = 未读、**灰**（dim）= 已读；不再有转圈动画，终端行没有记号。看板卡片同一套（在跑画蓝竖线，其余不画；卡片上它仍在标题前——那是一张卡不是一行）。连接状态行、工具步骤等处的小色点照旧。
 终端字体：等宽（mac 端 SF Mono/Menlo 族，Android 端打包 JetBrains Mono 或系统 monospace）。
+**两套主题的终端 ANSI 16 色都写死在令牌里，两端逐色相同**（v1.23 统一）：黑暗那套是照界面令牌调的——1/2/3/5/6/8/15 号刻意与 red / green / amber / magenta / accent / faint / ink 同值，终端里的红绿黄和界面上的同一个意思长一个样；Claude 橙那套是 gruvbox-light。**没有「主题不带就用 xterm 默认」这条回退**：Android 此前深色主题正是走的 termux 出厂表，同一段输出在两端颜色完全不一样，而「两端 UI 必须一致」是写在这一节标题上的。共享向量 `fixtures/tokens.json` 两套都钉着。
+
 Claude 橙主题里两个容易各画各的角色（v1.22 对齐）：**magenta = `#9b6b9e`（哑紫）**——品牌辅色不取强调色的邻色，否则和橙分不开（Android 此前直接等于 accent）；**inset = `#fffefa`**（下沉底比 surface 更亮一点点，Android 此前用的是 surface_raised）。
 两端逐字相同的两处**格式**：文件大小 `human_bytes` / `humanBytes` 一律**一位小数**（`B` / `1.5K` / `2.0M` / `1.2G`；Android 此前 K 不带小数、M 还按大小分两档，同一个文件两端显示不一样）；进度写作 **`3/7 完成`**（斜杠两边不留空格，与看板卡片的 `done/total` 同一种写法；mac 此前写 `3 / 7 完成`）。

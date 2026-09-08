@@ -5,6 +5,13 @@
 //! The handler now scans and names WITHOUT the lock and only takes it around
 //! the cwd-cache save (a file write, microseconds). Holding the lock for
 //! seconds here therefore must not delay the request.
+//!
+//! 2026-09-08 顺带量过另一条被外部评审点名的路径——`Session.meta: Mutex<Meta>` 太粗，
+//! 「PTY 输出、hook 事件、状态轮询都在抢它，高频刷屏时 API 请求会被间歇阻塞」。在真机上
+//! 实测（**184 个会话**、其中一个正在跑并持续输出）：`GET /sessions`（要逐个锁 184 把 meta）
+//! p50 **2.0ms** / p95 12.4ms，`GET /projects` p50 5.6ms，`GET /health` p50 0.2ms。
+//! 结论：这个量级上不成立，`last_output_at` 没有必要拆成 Atomic——那要改一圈读写点，
+//! 换来的是量不出来的收益。**要动它先拿数说话。**
 
 use std::path::Path;
 use std::sync::Arc;

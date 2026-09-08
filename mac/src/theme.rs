@@ -433,15 +433,17 @@ mod tests {
                 assert_eq!(roles[role].as_str().unwrap(), hex(got), "{name}.{role}");
             }
         }
-        // Claude 主题的终端 16 色（gruvbox-light）两端逐色相同——PROTOCOL 明写的。
-        // 深色那 16 色两端**故意不同**（Android 沿用 xterm / termux 默认），见 fixture 的 ansi_note。
-        let want: Vec<String> = fx["themes"]["claude"]["ansi"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| v.as_str().unwrap().to_string())
-            .collect();
-        assert_eq!(want, CLAUDE.ansi.iter().map(|c| hex(*c)).collect::<Vec<_>>());
+        // v1.23：**两套**主题的终端 16 色都两端逐色相同（深色那套 Android 以前用的是
+        // xterm / termux 出厂表，同一段输出在两端颜色完全不一样）。
+        for (name, ansi) in [("dark", &ANSI), ("claude", &CLAUDE.ansi)] {
+            let want: Vec<String> = fx["themes"][name]["ansi"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect();
+            assert_eq!(want, ansi.iter().map(|c| hex(*c)).collect::<Vec<_>>(), "{name}.ansi");
+        }
     }
 
     /// 动到进程级 CURRENT 的测试串行跑，别让并行的兄弟测试读到半路换掉的主题

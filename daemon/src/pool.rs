@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -155,6 +155,15 @@ impl Meta {
     }
 }
 
+/// 几个客户端同时连着一个终端时，PTY 该多大：**每一维都取最小**（tmux 的老规矩）。
+/// 大的那扇窗户右边 / 下边空一条，总好过小的那扇看不全——看不全的那个连滚动都救不回来，
+/// 因为超出的列根本没画出来过。谁都还没报尺寸就返回 None（保持现状，别乱抖）。
+pub fn effective_size(sizes: &[(u16, u16)]) -> Option<(u16, u16)> {
+    let cols = sizes.iter().map(|s| s.0).filter(|c| *c > 0).min()?;
+    let rows = sizes.iter().map(|s| s.1).filter(|r| *r > 0).min()?;
+    Some((cols, rows))
+}
+
 pub struct Live {
     pub master: Box<dyn MasterPty + Send>,
     pub writer: Box<dyn Write + Send>,
@@ -165,6 +174,12 @@ pub struct Live {
 pub struct Session {
     pub id: String,
     pub meta: Mutex<Meta>,
+    /// v1.23：每个 attach 报的视口尺寸（None = 还没报过）。PTY 的尺寸按**所有连着的
+    /// 客户端里最小的那个**算（[`effective_size`]），不再是「最后 resize 的说了算」——
+    /// 手机在后台连着的时候，它一帧 resize 就把桌面那扇窗户按成手机宽，桌面上正在看的
+    /// 输出当场重排。
+    pub attach_sizes: Mutex<std::collections::HashMap<u64, Option<(u16, u16)>>>,
+    next_attach: AtomicU64,
     pub parser: Mutex<Option<vt100::Parser>>,
     /// PTY output fan-out. `Bytes` so each chunk is allocated once and every
     /// attached client clones a refcount, not the buffer.
@@ -199,6 +214,8 @@ impl Session {
         let (tx, _) = broadcast::channel(8);
         Session {
             id: "s_test".into(),
+            attach_sizes: Mutex::new(std::collections::HashMap::new()),
+            next_attach: AtomicU64::new(1),
             meta: Mutex::new(Meta {
                 title: "t".into(),
                 custom_title: false,
@@ -360,6 +377,49 @@ impl Session {
                 std::io::ErrorKind::NotConnected,
                 "session not running",
             )),
+        }
+    }
+
+    /// 登记一个 attach（WS 连上来），返回它的号；断开时用这个号 [`detach`](Self::detach)。
+    /// 尺寸先空着——客户端第一帧 resize 到了才算数。
+    pub fn attach_size_slot(&self) -> u64 {
+        let mut m = self.attach_sizes.lock().unwrap();
+        let id = self.next_attach.fetch_add(1, Ordering::Relaxed);
+        m.insert(id, None);
+        id
+    }
+
+    /// 某个 attach 报了新尺寸：记下来，再按「所有连着的里最小的那个」重算 PTY 尺寸。
+    pub fn attach_resize(&self, id: u64, cols: u16, rows: u16) {
+        {
+            let mut m = self.attach_sizes.lock().unwrap();
+            if !m.contains_key(&id) {
+                return; // 已经断开了
+            }
+            m.insert(id, Some((cols, rows)));
+        }
+        self.apply_attach_size();
+    }
+
+    /// attach 断开：去掉它的尺寸，剩下的重新算（一个都不剩就保持现状——
+    /// 没人看的时候把 PTY 抖一下没有意义，还会让 TUI 白白重排一次）。
+    pub fn detach(&self, id: u64) {
+        let had_size = self.attach_sizes.lock().unwrap().remove(&id).flatten().is_some();
+        if had_size {
+            self.apply_attach_size();
+        }
+    }
+
+    fn apply_attach_size(&self) {
+        let sizes: Vec<(u16, u16)> = self.attach_sizes.lock().unwrap().values().flatten().copied().collect();
+        if let Some((cols, rows)) = effective_size(&sizes) {
+            let (cur_cols, cur_rows) = {
+                let m = self.meta.lock().unwrap();
+                (m.cols, m.rows)
+            };
+            if (cols, rows) != (cur_cols, cur_rows) {
+                self.resize(cols, rows);
+            }
         }
     }
 
@@ -566,7 +626,9 @@ impl SessionPool {
             let msgs = crate::messages::MsgStore::for_agent(&meta.agent);
             let sess = Arc::new(Session {
                 id: id.clone(),
-                meta: Mutex::new(meta),
+                attach_sizes: Mutex::new(std::collections::HashMap::new()),
+            next_attach: AtomicU64::new(1),
+            meta: Mutex::new(meta),
                 parser: Mutex::new(None),
                 out_tx: tx,
                 live: Mutex::new(None),
@@ -685,6 +747,8 @@ impl SessionPool {
         let msgs = crate::messages::MsgStore::for_agent(&spec.agent);
         let sess = Arc::new(Session {
             id,
+            attach_sizes: Mutex::new(std::collections::HashMap::new()),
+            next_attach: AtomicU64::new(1),
             meta: Mutex::new(meta),
             parser: Mutex::new(Some(vt100::Parser::new(
                 DEFAULT_ROWS,
@@ -817,6 +881,18 @@ impl SessionPool {
 
 #[cfg(test)]
 mod tests {
+    /// 几个客户端连着同一个终端时 PTY 多大：每一维取最小。以前是「最后 resize 的说了算」，
+    /// 手机在后台连着时一帧 resize 就把桌面那扇窗户按成手机宽。
+    #[test]
+    fn effective_size_is_the_smallest_viewport() {
+        assert_eq!(effective_size(&[(120, 40), (80, 24)]), Some((80, 24)));
+        // 两维分开取：一个窄而高、一个宽而矮，取窄 + 矮，谁都看得全
+        assert_eq!(effective_size(&[(80, 60), (200, 24)]), Some((80, 24)));
+        assert_eq!(effective_size(&[(100, 30)]), Some((100, 30)));
+        assert_eq!(effective_size(&[]), None, "没人连着就保持现状");
+        assert_eq!(effective_size(&[(0, 0)]), None, "还没报过尺寸的不算数");
+    }
+
     use super::*;
 
     #[test]

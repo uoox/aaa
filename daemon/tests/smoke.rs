@@ -852,3 +852,47 @@ async fn projects_and_sessions_carry_the_derived_fields() {
     assert_eq!(row["status"], "paused", "shell 不进项目列表的状态判定");
     assert!(row["session_id"].is_null(), "shell 不是项目的代表会话");
 }
+
+/// 断线期间发生的事，重连后必须靠**全量 snapshot** 找齐——这是 `/events` 唯一的补齐机制，
+/// 所以 v1.23 明确钉住它（评审提过「事件流该加 revision」：不需要，daemon 在**掉帧**
+/// (broadcast Lagged) 和**重连**两种情形下都补发 snapshot，而 snapshot 是整表替换、
+/// 两端都照单换掉自己那份列表，倒退不了）。
+#[tokio::test(flavor = "multi_thread")]
+async fn events_reconnect_snapshot_is_authoritative() {
+    let env = setup_env();
+    let _guard = spawn_daemon(&env);
+    let port = wait_port(&env);
+    let ws_url = format!("ws://127.0.0.1:{port}/api/v1/events?token={TOKEN}");
+
+    // 第一次连上：空的
+    let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+    let snap = tokio::time::timeout(Duration::from_secs(5), ws.next()).await.unwrap().unwrap().unwrap();
+    let v: Value = serde_json::from_str(snap.to_text().unwrap()).unwrap();
+    assert_eq!(v["t"], "snapshot");
+    assert!(v["sessions"].as_array().unwrap().is_empty());
+
+    // 断开，然后在「断线期间」开一个会话——这几帧它一条都收不到
+    drop(ws);
+    let (_, proj) = http("POST", port, "/api/v1/projects", Some(TOKEN), Some(serde_json::json!({"name": "recon"})));
+    let path = proj["path"].as_str().unwrap().to_string();
+    let (code, sess) = http(
+        "POST",
+        port,
+        "/api/v1/sessions",
+        Some(TOKEN),
+        Some(serde_json::json!({"project_path": path, "agent": "shell"})),
+    );
+    assert_eq!(code, 200, "{sess}");
+    let sid = sess["id"].as_str().unwrap().to_string();
+
+    // 重连：新的 snapshot 里必须有它，而且带着 v1.22 那几个派生字段
+    let (mut ws2, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+    let snap2 = tokio::time::timeout(Duration::from_secs(5), ws2.next()).await.unwrap().unwrap().unwrap();
+    let v2: Value = serde_json::from_str(snap2.to_text().unwrap()).unwrap();
+    assert_eq!(v2["t"], "snapshot");
+    let found = v2["sessions"].as_array().unwrap().iter().find(|s| s["id"] == sid.as_str());
+    let found = found.unwrap_or_else(|| panic!("重连的 snapshot 里没有断线期间开的会话: {v2}"));
+    assert!(found["status"].as_str().is_some(), "snapshot 里的会话也要带 status");
+    assert!(found["queued"].is_array(), "queued 也在");
+}
+

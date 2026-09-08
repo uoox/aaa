@@ -77,8 +77,10 @@ class TerminalInputTest {
         assertEquals(2, displayWidth('中')); assertEquals(1, displayWidth('a'))
     }
 
-    @Test fun darkThemeKeepsXtermAnsiAndLightThemesBringTheirOwn() {
-        assertArrayEquals(XTERM_ANSI, terminalAnsi(Palette.Dark))
-        assertTrue(terminalAnsi(Palette.Claude).contentEquals(Palette.Claude.ansi!!.map { it.toArgb() }.toIntArray()))
+    /** v1.23：两套主题都自带 16 色，`terminalAnsi` 原样交给 libvterm，不再有 xterm 默认表兜底。 */
+    @Test fun everyThemeFeedsItsOwnAnsiToVterm() {
+        listOf(Palette.Dark, Palette.Claude).forEach { p ->
+            assertTrue(p.name, terminalAnsi(p).contentEquals(p.ansi!!.map { it.toArgb() }.toIntArray()))
+        }
     }
 }

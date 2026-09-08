@@ -49,9 +49,10 @@ class PaletteTest {
         assertEquals(Palette.Claude.ink, Palette.Claude.termFg)
     }
 
-    @Test fun lightTerminalsBringTheirOwnAnsiAndDarkKeepsTermux() {
-        // 黑暗沿用 termux 出厂 16 色；亮底主题必须自带一套，且没有一个色比底还亮
-        assertEquals(null, Palette.Dark.ansi)
+    @Test fun everyThemeBringsItsOwnAnsiAndLightOnesStayReadable() {
+        // v1.23：两套主题都自带 16 色（深色那套与 mac 逐色相同，见 TokensTest）——
+        // 以前深色沿用 termux 出厂表，同一段输出两端颜色不一样。亮底那套还得没有一个色比底还亮。
+        assertEquals(16, Palette.Dark.ansi?.size)
         listOf(Palette.Claude).forEach { p ->
             val ansi = p.ansi!!
             assertEquals(16, ansi.size)
