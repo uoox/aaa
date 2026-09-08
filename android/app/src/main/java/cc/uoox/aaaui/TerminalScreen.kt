@@ -14,8 +14,12 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.Button
+import androidx.compose.material3.DrawerValue
+import androidx.compose.material3.ModalDrawerSheet
+import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -66,21 +70,40 @@ fun TerminalScreen(store: AppStore, nav: NavHostController, focusId: String) {
         }
     }
 
-    Column(Modifier.fillMaxSize().background(Tok.Bg)) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("‹", color = Tok.Dim, fontSize = 28.sp, modifier = Modifier.clickable { nav.popBackStack() }.padding(horizontal = 8.dp))
-            Text(label, color = Tok.Ink, fontSize = 17.sp, maxLines = 1, modifier = Modifier.weight(1f))
-            // 关掉这个终端：列表里立刻消失，kill + DELETE 在后台跑（AppStore.closeTerminal）
-            if (current != null) TextButton(onClick = { store.closeTerminal(current.id); nav.popBackStack() }) {
-                Text("关闭", color = Tok.Faint, fontSize = 13.sp)
+    // 左上角是 ☰ 不是「返回」（2026-09-08 用户拍板）：终端和会话平级，两屏的左上角就该
+    // 是同一个东西——拉出项目面板，从这里直接去任何一个项目或另一个终端。列表里终端行
+    // 那三道横杠，认的也是这个记号。
+    val drawerState = rememberDrawerState(DrawerValue.Closed)
+    ModalNavigationDrawer(
+        drawerState = drawerState,
+        drawerContent = {
+            ModalDrawerSheet(
+                modifier = Modifier.fillMaxWidth(0.92f),
+                drawerContainerColor = Tok.Surface, drawerContentColor = Tok.Ink,
+            ) {
+                ProjectPanel(store, nav, currentPath = current?.project_path, onBeforeNavigate = { scope.launch { drawerState.close() } })
             }
+        },
+    ) {
+        Column(Modifier.fillMaxSize().background(Tok.Bg)) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "☰", color = Tok.Dim, fontSize = 20.sp,
+                    modifier = Modifier.clickable { scope.launch { drawerState.open() } }.padding(horizontal = 8.dp, vertical = 2.dp),
+                )
+                Text(label, color = Tok.Ink, fontSize = 17.sp, maxLines = 1, modifier = Modifier.weight(1f))
+                // 关掉这个终端：列表里立刻消失，kill + DELETE 在后台跑（AppStore.closeTerminal）
+                if (current != null) TextButton(onClick = { store.closeTerminal(current.id); nav.popBackStack() }) {
+                    Text("关闭", color = Tok.Faint, fontSize = 13.sp)
+                }
+            }
+            if (current == null) Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("还没有终端", color = Tok.Faint)
+                    Button(onClick = { createTerminal() }, modifier = Modifier.padding(top = 12.dp)) { Text("开一个") }
+                }
+            } else TerminalPane(store, context, conn, current.id, Modifier.weight(1f))
         }
-        if (current == null) Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("还没有终端", color = Tok.Faint)
-                Button(onClick = { createTerminal() }, modifier = Modifier.padding(top = 12.dp)) { Text("开一个") }
-            }
-        } else TerminalPane(store, context, conn, current.id, Modifier.weight(1f))
     }
 }
 

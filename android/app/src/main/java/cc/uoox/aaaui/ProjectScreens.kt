@@ -524,14 +524,21 @@ private fun ProjectRowItem(row: ProjectRow, busy: Boolean, current: Boolean = fa
     Column(modifier) {
         Row(
             Modifier.fillMaxWidth()
-                .background(if (current) Tok.Raised else Color.Transparent)
+                // 置顶不写字也不挂图标，整行一层淡底就够了（2026-09-08 用户拍板）；
+                // 当前打开的那一行更重，压过置顶底
+                .background(
+                    when {
+                        current -> Tok.Raised
+                        row.project.pinned -> Tok.Pinned
+                        else -> Color.Transparent
+                    },
+                )
                 .combinedClickable(onClick = onClick, onLongClick = onLongClick)
                 .padding(horizontal = 16.dp, vertical = 11.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             RowIndicator(row.state, row.unread, busy)
             Spacer(Modifier.width(8.dp))
-            if (row.project.pinned) Text("📌", fontSize = 12.sp, modifier = Modifier.padding(end = 4.dp))
             Text(
                 row.title, color = if (row.alive) Tok.Ink else Tok.Dim, fontSize = 15.sp, fontWeight = FontWeight.Bold,
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),

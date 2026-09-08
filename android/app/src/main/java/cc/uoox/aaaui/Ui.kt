@@ -154,6 +154,9 @@ object Tok {
     val Red: Color get() = current.red
     val Blue: Color get() = current.blue
     val Inset: Color get() = current.inset
+
+    /** 置顶行的底色（2026-09-08 用户拍板：置顶不再挂 📌，改成整行一层淡淡的强调色底） */
+    val Pinned: Color get() = current.accent.copy(alpha = 0.12f)
     val TermBg: Color get() = current.termBg
     val TermFg: Color get() = current.termFg
 

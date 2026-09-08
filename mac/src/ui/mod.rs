@@ -1111,12 +1111,15 @@ impl RootView {
             let pin = row.project.as_ref().map(|p| (p.path.clone(), p.pinned));
             let indicator = row_indicator(&row);
             let unread = row.unread;
-            let title = if row.pinned { format!("📌 {}", row.title) } else { row.title };
+            let title = row.title;
             // 元素 id 用路径而不是序号：排序变了悬停 / 点击态跟着行走，不留在原位
             let row_id = SharedString::from(format!("sb-proj:{}", row.path));
             let act_id = SharedString::from(format!("sb-act:{}", row.path));
             let mut el = sidebar_row(row_id.into())
                 .group("sb-row")
+                // 置顶不挂图标，整行一层淡淡的强调色底就够了（2026-09-08 用户拍板）；
+                // 当前打开的那一行更重，压过置顶底
+                .when(row.pinned && !active, |el| el.bg(ca(theme::accent(), 0.12)))
                 .when(active, |el| el.bg(c(theme::surface_raised())))
                 .hover(|st| st.bg(c(theme::surface_raised())))
                 // 点一下：活着的会话直接进；未激活的 resume（daemon 幂等，找不到旧对话开新的）
