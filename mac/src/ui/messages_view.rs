@@ -320,7 +320,7 @@ impl MessagesView {
             return;
         }
         self.sending = true;
-        let fut = self.net.session_input(&self.sid, text.clone(), true);
+        let fut = self.net.session_input(&self.sid, text.clone());
         self.input.update(cx, |i, cx| i.set_text("", cx));
         cx.spawn(async move |this, cx| {
             let res = fut.await;

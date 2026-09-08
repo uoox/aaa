@@ -66,8 +66,10 @@ pub fn parse(md: &str) -> Vec<Block> {
     b.finish()
 }
 
-/// 块列表 → 纯文本（测试 / 回落用；bin crate 里非测试路径暂无调用方）
-#[cfg_attr(not(test), allow(dead_code))]
+/// 块列表 → 纯文本。**只有测试在用**：渲染走 `md_blocks`，表格那条唯一的等宽
+/// 回落路径调的是 [`table_text`]，不经过这里。以前挂 `allow(dead_code)` 假装
+/// 生产路径可能用到，2026-09-08 改成老实的 `cfg(test)`。
+#[cfg(test)]
 pub fn plain(blocks: &[Block]) -> String {
     blocks.iter().map(block_plain).collect::<Vec<_>>().join("\n\n")
 }
@@ -153,7 +155,7 @@ pub fn spans_plain(spans: &[Span]) -> String {
     spans.iter().map(|s| s.text.as_str()).collect()
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 fn block_plain(b: &Block) -> String {
     match b {
         Block::Heading { spans, .. } | Block::Paragraph(spans) => spans_plain(spans),

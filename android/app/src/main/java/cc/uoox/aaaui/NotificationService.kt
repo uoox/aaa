@@ -101,10 +101,6 @@ object Notifier {
             .build()
         try { nm.notify(sessionId.hashCode(), n) } catch (_: SecurityException) { }
     }
-
-    fun cancelFor(context: Context, sessionId: String) {
-        (context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).cancel(sessionId.hashCode())
-    }
 }
 
 /** 前台服务：仅为在后台保住进程与 events WS。 */

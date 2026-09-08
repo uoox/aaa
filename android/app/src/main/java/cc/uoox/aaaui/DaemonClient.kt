@@ -2,7 +2,6 @@ package cc.uoox.aaaui
 
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.serialization.builtins.ListSerializer
-import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -13,7 +12,6 @@ import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okhttp3.WebSocket
@@ -86,7 +84,6 @@ class DaemonClient(
     suspend fun health(): Health = json.decodeFromString(get("/health"))
     /** `POST /restart`：force = 连存活会话一起终止。有存活会话且不 force → 409 */
     suspend fun restartDaemon(force: Boolean): String = post("/restart", """{"force":$force}""")
-    suspend fun agents(): List<Agent> = json.decodeFromString(ListSerializer(Agent.serializer()), get("/agents"))
     suspend fun projects(): List<Project> = json.decodeFromString(ListSerializer(Project.serializer()), get("/projects"))
 
     suspend fun createProject(name: String?, agent: String?): Project {

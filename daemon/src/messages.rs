@@ -236,13 +236,9 @@ impl MsgStore {
         }
     }
 
-    /// 用户侧消息里的 `<task-notification>…<tool-use-id>X</tool-use-id>`：X 的后台任务回来了。
-    /// 只认包在 task-notification 里的，别的用户文本里出现这串字不算
-    fn settle_background(&mut self, text: &str) {
-        self.settle_background_at("", text);
-    }
-
-    /// 同上，并在真的销掉一个挂着的任务时往消息流塞一行 system：「后台任务完成：<summary>」
+    /// 用户侧消息里的 `<task-notification>…<tool-use-id>X</tool-use-id>`：X 的后台任务回来了
+    /// （只认包在 task-notification 里的，别的用户文本里出现这串字不算）。真的销掉一个挂着的
+    /// 任务时往消息流塞一行 system：「后台任务完成：<summary>」
     /// （v1.16 用户要求：不然「后台」→「运行」的翻转看不出是什么触发的）。同一个任务的
     /// enqueue / remove / attachment 三条记录只会有第一条真的销掉，天然去重
     fn settle_background_at(&mut self, ts: &str, text: &str) {

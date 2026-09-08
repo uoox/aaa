@@ -100,7 +100,7 @@ pub fn migrate_root(paths: &Paths, old: &Path, new: &Path) -> Result<Report, Str
         }
         // 一律现采：注册表里的 id 只在经 daemon resume 时回写过，用户可能
         // 之后用 aaal / 裸 agent 在该目录开过更新的对话。find 落空才留旧 id。
-        let sid = stores::find(paths, &mut cache, &agent, &dir);
+        let sid = stores::find(paths, &mut cache, &dir);
         if !sid.is_empty() {
             collected.push((dir, agent, sid));
         }

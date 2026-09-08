@@ -60,8 +60,6 @@ pub struct Meta {
     /// 排序，几个会话同时在跑时行才不会互相换位。老元数据文件没有它：退到 created_at。
     #[serde(default)]
     pub updated_at: Option<DateTime<Utc>>,
-    #[serde(default)]
-    pub preview: String,
     /// v1.1: inbox auto-feed enabled for this session (POST /sessions)
     #[serde(default = "default_true")]
     pub feed_inbox: bool,
@@ -203,7 +201,6 @@ impl Session {
                 created_at: now,
                 last_output_at: now,
                 updated_at: Some(now),
-                preview: String::new(),
                 feed_inbox: true,
                 last_output_inst: None,
                 needs_name: false,
@@ -235,15 +232,7 @@ impl Session {
     }
 
     pub fn to_json(&self) -> serde_json::Value {
-        // refresh preview from the parser when we have one
-        let preview = {
-            let parser = self.parser.lock().unwrap();
-            parser.as_ref().map(|p| crate::screen::preview(p.screen(), 4))
-        };
-        let mut meta = self.meta.lock().unwrap();
-        if let Some(p) = preview {
-            meta.preview = p;
-        }
+        let meta = self.meta.lock().unwrap();
         serde_json::json!({
             "id": self.id,
             "title": meta.title,
@@ -254,7 +243,6 @@ impl Session {
             "asking": meta.asking,
             // v1.16：正在等的权限对话框（null = 没有）；客户端画成「允许 / 拒绝」卡片
             "permission": meta.permission,
-            "preview": meta.preview,
             "rows": meta.rows,
             "cols": meta.cols,
             "pid": meta.pid,
@@ -641,7 +629,6 @@ impl SessionPool {
             created_at: now,
             last_output_at: now,
             updated_at: Some(now),
-            preview: String::new(),
             feed_inbox: spec.feed_inbox,
             last_output_inst: Some(Instant::now()),
             needs_name: true,

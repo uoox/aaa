@@ -25,12 +25,11 @@ class TerminalInputTest {
     /** Claude Code 启动时的一串：备用屏 + 任意移动鼠标 + SGR 坐标 + 括号粘贴 */
     @Test fun modeTrackerFollowsClaudeCodeStartup() {
         val (m, rest) = ModeTracker.scan(TermModes(), "$esc[?1049h$esc[?1003h$esc[?1006h$esc[?2004h$esc[?25l".toByteArray())
-        assertEquals(TermModes(mouse = 1003, sgrMouse = true, altScreen = true), m)
+        assertEquals(TermModes(mouse = 1003, sgrMouse = true), m)
         assertEquals(0, rest.size)
         // 退出：任一鼠标模式的 l 都关掉上报；1049l 回主屏
         val (off, _) = ModeTracker.scan(m, "$esc[?1003l$esc[?1006l$esc[?1049l".toByteArray())
         assertFalse(off.mouseOn)
-        assertFalse(off.altScreen)
     }
 
     @Test fun modeTrackerCarriesTruncatedSequenceAcrossFrames() {
@@ -41,7 +40,7 @@ class TerminalInputTest {
         assertEquals(1003, t.modes.value.mouse)
         // 多参数一次开几个
         t.feed("$esc[?1000;1006h".toByteArray())
-        assertEquals(TermModes(mouse = 1000, sgrMouse = true, altScreen = false), t.modes.value)
+        assertEquals(TermModes(mouse = 1000, sgrMouse = true), t.modes.value)
         t.reset()
         assertEquals(TermModes(), t.modes.value)
     }

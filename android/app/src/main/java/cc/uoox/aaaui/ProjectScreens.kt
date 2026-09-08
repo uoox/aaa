@@ -3,12 +3,9 @@ package cc.uoox.aaaui
 import android.widget.Toast
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -16,8 +13,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -70,9 +67,10 @@ const val DEFAULT_AGENT = "claude"
 
 /**
  * 项目行的内部状态。**2026-09-08 用户拍板：列表上不再写状态字**（「激活 / 未激活」这类词
- * 对着一屏项目说不出任何有用的东西）——行首只有两种记号：**在跑就转圈**，**跑完了 / 在等你
- * 回话且这台设备还没进去看就一个黄点**，其余什么都不画。这个枚举因此只剩两个职责：决定
- * 转不转圈，以及列表从上往下的顺序。
+ * 对着一屏项目说不出任何有用的东西）——行首只有一颗点，颜色说完一切：**蓝 = 在跑**，
+ * **黄 = 跑完了 / 在等你回话且这台设备还没进去看**，**灰 = 已读**。（同一天稍后又拍板：
+ * 蓝点替掉最初的转圈动画，行更紧凑。）这个枚举因此只剩两个职责：决定点是不是蓝的，
+ * 以及列表从上往下的顺序。
  *
  * 一个项目只有一个 agent（建项目时定死，从不切换），项目 ↔ 会话事实上一对一，所以
  * 会话状态直接挂在项目行上，首页不再单开会话页。终端永远不代表项目。全部由客户端把
@@ -87,8 +85,8 @@ enum class ProjectState(val rank: Int) {
     ACTIVE(3),
     INACTIVE(4);
 
-    /** 转圈：自己在跑，或后台任务还没回来——都是「它还在动，你不用管」 */
-    val spinning: Boolean get() = this == RUNNING || this == BACKGROUND
+    /** 蓝点：自己在跑，或后台任务还没回来——都是「它还在动，你不用管」 */
+    val running: Boolean get() = this == RUNNING || this == BACKGROUND
 }
 
 /** 首页一行要的全部东西，纯数据，方便单测。 */
@@ -157,7 +155,7 @@ fun projectStateOf(primary: Session?): ProjectState = when {
 
 /**
  * 一项目一行。排序（2026-09-08 用户拍板）：**置顶 > 有黄点 > 在跑 > 其余**，同一档里
- * **最近更新的在前**。置顶是自己按的，黄点也挤不掉它；黄点排在转圈前面——转圈的还在自己
+ * **最近更新的在前**。置顶是自己按的，黄点也挤不掉它；黄点排在蓝点前面——蓝点的还在自己
  * 往前走，黄点的那个是在等你。
  * 时间看的是 daemon 的 `updated_at`（状态翻转 / 改名），不是每个字节都动的 last_output_at
  * ——几个会话同时在跑时行才不会互相换位。同刻按路径稳住。
@@ -177,23 +175,26 @@ fun projectRows(projects: List<Project>, sessions: List<Session>, unread: Set<St
         .thenBy { it.project.path },
 )
 
-/** 行首那一格的宽度：转圈 / 黄点 / 什么都没有，三种情况标题都要对得齐 */
-private val INDICATOR_W = 20.dp
+/** 行首那一格的宽度。行首永远是一颗 7dp 的点，这一格只要放得下点 + 一点余白 */
+private val INDICATOR_W = 16.dp
 
 /**
- * 行首记号（2026-09-08 用户拍板，替掉了五个状态字）：
- * **转圈** = 在跑（含后台任务没回来，以及本行正在 resume）；**黄点** = 跑完了 / 在等你回话
- * 而这台设备还没进去看；**什么都没有** = 没什么要你操心的。
+ * 行首那一点的颜色（2026-09-08 用户拍板，替掉了先前的转圈动画）：
+ * **蓝** = 在跑（含后台任务没回来，以及本行正在 resume）；**黄** = 跑完了 / 在等你回话
+ * 而这台设备还没进去看；**灰** = 已读，没什么要你操心的。三种情况同一颗点，行高不随状态
+ * 跳，也不再为一个 24fps 的圆圈让整列跟着重组。
  */
+@Composable
+private fun rowDotColor(state: ProjectState, unread: Boolean, busy: Boolean): Color = when {
+    busy || state.running -> Tok.Blue
+    unread -> Tok.Amber
+    else -> Tok.Dim
+}
+
 @Composable
 private fun RowIndicator(state: ProjectState, unread: Boolean, busy: Boolean) {
     Box(Modifier.width(INDICATOR_W), contentAlignment = Alignment.Center) {
-        when {
-            busy || state.spinning ->
-                CircularProgressIndicator(Modifier.width(12.dp).height(12.dp), strokeWidth = 1.5.dp, color = Tok.Accent)
-            unread ->
-                Box(Modifier.width(8.dp).height(8.dp).background(Tok.Amber, CircleShape))
-        }
+        Box(Modifier.size(7.dp).background(rowDotColor(state, unread, busy), CircleShape))
     }
 }
 
@@ -250,7 +251,7 @@ fun NewProjectField(
 /**
  * 项目面板 = 以前的首页整块（2026-09-07 用户拍板：☰ 抽屉要有首页所有按钮和功能，首页就没
  * 必要单独存在了）。会话页的 ☰ 抽屉和「一个会话都没打开」时的落地页画的都是它：顶栏
- * （连接状态 / SSD / 终端 / 看板 / 设置）、套餐用量、新建项目框、项目列表（点开、长按操作）、
+ * 一行（额度 / 看板 / 设置，2026-09-08 用户拍板砍到这三样）、新建项目框、项目列表（点开、长按操作）、
  * 下拉刷新。`currentPath` 高亮当前会话的项目；`onBeforeNavigate` 在抽屉里就是「先关抽屉」。
  */
 @Composable
@@ -348,17 +349,24 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
         }
     }
 
+    // 顶栏只剩一栏（2026-09-08 用户拍板）：去掉 "AAA" 标题和 IP · 延迟——app 只有一个，
+    // 标题是废话；IP 和 ms 连着好的时候没人看。留下的三样是真会用的：额度、看板、设置。
+    // 连接**不**正常时那一格改写连接状态：断了得说一声，但这不值得常年占一整行。
+    val planSegs = planLineSegments(plan)
     Column(Modifier.fillMaxSize()) {
-        // 顶栏：标题 + 连接状态；右侧齿轮进设置
         Row(
-            Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp, top = 6.dp, bottom = 2.dp),
+            Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp, top = 2.dp, bottom = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text("AAA", color = Tok.Ink, fontSize = 22.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
-            Spacer(Modifier.width(12.dp))
             Box(Modifier.weight(1f)) {
-                when (val c = conn) {
-                    is ConnState.Connected -> DotWithText(Tok.Green, "${c.host.substringBefore(':')} · ${c.latencyMs}ms")
+                when (conn) {
+                    is ConnState.Connected ->
+                        // 套餐用量：5h / 7d / 按模型，最高的那个 ≥70 琥珀、≥90 红；点开看重置时间
+                        if (planSegs.isNotEmpty()) Text(
+                            segmentsAnnotated(planSegs, Tok.Faint),
+                            fontSize = 11.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.fillMaxWidth().clickable { planDialog = true },
+                        )
                     is ConnState.Connecting -> DotWithText(Tok.Amber, "连接中…")
                     is ConnState.Failed -> DotWithText(Tok.Red, "已断开")
                     ConnState.NoServer -> DotWithText(Tok.Dim, "未配对")
@@ -375,15 +383,6 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
             IconButton(onClick = { onBeforeNavigate(); nav.navigate("settings") }) {
                 Text("⚙", color = Tok.Dim, fontSize = 20.sp)
             }
-        }
-        // 套餐用量一行：5h / 7d / 按模型，最高的那个 ≥70 琥珀、≥90 红；点开看重置时间。没数据不占行
-        val planSegs = planLineSegments(plan)
-        if (planSegs.isNotEmpty()) {
-            Text(
-                segmentsAnnotated(planSegs, Tok.Faint),
-                fontSize = 11.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.fillMaxWidth().clickable { planDialog = true }.padding(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 6.dp),
-            )
         }
         // 与 mac 侧栏同一件东西：边输入边过滤列表，回车或右边 ＋ 就按这个名字新建项目
         NewProjectField(query, { query = it }, creating, onCreate = { create() }, modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp))
@@ -468,12 +467,6 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
     if (planDialog) plan?.let { PlanUsageDialog(it) { planDialog = false } }
 }
 
-/** 会话页 ☰ 抽屉：就是 [ProjectPanel]（首页整块），当前项目高亮；任何跳转前先关抽屉。 */
-@Composable
-fun ProjectSwitcher(store: AppStore, nav: NavHostController, currentPath: String?, onOpened: () -> Unit) {
-    ProjectPanel(store, nav, currentPath = currentPath, onBeforeNavigate = onOpened)
-}
-
 /** 每个窗口一行：名称 + 百分比（按级别着色）+ 重置时间 */
 @Composable
 fun PlanUsageDialog(plan: PlanUsage, onDismiss: () -> Unit) {
@@ -531,7 +524,7 @@ private fun ProjectRowItem(row: ProjectRow, busy: Boolean, current: Boolean = fa
             Spacer(Modifier.width(8.dp))
             Text(relativeTime(row.updatedIso), color = Tok.Faint, fontSize = 11.sp)
         }
-        HorizontalDivider(color = Tok.Edge, thickness = 1.dp, modifier = Modifier.padding(start = 44.dp))
+        HorizontalDivider(color = Tok.Edge, thickness = 1.dp, modifier = Modifier.padding(start = 40.dp))
     }
 }
 
@@ -556,7 +549,7 @@ private fun TerminalRowItem(label: String, onClick: () -> Unit, onClose: () -> U
             )
             IconButton(onClick = onClose) { Text("×", color = Tok.Faint, fontSize = 18.sp) }
         }
-        HorizontalDivider(color = Tok.Edge, thickness = 1.dp, modifier = Modifier.padding(start = 44.dp))
+        HorizontalDivider(color = Tok.Edge, thickness = 1.dp, modifier = Modifier.padding(start = 40.dp))
     }
 }
 

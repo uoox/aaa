@@ -12,12 +12,6 @@ pub struct EventHub {
     tx: broadcast::Sender<Utf8Bytes>,
 }
 
-impl Default for EventHub {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl EventHub {
     pub fn new() -> Self {
         let (tx, _) = broadcast::channel(512);

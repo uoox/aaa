@@ -155,16 +155,63 @@ fn merge_path(probed: Option<&str>, home: &std::path::Path) -> String {
 /// so we take the last line and only trust it if it looks like a PATH. Runs
 /// on its own thread with a deadline: a `.zshrc` that blocks must not wedge
 /// daemon startup.
-fn probe_login_path() -> Option<String> {
+/// 起一个子进程，把 `stdin_data` 喂进去，最多等 `timeout`，超时就杀掉；返回 stdout。
+/// 任何失败都返回 `None`——两个调用方都是「拿不到就降级」。
+///
+/// 2026-09-08 合并：namer 的 `run_haiku` 手写过一遍（读线程 + 100ms 轮询 `try_wait`
+/// + 手算 deadline），这里的 `probe_login_path` 又写了个简版，而且超时之后子进程
+/// 没人收。合成一个，顺手把那个漏掉的 kill 补上。
+///
+/// 刻意不看退出码：两个调用方要的都是 stdout，成不成由它们自己按内容判断。
+pub(crate) fn run_with_timeout(
+    mut cmd: std::process::Command,
+    stdin_data: Option<&[u8]>,
+    timeout: std::time::Duration,
+) -> Option<String> {
+    use std::io::{Read, Write};
+    use std::process::Stdio;
+    let mut child = cmd
+        .stdin(if stdin_data.is_some() { Stdio::piped() } else { Stdio::null() })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    if let Some(data) = stdin_data {
+        if let Some(mut si) = child.stdin.take() {
+            let _ = si.write_all(data);
+            // drop 关掉管道，子进程才看得到 EOF
+        }
+    }
+    // stdout 必须另起一个线程读：管道缓冲区满了子进程会阻塞在写上，永远等不到它退出
+    let mut stdout = child.stdout.take()?;
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let out = std::process::Command::new("zsh")
-            .args(["-lic", "printf %s \"$PATH\""])
-            .stdin(std::process::Stdio::null())
-            .output();
-        let _ = tx.send(out.ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).into_owned()));
+        let mut out = String::new();
+        let _ = stdout.read_to_string(&mut out);
+        let _ = tx.send(out);
     });
-    let raw = rx.recv_timeout(std::time::Duration::from_secs(5)).ok()??;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(_) => return None,
+        }
+    }
+    rx.recv_timeout(std::time::Duration::from_secs(5)).ok()
+}
+
+fn probe_login_path() -> Option<String> {
+    let mut cmd = std::process::Command::new("zsh");
+    cmd.args(["-lic", "printf %s \"$PATH\""]);
+    let raw = run_with_timeout(cmd, None, std::time::Duration::from_secs(5))?;
     let last = raw.lines().last()?.trim();
     (last.contains(':') && last.split(':').any(|d| d == "/usr/bin")).then(|| last.to_string())
 }

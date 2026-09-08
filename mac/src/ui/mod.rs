@@ -12,11 +12,10 @@ mod terminal_panel;
 mod terminal_view;
 
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
 
 use futures::StreamExt;
 use gpui::{
-    Animation, AnimationExt as _, AppContext as _, Context, ElementId, Entity, KeyDownEvent,
+    AppContext as _, Context, Entity, KeyDownEvent,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, SharedString, Task, Window, div,
     prelude::*, px,
 };
@@ -66,9 +65,10 @@ fn kill_needs_confirm(s: &Session) -> bool {
 }
 
 /// 项目行的内部状态。**2026-09-08 用户拍板：侧栏不再写状态字**（「激活 / 未激活」这类词
-/// 对着一列项目说不出任何有用的东西）——行首只有两种记号：**在跑就转圈**，**跑完了 / 在等你
-/// 回话且这台机器还没进去看就一个黄点**，其余什么都不画。这个枚举因此只剩两个职责：决定
-/// 转不转圈，以及侧栏从上往下的顺序。
+/// 对着一列项目说不出任何有用的东西）——行首只有一颗点，颜色说完一切：**蓝 = 在跑**，
+/// **黄 = 跑完了 / 在等你回话且这台机器还没进去看**，**灰 = 已读**。（同一天稍后又拍板：
+/// 蓝点替掉最初的转圈动画，行更紧凑，也不再按帧重画整个侧栏。）这个枚举因此只剩两个
+/// 职责：决定点是不是蓝的，以及侧栏从上往下的顺序。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RowStatus {
     Running,
@@ -89,8 +89,8 @@ impl RowStatus {
         }
     }
 
-    /// 转圈：自己在跑，或后台任务还没回来——都是「它还在动，你不用管」
-    fn spinning(self) -> bool {
+    /// 蓝点：自己在跑，或后台任务还没回来——都是「它还在动，你不用管」
+    fn running(self) -> bool {
         matches!(self, RowStatus::Running | RowStatus::Background)
     }
 
@@ -195,7 +195,7 @@ fn project_rows(projects: &[Project], sessions: &[Session], unread: &[String]) -
         });
     }
     // 2026-09-08 用户拍板：置顶 > 有黄点 > 在跑 > 其余，同一档里最近更新的在前，同刻按标题稳住。
-    // 置顶是自己按的，黄点也挤不掉它；黄点排在转圈前面——转圈的还在自己往前走，黄点的那个在等你。
+    // 置顶是自己按的，黄点也挤不掉它；黄点排在蓝点前面——蓝点的还在自己往前走，黄点的那个在等你。
     rows.sort_by(|a, b| {
         b.pinned
             .cmp(&a.pinned)
@@ -207,36 +207,32 @@ fn project_rows(projects: &[Project], sessions: &[Session], unread: &[String]) -
     rows
 }
 
-/// 侧栏行首那一格的宽度：转圈 / 黄点 / 什么都没有，三种情况标题都要对得齐
-const INDICATOR_W: f32 = 14.0;
+/// 侧栏行首那一格的宽度。行首永远是一颗 6px 的点，所以这一格只要放得下点 + 一点余白
+const INDICATOR_W: f32 = 12.0;
 
-/// 转圈用的盲文帧。8 帧 800ms，限到 12fps——一列项目同时在跑时它会带着整个侧栏重画，
-/// 没必要跟着显示器刷。
-pub(super) const SPINNER: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
+/// 行首那一点的颜色（2026-09-08 用户拍板，替掉了先前的转圈动画）：
+/// **蓝** = 在跑（含后台任务还没回来）；**黄** = 跑完了 / 在等你回话而这台机器还没进去看；
+/// **灰** = 已读，没什么要你操心的。三种情况都是同一颗点，行高不随状态跳，也不再有动画
+/// 带着整个侧栏按帧重画。
+fn row_dot_color(row: &ProjectRow) -> u32 {
+    if row.status.running() {
+        theme::blue()
+    } else if row.unread {
+        theme::amber()
+    } else {
+        theme::dim()
+    }
+}
 
-/// 行首记号（2026-09-08 用户拍板，替掉了五个状态字）：
-/// **转圈** = 在跑（含后台任务还没回来）；**黄点** = 跑完了 / 在等你回话而这台机器还没进去看；
-/// **什么都没有** = 没什么要你操心的。
 fn row_indicator(row: &ProjectRow) -> gpui::AnyElement {
-    let cell = || div().flex_none().w(px(INDICATOR_W)).flex().items_center().justify_center();
-    if row.status.spinning() {
-        return cell()
-            .font_family("Menlo")
-            .text_size(px(10.))
-            .text_color(c(theme::accent()))
-            .with_animation(
-                ElementId::from(SharedString::from(format!("sb-spin:{}", row.path))),
-                Animation::new(Duration::from_millis(800)).repeat().with_max_fps(12.),
-                |el, t| el.child(SPINNER[((t * SPINNER.len() as f32) as usize).min(SPINNER.len() - 1)]),
-            )
-            .into_any_element();
-    }
-    if row.unread {
-        return cell()
-            .child(div().w(px(7.)).h(px(7.)).rounded_full().bg(c(theme::amber())))
-            .into_any_element();
-    }
-    cell().into_any_element()
+    div()
+        .flex_none()
+        .w(px(INDICATOR_W))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(div().w(px(6.)).h(px(6.)).rounded_full().bg(c(row_dot_color(row))))
+        .into_any_element()
 }
 
 /// ⌃Tab 循环的候选：存活的项目会话，按侧栏顺序。
@@ -411,8 +407,6 @@ pub struct RootView {
     pub dashboard: Dashboard,
     /// 看板搜索框
     pub history_input: Entity<MiniInput>,
-    /// 看板：展开了「已做 N」的会话 id
-    pub history_expanded: HashSet<String>,
     /// 看板：显示已删除的
     pub dash_show_deleted: bool,
     /// 窗口宽度（render 开头刷新；看板按它算瀑布流列数）
@@ -535,7 +529,6 @@ impl RootView {
             plan: None,
             dashboard: Dashboard::default(),
             history_input,
-            history_expanded: HashSet::new(),
             dash_show_deleted: false,
             win_w: 1200.,
             detail: HashMap::new(),
@@ -637,14 +630,13 @@ impl RootView {
                     v.update(cx, |v, cx| v.fetch_if_behind(last_seq, cx));
                 }
                 // 详情面板正看着它：产物 / 改动按节流重拉
-                self.on_detail_messages_changed(&id, cx);
+                self.refresh_detail(&id, cx);
             }
             DaemonEvent::Usage { plan } => {
                 self.plan = plan;
                 cx.notify();
             }
             // 收件箱（待发送）由消息流自己管；mac 详情栏 v1.15 起不再画它
-            DaemonEvent::InboxChanged { .. } => {}
             DaemonEvent::Unknown => {}
         }
     }
@@ -1081,7 +1073,7 @@ impl RootView {
         };
 
         // ── 项目列表：单列（2026-09-06 用户拍板）──
-        //   行首只有转圈 / 黄点 / 什么都没有（2026-09-08 用户拍板，状态字整套去掉）。
+        //   行首只有一颗点：蓝 = 在跑 / 黄 = 未读 / 灰 = 已读（2026-09-08 用户拍板，状态字整套去掉）。
         //   问题本身不在侧栏画：进消息流，表单原生呈现、原地作答。exited 会话不代表项目
         //   （点一下 resume）；终端（shell）不在这里（归终端面板）。
         let rows = project_rows(&self.projects, &self.sessions, &self.unread_projects);
@@ -1937,7 +1929,7 @@ mod tests {
     }
 
     #[test]
-    fn row_status_and_spinning() {
+    fn row_status_and_running() {
         use SessionState::*;
         assert_eq!(RowStatus::of(Some(&sess("a", Running, false, ""))), RowStatus::Running);
         // 在问：哪怕屏幕还在变也是「待回复」
@@ -1946,9 +1938,9 @@ mod tests {
         assert_eq!(RowStatus::of(Some(&sess("a", Waiting, false, ""))), RowStatus::Active);
         assert_eq!(RowStatus::of(Some(&sess("a", Exited, false, ""))), RowStatus::Inactive);
         assert_eq!(RowStatus::of(None), RowStatus::Inactive);
-        // 2026-09-08：侧栏不再写状态字，枚举只管「转不转圈」和排序
-        assert!(RowStatus::Running.spinning() && RowStatus::Background.spinning());
-        assert!(!RowStatus::Asking.spinning() && !RowStatus::Active.spinning() && !RowStatus::Inactive.spinning());
+        // 2026-09-08：侧栏不再写状态字，枚举只管「点是不是蓝的」和排序
+        assert!(RowStatus::Running.running() && RowStatus::Background.running());
+        assert!(!RowStatus::Asking.running() && !RowStatus::Active.running() && !RowStatus::Inactive.running());
         // 后台：waiting 且 background 标志；在问的仍是待回复
         let mut bg = sess("b", SessionState::Waiting, false, "2026-09-02T12:00:00Z");
         bg.background = true;

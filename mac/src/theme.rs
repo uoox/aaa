@@ -1,53 +1,44 @@
 //! 设计令牌（来源 PROTOCOL.md「设计令牌」表）。
 //! 全部以 0xRRGGBB u32 存储，UI 层用 `gpui::rgb()` 转换。
 //!
-//! 2026-09-03 起有三套主题（黑暗 / 明亮 / Claude 橙），进程内可切换：
-//! - 下面的 `pub const` 是黑暗主题的原值，原样保留——终端渲染（terminal_view /
-//!   term）已改走调色板；常量只剩测试钉黑暗主题值用；
+//! 2026-09-03 起有多套主题，进程内可切换；2026-09-08 用户砍到两套（黑暗 / Claude 橙）：
+//! - 黑暗主题的原值直接写在 `DARK` 里；只有终端那张 16 色表（`ANSI` / `TERM_BG` /
+//!   `TERM_FG`）还是 `pub const`，因为 `indexed_color` 这个自由函数在用；
 //! - 其余 UI 一律走 `palette()` 或各令牌的小函数（`bg()`、`accent()`…），读的是
 //!   `set_current` 选定的那一套；每帧调用，代价只是一次原子读；
 //! - 选定的主题持久化在 `~/.config/aaa-ui/ui.toml` 的 `theme` 字段（model::UiState）。
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
-pub const BG: u32 = 0x0e1216; // 页面底
-pub const SURFACE: u32 = 0x1a222b; // 卡片/面板
-pub const SURFACE_RAISED: u32 = 0x212b36;
-pub const EDGE: u32 = 0x28323e; // 描边
-pub const EDGE_LIGHT: u32 = 0x36434f;
-pub const INK: u32 = 0xe3ebf3; // 文字一级
-pub const DIM: u32 = 0x8b99a8; // 文字二级
-pub const FAINT: u32 = 0x5f6d7c; // 文字三级
-pub const TERM_BG: u32 = 0x0a0e12; // 终端底
-pub const CYAN: u32 = 0x53c6dd; // 主操作/选中
-pub const MAGENTA: u32 = 0xc583e0; // 品牌辅色（= ANSI magenta）
-pub const GREEN: u32 = 0x5ecb8f; // running
-pub const AMBER: u32 = 0xe3b45c; // waiting
-pub const RED: u32 = 0xe57373; // exited
+/// 终端底（黑暗主题；`inset` 也用它）
+pub const TERM_BG: u32 = 0x0a0e12;
 
 // ── 主题 ────────────────────────────────────────────────────────────────────
 
-/// 三套主题。`Dark` 是原始设计令牌；`Light` 是常规浅色；`Claude` 是 Anthropic
-/// 的象牙白 + 陶土橙，终端保留一块暖色深底。
+/// 两套主题。`Dark` 是原始设计令牌；`Claude` 是 Anthropic 的象牙白 + 陶土橙，
+/// 终端保留一块暖色深底。
+///
+/// 2026-09-08 用户拍板砍掉了中间那套「明亮」：一套暗、一套亮就够，三套的第三套
+/// 从来只是「另一种亮」。存量 `ui.toml` 里写着 `theme = "light"` 的机器不需要迁移——
+/// [`ThemeKind::from_str`] 认不出的名字一律回黑暗。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ThemeKind {
     #[default]
     Dark,
-    Light,
     Claude,
 }
 
 impl ThemeKind {
     /// 设置页芯片的排列顺序
-    pub const ALL: [ThemeKind; 3] = [ThemeKind::Dark, ThemeKind::Light, ThemeKind::Claude];
+    pub const ALL: [ThemeKind; 2] = [ThemeKind::Dark, ThemeKind::Claude];
 
     /// ui.toml 里的值 → 主题；认不出来（旧文件、手改错）一律黑暗，不报错。
     // 刻意不实现 FromStr：这里要的是永不失败的兜底解析，Result 只会逼调用方再兜一次
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> ThemeKind {
         match s.trim().to_ascii_lowercase().as_str() {
-            "light" => ThemeKind::Light,
             "claude" => ThemeKind::Claude,
+            // "light" 也走这条：那套主题 2026-09-08 删了，存量配置自动回黑暗
             _ => ThemeKind::Dark,
         }
     }
@@ -56,7 +47,6 @@ impl ThemeKind {
     pub fn as_str(self) -> &'static str {
         match self {
             ThemeKind::Dark => "dark",
-            ThemeKind::Light => "light",
             ThemeKind::Claude => "claude",
         }
     }
@@ -65,15 +55,13 @@ impl ThemeKind {
     pub fn label(self) -> &'static str {
         match self {
             ThemeKind::Dark => "黑暗",
-            ThemeKind::Light => "明亮",
             ThemeKind::Claude => "Claude 橙",
         }
     }
 
     fn from_u8(v: u8) -> ThemeKind {
         match v {
-            1 => ThemeKind::Light,
-            2 => ThemeKind::Claude,
+            1 => ThemeKind::Claude,
             _ => ThemeKind::Dark,
         }
     }
@@ -99,71 +87,37 @@ pub struct Palette {
     pub green: u32,
     pub amber: u32,
     pub red: u32,
+    /// 项目行首「在跑」那一点。三套主题里都要是**蓝**：green/amber/red 各有旧含义，
+    /// accent 又随主题从青变成橙，只有蓝在三套里都读作「它自己在动」。
+    pub blue: u32,
     pub inset: u32,
     pub ansi: [u32; 16],
     pub is_dark: bool,
 }
 
-/// 黑暗 = 原始设计令牌，逐字段等于上面的 `pub const`（有测试钉住）
+/// 黑暗 = PROTOCOL.md「设计令牌」表的原值。以前这些值先声明成 15 个 `pub const`
+/// 再逐个填进来，另有一个测试断言两边相等——而结构体就是用那些常量初始化的，
+/// 断言恒真。常量在 theme.rs 之外零引用，2026-09-08 一并内联掉。
 static DARK: Palette = Palette {
-    bg: BG,
-    surface: SURFACE,
-    surface_raised: SURFACE_RAISED,
-    edge: EDGE,
-    edge_light: EDGE_LIGHT,
-    ink: INK,
-    dim: DIM,
-    faint: FAINT,
-    term_bg: TERM_BG,
+    bg: 0x0e1216,          // 页面底
+    surface: 0x1a222b,     // 卡片/面板
+    surface_raised: 0x212b36,
+    edge: 0x28323e,        // 描边
+    edge_light: 0x36434f,
+    ink: 0xe3ebf3,         // 文字一级
+    dim: 0x8b99a8,         // 文字二级
+    faint: 0x5f6d7c,       // 文字三级
+    term_bg: TERM_BG,      // 终端底
     term_fg: TERM_FG,
-    accent: CYAN,
-    magenta: MAGENTA,
-    green: GREEN,
-    amber: AMBER,
-    red: RED,
+    accent: 0x53c6dd,      // 主操作/选中（原 CYAN）
+    magenta: 0xc583e0,     // 品牌辅色（= ANSI magenta）
+    green: 0x5ecb8f,       // running
+    amber: 0xe3b45c,       // waiting
+    red: 0xe57373,         // exited
+    blue: 0x6c9ef8,        // 「在跑」的行首点
     inset: TERM_BG,
     ansi: ANSI,
     is_dark: true,
-};
-
-/// 明亮：中性冷灰纸面，终端白底。ANSI 取 one-light 一路——浅底上「亮色」要更深
-/// 才能看见，所以 8–15 比 0–7 更沉而不是更亮；7 white 给成灰，不然白字白底。
-static LIGHT: Palette = Palette {
-    bg: 0xf6f7f9,
-    surface: 0xffffff,
-    surface_raised: 0xeef1f4,
-    edge: 0xdce2e8,
-    edge_light: 0xc9d1d9,
-    ink: 0x1b2229,
-    dim: 0x5b6773,
-    faint: 0x8a96a3,
-    term_bg: 0xffffff,
-    term_fg: 0x1b2229,
-    accent: 0x0f8a9e,
-    magenta: 0x8e44ad,
-    green: 0x2e7d32,
-    amber: 0xb26a00,
-    red: 0xc62828,
-    inset: 0xffffff,
-    ansi: [
-        0x383a42, // 0 black
-        0xe45649, // 1 red
-        0x50a14f, // 2 green
-        0xc18401, // 3 yellow
-        0x4078f2, // 4 blue
-        0xa626a4, // 5 magenta
-        0x0184bc, // 6 cyan
-        0xa0a1a7, // 7 white（灰，白底可见）
-        0x696c77, // 8 bright black
-        0xca1243, // 9 bright red
-        0x3e8e3d, // 10 bright green
-        0x986801, // 11 bright yellow
-        0x2f5fcc, // 12 bright blue
-        0x8b1e89, // 13 bright magenta
-        0x0b6a9c, // 14 bright cyan
-        0x1b2229, // 15 bright white（= ink）
-    ],
-    is_dark: false,
 };
 
 /// Claude 橙：Anthropic 的象牙白 + 陶土橙；终端也是亮底暗字（暖白纸面，和界面一体），
@@ -185,6 +139,7 @@ static CLAUDE: Palette = Palette {
     green: 0x2f855a,
     amber: 0xb8860b,
     red: 0xc0392b,
+    blue: 0x3f6ea8,
     inset: 0xfffefa,
     ansi: [
         0x3c3836, // 0 black
@@ -211,7 +166,6 @@ impl Palette {
     pub const fn for_kind(kind: ThemeKind) -> &'static Palette {
         match kind {
             ThemeKind::Dark => &DARK,
-            ThemeKind::Light => &LIGHT,
             ThemeKind::Claude => &CLAUDE,
         }
     }
@@ -295,6 +249,11 @@ pub fn amber() -> u32 {
 }
 pub fn red() -> u32 {
     palette().red
+}
+
+/// 项目行首「在跑」那一点
+pub fn blue() -> u32 {
+    palette().blue
 }
 /// 输入框 / 折叠面板的下沉底（见 `Palette::inset`）
 pub fn inset() -> u32 {
@@ -382,23 +341,25 @@ pub fn state_label(state: &str) -> &'static str {
 
 // ── 终端 ANSI 16 色（深色主题，与设计令牌协调） ──────────────────────────────
 
+/// 1/2/3/5/6/8/15 号色刻意与界面令牌同值（红 / 绿 / 琥珀 / 品牌辅色 / 主色 /
+/// 文字三级 / 文字一级），终端里的这几个字和界面上的同一个意思长一个样。
 pub const ANSI: [u32; 16] = [
     0x1c242e, // 0 black（略亮于 term-bg，保证可见）
-    RED,      // 1 red
-    GREEN,    // 2 green
-    AMBER,    // 3 yellow
+    0xe57373, // 1 red（= DARK.red）
+    0x5ecb8f, // 2 green（= DARK.green）
+    0xe3b45c, // 3 yellow（= DARK.amber）
     0x6fa8dc, // 4 blue
-    MAGENTA,  // 5 magenta
-    CYAN,     // 6 cyan
+    0xc583e0, // 5 magenta（= DARK.magenta）
+    0x53c6dd, // 6 cyan（= DARK.accent）
     TERM_FG,  // 7 white
-    FAINT,    // 8 bright black
+    0x5f6d7c, // 8 bright black（= DARK.faint）
     0xef9a9a, // 9 bright red
     0x81e2ac, // 10 bright green
     0xf0c987, // 11 bright yellow
     0x8fc3f0, // 12 bright blue
     0xd9a8ef, // 13 bright magenta
     0x7fdbef, // 14 bright cyan
-    INK,      // 15 bright white
+    0xe3ebf3, // 15 bright white（= DARK.ink）
 ];
 
 pub const TERM_FG: u32 = 0xc9d4de;
@@ -450,8 +411,10 @@ mod tests {
             assert_eq!(ThemeKind::from_u8(k as u8), k);
         }
         // 大小写 / 空白宽容；认不出的一律黑暗
-        assert_eq!(ThemeKind::from_str(" Light "), ThemeKind::Light);
+        assert_eq!(ThemeKind::from_str(" Claude "), ThemeKind::Claude);
         assert_eq!(ThemeKind::from_str("CLAUDE"), ThemeKind::Claude);
+        // 2026-09-08 删掉的那套：存量 ui.toml 里的 "light" 静静回黑暗，不报错
+        assert_eq!(ThemeKind::from_str("light"), ThemeKind::Dark);
         assert_eq!(ThemeKind::from_str(""), ThemeKind::Dark);
         assert_eq!(ThemeKind::from_str("solarized"), ThemeKind::Dark);
         assert_eq!(ThemeKind::default(), ThemeKind::Dark);
@@ -459,26 +422,10 @@ mod tests {
     }
 
     #[test]
-    fn dark_palette_matches_legacy_consts() {
-        // 黑暗主题 = 原始设计令牌：调色板必须逐字段等于这些常量，改一处就得改两处
+    fn dark_palette_indexing_and_code_ink() {
         let p = Palette::for_kind(ThemeKind::Dark);
-        assert_eq!(p.bg, BG);
-        assert_eq!(p.surface, SURFACE);
-        assert_eq!(p.surface_raised, SURFACE_RAISED);
-        assert_eq!(p.edge, EDGE);
-        assert_eq!(p.edge_light, EDGE_LIGHT);
-        assert_eq!(p.ink, INK);
-        assert_eq!(p.dim, DIM);
-        assert_eq!(p.faint, FAINT);
-        assert_eq!(p.term_bg, TERM_BG);
-        assert_eq!(p.term_fg, TERM_FG);
-        assert_eq!(p.accent, CYAN);
-        assert_eq!(p.magenta, MAGENTA);
-        assert_eq!(p.green, GREEN);
-        assert_eq!(p.amber, AMBER);
-        assert_eq!(p.red, RED);
-        assert_eq!(p.ansi, ANSI);
         assert_eq!(p.code_ink(), 0x7fdbef, "代码字色 = 原 CODE_INK");
+        // 调色板版的 256 色索引必须与自由函数逐个一致
         for i in 0..=255u8 {
             assert_eq!(p.indexed_color(i), indexed_color(i));
         }
@@ -486,21 +433,16 @@ mod tests {
 
     #[test]
     fn palettes_are_distinct_and_flagged() {
-        let [d, l, c] = ThemeKind::ALL.map(Palette::for_kind);
-        assert_ne!(d.bg, l.bg);
-        assert_ne!(l.bg, c.bg);
+        let [d, c] = ThemeKind::ALL.map(Palette::for_kind);
         assert_ne!(d.bg, c.bg);
-        assert_ne!(d.accent, l.accent);
-        assert_ne!(l.accent, c.accent);
         assert_ne!(d.accent, c.accent);
         assert!(d.is_dark);
-        assert!(!l.is_dark);
         assert!(!c.is_dark, "Claude 橙是象牙白纸面");
         // 用户拍板的关键色
         assert_eq!(c.accent, 0xd97757);
-        // 三套里只有黑暗是暗底终端；两套浅色主题终端都是亮底暗字
+        // 两套里黑暗是暗底终端；Claude 橙是亮底暗字
         assert!(luminance(d.term_bg) < 0.2);
-        for p in [l, c] {
+        for p in [c] {
             assert!(luminance(p.term_bg) > 0.9, "浅色主题终端底要是亮的");
             assert!(luminance(p.term_fg) < 0.2, "浅色主题终端字要是暗的");
             assert!(luminance(p.code_ink()) < 0.4, "代码字色要在亮底上可读");
@@ -509,9 +451,13 @@ mod tests {
                 assert!(luminance(a) < 0.6, "{i}: ansi 色 {a:06x} 在亮底上看不见");
             }
         }
-        assert_eq!(l.accent, 0x0f8a9e);
+        // 项目行首三点（蓝 = 在跑 / 黄 = 未读 / 灰 = 已读）：两套主题上都得看得见，且互不撞色
+        for p in [d, c] {
+            assert_ne!(p.blue, p.amber);
+            assert_ne!(p.blue, p.dim);
+            assert!((luminance(p.blue) - luminance(p.bg)).abs() > 0.1, "行首蓝点在底色上看不见");
+        }
         // 浅色主题的下沉底不能是深色终端底：INK 字要落在上面
-        assert!(luminance(l.inset) > 0.5);
         assert!(luminance(c.inset) > 0.5);
     }
 
@@ -525,10 +471,9 @@ mod tests {
             // 三套 accent 都够亮，按钮字都是深色（用户要求）
             assert_ne!(text_on(p.accent), 0xffffff, "{k:?} accent 上应是深字");
         }
-        // 明亮 / Claude 的红是深红，危险按钮用白字；黑暗的红偏粉，仍是深字
-        assert_eq!(text_on(Palette::for_kind(ThemeKind::Light).red), 0xffffff);
+        // Claude 的红是深红，危险按钮用白字；黑暗的红偏粉，仍是深字
         assert_eq!(text_on(Palette::for_kind(ThemeKind::Claude).red), 0xffffff);
-        assert_ne!(text_on(RED), 0xffffff);
+        assert_ne!(text_on(Palette::for_kind(ThemeKind::Dark).red), 0xffffff);
         // mix 端点与中点
         assert_eq!(mix(0x000000, 0xffffff, 0.0), 0x000000);
         assert_eq!(mix(0x000000, 0xffffff, 1.0), 0xffffff);
@@ -572,9 +517,9 @@ mod tests {
         // 21 = 16 + 0*36 + 0*6 + 5 → 纯蓝
         assert_eq!(indexed_color(21), 0x0000ff);
         // 调色板版只替换 0-15，其余同一张表
-        let l = Palette::for_kind(ThemeKind::Light);
-        assert_eq!(l.indexed_color(1), l.ansi[1]);
-        assert_eq!(l.indexed_color(21), 0x0000ff);
+        let cl = Palette::for_kind(ThemeKind::Claude);
+        assert_eq!(cl.indexed_color(1), cl.ansi[1]);
+        assert_eq!(cl.indexed_color(21), 0x0000ff);
     }
 
     #[test]

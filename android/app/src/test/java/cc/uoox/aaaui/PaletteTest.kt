@@ -9,25 +9,25 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 三套配色的纯数据约束。Palette 不碰 Compose 运行时（只用 Color 这个值类），单测直接跑。
+ * 两套配色的纯数据约束。Palette 不碰 Compose 运行时（只用 Color 这个值类），单测直接跑。
  */
 class PaletteTest {
-    @Test fun threeThemesEachWithItsOwnBackgroundAndAccent() {
-        assertEquals(listOf("dark", "light", "claude"), Palette.all.map { it.name })
-        assertEquals(listOf("黑暗", "明亮", "Claude 橙"), Palette.all.map { it.label })
-        assertEquals(3, Palette.all.map { it.bg }.distinct().size)
-        assertEquals(3, Palette.all.map { it.accent }.distinct().size)
+    @Test fun twoThemesEachWithItsOwnBackgroundAndAccent() {
+        assertEquals(listOf("dark", "claude"), Palette.all.map { it.name })
+        assertEquals(listOf("黑暗", "Claude 橙"), Palette.all.map { it.label })
+        assertEquals(2, Palette.all.map { it.bg }.distinct().size)
+        assertEquals(2, Palette.all.map { it.accent }.distinct().size)
     }
 
     @Test fun forNameResolvesKnownNamesAndFallsBackToDark() {
         assertSame(Palette.Claude, Palette.forName("claude"))
-        assertSame(Palette.Light, Palette.forName("light"))
         assertSame(Palette.Dark, Palette.forName("dark"))
+        // 2026-09-08 删掉的那套：存量设置里的 "light" 静静回黑暗，不能崩
+        assertSame(Palette.Dark, Palette.forName("light"))
         // 旧版本没写过这个键 / 手改成了垃圾：都回到黑暗，不能崩
         assertSame(Palette.Dark, Palette.forName(null))
         assertSame(Palette.Dark, Palette.forName(""))
         assertSame(Palette.Dark, Palette.forName("solarized"))
-        assertSame(Palette.Dark, Palette.forName("Light"))
     }
 
     @Test fun darkKeepsThePrototypeTokens() {
@@ -41,21 +41,18 @@ class PaletteTest {
         assertTrue(d.isDark)
     }
 
-    @Test fun lightThemesHaveLightTerminals() {
-        assertFalse(Palette.Light.isDark)
+    @Test fun claudeIsTheLightThemeAndItsTerminalIsLightToo() {
         assertFalse(Palette.Claude.isDark)
         assertEquals(Color(0xFFD97757), Palette.Claude.accent)
-        // 两套浅色主题的终端都是亮底暗字；Claude 橙的底是暖白，字就是界面的墨
+        // Claude 橙的终端底是暖白，字就是界面的墨
         assertTrue(Palette.Claude.termBg.luminance() > 0.9f)
         assertEquals(Palette.Claude.ink, Palette.Claude.termFg)
-        assertEquals(Color(0xFFFFFFFF), Palette.Light.termBg)
-        assertEquals(Palette.Light.ink, Palette.Light.termFg)
     }
 
     @Test fun lightTerminalsBringTheirOwnAnsiAndDarkKeepsTermux() {
         // 黑暗沿用 termux 出厂 16 色；亮底主题必须自带一套，且没有一个色比底还亮
         assertEquals(null, Palette.Dark.ansi)
-        listOf(Palette.Light, Palette.Claude).forEach { p ->
+        listOf(Palette.Claude).forEach { p ->
             val ansi = p.ansi!!
             assertEquals(16, ansi.size)
             ansi.forEachIndexed { i, c ->

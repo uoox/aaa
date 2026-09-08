@@ -6,6 +6,7 @@
 # 连接：默认读 ~/.config/aaa-daemon/config.toml 连本机；AAA_HOST=主机:2730 AAA_TOKEN=… 指向远端。
 # token 只走请求头，永远不进 argv。
 import json, os, re, signal, subprocess, sys, time, urllib.error, urllib.request
+from datetime import datetime, timezone
 
 VERSION = "2.0.1"
 HELP = """aaa — AAA daemon 的工具箱
@@ -174,11 +175,16 @@ def status_of(s):
     if s.get("background"): return "background"
     return "active"
 
+def epoch(iso):
+    """ISO 时间串 → unix 秒；解不出给 0。两处各写过一遍正则 + calendar.timegm"""
+    try:
+        return datetime.strptime((iso or "")[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc).timestamp()
+    except ValueError:
+        return 0
+
 def ago(iso):
-    m = re.match(r"^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)", iso or "")
-    if not m: return ""
-    import calendar
-    t = calendar.timegm(tuple(int(x) for x in m.groups()) + (0, 0, 0))
+    t = epoch(iso)
+    if not t: return ""
     secs = int(time.time() - t)
     if secs < 60: return "%d秒" % max(secs, 0)
     if secs < 3600: return "%d分" % (secs // 60)
@@ -210,9 +216,7 @@ def sorted_sessions(sessions):
                   key=lambda s: (STATES.index(status_of(s)), -_ts(s)))
 
 def _ts(s):
-    import calendar
-    m = re.match(r"^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)", S(s, "updated_at") or S(s, "created_at") or "")
-    return calendar.timegm(tuple(int(x) for x in m.groups()) + (0, 0, 0)) if m else 0
+    return epoch(S(s, "updated_at") or S(s, "created_at"))
 
 # ---------------------------------------------------------------------------
 # 命令
@@ -296,7 +300,7 @@ def cmd_restart(conn, args):
         # 等所有会话都停在输入框再重启：daemon 记下约定，tick 里兑现；不用你挑时间。
         # 1.15 之前的 daemon 不认 when_idle（会按普通 restart 处理、有活会话就 409），
         # 那就由 CLI 起一个后台守望进程替它盯着：没有会话在「运行」就 --force 重启
-        if version_tuple(S(h, "version")) < (1, 15, 0):
+        if ver_tuple(S(h, "version")) < (1, 15, 0):
             start_idle_watch(conn, h); return
         v = call(conn, "POST", "/api/v1/restart", {"when_idle": True})
         if v.get("scheduled"):
@@ -315,9 +319,6 @@ def cmd_restart(conn, args):
     h2 = conn.wait_back()
     if not h2: die("90 秒内没回来，看 %s/daemon.err.log" % STATE)
     say("回来了：v%s，项目根 %s" % (S(h2, "version"), S(h2, "project_root")))
-
-def version_tuple(v):
-    return tuple(int(x) for x in re.findall(r"\d+", v or "0")[:3]) or (0,)
 
 IDLE_PID = os.path.join(STATE, "idle-restart.pid")
 IDLE_LOG = os.path.join(STATE, "idle-restart.log")
@@ -424,9 +425,9 @@ def report_migration(v):
 # ---------------------------------------------------------------------------
 NEED_VER = (1, 12, 1)
 
+# 上面 restart --when-idle 也用它比 daemon 版本（以前那边另写了一个 version_tuple）
 def ver_tuple(v):
-    try: return tuple(int(x) for x in v.split("."))
-    except ValueError: return (0,)
+    return tuple(int(x) for x in re.findall(r"\d+", v or "0")[:3]) or (0,)
 
 def confirm(q, yes):
     if yes: return True

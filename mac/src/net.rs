@@ -230,15 +230,16 @@ impl Net {
             }),
         )
     }
+    /// composer 发出去的一句话。`enter` 恒为 true——这个客户端没有「填进输入框
+    /// 但不回车」的入口，参数留着只会让调用点每次都写一个 true。
     pub fn session_input(
         &self,
         id: &str,
         text: String,
-        enter: bool,
     ) -> impl Future<Output = Result<serde_json::Value>> + use<> {
         self.post_json(
             &format!("/sessions/{id}/input"),
-            serde_json::json!({"text": text, "enter": enter}),
+            serde_json::json!({"text": text, "enter": true}),
         )
     }
     /// 回答当前待答的 AskUserQuestion 表单：一项对应一题，顺序同 `question.questions`。
@@ -273,13 +274,7 @@ impl Net {
         &self,
         id: &str,
     ) -> impl Future<Output = Result<serde_json::Value>> + use<> {
-        self.request_delete(format!("/sessions/{id}"))
-    }
-    fn request_delete(
-        &self,
-        path: String,
-    ) -> impl Future<Output = Result<serde_json::Value>> + use<> {
-        self.request_raw(reqwest::Method::DELETE, path, None)
+        self.request_raw(reqwest::Method::DELETE, format!("/sessions/{id}"), None)
     }
     pub fn rename_session(
         &self,
@@ -360,20 +355,6 @@ impl Net {
     /// v1.17 详情栏：子代理 / 后台任务 / 已上传 / 技能，一次拉齐
     pub fn session_detail(&self, id: &str) -> impl Future<Output = Result<SessionDetailResponse>> + use<> {
         self.get_json(&format!("/sessions/{id}/detail"))
-    }
-    /// 项目收件箱
-    pub fn inbox(&self, project_path: &str) -> impl Future<Output = Result<Vec<InboxItem>>> + use<> {
-        self.get_json(&format!("/inbox?path={}", percent_encode(project_path)))
-    }
-    pub fn inbox_add(
-        &self,
-        project_path: &str,
-        text: &str,
-    ) -> impl Future<Output = Result<serde_json::Value>> + use<> {
-        self.post_json("/inbox", serde_json::json!({ "path": project_path, "text": text }))
-    }
-    pub fn inbox_delete(&self, id: &str) -> impl Future<Output = Result<serde_json::Value>> + use<> {
-        self.request_delete(format!("/inbox/{}", percent_encode(id)))
     }
 
     // ── /events WS：断线指数退避重连 ─────────────────────────────────────
@@ -732,7 +713,7 @@ mod tests {
         // composer 发送：POST input {"text":"1","enter":true}
         let (port, req_rx) = one_shot_server("HTTP/1.1 200 OK", "{}");
         let net = test_net(port);
-        futures::executor::block_on(net.session_input("s_1", "1".into(), true)).unwrap();
+        futures::executor::block_on(net.session_input("s_1", "1".into())).unwrap();
         let req = req_rx.recv().unwrap();
         assert!(req.starts_with("POST /api/v1/sessions/s_1/input HTTP/1.1"));
         let body_start = req.find("\r\n\r\n").unwrap() + 4;
@@ -778,26 +759,6 @@ mod tests {
         assert!(v["answers"][0].get("other").is_none(), "other 为空时不发字段");
         assert_eq!(v["answers"][1]["selected"], serde_json::json!([]));
         assert_eq!(v["answers"][1]["other"], "Zed");
-    }
-
-    #[test]
-    fn rest_inbox_paths() {
-        // 收件箱 GET：路径进查询串要编码
-        let (port, req_rx) = one_shot_server("HTTP/1.1 200 OK", r#"[{"id":"i1","text":"t"}]"#);
-        let net = test_net(port);
-        let items = futures::executor::block_on(net.inbox("/Volumes/SSD/project/x y")).unwrap();
-        assert_eq!(items[0].id, "i1");
-        let req = req_rx.recv().unwrap();
-        assert!(
-            req.starts_with("GET /api/v1/inbox?path=%2FVolumes%2FSSD%2Fproject%2Fx%20y HTTP/1.1"),
-            "req: {req}"
-        );
-        // 删除条目：DELETE /inbox/:id
-        let (port, req_rx) = one_shot_server("HTTP/1.1 200 OK", "");
-        let net = test_net(port);
-        futures::executor::block_on(net.inbox_delete("i1")).unwrap();
-        let req = req_rx.recv().unwrap();
-        assert!(req.starts_with("DELETE /api/v1/inbox/i1 HTTP/1.1"), "req: {req}");
     }
 
     #[test]

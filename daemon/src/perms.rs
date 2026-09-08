@@ -22,16 +22,11 @@ pub const PERM_IDS: &[(&str, &str)] = &[
     ("full_disk_access", "完全磁盘访问"),
     ("automation_system_events", "自动化 · System Events"),
     ("automation_finder", "自动化 · Finder"),
-    ("camera", "摄像头"),
-    ("microphone", "麦克风"),
 ];
 
 #[cfg(target_os = "macos")]
 mod ffi {
     use std::ffi::c_void;
-    use std::os::raw::c_char;
-
-    pub const UTF8: u32 = 0x0800_0100;
 
     #[repr(C)]
     pub struct AEDesc {
@@ -89,54 +84,11 @@ mod ffi {
             key_callbacks: *const u8,
             value_callbacks: *const u8,
         ) -> *const c_void;
-        pub fn CFStringCreateWithCString(
-            alloc: *const c_void,
-            cstr: *const c_char,
-            encoding: u32,
-        ) -> *const c_void;
         pub fn CFRelease(cf: *const c_void);
     }
 
-    // objc runtime for AVCaptureDevice (avoids the objc2 crate stack)
-    #[link(name = "objc")]
-    extern "C" {
-        pub fn objc_getClass(name: *const c_char) -> *mut c_void;
-        pub fn sel_registerName(name: *const c_char) -> *mut c_void;
-        pub fn objc_msgSend();
-    }
-    // force-load AVFoundation so the class is registered
-    #[link(name = "AVFoundation", kind = "framework")]
-    extern "C" {}
-
     pub fn fourcc(s: &[u8; 4]) -> u32 {
         u32::from_be_bytes(*s)
-    }
-
-    /// AVCaptureDevice.authorizationStatus(for:) — read-only, no prompt.
-    /// media: b"vide" -> camera, b"soun" -> microphone.
-    /// Returns None if the class/selector can't be resolved.
-    pub fn av_authorization_status(media: &str) -> Option<i64> {
-        unsafe {
-            let cls = objc_getClass(c"AVCaptureDevice".as_ptr());
-            if cls.is_null() {
-                return None;
-            }
-            let sel = sel_registerName(c"authorizationStatusForMediaType:".as_ptr());
-            if sel.is_null() {
-                return None;
-            }
-            let cmedia = std::ffi::CString::new(media).ok()?;
-            let cfstr = CFStringCreateWithCString(std::ptr::null(), cmedia.as_ptr(), UTF8);
-            if cfstr.is_null() {
-                return None;
-            }
-            // CFStringRef is toll-free bridged to NSString*
-            let f: extern "C" fn(*mut c_void, *mut c_void, *const c_void) -> i64 =
-                std::mem::transmute(objc_msgSend as *const c_void);
-            let status = f(cls, sel, cfstr);
-            CFRelease(cfstr);
-            Some(status)
-        }
     }
 
     /// AEDeterminePermissionToAutomateTarget on a bundle-id address desc.
@@ -265,16 +217,6 @@ fn status_one(id: &str) -> &'static str {
                 _ => "unknown",
             }
         }
-        "camera" | "microphone" => {
-            let media = if id == "camera" { "vide" } else { "soun" };
-            match ffi::av_authorization_status(media) {
-                Some(3) => "granted",
-                Some(2) => "denied",
-                Some(1) => "denied", // restricted
-                Some(0) => "undetermined",
-                _ => "unknown",
-            }
-        }
         _ => "unknown",
     }
 }
@@ -305,9 +247,6 @@ pub fn status_all() -> Vec<PermStatus> {
                 }
                 ("automation_system_events" | "automation_finder", "denied") => {
                     "系统设置 → 隐私与安全性 → 自动化 里把 aaa-daemon → 目标 勾上"
-                }
-                ("camera" | "microphone", status) if status != "granted" => {
-                    "daemon 没有 Info.plist，系统不给弹窗；一般用不到"
                 }
                 _ => "",
             };
@@ -382,16 +321,6 @@ pub fn request(ids: &[String]) -> (Vec<&'static str>, Vec<&'static str>) {
                 let _ = ffi::ae_determine("com.apple.finder", true);
             });
             triggered.push("automation_finder");
-        }
-        // Camera/mic: AVCaptureDevice requestAccess would abort in a process
-        // without a usage-description Info.plist, so route to Settings.
-        if want("camera") {
-            ffi::open_settings("Privacy_Camera");
-            opened.push("camera");
-        }
-        if want("microphone") {
-            ffi::open_settings("Privacy_Microphone");
-            opened.push("microphone");
         }
         if want("full_disk_access") {
             ffi::open_settings("Privacy_AllFiles");

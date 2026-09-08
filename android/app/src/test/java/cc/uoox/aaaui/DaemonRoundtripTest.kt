@@ -147,9 +147,6 @@ class DaemonRoundtripTest {
                 assertTrue(health.ssd_mounted)
                 assertTrue(health.version.isNotBlank())
 
-                val agents = api.agents()
-                assertTrue(agents.any { it.id == "shell" } && agents.any { it.id == "claude" })
-
                 // 新建屏：POST /projects → 完整项目对象
                 val proj = api.createProject("Demo Project", agent = "claude")
                 assertTrue("unexpected slug: ${proj.path}", proj.path.endsWith("Demo-Project")) // slugify 保大小写、空格→-

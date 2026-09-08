@@ -23,26 +23,15 @@ class UsageTest {
         assertEquals(PctLevel.CRIT, pctColorLevel(100.0))
     }
 
-    @Test fun subtitleFull() {
-        val u = SessionUsage(model = "Fable 5.1", context_pct = 30.4, cost_usd = 1.25)
-        assertEquals("Fable 5.1 · 上下文 30% · $1.25", usageSubtitle(u))
-    }
-
-    @Test fun subtitleOmitsMissing() {
-        assertEquals("上下文 92%", usageSubtitle(SessionUsage(context_pct = 91.6)))
-        assertEquals("Fable 5.1 · $0.00", usageSubtitle(SessionUsage(model = "Fable 5.1", cost_usd = 0.0)))
-        assertNull(usageSubtitle(null))
-        assertNull(usageSubtitle(SessionUsage()))
-        assertNull(usageSubtitle(SessionUsage(model = "  ")))
-    }
-
-    @Test fun subtitleSegmentColoursOnlyContext() {
-        val segs = usageSubtitleSegments(SessionUsage(model = "M", context_pct = 95.0, cost_usd = 2.0))
-        assertEquals(listOf(PctLevel.NORMAL, PctLevel.CRIT, PctLevel.NORMAL), segs.map { it.level })
-        // 提示缓存命中率排在上下文后面；没有 current_usage 的老 daemon 不出现
-        val withCache = usageSubtitleSegments(SessionUsage(model = "M", context_pct = 10.0, cache_hit_pct = 87.0, cost_usd = 1.0))
-        assertEquals(listOf("M", "上下文 10%", "缓存 87.0%", "$1.00"), withCache.map { it.text })
-        assertTrue(segs.none { it.text.startsWith("缓存") })
+    /** 会话顶栏那一行：只有模型和上下文占比（2026-09-08 起顶栏并成一行） */
+    @Test fun headerSegmentsAreModelAndContextOnly() {
+        val u = SessionUsage(model = "Fable 5.1", context_pct = 30.4, cache_hit_pct = 87.0, cost_usd = 1.25)
+        assertEquals(listOf("Fable 5.1", "30%"), usageHeaderSegments(u).map { it.text })
+        assertEquals(listOf("92%"), usageHeaderSegments(SessionUsage(context_pct = 91.6)).map { it.text })
+        assertEquals(listOf(PctLevel.NORMAL, PctLevel.CRIT), usageHeaderSegments(SessionUsage(model = "M", context_pct = 95.0)).map { it.level })
+        assertTrue(usageHeaderSegments(null).isEmpty())
+        assertTrue(usageHeaderSegments(SessionUsage()).isEmpty())
+        assertTrue(usageHeaderSegments(SessionUsage(model = "  ")).isEmpty())
     }
 
     @Test fun planLineFull() {
@@ -50,17 +39,19 @@ class UsageTest {
             five_hour = PlanWindow(32.0), seven_day = PlanWindow(61.0),
             model_scoped = listOf(ModelScopedUsage("Fable", 40.0), ModelScopedUsage("Opus", 72.0)),
         )
-        assertEquals("5h 32% · 7d 61% · Fable 40% · Opus 72%", planLine(plan))
-        assertEquals(PctLevel.WARN, planMaxLevel(plan))
+        assertEquals(
+            listOf("5h 32%", "7d 61%", "Fable 40%", "Opus 72%"),
+            planLineSegments(plan).map { it.text },
+        )
+        assertEquals(PctLevel.WARN, planLineSegments(plan).maxOf { it.level })
     }
 
     @Test fun planLinePartial() {
-        assertEquals("7d 95%", planLine(PlanUsage(seven_day = PlanWindow(95.0))))
-        assertEquals(PctLevel.CRIT, planMaxLevel(PlanUsage(seven_day = PlanWindow(95.0))))
-        assertNull(planLine(null))
-        assertNull(planLine(PlanUsage()))
-        assertNull(planLine(PlanUsage(five_hour = PlanWindow(null))))
-        assertEquals(PctLevel.NORMAL, planMaxLevel(null))
+        assertEquals(listOf("7d 95%"), planLineSegments(PlanUsage(seven_day = PlanWindow(95.0))).map { it.text })
+        assertEquals(PctLevel.CRIT, planLineSegments(PlanUsage(seven_day = PlanWindow(95.0))).maxOf { it.level })
+        assertTrue(planLineSegments(null).isEmpty())
+        assertTrue(planLineSegments(PlanUsage()).isEmpty())
+        assertTrue(planLineSegments(PlanUsage(five_hour = PlanWindow(null))).isEmpty())
     }
 
     @Test fun parseResetsAtEpochSeconds() {
@@ -126,7 +117,7 @@ class UsageTest {
         assertEquals(Instant.parse("2026-09-03T06:30:00Z"), parseResetsAt(r.plan?.five_hour?.resets_at))
         assertEquals(Instant.parse("2026-09-05T00:00:00Z"), parseResetsAt(r.plan?.seven_day?.resets_at))
         assertNull(parseResetsAt(r.plan?.model_scoped?.first()?.resets_at))
-        assertEquals("5h 32% · 7d 62% · Fable 40%", planLine(r.plan))
+        assertEquals(listOf("5h 32%", "7d 62%", "Fable 40%"), planLineSegments(r.plan).map { it.text })
         assertNull(j.decodeFromString(UsageResponse.serializer(), """{"plan":null}""").plan)
 
         val a = j.decodeFromString(ArtifactsResponse.serializer(), """{"artifacts":[{"url":"https://x/1","title":"T","description":"D","file_path":"/p","ts":"2026-09-03T01:05:00Z"}]}""")

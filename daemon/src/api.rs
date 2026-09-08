@@ -135,9 +135,6 @@ impl ApiError {
     pub fn agent_unknown(agent: &str) -> Self {
         Self { status: StatusCode::BAD_REQUEST, code: "agent_unknown", message: format!("unknown agent: {agent}") }
     }
-    pub fn ssd_unmounted() -> Self {
-        Self::ssd_unmounted_with("project root is not mounted; refusing writes")
-    }
     pub fn ssd_unmounted_with(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
@@ -382,25 +379,6 @@ async fn restart(
     })))
 }
 
-async fn agents_list(State(app): State<SharedApp>) -> Json<Value> {
-    let home = app.paths.home.clone();
-    let list: Vec<Value> = agents::AGENTS
-        .iter()
-        .map(|a| {
-            json!({
-                "id": a.id,
-                "label": a.label,
-                "cmd": a.cmd,
-                "resume_cmd": a.resume_cmd,
-                "available": agents::which(agents::agent_bin(a), &home).is_some(),
-                // 终端不是 agent：新建项目/会话的选择里没有它，它是常驻的终端面板
-                "terminal": a.id == "shell",
-            })
-        })
-        .collect();
-    Json(json!(list))
-}
-
 async fn projects_list(State(app): State<SharedApp>) -> ApiResult<Json<Value>> {
     if app.restarting.load(std::sync::atomic::Ordering::SeqCst) {
         // 迁根 / 重启窗口里别扫：目录可能正在搬，cwd 缓存正在改写（gpt-6 审阅指出这条路没上锁）
@@ -451,7 +429,6 @@ async fn projects_list(State(app): State<SharedApp>) -> ApiResult<Json<Value>> {
                     "name": r.name,
                     "mtime": iso_from_epoch(r.mtime),
                     "dir_size": r.dir_size,
-                    "ctx_size": r.ctx_size.unwrap_or(0),
                     "agent": agent,
                     "session_title": if title.is_empty() { Value::Null } else { Value::String(title) },
                     // v1.8：置顶（POST /projects/pin）
@@ -510,7 +487,6 @@ async fn projects_create(
         "name": name,
         "mtime": iso_from_epoch(mtime),
         "dir_size": 0,
-        "ctx_size": 0,
         "agent": agent,
         "session_title": Value::Null,
         "pinned": false,
@@ -522,7 +498,11 @@ struct HistoryQuery {
     limit: Option<usize>,
 }
 
-/// 会话日志：所有出现过的会话（含已退出、已删除），最新在前
+/// 会话日志：所有出现过的会话（含已退出、已删除），最新在前。
+///
+/// 2026-09-08 差点被当成死路由删掉：两端确实只取 `/history/dashboard`。但看板**不收终端**，
+/// 而历史账本是收的——删项目之后「记录还在吗」只有这里能看见（smoke 就这么验的）。
+/// 它是这个账本唯一的读出口，留着。
 async fn history_list(
     State(app): State<SharedApp>,
     axum::extract::Query(q): axum::extract::Query<HistoryQuery>,
@@ -684,10 +664,11 @@ async fn projects_delete(
                 }
             };
             let target = target_dir.to_string_lossy().into_owned();
-            let purged: Vec<Value> = stores::purge(&app2.paths, &mut cache, &target)
-                .into_iter()
-                .map(|(label, count)| json!({"agent_label": label, "count": count}))
-                .collect();
+            // 线上形状不变（PROTOCOL.md「删除项目」）：只有 Claude 一个存储，
+            // 所以这个数组最多一项
+            let n = stores::purge(&app2.paths, &mut cache, &target);
+            let purged: Vec<Value> =
+                if n > 0 { vec![json!({"agent_label": "Claude", "count": n})] } else { vec![] };
             let _ = reg.unset(p);
             let _ = reg.unset(&target);
             let rm_ok = if target_dir.exists() {
@@ -808,7 +789,7 @@ async fn sessions_create(
         let agent_id = agent.id;
         let sid = blocking(move || {
             let mut cache = CwdCache::load(&app2.paths.cwd_cache());
-            let mut sid = stores::find(&app2.paths, &mut cache, agent_id, &target);
+            let mut sid = stores::find(&app2.paths, &mut cache, &target);
             if cache.dirty() {
                 let _g = app2.store_lock.lock().unwrap();
                 cache.save();
@@ -818,14 +799,14 @@ async fn sessions_create(
             if sid.is_empty() {
                 // 项目根迁移后 agent 存储按旧 cwd 查不到会话；注册表第三列
                 // 记的对话 id 是兜底（仅当登记的 agent 就是本次要开的）。
-                // 能验证的 agent 先验证：坏 id 当场清掉并开新会话，不要每次
-                // resume 都拿同一个已被 GC 的 id 去撞墙。
+                // 先验证：坏 id 当场清掉并开新会话，不要每次 resume 都拿同一个
+                // 已被 GC 的 id 去撞墙。
                 if reg.get(&target) == Some(agent_id) {
                     let cand = reg.get_id(&target).unwrap_or_default().to_string();
-                    if stores::id_exists(&app2.paths, agent_id, &cand) == Some(false) {
-                        let _ = reg.clear_id(&target);
-                    } else {
+                    if stores::id_exists(&app2.paths, &cand) {
                         sid = cand;
+                    } else {
+                        let _ = reg.clear_id(&target);
                     }
                 }
             } else {
@@ -1772,14 +1753,13 @@ async fn events_loop(app: SharedApp, mut socket: WebSocket) {
 pub fn router(app: SharedApp) -> Router {
     Router::new()
         .route("/api/v1/health", get(health))
-        .route("/api/v1/agents", get(agents_list))
         .route("/api/v1/projects", get(projects_list).post(projects_create))
         .route("/api/v1/projects/delete", post(projects_delete))
         .route("/api/v1/projects/pin", post(projects_pin))
+        .route("/api/v1/history", get(history_list))
         .route("/api/v1/history/backfill", post(history_backfill))
         .route("/api/v1/sessions/{id}/permission", post(session_permission))
         .route("/api/v1/sessions/{id}/checklist", post(session_checklist))
-        .route("/api/v1/history", get(history_list))
         .route("/api/v1/history/dashboard", get(history_dashboard))
         .route("/api/v1/sessions", get(sessions_list).post(sessions_create))
         .route("/api/v1/sessions/{id}", delete(session_delete))

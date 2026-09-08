@@ -62,11 +62,6 @@ pub fn next_key(screen: &vt100::Screen) -> Option<&'static [u8]> {
     None
 }
 
-/// 兼容旧调用：完整按键序列（测试与 feed 的「对话框在不在」判断用）
-pub fn accept_keys(screen: &vt100::Screen) -> Option<Vec<u8>> {
-    next_key(screen).map(|k| k.to_vec())
-}
-
 /// Is the trust dialog on screen? Both option lines must show — the prompt
 /// alone also appears in docs/help text claude might print later.
 pub fn dialog_visible(screen: &vt100::Screen) -> bool {
@@ -137,7 +132,7 @@ mod tests {
             "╭──────────────────────────────╮\n│ Do you trust the files in this folder? │\n│ /Users/x/proj │\n│ ❯ 1. Yes, proceed │\n│   2. No, exit │\n╰──────────────────────────────╯",
         );
         assert!(dialog_visible(dlg.screen()));
-        assert_eq!(accept_keys(dlg.screen()), Some(b"\r".to_vec()));
+        assert_eq!(next_key(dlg.screen()), Some(&b"\r"[..]));
         let doc = screen_of("Claude asked: Do you trust the files in this folder? — that is the trust dialog.");
         assert!(!dialog_visible(doc.screen()), "prompt text quoted in output is not a dialog");
         let composer = screen_of("> Yes, proceed with the refactor");

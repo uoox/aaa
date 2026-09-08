@@ -3,17 +3,15 @@
 //!
 //! 顶上是未完成条目数 + 搜索（2026-09-08 用户拍板：五态计数条和状态字跟着侧栏一起去掉——
 //! 看板和项目列表要说同一套话）。主体是**瀑布流、全展开**（2026-09-07 第三版，用户要一眼
-//! 看全）：一会话一张卡——转圈 / 什么都没有 + 标题 + 项目，一根进度条 `done/total`，全部
+//! 看全）：一会话一张卡——在跑就一个蓝点、否则什么都没有 + 标题 + 项目，一根进度条 `done/total`，全部
 //! 清单项直接列出（没勾的在前、做完的灰掉），不折叠、不分组；卡片按估算高度塞进最短的一
 //! 列，列数随窗口宽度变。已删除的默认不显示，一个开关切出来。会话还在就能点开。
 
-use std::time::Duration;
+use gpui::{Context, SharedString, div, prelude::*, px};
 
-use gpui::{Animation, AnimationExt as _, Context, ElementId, SharedString, div, prelude::*, px};
-
-use super::{RootView, SPINNER};
+use super::RootView;
 use super::kit::*;
-use crate::model::{Dashboard, SessionCard, card_matches, card_spinning};
+use crate::model::{Dashboard, SessionCard, card_matches, card_running};
 use crate::theme;
 
 impl RootView {
@@ -65,19 +63,16 @@ impl RootView {
                     .flex()
                     .items_start()
                     .gap(px(8.))
-                    // 转圈 = 还在跑；已删除的写一个字；其余什么都不画（和项目列表同一套话）
-                    .when(card_spinning(card), |el| {
+                    // 蓝点 = 还在跑；已删除的写一个字；其余什么都不画（和项目列表同一套话）
+                    .when(card_running(card), |el| {
                         el.child(
                             div()
                                 .flex_none()
-                                .font_family("Menlo")
-                                .text_size(px(10.))
-                                .text_color(c(theme::accent()))
-                                .with_animation(
-                                    ElementId::from(SharedString::from(format!("card-spin:{}", card.id))),
-                                    Animation::new(Duration::from_millis(800)).repeat().with_max_fps(12.),
-                                    |el, t| el.child(SPINNER[((t * SPINNER.len() as f32) as usize).min(SPINNER.len() - 1)]),
-                                ),
+                                .mt(px(5.))
+                                .w(px(6.))
+                                .h(px(6.))
+                                .rounded_full()
+                                .bg(c(theme::blue())),
                         )
                     })
                     .when(card.deleted, |el| {

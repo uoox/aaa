@@ -70,10 +70,6 @@ impl Paths {
             })
     }
 
-    pub fn claude_settings(&self) -> PathBuf {
-        self.home.join(".claude").join("settings.json")
-    }
-
     /// Linux：systemd 用户单元
     pub fn systemd_unit(&self) -> PathBuf {
         self.home

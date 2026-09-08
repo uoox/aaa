@@ -72,8 +72,8 @@ fn find_claude_newest_by_mtime() {
     fx.claude_session("p1", "sid-new", &fx.cwd, 2_000_000);
     fx.claude_session("p2", "sid-elsewhere", &fx.other, 3_000_000);
     let mut cache = CwdCache::load(&fx.cache_path);
-    assert_eq!(stores::find(&fx.paths, &mut cache, "claude", &fx.cwd), "sid-new");
-    assert_eq!(stores::find(&fx.paths, &mut cache, "claude", "/nope"), "");
+    assert_eq!(stores::find(&fx.paths, &mut cache, &fx.cwd), "sid-new");
+    assert_eq!(stores::find(&fx.paths, &mut cache, "/nope"), "");
     // cache write-back uses aaa-compatible `claude:<path>` keys
     cache.save();
     let raw: serde_json::Value =
@@ -96,31 +96,14 @@ fn find_honours_preexisting_cli_cache() {
     )
     .unwrap();
     let mut cache = CwdCache::load(&fx.cache_path);
-    assert_eq!(stores::find(&fx.paths, &mut cache, "claude", &fx.cwd), "");
-    assert_eq!(
-        stores::find(&fx.paths, &mut cache, "claude", "/somewhere/else"),
-        "sid-x"
-    );
-}
-
-// ---------- detect ----------
-
-#[test]
-fn detect_reports_claude_or_nothing() {
-    let fx = fixture();
-    fx.claude_session("p1", "c1", &fx.cwd, 1_000_000);
-    let mut cache = CwdCache::load(&fx.cache_path);
-    assert_eq!(stores::detect(&fx.paths, &mut cache, &fx.cwd), "claude");
-    assert_eq!(stores::detect(&fx.paths, &mut cache, &fx.other), "");
-    // 其它 agent 的存储不再被识别
-    assert_eq!(stores::find(&fx.paths, &mut cache, "codex", &fx.cwd), "");
-    assert_eq!(stores::find(&fx.paths, &mut cache, "shell", &fx.cwd), "");
+    assert_eq!(stores::find(&fx.paths, &mut cache, &fx.cwd), "");
+    assert_eq!(stores::find(&fx.paths, &mut cache, "/somewhere/else"), "sid-x");
 }
 
 // ---------- collect ----------
 
 #[test]
-fn collect_lists_projects_with_ctx_and_agent() {
+fn collect_lists_projects_with_agent() {
     let fx = fixture();
     let root = fx.paths.home.join("projroot");
     let p_a = root.join("alpha");
@@ -140,10 +123,8 @@ fn collect_lists_projects_with_ctx_and_agent() {
     assert_eq!(rows[0].name, "alpha", "sorted by mtime desc");
     assert_eq!(rows[1].name, "beta");
     assert_eq!(rows[0].det_agent.as_deref(), Some("claude"));
-    assert!(rows[0].ctx_size.unwrap() > 0);
     assert!(rows[0].dir_size >= 1000);
     assert_eq!(rows[1].det_agent, None);
-    assert_eq!(rows[1].ctx_size, None);
 }
 
 // ---------- purge ----------
@@ -156,12 +137,11 @@ fn purge_removes_claude_sessions_of_the_target_only() {
     let keep_claude = fx.claude_session("p1", "keep", &fx.other, 1_000_000);
 
     let mut cache = CwdCache::load(&fx.cache_path);
-    let report = stores::purge(&fx.paths, &mut cache, &fx.cwd);
-    assert_eq!(report, vec![("Claude".to_string(), 2)]);
+    assert_eq!(stores::purge(&fx.paths, &mut cache, &fx.cwd), 2);
     assert!(keep_claude.exists(), "unrelated cwd untouched");
 
     // second purge: nothing left to report
-    assert!(stores::purge(&fx.paths, &mut cache, &fx.cwd).is_empty());
+    assert_eq!(stores::purge(&fx.paths, &mut cache, &fx.cwd), 0);
     // non-absolute target refused outright
-    assert!(stores::purge(&fx.paths, &mut cache, "relative/path").is_empty());
+    assert_eq!(stores::purge(&fx.paths, &mut cache, "relative/path"), 0);
 }

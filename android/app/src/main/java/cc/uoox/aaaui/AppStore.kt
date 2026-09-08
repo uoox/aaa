@@ -130,13 +130,6 @@ class AppStore private constructor(context: Context) {
         reconnectKick.trySend(Unit)
     }
 
-    suspend fun clearServer() {
-        settings.setServer(null)
-        client = null
-        _connState.value = ConnState.NoServer
-        reconnectKick.trySend(Unit)
-    }
-
     fun kickReconnect() { reconnectKick.trySend(Unit) }
 
     // ---------- connection loop ----------

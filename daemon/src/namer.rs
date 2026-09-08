@@ -56,44 +56,9 @@ fn take_chars(s: &str, n: usize) -> String {
 /// Run `claude -p --model haiku` with the prompt on stdin, 60s timeout.
 /// Returns None on any failure (silent downgrade).
 pub fn run_haiku(exe: &Path, prompt: &str) -> Option<String> {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
-    let mut child = Command::new(exe)
-        .args(["-p", "--model", "haiku"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(prompt.as_bytes());
-        // drop closes the pipe
-    }
-    let stdout = child.stdout.take()?;
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        use std::io::Read;
-        let mut out = String::new();
-        let mut r = stdout;
-        let _ = r.read_to_string(&mut out);
-        let _ = tx.send(out);
-    });
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) => {
-                if std::time::Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return None;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-            Err(_) => return None,
-        }
-    }
-    rx.recv_timeout(std::time::Duration::from_secs(5)).ok()
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(["-p", "--model", "haiku"]);
+    crate::agents::run_with_timeout(cmd, Some(prompt.as_bytes()), std::time::Duration::from_secs(60))
 }
 
 /// Test hook signature: replaces the real `claude -p --model haiku` call.

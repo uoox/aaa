@@ -10,17 +10,19 @@ use std::collections::HashSet;
 
 use crate::model::ChatMessage;
 
-/// 一轮。`key` 取轮内第一条消息的 seq——用户轮就是用户消息的 seq，跨次刷新稳定。
+/// 一轮。
 /// `body` 是除用户消息外的全部消息，保持原序。
 /// `live`：会话仍在跑且这是最后一轮——尾部那段过程画成「进行中」并带最近一步。
 #[derive(Debug)]
 pub struct Turn<'a> {
     pub user: Option<&'a ChatMessage>,
     pub body: Vec<&'a ChatMessage>,
-    pub key: u64,
     pub live: bool,
 }
 
+/// 轮内切片的两个取法。只有测试在问这两个问题——渲染走的是 [`flatten`]，它把
+/// 一轮直接摊成 [`StreamItem`]，从不先要一份 steps 或 replies 的列表。
+#[cfg(test)]
 impl<'a> Turn<'a> {
     /// 轮内所有会被折叠的消息（思考 / 工具 / system）
     pub fn steps(&self) -> Vec<&'a ChatMessage> {
@@ -97,10 +99,9 @@ pub fn fold_turns(messages: &[ChatMessage], live: bool) -> Vec<Turn<'_>> {
         .into_iter()
         .enumerate()
         .map(|(i, g)| {
-            let key = g[0].seq;
             let user = g.first().copied().filter(|m| starts_turn(m));
             let body = if user.is_some() { g[1..].to_vec() } else { g };
-            Turn { user, body, key, live: live && i == last }
+            Turn { user, body, live: live && i == last }
         })
         .collect()
 }
@@ -302,7 +303,6 @@ mod tests {
         assert_eq!(turns[0].user.map(|m| m.seq), Some(1));
         assert_eq!(seqs(&turns[0].steps()), vec![2, 3]);
         assert_eq!(seqs(&turns[0].replies()), vec![4]);
-        assert_eq!(turns[0].key, 1);
         assert_eq!(turns[1].user.map(|m| m.seq), Some(5));
         assert!(turns[1].steps().is_empty());
         assert_eq!(seqs(&turns[1].replies()), vec![6]);
@@ -356,7 +356,6 @@ mod tests {
         let turns = fold_turns(&msgs, false);
         assert_eq!(turns.len(), 2);
         assert!(turns[0].user.is_none());
-        assert_eq!(turns[0].key, 7);
         assert_eq!(seqs(&turns[0].steps()), vec![7, 8]);
         assert_eq!(seqs(&turns[0].replies()), vec![9]);
         assert_eq!(turns[1].user.map(|m| m.seq), Some(10));

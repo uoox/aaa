@@ -136,32 +136,19 @@ fn val_str(v: &Value) -> String {
 
 // ---- session iterators ----
 
-/// 注册表第三列兜底 id 的有效性检查：`Some(存在与否)`=能便宜验证（claude /
-/// reasonix 的会话文件名就是 id，扫一层目录即可）；`None`=该 agent 没有便宜
-/// 的验证手段（codex 要拆 rollout 文件、pi 根本不用 id），调用方按 best-effort
-/// 继续用。目的：agent 那边把会话 GC 掉之后，别拿着坏 id 反复 resume 失败。
-pub fn id_exists(paths: &Paths, agent: &str, id: &str) -> Option<bool> {
+/// 注册表第三列兜底 id 还在不在。claude 的会话文件名就是 id，扫一层目录即可。
+/// 目的：Claude Code 那边把会话 GC 掉之后，别拿着坏 id 反复 resume 失败。
+///
+/// 2026-09-08：以前带 `agent` 参数、返回 `Option<bool>`（`None` = 那个 agent 没有
+/// 便宜的验证手段），是 codex / pi 还在支持列表里时的形状。现在只有 claude 会走到
+/// 这里，shell 没有会话文件。
+pub fn id_exists(paths: &Paths, id: &str) -> bool {
     if id.is_empty() || id.contains('/') || id.contains("..") {
-        return Some(false);
+        return false;
     }
     let name = format!("{id}.jsonl");
-    let scan = |root: std::path::PathBuf, nested: Option<&str>| -> bool {
-        let Ok(rd) = std::fs::read_dir(&root) else { return false };
-        for e in rd.flatten() {
-            let dir = match nested {
-                Some(sub) => e.path().join(sub),
-                None => e.path(),
-            };
-            if dir.join(&name).is_file() {
-                return true;
-            }
-        }
-        false
-    };
-    match agent {
-        "claude" => Some(scan(paths.claude_root(), None)),
-        _ => None,
-    }
+    let Ok(rd) = std::fs::read_dir(paths.claude_root()) else { return false };
+    rd.flatten().any(|e| e.path().join(&name).is_file())
 }
 
 pub fn claude_sessions(paths: &Paths, cache: &mut CwdCache) -> Vec<SessRec> {
@@ -215,30 +202,15 @@ fn newest<I: IntoIterator<Item = (f64, String)>>(pairs: I) -> String {
     best.map(|b| b.1).unwrap_or_default()
 }
 
-/// Find the most recent session id for (agent, cwd). `target` should already
+/// Find the most recent claude session id for `cwd`. `target` should already
 /// be realpath'd by the caller (as the zsh caller does with `pwd -P`).
-pub fn find(paths: &Paths, cache: &mut CwdCache, agent: &str, target: &str) -> String {
-    match agent {
-        "claude" => newest(
-            claude_sessions(paths, cache)
-                .into_iter()
-                .filter(|r| r.cwd == target)
-                .map(|r| (r.mtime, r.sid)),
-        ),
-        _ => String::new(),
-    }
-}
-
-// ---- detect ----
-
-/// Agent of the most recent session for `target`, across all stores. Part of
-/// the ported AAA_PY surface (used by the store_debug example + parity tests).
-pub fn detect(paths: &Paths, cache: &mut CwdCache, target: &str) -> String {
-    let target = realpath(target);
-    let hit = claude_sessions(paths, cache)
-        .into_iter()
-        .any(|r| !r.cwd.is_empty() && realpath(&r.cwd) == target);
-    if hit { "claude".to_string() } else { String::new() }
+pub fn find(paths: &Paths, cache: &mut CwdCache, target: &str) -> String {
+    newest(
+        claude_sessions(paths, cache)
+            .into_iter()
+            .filter(|r| r.cwd == target)
+            .map(|r| (r.mtime, r.sid)),
+    )
 }
 
 // ---- collect ----
@@ -249,7 +221,6 @@ pub struct ProjectRow {
     pub name: String,
     pub mtime: f64,
     pub dir_size: u64,
-    pub ctx_size: Option<u64>,
     /// agent of the most recent session found in any store (None = none found)
     pub det_agent: Option<String>,
     /// session file path usable by the namer (claude jsonl / reasonix .meta)
@@ -258,7 +229,6 @@ pub struct ProjectRow {
 
 pub fn collect(paths: &Paths, cache: &mut CwdCache, root: &Path) -> Vec<ProjectRow> {
     use std::collections::HashMap;
-    let mut ctx: HashMap<String, (u64, f64)> = HashMap::new();
     let mut det: HashMap<String, (f64, String, String)> = HashMap::new();
     // Session records share few distinct cwds; memoize canonicalization so a
     // scan does one `canonicalize` per cwd instead of two per record.
@@ -291,30 +261,8 @@ pub fn collect(paths: &Paths, cache: &mut CwdCache, root: &Path) -> Vec<ProjectR
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn push(
-        ctx: &mut HashMap<String, (u64, f64)>,
-        det: &mut HashMap<String, (f64, String, String)>,
-        memo: &mut HashMap<String, String>,
-        cwd: &str,
-        size: u64,
-        mtime: f64,
-        agent: &str,
-        path: &str,
-    ) {
-        if cwd.is_empty() {
-            return;
-        }
-        let rp = realpath_memo(memo, cwd);
-        let cur = ctx.get(&rp);
-        if cur.map(|c| mtime > c.1).unwrap_or(true) {
-            ctx.insert(rp, (size, mtime));
-        }
-        mark(det, memo, cwd, mtime, agent, path);
-    }
-
     for r in claude_sessions(paths, cache) {
-        push(&mut ctx, &mut det, &mut memo, &r.cwd, r.size, r.mtime, "claude", &r.path.to_string_lossy());
+        mark(&mut det, &mut memo, &r.cwd, r.mtime, "claude", &r.path.to_string_lossy());
     }
 
     fn dir_size_one_level(d: &Path) -> u64 {
@@ -351,11 +299,9 @@ pub fn collect(paths: &Paths, cache: &mut CwdCache, root: &Path) -> Vec<ProjectR
     rows.into_iter()
         .map(|(mt, p, name)| {
             let rp = realpath_memo(&mut memo, &p);
-            let tup = ctx.get(&rp).or_else(|| ctx.get(&p));
             let dt = det.get(&rp).or_else(|| det.get(&p));
             ProjectRow {
                 dir_size: dir_size_one_level(Path::new(&p)),
-                ctx_size: tup.map(|t| t.0),
                 det_agent: dt.map(|d| d.1.clone()),
                 det_path: dt.map(|d| d.2.clone()).unwrap_or_default(),
                 path: p,
@@ -368,12 +314,12 @@ pub fn collect(paths: &Paths, cache: &mut CwdCache, root: &Path) -> Vec<ProjectR
 
 // ---- purge ----
 
-/// Purge the Claude store for `target` (an absolute, realpath'd cwd).
-/// Returns `(label, count)` pairs for stores that had hits (only Claude now).
-pub fn purge(paths: &Paths, cache: &mut CwdCache, target: &str) -> Vec<(String, u64)> {
-    let mut report = Vec::new();
+/// Purge the Claude store for `target` (an absolute, realpath'd cwd)；返回删掉几个。
+/// 以前返回 `Vec<(label, count)>`，但那个 Vec 只可能装 `("Claude", n)` 一项——线上的
+/// `purged: [{agent_label, count}]` 形状不变，由调用方拼（PROTOCOL.md「删除项目」）。
+pub fn purge(paths: &Paths, cache: &mut CwdCache, target: &str) -> u64 {
     if !target.starts_with('/') {
-        return report; // safety: only absolute cwds, same contract as the CLI
+        return 0; // safety: only absolute cwds, same contract as the CLI
     }
     let mut n = 0u64;
     for r in claude_sessions(paths, cache) {
@@ -381,10 +327,7 @@ pub fn purge(paths: &Paths, cache: &mut CwdCache, target: &str) -> Vec<(String, 
             n += 1;
         }
     }
-    if n > 0 {
-        report.push(("Claude".to_string(), n));
-    }
-    report
+    n
 }
 
 #[cfg(test)]
@@ -398,12 +341,11 @@ mod id_exists_tests {
         let proj = paths.claude_root().join("-Volumes-SSD-project-x");
         std::fs::create_dir_all(&proj).unwrap();
         std::fs::write(proj.join("live-id.jsonl"), "{}\n").unwrap();
-        assert_eq!(id_exists(&paths, "claude", "live-id"), Some(true));
-        assert_eq!(id_exists(&paths, "claude", "gone-id"), Some(false), "被 GC 的 id 要报 false");
+        assert!(id_exists(&paths, "live-id"));
+        assert!(!id_exists(&paths, "gone-id"), "被 GC 的 id 要报 false");
         // 非 claude（终端）没有可验证的存储
-        assert_eq!(id_exists(&paths, "shell", "whatever"), None);
         // 别让奇怪的 id 变成路径穿越
-        assert_eq!(id_exists(&paths, "claude", "../../etc/passwd"), Some(false));
-        assert_eq!(id_exists(&paths, "claude", ""), Some(false));
+        assert!(!id_exists(&paths, "../../etc/passwd"));
+        assert!(!id_exists(&paths, ""));
     }
 }

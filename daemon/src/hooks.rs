@@ -69,11 +69,6 @@ pub fn statusline_path(paths: &crate::paths::Paths) -> PathBuf {
     paths.state_dir().join("aaa-statusline.sh")
 }
 
-/// Settings fragment for `claude --settings <file>`.
-pub fn settings_json(port: u16, token: &str) -> Value {
-    settings_json_with(port, token, &statusline_path(&crate::paths::Paths::from_env()))
-}
-
 pub fn settings_json_with(port: u16, token: &str, statusline: &Path) -> Value {
     let mut hooks = serde_json::Map::new();
     for ev in EVENTS {
@@ -477,7 +472,7 @@ mod tests {
 
     #[test]
     fn settings_register_every_event_as_async_http_with_session_header() {
-        let v = settings_json(2730, "aaa_tk_x");
+        let v = settings_json_with(2730, "aaa_tk_x", Path::new("/tmp/statusline"));
         let hooks = v["hooks"].as_object().unwrap();
         for ev in EVENTS {
             let h = &hooks[*ev][0]["hooks"][0];

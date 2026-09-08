@@ -54,13 +54,9 @@ pub struct Session {
     #[serde(default)]
     pub background: bool,
     #[serde(default)]
-    pub preview: String,
-    #[serde(default)]
     pub rows: u16,
     #[serde(default)]
     pub cols: u16,
-    #[serde(default)]
-    pub pid: Option<i64>,
     #[serde(default)]
     pub exit_code: Option<i32>,
     #[serde(default)]
@@ -73,9 +69,6 @@ pub struct Session {
     /// 老 daemon 不给 → 空串，排序时退到 created_at
     #[serde(default)]
     pub updated_at: String,
-    /// v1.3：状态由 Claude Code hooks 驱动
-    #[serde(default)]
-    pub hooked: bool,
     /// StopFailure 的错误类型（rate_limit / overloaded / authentication_failed…）
     #[serde(default)]
     pub error: Option<String>,
@@ -172,14 +165,16 @@ pub fn card_matches(c: &SessionCard, query: &str) -> bool {
         || c.items.iter().any(|i| i.text.to_lowercase().contains(&q))
 }
 
-/// 卡片上转不转圈（2026-09-08 用户拍板：看板和侧栏说同一套话——转圈 / 什么都没有，
+/// 卡片上画不画蓝点（2026-09-08 用户拍板：看板和侧栏说同一套话——蓝点 / 什么都没有，
 /// 五个状态字连同顶上的计数条一起去掉）。`status` 本身还留在协议里，它是排序和这个判断的依据。
-pub fn card_spinning(c: &SessionCard) -> bool {
+pub fn card_running(c: &SessionCard) -> bool {
     !c.deleted && (c.status == "running" || c.status == "background")
 }
 
-/// 「已完成」= 暂停且清单全勾完（或没清单）：真正结束的活儿，看板默认收起来
-pub fn card_is_finished(c: &SessionCard) -> bool {
+#[cfg(test)]
+/// 「已完成」= 暂停且清单全勾完（或没清单）。v1.17 取消了「做完的折起来」之后
+/// 生产代码不再问这个问题，只有看板分组的测试还在用它当参照。
+fn card_is_finished(c: &SessionCard) -> bool {
     c.status == "paused" && c.open == 0
 }
 
@@ -218,12 +213,6 @@ pub struct SessionUsage {
     /// 0–100
     #[serde(default)]
     pub context_pct: Option<f64>,
-    #[serde(default)]
-    pub context_window_size: Option<u64>,
-    #[serde(default)]
-    pub input_tokens: Option<u64>,
-    #[serde(default)]
-    pub output_tokens: Option<u64>,
     #[serde(default)]
     pub cost_usd: Option<f64>,
     #[serde(default)]
@@ -319,8 +308,6 @@ pub struct Artifact {
     pub title: String,
     #[serde(default)]
     pub description: String,
-    #[serde(default)]
-    pub file_path: String,
     /// ISO 时间
     #[serde(default)]
     pub ts: String,
@@ -398,17 +385,6 @@ pub struct ArtifactsResponse {
     pub artifacts: Vec<Artifact>,
 }
 
-/// 任务收件箱一项（按项目路径归属）
-#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
-pub struct InboxItem {
-    #[serde(default)]
-    pub id: String,
-    #[serde(default)]
-    pub text: String,
-    #[serde(default)]
-    pub created_at: String,
-}
-
 impl Session {
     /// StopFailure 的错误类型 → 一句人话
     pub fn error_label(&self) -> Option<String> {
@@ -452,8 +428,6 @@ pub struct Project {
     pub mtime: String,
     #[serde(default)]
     pub dir_size: u64,
-    #[serde(default)]
-    pub ctx_size: u64,
     #[serde(default)]
     pub agent: Option<String>,
     #[serde(default)]
@@ -634,11 +608,6 @@ pub enum DaemonEvent {
         #[serde(default)]
         plan: Option<PlanUsage>,
     },
-    /// 收件箱变了（按项目路径）：详情面板正显示该项目就重拉
-    InboxChanged {
-        #[serde(default)]
-        path: String,
-    },
     /// 未知帧向前兼容（已移除的 session_stalled 也落到这里）
     #[serde(other)]
     Unknown,
@@ -774,21 +743,6 @@ pub fn set_flagged(flags: &mut Vec<String>, project_path: &str, on: bool) -> boo
     true
 }
 
-/// 切换静音；返回切换后是否静音
-pub fn toggle_muted(muted: &mut Vec<String>, project_path: &str) -> bool {
-    let p = project_path.trim_end_matches('/');
-    if p.is_empty() {
-        return false;
-    }
-    if is_muted(muted, p) {
-        muted.retain(|m| m.trim_end_matches('/') != p);
-        false
-    } else {
-        muted.push(p.to_string());
-        true
-    }
-}
-
 impl UiState {
     fn path() -> Option<std::path::PathBuf> {
         Some(dirs::home_dir()?.join(".config/aaa-ui/ui.toml"))
@@ -865,7 +819,6 @@ mod tests {
         assert_eq!(s.state, SessionState::Waiting);
         assert!(s.asking);
         assert_eq!(s.rows, 40);
-        assert_eq!(s.pid, Some(12345));
         assert_eq!(s.exit_code, None);
         assert_eq!(s.display_title(), "aaa-ui 交互原型设计");
     }
@@ -904,10 +857,10 @@ mod tests {
         };
         assert!(card_matches(&c, "") && card_matches(&c, "登录") && card_matches(&c, "shop") && card_matches(&c, "测试"));
         assert!(!card_matches(&c, "支付"));
-        assert!(card_spinning(&SessionCard { status: "running".into(), ..Default::default() }));
-        assert!(card_spinning(&SessionCard { status: "background".into(), ..Default::default() }));
-        assert!(!card_spinning(&SessionCard { status: "active".into(), ..Default::default() }));
-        assert!(!card_spinning(&SessionCard { status: "running".into(), deleted: true, ..Default::default() }), "已删除的不转圈");
+        assert!(card_running(&SessionCard { status: "running".into(), ..Default::default() }));
+        assert!(card_running(&SessionCard { status: "background".into(), ..Default::default() }));
+        assert!(!card_running(&SessionCard { status: "active".into(), ..Default::default() }));
+        assert!(!card_running(&SessionCard { status: "running".into(), deleted: true, ..Default::default() }), "已删除的不画蓝点");
         assert!(!card_is_finished(&c), "暂停但还有没勾的：不算完");
         let done = SessionCard { status: "paused".into(), open: 0, ..Default::default() };
         assert!(card_is_finished(&done));
@@ -1027,9 +980,10 @@ mod tests {
         assert!(
             matches!(e, DaemonEvent::MessagesChanged { ref id, last_seq: 42 } if id == "s_1")
         );
+        // 已删掉的帧（inbox_changed 等）落进 Unknown，不能反序列化失败
         let e: DaemonEvent =
             serde_json::from_str(r#"{"t":"inbox_changed","path":"/p/x"}"#).unwrap();
-        assert!(matches!(e, DaemonEvent::InboxChanged { ref path } if path == "/p/x"));
+        assert!(matches!(e, DaemonEvent::Unknown));
         // usage 帧：plan 可为 null
         let e: DaemonEvent = serde_json::from_str(r#"{"t":"usage","plan":null}"#).unwrap();
         assert!(matches!(e, DaemonEvent::Usage { plan: None }));
@@ -1089,16 +1043,13 @@ mod tests {
     }
 
     #[test]
-    fn artifacts_inbox_parse() {
+    fn artifacts_parse() {
+        // file_path 仍在线上，客户端不再收：多出来的键必须被静静吃掉
         let a: ArtifactsResponse = serde_json::from_str(
             r#"{"artifacts":[{"url":"https://claude.ai/a/1","title":"报告","description":"desc","file_path":"/x.html","ts":"2026-09-03T10:00:00Z"}]}"#,
         )
         .unwrap();
         assert_eq!(a.artifacts[0].title, "报告");
-        let i: Vec<InboxItem> =
-            serde_json::from_str(r#"[{"id":"i1","text":"修 bug","created_at":"2026-09-03T10:00:00Z"}]"#)
-                .unwrap();
-        assert_eq!(i[0].text, "修 bug");
     }
 
     #[test]
@@ -1109,14 +1060,14 @@ mod tests {
         assert!(is_muted(&muted, "/p/a/"));
         assert!(!is_muted(&muted, "/p/ab"));
         assert!(!is_muted(&muted, ""));
-        // 切换：开 → 关 → 开
-        assert!(!toggle_muted(&mut muted, "/p/a"));
+        // 切换（详情面板直接调 set_flagged 取反）；返回值是「有没有变」
+        assert!(set_flagged(&mut muted, "/p/a", false));
         assert!(muted.is_empty());
-        assert!(toggle_muted(&mut muted, "/p/b/"));
+        assert!(set_flagged(&mut muted, "/p/b/", true));
         assert_eq!(muted, vec!["/p/b".to_string()]);
         assert!(is_muted(&muted, "/p/b"));
         // 空路径不记
-        assert!(!toggle_muted(&mut muted, ""));
+        assert!(!set_flagged(&mut muted, "", true));
         assert_eq!(muted.len(), 1);
     }
 

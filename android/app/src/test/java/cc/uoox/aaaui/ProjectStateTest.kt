@@ -8,14 +8,14 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 首页的项目 ↔ 会话拼接、行首记号（转圈 / 黄点）与排序。全在客户端算，daemon 只给两张表。
+ * 首页的项目 ↔ 会话拼接、行首那一点（蓝 / 黄 / 灰）与排序。全在客户端算，daemon 只给两张表。
  */
 class ProjectStateTest {
     private val p = Project(path = "/r/a", name = "a", mtime = "2026-09-01T00:00:00Z", agent = "claude", session_title = "旧对话")
     private val bare = Project(path = "/r/b", name = "b", mtime = "2026-09-01T00:00:00Z", agent = "claude", session_title = null)
 
-    private fun s(id: String, state: String, at: String, asking: Boolean = false, path: String = p.path, preview: String = "", title: String = "", updated: String = "") =
-        Session(id = id, project_path = path, agent = "claude", state = state, asking = asking, last_output_at = at, preview = preview, title = title, updated_at = updated)
+    private fun s(id: String, state: String, at: String, asking: Boolean = false, path: String = p.path, title: String = "", updated: String = "") =
+        Session(id = id, project_path = path, agent = "claude", state = state, asking = asking, last_output_at = at, title = title, updated_at = updated)
 
     @Test fun askingBeatsRunningRegardlessOfRecency() {
         val running = s("run", "running", "2026-09-02T10:00:00Z")
@@ -31,12 +31,12 @@ class ProjectStateTest {
         assertEquals(ProjectState.ACTIVE, projectStateOf(s("w", "waiting", "2026-09-02T09:00:00Z")))
         assertEquals(ProjectState.INACTIVE, projectStateOf(s("x", "exited", "2026-09-02T09:00:00Z")))
         assertEquals(ProjectState.INACTIVE, projectStateOf(null))
-        // 2026-09-08：列表上不再写状态字，枚举只管「转不转圈」和排序
-        assertTrue(ProjectState.RUNNING.spinning)
-        assertTrue(ProjectState.BACKGROUND.spinning)
-        assertFalse(ProjectState.NEEDS_REPLY.spinning)
-        assertFalse(ProjectState.ACTIVE.spinning)
-        assertFalse(ProjectState.INACTIVE.spinning)
+        // 2026-09-08：列表上不再写状态字，枚举只管「点是不是蓝的」和排序
+        assertTrue(ProjectState.RUNNING.running)
+        assertTrue(ProjectState.BACKGROUND.running)
+        assertFalse(ProjectState.NEEDS_REPLY.running)
+        assertFalse(ProjectState.ACTIVE.running)
+        assertFalse(ProjectState.INACTIVE.running)
         // 后台：waiting 且 background；在问的仍是待回复
         assertEquals(ProjectState.BACKGROUND, projectStateOf(s("w", "waiting", "2026-09-02T09:00:00Z").copy(background = true)))
         assertEquals(ProjectState.NEEDS_REPLY, projectStateOf(s("w", "waiting", "2026-09-02T09:00:00Z", asking = true).copy(background = true)))

@@ -4,10 +4,14 @@
 //! Artifact，点开浏览器）、改动（start 检查点 vs 工作区，可展开 patch、可回滚）、
 //! 收件箱（项目任务清单，Claude 空下来时 daemon 自动喂）、通知（按项目静音）。
 //!
-//! 拉取节流：产物 / 改动各有一个 [`Throttle`]——`messages_changed` 帧来得很密
+//! 拉取节流：整个面板共用一个 [`Throttle`]——`messages_changed` 帧来得很密
 //! （daemon 侧 ≥500ms 一帧），这里按「间隔内最多一次、间隔末尾补一次」收口：
 //! 间隔外立刻拉；间隔内只挂一个定时器，到点再拉一次（不丢最后一次变化）；
-//! 定时器已挂着时再来的帧直接忽略。
+//! 定时器已挂着时再来的帧直接忽略。**末尾那次补拉不能省**——变化正好落在间隔内
+//! 时，朴素的「距上次够久才拉」会把它整个丢掉，面板僵在旧数据上。
+//!
+//! 2026-09-08：以前产物和 extras 各有一个节流器、由一个 `DetailKind` 选择走哪个，
+//! 但两个调用点从来都是两样一起要，枚举永远只有一个取值。合成一个。
 
 use std::time::{Duration, Instant};
 
@@ -18,14 +22,14 @@ use super::kit::*;
 use super::{Page, RootView};
 use crate::model::{
     Artifact, PlanUsage, Session, SessionDetailResponse, SessionUsage, is_muted, parse_checklist,
-    toggle_muted,
+    set_flagged,
 };
 use crate::theme::{self, human_bytes};
 
 /// 面板宽度
 pub(super) const DETAIL_W: f32 = 300.0;
-/// 产物的最小重拉间隔
-const ARTIFACTS_MIN: Duration = Duration::from_secs(2);
+/// 面板的最小重拉间隔
+const DETAIL_MIN: Duration = Duration::from_secs(2);
 
 // ── 纯函数 ──────────────────────────────────────────────────────────────────
 
@@ -223,28 +227,20 @@ where
 
 // ── 每会话的面板状态 ────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum DetailKind {
-    Artifacts,
-    /// v1.17：子代理 / 后台任务 / 已上传 / 技能，一个接口一次拿齐
-    Extras,
-}
-
 pub(super) struct SessionDetail {
     pub artifacts: Vec<Artifact>,
-    pub artifacts_fetch: Throttle,
     /// `GET /sessions/:id/detail` 的结果；老 daemon 404 时留空表
     pub extras: SessionDetailResponse,
-    pub extras_fetch: Throttle,
+    /// 两样一起拉，一个节流器管着
+    pub fetch: Throttle,
 }
 
 impl Default for SessionDetail {
     fn default() -> Self {
         SessionDetail {
             artifacts: Vec::new(),
-            artifacts_fetch: Throttle::new(ARTIFACTS_MIN),
             extras: SessionDetailResponse::default(),
-            extras_fetch: Throttle::new(ARTIFACTS_MIN),
+            fetch: Throttle::new(DETAIL_MIN),
         }
     }
 }
@@ -269,38 +265,15 @@ impl RootView {
         self.detail_visible && self.page == Page::Session(id.to_string())
     }
 
-    /// 进入会话页 / 打开面板：产物、收件箱都（按节流）拉一遍
+    /// 进入会话页 / 打开面板 / `messages_changed` 帧：面板正看着这个会话才拉
+    /// （不做无谓轮询），节流见模块注释。终端没有详情。
     pub(super) fn refresh_detail(&mut self, id: &str, cx: &mut Context<Self>) {
         if !self.detail_showing(id) || self.session(id).is_none_or(Session::is_terminal) {
             return;
         }
-        self.request_detail_fetch(id, DetailKind::Artifacts, cx);
-        self.request_detail_fetch(id, DetailKind::Extras, cx);
-    }
-
-    /// `messages_changed`：面板正看着它才重拉（不做无谓轮询），节流见模块注释
-    pub(super) fn on_detail_messages_changed(&mut self, id: &str, cx: &mut Context<Self>) {
-        if !self.detail_showing(id) {
-            return;
-        }
-        self.request_detail_fetch(id, DetailKind::Artifacts, cx);
-        self.request_detail_fetch(id, DetailKind::Extras, cx);
-    }
-
-    /// 会话没了：面板状态一起丢
-    pub(super) fn forget_detail(&mut self, id: &str) {
-        self.detail.remove(id);
-    }
-
-    fn request_detail_fetch(&mut self, id: &str, kind: DetailKind, cx: &mut Context<Self>) {
         let now = Instant::now();
-        let d = self.detail.entry(id.to_string()).or_default();
-        let t = match kind {
-            DetailKind::Artifacts => &mut d.artifacts_fetch,
-            DetailKind::Extras => &mut d.extras_fetch,
-        };
-        match t.request(now) {
-            Decision::Now => self.fetch_detail_now(id, kind, cx),
+        match self.detail.entry(id.to_string()).or_default().fetch.request(now) {
+            Decision::Now => self.fetch_detail_now(id, cx),
             Decision::Defer(delay) => {
                 let id = id.to_string();
                 cx.spawn(async move |this, cx| {
@@ -308,11 +281,8 @@ impl RootView {
                     let _ = this.update(cx, |r, cx| {
                         // 会话已被删就算了
                         if let Some(d) = r.detail.get_mut(&id) {
-                            match kind {
-                                DetailKind::Artifacts => d.artifacts_fetch.fire(Instant::now()),
-                                DetailKind::Extras => d.extras_fetch.fire(Instant::now()),
-                            }
-                            r.fetch_detail_now(&id, kind, cx);
+                            d.fetch.fire(Instant::now());
+                            r.fetch_detail_now(&id, cx);
                         }
                     });
                 })
@@ -322,36 +292,37 @@ impl RootView {
         }
     }
 
-    fn fetch_detail_now(&mut self, id: &str, kind: DetailKind, cx: &mut Context<Self>) {
+    /// 会话没了：面板状态一起丢
+    pub(super) fn forget_detail(&mut self, id: &str) {
+        self.detail.remove(id);
+    }
+
+    /// 产物和 extras 两个接口一起打（并发，两个 spawn）
+    fn fetch_detail_now(&mut self, id: &str, cx: &mut Context<Self>) {
         let sid = id.to_string();
-        match kind {
-            DetailKind::Artifacts => {
-                let fut = self.net.artifacts(id);
-                self.spawn_fetch(
-                    fut,
-                    move |r, resp: crate::model::ArtifactsResponse, cx| {
-                        let mut list = resp.artifacts;
-                        sort_artifacts_newest_first(&mut list);
-                        r.detail.entry(sid).or_default().artifacts = list;
-                        cx.notify();
-                    },
-                    false,
-                    cx,
-                );
-            }
-            DetailKind::Extras => {
-                let fut = self.net.session_detail(id);
-                self.spawn_fetch(
-                    fut,
-                    move |r, resp: crate::model::SessionDetailResponse, cx| {
-                        r.detail.entry(sid).or_default().extras = resp;
-                        cx.notify();
-                    },
-                    false,
-                    cx,
-                );
-            }
-        }
+        let fut = self.net.artifacts(id);
+        self.spawn_fetch(
+            fut,
+            move |r, resp: crate::model::ArtifactsResponse, cx| {
+                let mut list = resp.artifacts;
+                sort_artifacts_newest_first(&mut list);
+                r.detail.entry(sid).or_default().artifacts = list;
+                cx.notify();
+            },
+            false,
+            cx,
+        );
+        let sid = id.to_string();
+        let fut = self.net.session_detail(id);
+        self.spawn_fetch(
+            fut,
+            move |r, resp: crate::model::SessionDetailResponse, cx| {
+                r.detail.entry(sid).or_default().extras = resp;
+                cx.notify();
+            },
+            false,
+            cx,
+        );
     }
 
     /// 套餐用量：连上时拉一次，之后靠 `usage` 帧
@@ -377,7 +348,8 @@ impl RootView {
 
     fn toggle_mute_current(&mut self, cx: &mut Context<Self>) {
         if let Some(path) = self.current_project_path() {
-            toggle_muted(&mut self.muted_projects, &path);
+            let on = !is_muted(&self.muted_projects, &path);
+            set_flagged(&mut self.muted_projects, &path, on);
             self.ui_state().save();
             cx.notify();
         }

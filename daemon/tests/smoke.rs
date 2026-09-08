@@ -143,17 +143,6 @@ async fn full_session_lifecycle() {
     let (code, _) = http("GET", port, "/api/v1/health", Some("wrong"), None);
     assert_eq!(code, 401);
 
-    // ---- agents table ----
-    let (code, agents) = http("GET", port, "/api/v1/agents", Some(TOKEN), None);
-    assert_eq!(code, 200);
-    let shell = agents
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|a| a["id"] == "shell")
-        .unwrap();
-    assert_eq!(shell["available"], true);
-
     // ---- project create (+conflict) ----
     let (code, proj) = http(
         "POST",
@@ -691,7 +680,8 @@ async fn deleting_a_project_kills_its_live_sessions() {
             "会话必须一起消失（含已退出的回放），否则 mac 侧栏会为「有会话但没登记」的目录补一行: {list}"
         );
     }
-    // 日志里留着，并盖了删除戳
+    // 日志里留着，并盖了删除戳。这条断言是 GET /history 存在的理由：看板不收终端，
+    // 只有历史账本收——2026-09-08 审计说这个路由零调用方，其实它是账本唯一的读出口
     let (_, hist) = http("GET", port, "/api/v1/history?limit=50", Some(TOKEN), None);
     let row = hist["entries"]
         .as_array()

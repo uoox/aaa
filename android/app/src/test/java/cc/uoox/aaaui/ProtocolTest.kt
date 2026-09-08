@@ -39,11 +39,6 @@ class ProtocolTest {
         assertFalse(json.decodeFromString<Session>("""{"id":"s_2","state":"idle"}""").asking)
     }
 
-    @Test fun agentTerminalFieldDefaultsAndParses() {
-        assertTrue(json.decodeFromString<Agent>("""{"id":"shell","label":"终端","terminal":true}""").terminal)
-        assertFalse(json.decodeFromString<Agent>("""{"id":"claude","label":"Claude"}""").terminal)
-    }
-
     @Test fun questionMessageCarriesTheForm() {
         val m = json.decodeFromString<ChatMessage>(
             """{"seq":7,"ts":"2026-09-02T10:00:00.000Z","role":"assistant","kind":"question","text":"Pick fruits",
@@ -105,8 +100,8 @@ class ProtocolTest {
         assertTrue(cardMatches(a, "") && cardMatches(a, "测试") && cardMatches(a, "shop") && cardMatches(a, "登录"))
         assertTrue(!cardMatches(a, "支付"))
         assertTrue(!cardIsFinished(a) && cardIsFinished(d.sessions[1]))
-        assertTrue(cardSpinning(a.copy(status = "running")) && cardSpinning(a.copy(status = "background")))
-        assertTrue(!cardSpinning(a.copy(status = "active")) && !cardSpinning(a.copy(status = "running", deleted = true)))
+        assertTrue(cardRunning(a.copy(status = "running")) && cardRunning(a.copy(status = "background")))
+        assertTrue(!cardRunning(a.copy(status = "active")) && !cardRunning(a.copy(status = "running", deleted = true)))
         // 老 daemon 的形状（没有 sessions）必须解码失败 → 界面报「请升级」，不能静默画空看板
         assertTrue(runCatching { json.decodeFromString<Dashboard>("""{"today":{"sessions":1},"days":[]}""") }.isFailure)
     }

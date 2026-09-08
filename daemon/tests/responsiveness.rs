@@ -19,7 +19,6 @@ fn build_app(root: &Path, home: &Path) -> aaa_daemon::api::SharedApp {
         token: TOKEN.to_string(),
         project_root: root.to_path_buf(),
         namer: true, // naming enabled, as in production
-        remote_control_name: true,
         auto_trust: true,
     };
     let paths = aaa_daemon::paths::Paths::new(home);

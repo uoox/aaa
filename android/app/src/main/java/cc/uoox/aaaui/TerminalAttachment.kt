@@ -27,7 +27,6 @@ data class TermModes(
     /** DECSET 1006：SGR 坐标编码（不限 223 列）。 */
     val sgrMouse: Boolean = false,
     /** DECSET 1049 / 47 / 1047：备用屏。备用屏没有回滚，滑动要变成滚轮事件发给 TUI。 */
-    val altScreen: Boolean = false,
 ) {
     val mouseOn: Boolean get() = mouse != 0
 }
@@ -80,7 +79,6 @@ class ModeTracker {
                     for (p in params.split(';')) when (val n = p.toIntOrNull()) {
                         1000, 1002, 1003 -> m = m.copy(mouse = if (on) n else 0)
                         1006 -> m = m.copy(sgrMouse = on)
-                        1049, 47, 1047 -> m = m.copy(altScreen = on)
                     }
                 }
                 i = j + 1

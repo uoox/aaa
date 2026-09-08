@@ -23,6 +23,10 @@ commands:
   perms request-all         逐项触发授权弹窗 (弹窗出现在 Mac 屏幕上)
 ";
 
+/// `messages_changed` 两帧之间的最小间隔（PROTOCOL「/events」：≥500ms）。
+/// 尾随节拍是 250ms，所以这个节流必须显式做。
+const MSG_EVT_MIN: Duration = Duration::from_millis(500);
+
 pub fn main_entry() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().map(String::as_str).unwrap_or("");
@@ -262,29 +266,52 @@ fn run() {
                 }
             });
         }
-        // v1.1 message stream tail (1s; the cadence itself is the >=500ms
-        // throttle for messages_changed)
+        // v1.1 消息流尾随。
+        //
+        // **节拍 250ms**（2026-09-08 从 1s 改下来）：一条消息落进 transcript 到客户端
+        // 看见它，以前最坏要等满一秒——那是这条链路上唯一能压的延迟。transcript 本身
+        // 只在一条消息**写完**时才落盘（量过：条目成簇出现，簇间静默 30s 到 10 分钟），
+        // 所以流式是拿不到的，但那一秒是白等的。
+        //
+        // 活会话每拍都看；**已退出的每 4 拍看一次**——它们的 transcript 不会再长，
+        // 池子里两百多条大都是这种。总 I/O 因此和以前一个量级。
+        //
+        // `messages_changed` 的 ≥500ms 节流以前是「节拍本身」，现在得显式做（PROTOCOL
+        // 「/events」）：窗口内攒着，下一拍补发，一次都不丢。
         {
             let app = Arc::clone(&app);
             tokio::spawn(async move {
-                let mut iv = tokio::time::interval(Duration::from_secs(1));
+                let mut iv = tokio::time::interval(Duration::from_millis(250));
+                // 会话 id → (上次发帧的时刻, 攒着还没发的 last_seq)
+                let mut evt: std::collections::HashMap<String, (std::time::Instant, Option<u64>)> =
+                    std::collections::HashMap::new();
+                let mut tick: u64 = 0;
                 loop {
                     iv.tick().await;
+                    tick = tick.wrapping_add(1);
+                    let slow_tick = tick.is_multiple_of(4);
                     let app2 = Arc::clone(&app);
-                    let _ = tokio::task::spawn_blocking(move || {
+                    let fresh = tokio::task::spawn_blocking(move || {
                         let sessions = app2.pool.all();
+                        // 「已被别的会话认领的 transcript」整轮只算一次。以前它在循环
+                        // **里面**重建，每个会话都要把其余所有会话的 msgs 锁挨个锁一遍
+                        // ——216 个会话就是每秒四万多次加锁，锁的还正是 GET /messages
+                        // 要拿的那把。带上自己那份无害：`claimed` 只在「还没认到文件」
+                        // 和「兜底文件找升级」两条路上读，后者本来就会跳过自己当前的文件。
+                        let claimed: std::collections::HashSet<std::path::PathBuf> = sessions
+                            .iter()
+                            .filter_map(|s| s.msgs.lock().unwrap().file.clone())
+                            .collect();
+                        let mut fresh: Vec<(String, u64)> = Vec::new();
                         for sess in &sessions {
-                            // 其他会话已认领的存储文件（同目录并发不许抢）
-                            let claimed: std::collections::HashSet<std::path::PathBuf> =
-                                sessions
-                                    .iter()
-                                    .filter(|s| s.id != sess.id)
-                                    .filter_map(|s| s.msgs.lock().unwrap().file.clone())
-                                    .collect();
+                            let exited = sess.state() == State::Exited;
+                            if exited && !slow_tick {
+                                continue;
+                            }
                             if let Some(last_seq) =
                                 crate::messages::poll_session(&app2.paths, sess, &claimed)
                             {
-                                app2.hub.messages_changed(&sess.id, last_seq);
+                                fresh.push((sess.id.clone(), last_seq));
                             }
                             // mirror「有问题在等回答」to the session object
                             // (structured: transcript AskUserQuestion without
@@ -319,8 +346,26 @@ fn run() {
                             }
                             crate::messages::mirror_background(sess);
                         }
+                        fresh
                     })
                     .await;
+                    // ≥500ms 一帧的显式节流：窗口内的攒进 pending，下一拍补发
+                    let now = std::time::Instant::now();
+                    for (id, seq) in fresh.unwrap_or_default() {
+                        let e = evt.entry(id).or_insert((now - MSG_EVT_MIN, None));
+                        e.1 = Some(e.1.map_or(seq, |p: u64| p.max(seq)));
+                    }
+                    evt.retain(|id, (last, pending)| {
+                        if now.duration_since(*last) >= MSG_EVT_MIN {
+                            if let Some(seq) = *pending {
+                                app.hub.messages_changed(id, seq);
+                                *last = now;
+                                *pending = None;
+                            }
+                        }
+                        // 会话没了就不再占位；没有待发帧且很久没动的条目也清掉
+                        pending.is_some() || now.duration_since(*last) < Duration::from_secs(60)
+                    });
                 }
             });
         }

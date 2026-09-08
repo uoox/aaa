@@ -14,16 +14,16 @@ import androidx.compose.foundation.layout.fillMaxWidth as fillMaxWidthFrac
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.staggeredgrid.LazyVerticalStaggeredGrid
 import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridCells
 import androidx.compose.foundation.lazy.staggeredgrid.items
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -51,7 +51,7 @@ import androidx.navigation.NavHostController
  * 数据是 daemon 一次算好的 `GET /history/dashboard`。
  *
  * 顶上是未完成条目数 + 搜索（2026-09-08 用户拍板：五态计数条和状态字一起去掉，看板和项目
- * 列表说同一套话）。主体一会话一张卡：转圈 / 黄点 / 什么都没有 + 标题 + 项目，一根进度条 done/total，下面直接列
+ * 列表说同一套话）。主体一会话一张卡：在跑就一个蓝点、否则什么都没有 + 标题 + 项目，一根进度条 done/total，下面直接列
  * 没勾的项，做完的折成一行「已做 N」点开看。已完成的（暂停且全勾完）默认收进「已完成 N」；
  * 已删除的默认不显示，一个开关切出来。会话还在就能点开，已退出的只能看。
  */
@@ -136,13 +136,6 @@ fun HistoryScreen(store: AppStore, nav: NavHostController) {
     }
 }
 
-private fun statusColor(status: String): Color = when (status) {
-    "asking" -> Tok.Amber
-    "running", "background" -> Tok.Green
-    "active" -> Tok.Accent
-    else -> Tok.Faint
-}
-
 /** 一张卡：状态字 + 标题 + 项目 → 进度条 → 全部清单项（没勾的在前、做完的灰掉）。全展开，一眼看全。会话还在才可点开 */
 @Composable
 private fun SessionCardView(c: SessionCard, onOpen: () -> Unit, onToggle: (ChecklistItem) -> Unit = {}) {
@@ -153,9 +146,9 @@ private fun SessionCardView(c: SessionCard, onOpen: () -> Unit, onToggle: (Check
             .clickable(enabled = c.alive, onClick = onOpen).padding(12.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            // 转圈 = 还在跑；已删除的写一个字；其余什么都不画（和项目列表同一套话）
-            if (cardSpinning(c)) {
-                CircularProgressIndicator(Modifier.width(12.dp).height(12.dp), strokeWidth = 1.5.dp, color = Tok.Accent)
+            // 蓝点 = 还在跑；已删除的写一个字；其余什么都不画（和项目列表同一套话）
+            if (cardRunning(c)) {
+                Box(Modifier.size(7.dp).background(Tok.Blue, CircleShape))
                 Spacer(Modifier.width(8.dp))
             } else if (c.deleted) {
                 Text("已删除", color = Tok.Faint, fontSize = 10.5.sp, fontFamily = FontFamily.Monospace)

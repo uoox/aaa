@@ -26,24 +26,16 @@ import java.net.URLDecoder
     val background: Boolean = false,
     /** v1.16：正在等的权限对话框（Bash 授权 / ExitPlanMode 批准…）；消息流画成「允许 / 拒绝」卡片 */
     val permission: PermissionPrompt? = null,
-    val preview: String = "",
     val rows: Int = 24,
     val cols: Int = 80,
-    val pid: Int? = null,
     val exit_code: Int? = null,
     val resume_id: String? = null,
     val created_at: String = "",
     val last_output_at: String = "",
     /** v1.5：状态翻转 / 改名的时刻（不随每个 PTY 字节跳），首页按它排序；老 daemon 不给 → 空 */
     val updated_at: String = "",
-    /** v1.3：状态由 Claude Code hooks 驱动（不再是屏幕静默猜的） */
-    val hooked: Boolean = false,
     /** StopFailure 的错误类型：rate_limit / overloaded / authentication_failed… */
     val error: String? = null,
-    /** 正在整理上下文（PreCompact → PostCompact） */
-    val compacting: Boolean = false,
-    /** 用户自己结束的：退出不弹通知 */
-    val user_killed: Boolean = false,
     /** v1.4：Claude Code statusline 喂来的用量（模型 / 上下文占比 / 花费）；没有就 null */
     val usage: SessionUsage? = null,
     /** v1.7：整个对话的进度清单（`- [x] 已做` / `- [ ] 未做` 的 markdown），每轮结束后 daemon 重写 */
@@ -66,21 +58,12 @@ fun parseChecklist(md: String): List<ChecklistItem> = md.lines().mapNotNull { ra
 
 @Serializable data class SessionUsage(
     val model: String? = null,
-    val model_id: String? = null,
     /** 0-100 */
     val context_pct: Double? = null,
-    val context_window_size: Long? = null,
-    val input_tokens: Long? = null,
-    val output_tokens: Long? = null,
     val cost_usd: Double? = null,
     val duration_ms: Long? = null,
     val lines_added: Long? = null,
     val lines_removed: Long? = null,
-    val effort: String? = null,
-    /** v1.8：提示缓存——最近一次调用里从缓存读 / 新写进缓存 / 新读的 token，与命中率（0–100） */
-    val cache_read_tokens: Long? = null,
-    val cache_creation_tokens: Long? = null,
-    val fresh_input_tokens: Long? = null,
     val cache_hit_pct: Double? = null,
 )
 
@@ -132,13 +115,11 @@ fun parseChecklist(md: String): List<ChecklistItem> = md.lines().mapNotNull { ra
     /** 二进制被重新构建过、跑的还是旧进程：设置页亮「需重启」 */
     val update_pending: Boolean = false,
 )
-@Serializable data class Agent(val id: String, val label: String, val available: Boolean = false, val terminal: Boolean = false)
 @Serializable data class Project(
     val path: String,
     val name: String,
     val mtime: String = "",
     val dir_size: Long = 0,
-    val ctx_size: Long = 0,
     val agent: String? = null,
     val session_title: String? = null,
     /** v1.8：置顶（daemon 侧存，三端一起变） */
@@ -146,7 +127,7 @@ fun parseChecklist(md: String): List<ChecklistItem> = md.lines().mapNotNull { ra
 )
 /** kind：permission（能替答）| elicitation（MCP 表单，只能去终端） */
 @Serializable data class PermissionPrompt(val kind: String = "permission", val tool_name: String = "", val summary: String = "", val since: String = "")
-@Serializable data class ScreenText(val text: String = "", val alternate_screen: Boolean = false)
+@Serializable data class ScreenText(val text: String = "")
 @Serializable data class PurgedAgent(val agent_label: String, val count: Int)
 @Serializable data class ProjectDeleteResult(val path: String, val ok: Boolean, val purged: List<PurgedAgent> = emptyList())
 
@@ -209,10 +190,10 @@ fun parseChecklist(md: String): List<ChecklistItem> = md.lines().mapNotNull { ra
 )
 
 /**
- * 卡片上转不转圈（2026-09-08 用户拍板：看板和项目列表说同一套话——转圈 / 黄点 / 什么都没有，
+ * 卡片上画不画蓝点（2026-09-08 用户拍板：看板和项目列表说同一套话——蓝点 / 黄点 / 什么都没有，
  * 五个状态字连同顶上的计数条一起去掉）。`status` 本身还留在协议里，它是排序和这个判断的依据。
  */
-fun cardSpinning(c: SessionCard): Boolean = !c.deleted && (c.status == "running" || c.status == "background")
+fun cardRunning(c: SessionCard): Boolean = !c.deleted && (c.status == "running" || c.status == "background")
 
 /** 看板搜索：标题 / 项目 / 任一清单项含关键字（不分大小写）；空串全匹配 */
 fun cardMatches(c: SessionCard, query: String): Boolean {

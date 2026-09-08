@@ -18,7 +18,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
-import androidx.compose.material3.windowsizeclass.WindowWidthSizeClass
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
@@ -47,13 +46,13 @@ import java.time.format.DateTimeFormatter
 // ---------- 配色 ----------
 
 /**
- * 一套完整配色。三套：黑暗（PROTOCOL.md 的原始 token，一个值都没改）、明亮、
+ * 一套完整配色。两套：黑暗（PROTOCOL.md 的原始 token，一个值都没改）与
  * Claude 橙（Anthropic 品牌的米白 + 赭橙，终端也是暖白底墨字）。纯数据，PaletteTest 直接跑。
  *
  * [isDark] 说的是**界面**底色深浅——决定系统栏图标颜色与 Material 基线。
  */
 data class Palette(
-    /** 设置里存的键：dark / light / claude。 */
+    /** 设置里存的键：dark / claude。 */
     val name: String,
     /** 设置页显示的名字。 */
     val label: String,
@@ -75,6 +74,11 @@ data class Palette(
     val green: Color,
     val amber: Color,
     val red: Color,
+    /**
+     * 项目行首「在跑」那一点。三套主题里都要是**蓝**：green/amber/red 各有旧含义，
+     * accent 又随主题从青变成橙，只有蓝在三套里都读作「它自己在动」。
+     */
+    val blue: Color,
     /** 代码块 / 思考行 / 工具输出这类「凹下去」的小面板底色——界面侧的，跟终端无关。 */
     val inset: Color,
     /** 终端画布底色与默认前景。 */
@@ -96,22 +100,8 @@ data class Palette(
             edge = Color(0xFF28323E), edge2 = Color(0xFF36434F),
             ink = Color(0xFFE3EBF3), dim = Color(0xFF8B99A8), faint = Color(0xFF5F6D7C),
             accent = Color(0xFF53C6DD), onAccent = Color(0xFF08252C), magenta = Color(0xFFC583E0),
-            green = Color(0xFF5ECB8F), amber = Color(0xFFE3B45C), red = Color(0xFFE57373),
+            green = Color(0xFF5ECB8F), amber = Color(0xFFE3B45C), red = Color(0xFFE57373), blue = Color(0xFF6C9EF8),
             inset = Color(0xFF0A0E12), termBg = Color(0xFF0A0E12), termFg = Color(0xFFFFFFFF),
-        )
-        val Light = Palette(
-            name = "light", label = "明亮", isDark = false,
-            bg = Color(0xFFF6F7F9), surface = Color(0xFFFFFFFF), raised = Color(0xFFEEF1F4),
-            edge = Color(0xFFDCE2E8), edge2 = Color(0xFFC9D1D9),
-            ink = Color(0xFF1B2229), dim = Color(0xFF5B6773), faint = Color(0xFF8A96A3),
-            accent = Color(0xFF0F8A9E), onAccent = Color(0xFFFFFFFF), magenta = Color(0xFF7B4FA8),
-            green = Color(0xFF2E7D32), amber = Color(0xFFB26A00), red = Color(0xFFC62828),
-            inset = Color(0xFFE9EDF1), termBg = Color(0xFFFFFFFF), termFg = Color(0xFF1B2229),
-            // one-light；与 mac 的 LIGHT.ansi 逐色相同
-            ansi = listOf(
-                0xFF383A42, 0xFFE45649, 0xFF50A14F, 0xFFC18401, 0xFF4078F2, 0xFFA626A4, 0xFF0184BC, 0xFFA0A1A7,
-                0xFF696C77, 0xFFCA1243, 0xFF3E8E3D, 0xFF986801, 0xFF2F5FCC, 0xFF8B1E89, 0xFF0B6A9C, 0xFF1B2229,
-            ).map(::Color),
         )
         val Claude = Palette(
             name = "claude", label = "Claude 橙", isDark = false,
@@ -119,7 +109,7 @@ data class Palette(
             edge = Color(0xFFDAD8CE), edge2 = Color(0xFFC8C6BC),
             ink = Color(0xFF141413), dim = Color(0xFF5E5D59), faint = Color(0xFF91908A),
             accent = Color(0xFFD97757), onAccent = Color(0xFF141413), magenta = Color(0xFFD97757),
-            green = Color(0xFF2F855A), amber = Color(0xFFB8860B), red = Color(0xFFC0392B),
+            green = Color(0xFF2F855A), amber = Color(0xFFB8860B), red = Color(0xFFC0392B), blue = Color(0xFF3F6EA8),
             inset = Color(0xFFE8E6DC), termBg = Color(0xFFFFFDF7), termFg = Color(0xFF141413),
             // gruvbox-light；与 mac 的 CLAUDE.ansi 逐色相同
             ansi = listOf(
@@ -129,9 +119,12 @@ data class Palette(
         )
 
         /** 设置页的排列顺序。 */
-        val all: List<Palette> = listOf(Dark, Light, Claude)
+        val all: List<Palette> = listOf(Dark, Claude)
 
-        /** 设置里存的名字 → 配色；不认识的（含 null、旧版本没写过）一律黑暗。 */
+        /**
+         * 设置里存的名字 → 配色；不认识的（含 null、旧版本没写过、以及 2026-09-08
+         * 删掉的 "light"）一律黑暗。存量设置因此不需要迁移。
+         */
         fun forName(name: String?): Palette = all.firstOrNull { it.name == name } ?: Dark
     }
 }
@@ -159,26 +152,16 @@ object Tok {
     val Green: Color get() = current.green
     val Amber: Color get() = current.amber
     val Red: Color get() = current.red
+    val Blue: Color get() = current.blue
     val Inset: Color get() = current.inset
     val TermBg: Color get() = current.termBg
     val TermFg: Color get() = current.termFg
-
-    /** 只剩 Claude 与终端两种；其它 agent 的会话（旧注册表里可能还有）用中性色。 */
-    fun agentColor(agent: String): Color = when (agent) {
-        "claude" -> Accent
-        else -> Dim
-    }
 
     fun stateColor(state: String): Color = when (state) {
         "running" -> Green
         "waiting" -> Amber
         "exited" -> Red
         else -> Dim
-    }
-
-    fun agentLabel(agent: String): String = when (agent) {
-        "claude" -> "Claude"; "shell" -> "终端"
-        else -> agent
     }
 }
 
@@ -283,25 +266,6 @@ private tailrec fun Context.findActivity(): Activity? = when (this) {
     is ContextWrapper -> baseContext.findActivity()
     else -> null
 }
-
-// ---------- 折叠屏 / 大屏布局 ----------
-
-/** 主导航放哪儿：窄屏底部标签栏，宽屏左侧 rail。 */
-enum class NavPlacement { Bottom, Rail }
-
-/**
- * 只有导航位置随宽度变，内容始终单栏。
- *
- * 展开后曾经试过列表 + 会话两栏，实机上信息太碎；宽屏真正的收益只是把横跨整个
- * 屏幕、只装三个 tab 的底栏收成左侧 rail，顺便把内容推高一整条。断点取 Medium
- * (600dp)：OnePlus Open 内屏实测 sw698dp（2268px ÷ 3.25），外屏 343dp 和直板机
- * 都留在底栏。
- *
- * 首页收成单页（项目列表就是首页，设置是压栈路由）之后没有 tab 可摆，首页不再
- * 按这个值切布局；断点本身保留给 PaneLayoutTest 与以后可能的宽屏两栏。
- */
-fun navPlacementFor(width: WindowWidthSizeClass): NavPlacement =
-    if (width == WindowWidthSizeClass.Compact) NavPlacement.Bottom else NavPlacement.Rail
 
 /** 打开会话的统一入口，由 AaaApp 提供（压栈到 session/{id}）。 */
 val LocalOpenSession = staticCompositionLocalOf<(String, String) -> Unit> {
