@@ -3,7 +3,8 @@ package cc.uoox.aaaui
 import android.widget.Toast
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
@@ -14,7 +15,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -67,9 +67,9 @@ const val DEFAULT_AGENT = "claude"
 
 /**
  * 项目行的内部状态。**2026-09-08 用户拍板：列表上不再写状态字**（「激活 / 未激活」这类词
- * 对着一屏项目说不出任何有用的东西）——行首只有一颗点，颜色说完一切：**蓝 = 在跑**，
- * **黄 = 跑完了 / 在等你回话且这台设备还没进去看**，**灰 = 已读**。（同一天稍后又拍板：
- * 蓝点替掉最初的转圈动画，行更紧凑。）这个枚举因此只剩两个职责：决定点是不是蓝的，
+ * 对着一屏项目说不出任何有用的东西）——行首只有一根竖线，颜色说完一切：**蓝 = 在跑**，
+ * **黄 = 跑完了 / 在等你回话且这台设备还没进去看**，**灰 = 已读**。（同一天稍后两次改形：
+ * 先用蓝点替掉转圈动画，再把点换成竖线。）这个枚举因此只剩两个职责：决定线是不是蓝的，
  * 以及列表从上往下的顺序。
  *
  * 一个项目只有一个 agent（建项目时定死，从不切换），项目 ↔ 会话事实上一对一，所以
@@ -85,7 +85,7 @@ enum class ProjectState(val rank: Int) {
     ACTIVE(3),
     INACTIVE(4);
 
-    /** 蓝点：自己在跑，或后台任务还没回来——都是「它还在动，你不用管」 */
+    /** 蓝线：自己在跑，或后台任务还没回来——都是「它还在动，你不用管」 */
     val running: Boolean get() = this == RUNNING || this == BACKGROUND
 }
 
@@ -155,7 +155,7 @@ fun projectStateOf(primary: Session?): ProjectState = when {
 
 /**
  * 一项目一行。排序（2026-09-08 用户拍板）：**置顶 > 有黄点 > 在跑 > 其余**，同一档里
- * **最近更新的在前**。置顶是自己按的，黄点也挤不掉它；黄点排在蓝点前面——蓝点的还在自己
+ * **最近更新的在前**。置顶是自己按的，黄线也挤不掉它；黄线排在蓝线前面——蓝线的还在自己
  * 往前走，黄点的那个是在等你。
  * 时间看的是 daemon 的 `updated_at`（状态翻转 / 改名），不是每个字节都动的 last_output_at
  * ——几个会话同时在跑时行才不会互相换位。同刻按路径稳住。
@@ -175,26 +175,41 @@ fun projectRows(projects: List<Project>, sessions: List<Session>, unread: Set<St
         .thenBy { it.project.path },
 )
 
-/** 行首那一格的宽度。行首永远是一颗 7dp 的点，这一格只要放得下点 + 一点余白 */
+/** 行首那一格的宽度。项目行是一根竖线、终端行是三道横杠，这一格放得下较宽的那个 */
 private val INDICATOR_W = 16.dp
 
 /**
- * 行首那一点的颜色（2026-09-08 用户拍板，替掉了先前的转圈动画）：
+ * 行首那根竖线的颜色（2026-09-08 用户拍板，先替掉转圈动画、当天又把点换成竖线）：
  * **蓝** = 在跑（含后台任务没回来，以及本行正在 resume）；**黄** = 跑完了 / 在等你回话
- * 而这台设备还没进去看；**灰** = 已读，没什么要你操心的。三种情况同一颗点，行高不随状态
- * 跳，也不再为一个 24fps 的圆圈让整列跟着重组。
+ * 而这台设备还没进去看；**灰** = 已读，没什么要你操心的。三种情况同一根线，行高不随状态
+ * 跳，也不再为一个 24fps 的圆圈让整列跟着重组。竖线比圆点更贴着行走，一列扫下来是条
+ * 节奏线而不是一串珠子。
  */
 @Composable
-private fun rowDotColor(state: ProjectState, unread: Boolean, busy: Boolean): Color = when {
+private fun rowMarkColor(state: ProjectState, unread: Boolean, busy: Boolean): Color = when {
     busy || state.running -> Tok.Blue
     unread -> Tok.Amber
     else -> Tok.Dim
 }
 
+/** 行首竖线本体（看板卡片同一套） */
+@Composable
+fun MarkBar(color: Color, modifier: Modifier = Modifier) {
+    Box(modifier.width(2.5.dp).height(16.dp).background(color, RoundedCornerShape(1.25.dp)))
+}
+
+/** 终端那一行的记号：三道横杠（终端 = 一屏文本行）。和项目行的竖线成一对。 */
+@Composable
+private fun MarkLines(color: Color) {
+    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        repeat(3) { Box(Modifier.width(12.dp).height(1.5.dp).background(color, RoundedCornerShape(0.75.dp))) }
+    }
+}
+
 @Composable
 private fun RowIndicator(state: ProjectState, unread: Boolean, busy: Boolean) {
     Box(Modifier.width(INDICATOR_W), contentAlignment = Alignment.Center) {
-        Box(Modifier.size(7.dp).background(rowDotColor(state, unread, busy), CircleShape))
+        MarkBar(rowMarkColor(state, unread, busy))
     }
 }
 
@@ -540,7 +555,7 @@ private fun TerminalRowItem(label: String, onClick: () -> Unit, onClose: () -> U
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Box(Modifier.width(INDICATOR_W), contentAlignment = Alignment.Center) {
-                Text(">_", color = Tok.Dim, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                MarkLines(Tok.Dim)
             }
             Spacer(Modifier.width(8.dp))
             Text(

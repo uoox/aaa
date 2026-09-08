@@ -103,16 +103,6 @@ impl RootView {
         }
     }
 
-    /// 切到终端面板（侧栏入口行）：焦点交给当前标签
-    pub(super) fn open_terminal_panel(&mut self, cx: &mut Context<Self>) {
-        self.page = Page::Terminal;
-        self.sync_active_terminal(cx);
-        if let Some(id) = self.active_terminal.clone() {
-            self.pending_focus = Some(id);
-        }
-        cx.notify();
-    }
-
     /// 激活某个标签（点标签 / 新开 / 旧 shell 项目双击 / 别处开的 shell）
     pub(super) fn focus_terminal(&mut self, id: String, cx: &mut Context<Self>) {
         self.ensure_terminal_view(&id, cx);
@@ -180,7 +170,6 @@ impl RootView {
 
     // ── 渲染 ────────────────────────────────────────────────────────────
 
-    /// 侧栏底部的入口行（daemon 状态行上方）：`>_ 终端   n  ＋`
     /// 侧栏底部「看板」入口：最近做了什么 + 还有什么没做
     pub(super) fn render_history_entry(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let active = self.page == Page::History;
@@ -213,117 +202,68 @@ impl RootView {
             )
     }
 
-    pub(super) fn render_terminal_entry(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let n = self.live_terminal_tabs().len();
-        let active = self.page == Page::Terminal;
-        let accent = c(if active { theme::accent() } else { theme::dim() });
-        div()
-            .id("sb-terminal")
+    /// 侧栏里的终端小节：一条分隔线 + 「终端」小标题 + 一终端一行 + 「＋ 新增终端」。
+    /// 2026-09-08 用户拍板：终端与对话同级——和项目行排在同一列里、同一套行样式，
+    /// 点一行就是那一个终端。以前它是底部一个入口行，后面还藏着一条标签条。
+    pub(super) fn render_terminal_rows(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let mut col = div()
             .flex()
-            .items_center()
-            .gap(px(8.))
-            .px(px(16.))
-            .py(px(7.))
-            .border_t_1()
-            .border_color(c(theme::edge()))
-            .cursor_pointer()
-            .when(active, |el| el.bg(c(theme::surface_raised())))
-            .hover(|st| st.bg(c(theme::surface_raised())))
-            .on_click(cx.listener(|this, _, _, cx| this.open_terminal_panel(cx)))
+            .flex_col()
+            .gap(px(1.))
+            .mt(px(10.))
             .child(
                 div()
-                    .font_family("Menlo")
-                    .text_size(px(11.))
-                    .text_color(accent)
-                    .child(">_"),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .text_size(px(12.5))
-                    .text_color(c(if active { theme::accent() } else { theme::ink() }))
-                    .child("终端"),
-            )
-            .when(n > 0, |el| {
-                el.child(
-                    div()
-                        .font_family("Menlo")
-                        .text_size(px(10.))
-                        .text_color(c(theme::faint()))
-                        .child(SharedString::from(n.to_string())),
-                )
-            })
-            .child(
-                div()
-                    .id("sb-terminal-new")
-                    .flex_none()
-                    .px(px(4.))
-                    .rounded(px(4.))
-                    .text_size(px(13.))
-                    .text_color(c(theme::dim()))
-                    .hover(|st| st.text_color(c(theme::accent())).bg(c(theme::edge_light())))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.new_terminal(cx);
-                    }))
-                    .child("＋"),
-            )
-    }
-
-    /// 面板正文：标签条 + 当前标签的终端视图；没有标签时给个开一个的入口
-    pub(super) fn render_terminal_page(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let tabs = self.live_terminal_tabs();
-        let active = self.active_terminal.clone();
-
-        let mut strip = div()
-            .flex_none()
-            .flex()
-            .items_center()
-            .h(px(30.))
-            .overflow_hidden()
-            .bg(c(theme::surface()))
-            .border_b_1()
-            .border_color(c(theme::edge()));
-        for (ix, (id, label)) in tabs.iter().enumerate() {
-            let is_active = active.as_deref() == Some(id.as_str());
-            let id_click = id.clone();
-            let id_close = id.clone();
-            strip = strip.child(
-                div()
-                    .id(("term-tab", ix))
-                    .group("term-tab")
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .h_full()
-                    .px(px(12.))
-                    .border_r_1()
+                    .mx(px(6.))
+                    .px(px(10.))
+                    .pt(px(8.))
+                    .pb(px(4.))
+                    .border_t_1()
                     .border_color(c(theme::edge()))
-                    .cursor_pointer()
-                    .text_size(px(12.))
-                    .when(is_active, |el| {
-                        el.bg(c(theme::surface_raised())).text_color(c(theme::ink()))
-                    })
-                    .when(!is_active, |el| {
-                        el.text_color(c(theme::dim()))
-                            .hover(|st| st.bg(c(theme::surface_raised())))
-                    })
+                    .font_family("Menlo")
+                    .text_size(px(10.))
+                    .text_color(c(theme::faint()))
+                    .child("终端"),
+            );
+        for (ix, (id, label)) in self.live_terminal_tabs().into_iter().enumerate() {
+            let active =
+                self.page == Page::Terminal && self.active_terminal.as_deref() == Some(id.as_str());
+            let id_click = id.clone();
+            let id_close = id;
+            col = col.child(
+                super::sidebar_row(("sb-term", ix).into())
+                    .group("sb-row")
+                    .when(active, |el| el.bg(c(theme::surface_raised())))
+                    .hover(|st| st.bg(c(theme::surface_raised())))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.focus_terminal(id_click.clone(), cx);
                     }))
-                    .child(SharedString::from(label.clone()))
+                    .child(super::indicator_slot(super::mark_lines(if active {
+                        theme::accent()
+                    } else {
+                        theme::dim()
+                    })))
                     .child(
-                        // × 关标签：当前标签常显，其余悬停才现身（与侧栏 × 一致）
                         div()
-                            .id(("term-tab-close", ix))
+                            .flex_1()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .text_size(px(12.5))
+                            .text_color(c(if active { theme::ink() } else { theme::dim() }))
+                            .child(SharedString::from(label)),
+                    )
+                    // × 关终端：当前行常显，其余悬停才现身（与项目行一致）
+                    .child(
+                        div()
+                            .id(("sb-term-close", ix))
                             .flex_none()
                             .px(px(3.))
                             .rounded(px(4.))
                             .text_size(px(10.))
                             .text_color(c(theme::faint()))
                             .hover(|st| st.text_color(c(theme::red())).bg(c(theme::edge_light())))
-                            .when(!is_active, |el| {
-                                el.invisible().group_hover("term-tab", |st| st.visible())
+                            .when(!active, |el| {
+                                el.invisible().group_hover("sb-row", |st| st.visible())
                             })
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
@@ -333,27 +273,30 @@ impl RootView {
                     ),
             );
         }
-        strip = strip.child(
-            div()
-                .id("term-tab-new")
-                .flex_none()
-                .flex()
-                .items_center()
-                .h_full()
-                .px(px(12.))
-                .cursor_pointer()
-                .text_size(px(14.))
-                .text_color(c(theme::dim()))
-                .hover(|st| st.text_color(c(theme::accent())).bg(c(theme::surface_raised())))
+        col.child(
+            super::sidebar_row("sb-term-new".into())
+                .hover(|st| st.bg(c(theme::surface_raised())))
                 .on_click(cx.listener(|this, _, _, cx| this.new_terminal(cx)))
-                .child("＋"),
-        );
+                .child(super::indicator_slot(div()))
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(px(12.5))
+                        .text_color(c(theme::accent()))
+                        .child("＋ 新增终端"),
+                ),
+        )
+    }
 
-        let view = active
+    /// 面板正文：当前终端的视图。标签条 2026-09-08 拆了——侧栏就是标签条，
+    /// 两处并排列同一批终端只会互相打架。
+    pub(super) fn render_terminal_page(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let view = self
+            .active_terminal
             .as_deref()
             .and_then(|id| self.terminals.get(id))
             .cloned();
-        let body = match view {
+        match view {
             Some(t) => div().flex_1().min_h(px(0.)).child(t),
             None => div()
                 .flex_1()
@@ -363,23 +306,15 @@ impl RootView {
                 .justify_center()
                 .gap(px(10.))
                 .text_color(c(theme::faint()))
-                .child(div().text_size(px(13.)).child("还没有终端 · 点 + 开一个"))
+                .child(div().text_size(px(13.)).child("还没有终端"))
                 .child(
                     tbtn("term-empty-new", "＋ 新终端")
                         .on_click(cx.listener(|this, _, _, cx| this.new_terminal(cx))),
                 ),
-        };
-
-        div()
-            .flex_1()
-            .min_h(px(0.))
-            .flex()
-            .flex_col()
-            .child(strip)
-            .child(body)
+        }
     }
 
-    /// 状态栏（终端面板）：当前标签所在目录 · 终端 · 标签数 / ⌘W 提示
+    /// 状态栏（终端面板）：当前终端所在目录 · 终端 · ⌘W 提示
     pub(super) fn render_terminal_statusbar(&self, bar: gpui::Div) -> gpui::Div {
         let path = self
             .active_terminal
@@ -388,11 +323,10 @@ impl RootView {
             .map(|s| s.project_path.clone())
             .filter(|p| !p.is_empty())
             .unwrap_or_else(|| self.project_root());
-        let n = self.live_terminal_tabs().len();
-        let hint = if n > 0 {
-            format!("{n} 个标签 · ⌘W 关闭当前")
+        let hint = if self.active_terminal.is_some() {
+            "⌘W 关闭当前"
         } else {
-            String::new()
+            ""
         };
         bar.child(
             div()
@@ -406,7 +340,7 @@ impl RootView {
             div()
                 .ml_auto()
                 .text_color(c(theme::faint()))
-                .child(SharedString::from(hint)),
+                .child(hint),
         )
     }
 }

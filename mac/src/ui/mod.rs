@@ -65,10 +65,10 @@ fn kill_needs_confirm(s: &Session) -> bool {
 }
 
 /// 项目行的内部状态。**2026-09-08 用户拍板：侧栏不再写状态字**（「激活 / 未激活」这类词
-/// 对着一列项目说不出任何有用的东西）——行首只有一颗点，颜色说完一切：**蓝 = 在跑**，
-/// **黄 = 跑完了 / 在等你回话且这台机器还没进去看**，**灰 = 已读**。（同一天稍后又拍板：
-/// 蓝点替掉最初的转圈动画，行更紧凑，也不再按帧重画整个侧栏。）这个枚举因此只剩两个
-/// 职责：决定点是不是蓝的，以及侧栏从上往下的顺序。
+/// 对着一列项目说不出任何有用的东西）——行首只有一根竖线，颜色说完一切：**蓝 = 在跑**，
+/// **黄 = 跑完了 / 在等你回话且这台机器还没进去看**，**灰 = 已读**。（同一天稍后两次改形：
+/// 先用蓝点替掉转圈动画，再把点换成竖线。）这个枚举因此只剩两个职责：决定线是不是蓝的，
+/// 以及侧栏从上往下的顺序。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RowStatus {
     Running,
@@ -195,7 +195,7 @@ fn project_rows(projects: &[Project], sessions: &[Session], unread: &[String]) -
         });
     }
     // 2026-09-08 用户拍板：置顶 > 有黄点 > 在跑 > 其余，同一档里最近更新的在前，同刻按标题稳住。
-    // 置顶是自己按的，黄点也挤不掉它；黄点排在蓝点前面——蓝点的还在自己往前走，黄点的那个在等你。
+    // 置顶是自己按的，黄线也挤不掉它；黄线排在蓝线前面——蓝线的还在自己往前走，黄线的那个在等你。
     rows.sort_by(|a, b| {
         b.pinned
             .cmp(&a.pinned)
@@ -207,14 +207,17 @@ fn project_rows(projects: &[Project], sessions: &[Session], unread: &[String]) -
     rows
 }
 
-/// 侧栏行首那一格的宽度。行首永远是一颗 6px 的点，所以这一格只要放得下点 + 一点余白
+/// 侧栏行首那一格的宽度。行首永远是一根竖线，这一格只要放得下线 + 一点余白
 const INDICATOR_W: f32 = 12.0;
+/// 行首竖线的粗细与长度（看板卡片同一套）
+pub(super) const MARK_W: f32 = 2.0;
+pub(super) const MARK_H: f32 = 14.0;
 
-/// 行首那一点的颜色（2026-09-08 用户拍板，替掉了先前的转圈动画）：
+/// 行首那根竖线的颜色（2026-09-08 用户拍板，先替掉转圈动画、当天又把点换成竖线）：
 /// **蓝** = 在跑（含后台任务还没回来）；**黄** = 跑完了 / 在等你回话而这台机器还没进去看；
-/// **灰** = 已读，没什么要你操心的。三种情况都是同一颗点，行高不随状态跳，也不再有动画
-/// 带着整个侧栏按帧重画。
-fn row_dot_color(row: &ProjectRow) -> u32 {
+/// **灰** = 已读，没什么要你操心的。三种情况都是同一根线，行高不随状态跳，也不再有动画
+/// 带着整个侧栏按帧重画。竖线比圆点更贴着行走，一列扫下来是条节奏线而不是一串珠子。
+fn row_mark_color(row: &ProjectRow) -> u32 {
     if row.status.running() {
         theme::blue()
     } else if row.unread {
@@ -224,15 +227,44 @@ fn row_dot_color(row: &ProjectRow) -> u32 {
     }
 }
 
-fn row_indicator(row: &ProjectRow) -> gpui::AnyElement {
+/// 行首竖线本体。看板卡片也用它，所以给了个名字。
+pub(super) fn mark_bar(color: u32) -> gpui::Div {
+    div().flex_none().w(px(MARK_W)).h(px(MARK_H)).rounded(px(MARK_W / 2.)).bg(c(color))
+}
+
+/// 终端那一行的记号：三道横杠（终端 = 一屏文本行）。和项目行的竖线成一对。
+pub(super) fn mark_lines(color: u32) -> gpui::Div {
+    let bar = move || div().w(px(11.)).h(px(1.5)).rounded(px(0.75)).bg(c(color));
+    div().flex().flex_col().gap(px(3.)).child(bar()).child(bar()).child(bar())
+}
+
+/// 行首那一格：记号居中放进固定宽度里，项目行的竖线和终端行的三道杠才对得齐。
+pub(super) fn indicator_slot(mark: gpui::Div) -> gpui::Div {
     div()
         .flex_none()
         .w(px(INDICATOR_W))
         .flex()
         .items_center()
         .justify_center()
-        .child(div().w(px(6.)).h(px(6.)).rounded_full().bg(c(row_dot_color(row))))
-        .into_any_element()
+        .child(mark)
+}
+
+/// 侧栏一行的底子：项目行和终端行共用——同一套内边距和圆角，才看得出是平级的。
+pub(super) fn sidebar_row(id: gpui::ElementId) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .px(px(10.))
+        .py(px(5.))
+        .mx(px(6.))
+        .rounded(px(6.))
+        .cursor_pointer()
+}
+
+fn row_indicator(row: &ProjectRow) -> gpui::AnyElement {
+    indicator_slot(mark_bar(row_mark_color(row))).into_any_element()
 }
 
 /// ⌃Tab 循环的候选：存活的项目会话，按侧栏顺序。
@@ -1055,25 +1087,13 @@ impl RootView {
 
     // ── 侧栏 ───────────────────────────────────────────────────────────
     //
-    // 结构（自上而下）：新建项目输入框 → 项目列表（一项目一行，状态字 + 标题，
-    // 最近更新的在前）。没有大标题、没有总览页——侧栏本身就是全部导航。
+    // 结构（自上而下）：新建项目输入框 → 项目列表（一项目一行，记号 + 标题，最近
+    // 更新的在前）→ 终端一节（同一列里，与项目行平级）。没有大标题、没有总览页
+    // ——侧栏本身就是全部导航。
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let row_base = |id: gpui::ElementId| {
-            div()
-                .id(id)
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .px(px(10.))
-                .py(px(5.))
-                .mx(px(6.))
-                .rounded(px(6.))
-                .cursor_pointer()
-        };
-
         // ── 项目列表：单列（2026-09-06 用户拍板）──
-        //   行首只有一颗点：蓝 = 在跑 / 黄 = 未读 / 灰 = 已读（2026-09-08 用户拍板，状态字整套去掉）。
+        //   行首只有一根竖线：蓝 = 在跑 / 黄 = 未读 / 灰 = 已读（2026-09-08 用户拍板，状态字整套去掉）。
         //   问题本身不在侧栏画：进消息流，表单原生呈现、原地作答。exited 会话不代表项目
         //   （点一下 resume）；终端（shell）不在这里（归终端面板）。
         let rows = project_rows(&self.projects, &self.sessions, &self.unread_projects);
@@ -1095,7 +1115,7 @@ impl RootView {
             // 元素 id 用路径而不是序号：排序变了悬停 / 点击态跟着行走，不留在原位
             let row_id = SharedString::from(format!("sb-proj:{}", row.path));
             let act_id = SharedString::from(format!("sb-act:{}", row.path));
-            let mut el = row_base(row_id.into())
+            let mut el = sidebar_row(row_id.into())
                 .group("sb-row")
                 .when(active, |el| el.bg(c(theme::surface_raised())))
                 .hover(|st| st.bg(c(theme::surface_raised())))
@@ -1181,6 +1201,9 @@ impl RootView {
             }
             list_col = list_col.child(el);
         }
+        // 终端与对话同级（2026-09-08 用户拍板）：终端不再是侧栏底部通往标签页的
+        // 一个入口，而是接着项目行排在同一列里，点一行就是那一个终端。
+        list_col = list_col.child(self.render_terminal_rows(cx));
         let (conn_color, conn_text) = match self.conn {
             ConnState::Connected => (
                 theme::green(),
@@ -1246,8 +1269,6 @@ impl RootView {
                     .pt(px(4.))
                     .child(list_col),
             )
-            // 终端面板入口：常驻工具，坐在 daemon 状态行上方
-            .child(self.render_terminal_entry(cx))
             // 会话日志入口
             .child(self.render_history_entry(cx))
             .child(
@@ -1938,7 +1959,7 @@ mod tests {
         assert_eq!(RowStatus::of(Some(&sess("a", Waiting, false, ""))), RowStatus::Active);
         assert_eq!(RowStatus::of(Some(&sess("a", Exited, false, ""))), RowStatus::Inactive);
         assert_eq!(RowStatus::of(None), RowStatus::Inactive);
-        // 2026-09-08：侧栏不再写状态字，枚举只管「点是不是蓝的」和排序
+        // 2026-09-08：侧栏不再写状态字，枚举只管「竖线是不是蓝的」和排序
         assert!(RowStatus::Running.running() && RowStatus::Background.running());
         assert!(!RowStatus::Asking.running() && !RowStatus::Active.running() && !RowStatus::Inactive.running());
         // 后台：waiting 且 background 标志；在问的仍是待回复
