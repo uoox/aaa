@@ -342,6 +342,16 @@ pub fn backfill(app: &SharedApp, max: usize) -> usize {
 
 /// 把清单里文字等于 `item` 的那一行改成 done / 未 done；没有这一项就原样返回
 pub fn set_item(summary: &str, item: &str, done: bool) -> String {
+    set_item_at(summary, None, item, done)
+}
+
+/// v1.22：按**位置**勾（`index` = 清单里的第几项，与 `parse_checklist` 的下标同口径），
+/// 文字只用来核对。以前只按文字匹配，且**每一条**同文的都跟着翻——清单里出现两条一样
+/// 的话（haiku 重写时并不罕见），点一条就勾掉了两条。`index` 为 None（老客户端、
+/// 或 haiku 重写后按 override 盖回去）时只翻**第一条**匹配的，不再全翻。
+pub fn set_item_at(summary: &str, index: Option<usize>, item: &str, done: bool) -> String {
+    let mut seen = 0usize;
+    let mut hit = false;
     summary
         .lines()
         .map(|raw| {
@@ -350,10 +360,19 @@ pub fn set_item(summary: &str, item: &str, done: bool) -> String {
                 .strip_prefix("[x]")
                 .or_else(|| l.strip_prefix("[X]"))
                 .or_else(|| l.strip_prefix("[ ]"));
-            match rest {
-                Some(r) if r.trim() == item => format!("- [{}] {}", if done { 'x' } else { ' ' }, item),
-                _ => raw.to_string(),
+            let Some(r) = rest else { return raw.to_string() };
+            let here = seen;
+            seen += 1;
+            let matches = r.trim() == item
+                && match index {
+                    Some(i) => i == here,
+                    None => !hit,
+                };
+            if !matches {
+                return raw.to_string();
             }
+            hit = true;
+            format!("- [{}] {}", if done { 'x' } else { ' ' }, item)
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -361,6 +380,20 @@ pub fn set_item(summary: &str, item: &str, done: bool) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// 点一条勾一条：清单里有两条一样的话，以前 `set_item` 会把两条一起翻过去。
+    #[test]
+    fn set_item_at_flips_exactly_one() {
+        let md = "- [ ] 补测试\n- [ ] 别的事\n- [ ] 补测试";
+        // 按位置：只翻第 2 条（下标 2）
+        let out = crate::summary::set_item_at(md, Some(2), "补测试", true);
+        assert_eq!(out, "- [ ] 补测试\n- [ ] 别的事\n- [x] 补测试");
+        // 没给位置（老客户端 / override 盖回）：只翻第一条匹配的
+        let out = crate::summary::set_item_at(md, None, "补测试", true);
+        assert_eq!(out, "- [x] 补测试\n- [ ] 别的事\n- [ ] 补测试");
+        // 位置对不上文字：不动
+        assert_eq!(crate::summary::set_item_at(md, Some(1), "补测试", true), md);
+    }
+
     #[test]
     fn locate_by_cwd_picks_the_transcript_active_in_the_window() {
         let dir = tempfile::tempdir().unwrap();

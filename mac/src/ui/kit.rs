@@ -96,3 +96,72 @@ pub fn btn_danger(id: impl Into<gpui::ElementId>, label: impl Into<SharedString>
         .hover(|s| s.opacity(0.85))
         .child(label.into())
 }
+
+// ── 侧栏行 ──────────────────────────────────────────────────────────────
+
+const MARK_W: f32 = 2.0;
+const MARK_H: f32 = 14.0;
+
+/// 竖线本体（2026-09-08 用户拍板挪到**行尾**：标题顶格起，一列扫下来是齐的；
+/// 状态和时间一起收在右边那一处）。看板卡片也用它，所以给了个名字。
+pub fn mark_bar(color: u32) -> Div {
+    div().flex_none().w(px(MARK_W)).h(px(MARK_H)).rounded(px(MARK_W / 2.)).bg(c(color))
+}
+
+/// 侧栏一行的底子：项目行和终端行共用——同一套内边距和圆角，才看得出是平级的。
+pub fn sidebar_row(id: gpui::ElementId) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .px(px(10.))
+        .py(px(5.))
+        .mx(px(6.))
+        .rounded(px(6.))
+        .cursor_pointer()
+}
+
+/// 侧栏行尾的悬停小按钮（项目行的「顶 / 删 / ✕」、终端行的「✕」）：
+/// 三处骨架逐字相同——非当前行平时不画（invisible 连命中盒一起去掉），
+/// 整行悬停才现身。`always_visible` 是「这是当前行」。
+///
+/// 只收骨架：hover 配色各处不同（红 = 终止、主色 = 置顶），
+/// 硬塞成参数就得再传两个颜色，不如让调用方接着 `.hover(..)` 写清楚。
+pub fn row_btn(id: impl Into<gpui::ElementId>, always_visible: bool) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex_none()
+        .px(px(3.))
+        .rounded(px(4.))
+        .text_size(px(10.))
+        .text_color(c(theme::faint()))
+        .when(!always_visible, |el| {
+            el.invisible().group_hover("sb-row", |st| st.visible())
+        })
+}
+
+// ── 文字与容器 ──────────────────────────────────────────────────────────
+
+/// 元信息小字：段标题、版本号、时间、路径这类「不是内容、只是标注」的一行。
+/// 设置页、详情面板、看板、侧栏终端小节共十处逐字相同（详情面板原来还留着
+/// 「与设置页同款」的注释），字号/字族/颜色一次定死。
+///
+/// 不带 `.child()`：一半调用点后面还要接 `.pb()` / `.pr()` / `.truncate()`，
+/// 收进来就得再加一串参数。
+pub fn meta() -> Div {
+    div()
+        .font_family("Menlo")
+        .text_size(px(10.))
+        .text_color(c(theme::faint()))
+}
+
+/// 卡片底：设置页三个小节和看板卡片共用的「surface 底 + edge 描边 + 10 圆角」。
+/// 内边距和内部排布各处不同（设置页 14、看板 12 且要 id），所以不收进来。
+pub fn card() -> Div {
+    div()
+        .rounded(px(10.))
+        .bg(c(theme::surface()))
+        .border_1()
+        .border_color(c(theme::edge()))
+}

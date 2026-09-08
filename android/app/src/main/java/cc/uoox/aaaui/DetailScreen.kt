@@ -16,15 +16,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -103,7 +100,7 @@ fun SessionDetailScreen(store: AppStore, nav: NavHostController, sessionId: Stri
 
     Column(Modifier.fillMaxSize().background(Tok.Bg).navigationBarsPadding()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("‹", color = Tok.Dim, fontSize = 28.sp, modifier = Modifier.clickable { nav.popBackStack() }.padding(horizontal = 8.dp))
+            BackArrow(onClick = { nav.popBackStack() }, fontSize = 28.sp)
             Text("详情", color = Tok.Ink, fontSize = 18.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
         }
         if (s == null) {
@@ -121,8 +118,8 @@ fun SessionDetailScreen(store: AppStore, nav: NavHostController, sessionId: Stri
             // ── 用量：顶栏只留了模型和上下文，缓存命中率、花费、时长、行数在这里
             DetailSection("用量", null, initiallyOpen = true) { UsageBlock(s.usage) }
 
-            // ── 进度：daemon 每轮 Stop 后让 haiku 重写的清单
-            val items = remember(s.summary) { parseChecklist(s.summary) }
+            // ── 进度：daemon 每轮 Stop 后让 haiku 重写的清单（v1.22 起连解析也在 daemon，这边直接画）
+            val items = s.checklist
             DetailSection("进度", items.size.takeIf { it > 0 }, initiallyOpen = true, note = if (items.isEmpty()) null else checklistProgress(items)) {
                 if (items.isEmpty()) {
                     EmptyHint("每轮回复结束后这里会更新一份「做了什么 / 还没做什么」")
@@ -191,7 +188,8 @@ fun SessionDetailScreen(store: AppStore, nav: NavHostController, sessionId: Stri
                 Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text("静音此项目通知", color = Tok.Ink, fontSize = 14.sp, modifier = Modifier.weight(1f))
                     Switch(
-                        s.project_path in settings.mutedProjects,
+                        // 去尾斜杠再比：`/p/a` 与 `/p/a/` 是同一个项目（见 pathListContains）
+                        pathListContains(settings.mutedProjects, s.project_path),
                         { v -> scope.launch { store.settings.setProjectMuted(s.project_path, v) } },
                     )
                 }
@@ -234,41 +232,37 @@ fun SessionDetailScreen(store: AppStore, nav: NavHostController, sessionId: Stri
 
     if (renameDialog) {
         var title by remember { mutableStateOf(s?.title.orEmpty()) }
-        AlertDialog(
-            onDismissRequest = { renameDialog = false },
-            containerColor = Tok.Raised,
-            title = { Text("重命名会话", color = Tok.Ink) },
-            text = { OutlinedTextField(title, { title = it }, singleLine = true) },
-            confirmButton = {
-                TextButton(onClick = {
-                    scope.launch {
-                        runCatching { store.client?.rename(sessionId, title.trim()) }.onFailure { toast("重命名失败：${it.message}") }
-                        store.refreshSessions()
-                    }
-                    renameDialog = false
-                }) { Text("确定") }
+        AaaDialog(
+            title = "重命名会话",
+            onDismiss = { renameDialog = false },
+            confirmLabel = "确定",
+            onConfirm = {
+                scope.launch {
+                    runCatching { store.client?.rename(sessionId, title.trim()) }.onFailure { toast("重命名失败：${it.message}") }
+                    store.refreshSessions()
+                }
+                renameDialog = false
             },
-            dismissButton = { TextButton(onClick = { renameDialog = false }) { Text("取消", color = Tok.Dim) } },
-        )
+            cancelLabel = "取消",
+        ) { OutlinedTextField(title, { title = it }, singleLine = true) }
     }
     urlsDialog?.let { urls ->
-        AlertDialog(
-            onDismissRequest = { urlsDialog = null },
-            containerColor = Tok.Raised,
-            title = { Text("回放里的链接", color = Tok.Ink) },
-            text = {
-                Column(Modifier.verticalScroll(rememberScrollState())) {
-                    urls.forEach { url ->
-                        Text(
-                            url, color = Tok.Accent, fontSize = 13.sp, fontFamily = FontFamily.Monospace,
-                            maxLines = 2, overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.fillMaxWidth().clickable { openUrl(context, url); urlsDialog = null }.padding(vertical = 8.dp),
-                        )
-                    }
+        AaaDialog(
+            title = "回放里的链接",
+            onDismiss = { urlsDialog = null },
+            confirmLabel = "取消",
+            confirmColor = Tok.Dim,
+        ) {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                urls.forEach { url ->
+                    Text(
+                        url, color = Tok.Accent, fontSize = 13.sp, fontFamily = FontFamily.Monospace,
+                        maxLines = 2, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.fillMaxWidth().clickable { openUrl(context, url); urlsDialog = null }.padding(vertical = 8.dp),
+                    )
                 }
-            },
-            confirmButton = { TextButton(onClick = { urlsDialog = null }) { Text("取消", color = Tok.Dim) } },
-        )
+            }
+        }
     }
 }
 
@@ -371,12 +365,11 @@ private fun UsageBlock(u: SessionUsage?) {
         u.context_pct?.let { pct ->
             Row(Modifier.fillMaxWidth().padding(vertical = 5.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("上下文", color = Tok.Dim, fontSize = 13.sp, modifier = Modifier.width(76.dp))
-                Box(Modifier.weight(1f).height(4.dp).background(Tok.Edge, RoundedCornerShape(2.dp))) {
-                    Box(
-                        Modifier.fillMaxWidth((pct / 100.0).coerceIn(0.0, 1.0).toFloat()).height(4.dp)
-                            .background(pctColor(pctColorLevel(pct), Tok.Accent), RoundedCornerShape(2.dp)),
-                    )
-                }
+                ThinProgressBar(
+                    (pct / 100.0).coerceIn(0.0, 1.0).toFloat(),
+                    pctColor(pctColorLevel(pct), Tok.Accent),
+                    Modifier.weight(1f),
+                )
                 Spacer(Modifier.width(8.dp))
                 Text(pctText(pct), color = pctColor(pctColorLevel(pct), Tok.Ink), fontSize = 12.sp, fontFamily = FontFamily.Monospace)
             }

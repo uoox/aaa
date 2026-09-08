@@ -262,8 +262,65 @@ pub fn parse_checklist(md: &str) -> Vec<ChecklistItem> {
 /// 会话此刻的状态字（与侧栏同一套五态，PROTOCOL「GUI 列表口径」）
 pub const STATUS_ORDER: [&str; 5] = ["asking", "running", "background", "active", "paused"];
 
+/// 池子里一条会话此刻是五态里的哪一个。**只此一处**（v1.22）：看板、项目列表、
+/// 两端的侧栏说的都是这一句——此前 daemon 一份、mac `RowStatus::of` 一份、
+/// Android `projectStateOf` 一份，同一台机器同一时刻能给出不同的答案。
+/// 退出的进程一律 `paused`（哪怕还在池子里点得开）。
+pub fn status_of(m: &crate::pool::Meta) -> &'static str {
+    match m.state {
+        crate::pool::State::Exited => "paused",
+        _ if m.asking => "asking",
+        crate::pool::State::Running => "running",
+        crate::pool::State::Waiting if m.background > 0 => "background",
+        crate::pool::State::Waiting => "active",
+    }
+}
+
 pub fn status_rank(status: &str) -> usize {
     STATUS_ORDER.iter().position(|s| *s == status).unwrap_or(STATUS_ORDER.len())
+}
+
+/// 池子里一条会话，聚项目行时要看的那几样（v1.22）
+#[derive(Clone, Debug)]
+pub struct SessSnap {
+    /// 已规范化的项目路径（`stores::realpath`）
+    pub path: String,
+    pub id: String,
+    /// 会话的 agent（claude / codex…）：没登记的目录靠它给项目行填 agent
+    pub agent: String,
+    pub title: String,
+    /// 排序键：状态翻转 / 改名的时刻（老元数据没有 → created_at）
+    pub updated_at: String,
+    /// 五态之一（[`status_of`]）。`paused` = 这个进程已经退出了
+    pub status: &'static str,
+}
+
+/// 一个项目在池子里的会话聚成的一条
+#[derive(Default, Clone, Debug)]
+pub struct ProjAgg {
+    /// 代表这个项目的**活**会话：几个同时活着取最近更新的。None = 项目此刻没有活会话
+    pub live: Option<SessSnap>,
+    /// 最新一条会话（**含已退出**）：项目行的排序时间，也是「点一下 resume 谁」
+    pub latest: Option<SessSnap>,
+}
+
+/// 会话 → 项目行的聚合（v1.22，`GET /projects` 用）。**这条口径只此一处**：
+/// 此前 mac 取 `updated_at` 最大的活会话、Android 先按 agent 过滤再按
+/// 「待回复 < 执行中 < 其它」排，同一个项目在两台设备上会显示不同的标题和状态。
+/// 传进来的应当已经滤掉终端（shell 不代表项目）。
+pub fn project_aggregate(snaps: impl Iterator<Item = SessSnap>) -> std::collections::HashMap<String, ProjAgg> {
+    let mut out: std::collections::HashMap<String, ProjAgg> = std::collections::HashMap::new();
+    for s in snaps {
+        let e = out.entry(s.path.clone()).or_default();
+        if e.latest.as_ref().is_none_or(|l| s.updated_at > l.updated_at) {
+            e.latest = Some(s.clone());
+        }
+        // 退出的会话只贡献排序时间：它不代表项目（PROTOCOL「exited 会话不代表项目」）
+        if s.status != "paused" && e.live.as_ref().is_none_or(|l| s.updated_at > l.updated_at) {
+            e.live = Some(s);
+        }
+    }
+    out
 }
 
 /// 池子里一条会话此刻的样子（api 层从 pool 取）
@@ -357,6 +414,43 @@ pub fn dashboard(
 mod dashboard_tests {
     use super::*;
     use std::collections::HashMap;
+
+    fn snap(path: &str, id: &str, title: &str, updated: &str, status: &'static str) -> SessSnap {
+        SessSnap { path: path.into(), id: id.into(), agent: "claude".into(), title: title.into(), updated_at: updated.into(), status }
+    }
+
+    /// 项目行的代表会话：活着的优先、几个活着取最近更新的；全退出了只留排序时间。
+    /// 这条口径 v1.22 从两端搬进来——两端此前的推法本来还不一样。
+    #[test]
+    fn project_aggregate_picks_the_live_session() {
+        let m = project_aggregate(
+            [
+                snap("/p/a", "s_old", "旧", "2026-09-08T10:00:00Z", "paused"),
+                snap("/p/a", "s_live", "在跑", "2026-09-08T11:00:00Z", "running"),
+                snap("/p/a", "s_new", "更新但退了", "2026-09-08T12:00:00Z", "paused"),
+                snap("/p/b", "s_b", "都退了", "2026-09-08T09:00:00Z", "paused"),
+            ]
+            .into_iter(),
+        );
+        let a = &m["/p/a"];
+        assert_eq!(a.live.as_ref().unwrap().id, "s_live", "退出的不代表项目，哪怕它更新");
+        assert_eq!(a.latest.as_ref().unwrap().id, "s_new", "排序时间含已退出的");
+        let b = &m["/p/b"];
+        assert!(b.live.is_none(), "一个活的都没有 = paused");
+        assert_eq!(b.latest.as_ref().unwrap().id, "s_b", "点它 resume");
+    }
+
+    #[test]
+    fn project_aggregate_prefers_the_newest_live_one() {
+        let m = project_aggregate(
+            [
+                snap("/p/a", "s1", "先跑的", "2026-09-08T10:00:00Z", "asking"),
+                snap("/p/a", "s2", "后跑的", "2026-09-08T10:30:00Z", "active"),
+            ]
+            .into_iter(),
+        );
+        assert_eq!(m["/p/a"].live.as_ref().unwrap().id, "s2");
+    }
 
     /// 三端共享向量 fixtures/dashboard.json：daemon 的输出必须逐字段等于 `sessions`
     #[test]

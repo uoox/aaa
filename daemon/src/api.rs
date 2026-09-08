@@ -237,6 +237,10 @@ where
 async fn health(State(app): State<SharedApp>) -> Json<Value> {
     Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
+        // v1.22：客户端唯一的兼容闸门（PROTOCOL「版本兼容」）。语义搬家时 +1；
+        // 纯新增可选字段不动它。2 = /projects 带 status/title/session_id/updated_at、
+        // 会话带 asking_seq/checklist——客户端据此决定「直接画」还是「挂降级横幅」
+        "schema": crate::SCHEMA,
         // kept as "mounted" for wire compatibility: to a client it has always
         // meant "usable". root_state says *why* when it is not.
         "ssd_mounted": app.root_state().usable(),
@@ -384,6 +388,22 @@ async fn projects_list(State(app): State<SharedApp>) -> ApiResult<Json<Value>> {
         // 迁根 / 重启窗口里别扫：目录可能正在搬，cwd 缓存正在改写（gpt-6 审阅指出这条路没上锁）
         return Err(ApiError::conflict("daemon 正在重启，稍候重试"));
     }
+    // v1.22：这一项目此刻的样子（代表会话 / 五态 / 标题 / 排序时间）由 daemon 算一次，
+    // 两端只画（PROTOCOL「版本兼容」）。此前两端各自从 /sessions 推，推法还不一样：
+    // mac 取 updated_at 最大的活会话，Android 先按 agent 过滤再按「待回复<执行中<其它」
+    // 排——同一个项目在两台设备上会显示不同的标题和状态。
+    let agg = crate::history::project_aggregate(app.pool.list().iter().filter_map(|sess| {
+        let m = sess.meta.lock().unwrap();
+        // 终端不代表项目（PROTOCOL「终端」：不进项目列表、不参与主会话判定）
+        (m.agent != "shell").then(|| crate::history::SessSnap {
+            path: stores::realpath(&m.project_path),
+            id: sess.id.clone(),
+            agent: m.agent.clone(),
+            title: m.title.clone(),
+            updated_at: m.updated_at.unwrap_or(m.created_at).to_rfc3339_opts(SecondsFormat::Secs, true),
+            status: crate::history::status_of(&m),
+        })
+    }));
     let app2 = Arc::clone(&app);
     let rows = blocking(move || {
         // No store_lock here: naming may call haiku (up to 60s) and the cache
@@ -424,15 +444,39 @@ async fn projects_list(State(app): State<SharedApp>) -> ApiResult<Json<Value>> {
                         Path::new(&r.det_path),
                     )
                 };
+                // 会话那边的 key 是 canonicalize 过的，项目行这边是 read_dir 给的原始路径：
+                // 项目根只要经过一个软链接（/Volumes 下很常见），两边就对不上，整列项目
+                // 会全部显示成「没有活会话」。所以查表前统一走一次 realpath。
+                let a = agg.get(&stores::realpath(&r.path));
+                let live = a.and_then(|a| a.live.as_ref());
                 json!({
                     "path": r.path,
                     "name": r.name,
                     "mtime": iso_from_epoch(r.mtime),
                     "dir_size": r.dir_size,
                     "agent": agent,
-                    "session_title": if title.is_empty() { Value::Null } else { Value::String(title) },
+                    "session_title": if title.is_empty() { Value::Null } else { Value::String(title.clone()) },
                     // v1.8：置顶（POST /projects/pin）
                     "pinned": pinned.contains(&r.path),
+                    // v1.22：登记过的项目才能 resume / 删（见下面补的「没登记但有活会话」那几行）
+                    "registered": true,
+                    // ↓ v1.22：daemon 算好的「这一项目此刻的样子」，客户端只画
+                    // 代表会话：活着的那个；都退出了就是最近退出的那个（点它 resume）
+                    "session_id": live
+                        .map(|l| l.id.clone())
+                        .or_else(|| a.and_then(|a| a.latest.as_ref().map(|l| l.id.clone()))),
+                    // 五态与看板、CLI 同一句话（history::status_of）；没有活会话 = paused
+                    "status": live.map(|l| l.status).unwrap_or("paused"),
+                    // 标题回退链：活会话的标题 → agent 存储读出的 session_title → 目录名。
+                    // 这条链此前三端各写一遍
+                    "title": live
+                        .map(|l| l.title.clone())
+                        .filter(|t| !t.trim().is_empty())
+                        .unwrap_or_else(|| if title.is_empty() { r.name.clone() } else { title.clone() }),
+                    // 排序键：该项目最新一条非终端会话的 updated_at（含已退出）；一个都没有 → 目录 mtime
+                    "updated_at": a
+                        .and_then(|a| a.latest.as_ref().map(|l| l.updated_at.clone()))
+                        .unwrap_or_else(|| iso_from_epoch(r.mtime)),
                 })
             })
             .collect();
@@ -440,9 +484,42 @@ async fn projects_list(State(app): State<SharedApp>) -> ApiResult<Json<Value>> {
             let _g = app2.store_lock.lock().unwrap();
             cache.save();
         }
-        out
+        (out, agg)
     })
     .await?;
+    let (rows, agg) = rows;
+    // 在别处 `aaa open` 开出来的目录：注册表里没有，但此刻有活会话——也得给一行，
+    // 否则它无处可点（PROTOCOL「GUI 列表口径」）。v1.22 起由 daemon 补：mac 侧此前
+    // 自己补一遍、Android 压根没补，同一台 daemon 在两端显示的行数都不一样。
+    let seen: std::collections::HashSet<String> = rows
+        .iter()
+        .filter_map(|r| r["path"].as_str())
+        .map(stores::realpath)
+        .collect();
+    let extra: Vec<Value> = agg
+        .iter()
+        .filter(|(path, a)| a.live.is_some() && !seen.contains(*path))
+        .map(|(path, a)| {
+            let l = a.live.as_ref().expect("filtered above");
+            json!({
+                "path": path,
+                "name": Path::new(path).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| path.clone()),
+                "mtime": l.updated_at,
+                "dir_size": 0,
+                "agent": l.agent,
+                "session_title": Value::Null,
+                "pinned": false,
+                // 没登记 = 不能 resume / 删项目，客户端据此收起那些菜单项
+                "registered": false,
+                "session_id": l.id,
+                "status": l.status,
+                "title": if l.title.trim().is_empty() { Value::String(path.clone()) } else { Value::String(l.title.clone()) },
+                "updated_at": a.latest.as_ref().map(|x| x.updated_at.clone()).unwrap_or_else(|| l.updated_at.clone()),
+            })
+        })
+        .collect();
+    let mut rows = rows;
+    rows.extend(extra);
     Ok(Json(json!(rows)))
 }
 
@@ -534,13 +611,7 @@ async fn history_dashboard(State(app): State<SharedApp>) -> ApiResult<Json<Value
     let mut live = std::collections::HashMap::new();
     for s in app.pool.list() {
         let m = s.meta.lock().unwrap();
-        let status = match m.state {
-            SState::Exited => "paused",
-            _ if m.asking => "asking",
-            SState::Running => "running",
-            SState::Waiting if m.background > 0 => "background",
-            SState::Waiting => "active",
-        };
+        let status = crate::history::status_of(&m);
         let updated_at = m.updated_at.unwrap_or(m.created_at).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         live.insert(s.id.clone(), crate::history::LiveStatus { status, updated_at });
     }
@@ -1198,9 +1269,15 @@ async fn session_permission(
 
 #[derive(Deserialize)]
 struct ChecklistBody {
-    /// 清单项的文字（看板卡片里那一行；按文字匹配，客户端把没勾的排前面也不怕）
+    /// 清单项的文字（看板卡片里那一行）
     text: String,
     done: bool,
+    /// v1.22：这是清单里的第几项（与 `history::parse_checklist` / 会话对象上的
+    /// `checklist` 同下标）。给了就只翻这一条，文字只用来核对；不给（老客户端）
+    /// 退回「只翻第一条匹配的」。以前每一条同文的都跟着翻——清单里出现两条一样
+    /// 的话，点一条勾掉两条。
+    #[serde(default)]
+    index: Option<usize>,
 }
 
 /// v1.16：看板上直接勾 / 取消勾。改 summary 里那一行，并记进 checklist_overrides：
@@ -1217,7 +1294,7 @@ async fn session_checklist(
     }
     {
         let mut meta = sess.meta.lock().unwrap();
-        let next = crate::summary::set_item(&meta.summary, &text, body.done);
+        let next = crate::summary::set_item_at(&meta.summary, body.index, &text, body.done);
         if next == meta.summary && !meta.summary.contains(&text) {
             return Err(ApiError::not_found("清单里没有这一项"));
         }

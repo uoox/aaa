@@ -316,17 +316,31 @@ fn run() {
                             // mirror「有问题在等回答」to the session object
                             // (structured: transcript AskUserQuestion without
                             // an answer, from this process's lifetime)
-                            let asking = {
+                            // v1.22：不只判「有没有」，把**是哪一条**（seq）也带出来——
+                            // 客户端据它画表单卡片，不再自己从消息流倒着找一遍
+                            let seq = {
                                 let meta = sess.meta.lock().unwrap();
                                 if meta.state == State::Exited {
-                                    false
+                                    None
                                 } else {
                                     let since = meta
                                         .created_at
                                         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
                                     drop(meta);
-                                    sess.msgs.lock().unwrap().pending_question(Some(&since)).is_some()
+                                    sess.msgs.lock().unwrap().pending_question(Some(&since)).map(|m| m.seq)
                                 }
+                            };
+                            let asking = seq.is_some();
+                            // v1.22：Claude Code 自己排着的待发送消息 + 信任对话框弹着时
+                            // daemon 替用户收下的那几条，合成一份镜到会话对象上。客户端
+                            // 因此不再维护第二套「待发送」，发送一律走 /input
+                            let queued = {
+                                let mut q = sess.msgs.lock().unwrap().queued.clone();
+                                let path = sess.meta.lock().unwrap().project_path.clone();
+                                q.extend(app2.inbox.lock().unwrap().list(&crate::stores::realpath(&path)).into_iter().map(
+                                    |e| crate::messages::QueuedMsg { ts: e.created_at, text: e.text },
+                                ));
+                                q
                             };
                             let mut meta = sess.meta.lock().unwrap();
                             // hooks 刚报了 AskUserQuestion、transcript 还没落盘：几秒内不压回
@@ -337,8 +351,13 @@ fn run() {
                             // v1.16：权限对话框在等 = 待回复（hook 记的，跟 transcript 无关）
                             let asking = (asking || (hinted && meta.state != State::Exited) || meta.permission.is_some())
                                 && meta.state != State::Exited;
-                            if meta.asking != asking {
+                            // 会话退出后没有可答的了；权限对话框 / hook 抢跑撑起的 asking
+                            // 没有对应的 transcript 条目，seq 就是 None
+                            let seq = if asking { seq } else { None };
+                            if meta.asking != asking || meta.asking_seq != seq || meta.queued != queued {
                                 meta.asking = asking;
+                                meta.asking_seq = seq;
+                                meta.queued = queued;
                                 drop(meta);
                                 sess.mark_dirty();
                             } else {

@@ -167,13 +167,24 @@ STATES = ["asking", "running", "background", "active", "paused"]
 LABELS = {"asking": "待回复", "running": "运行", "background": "后台", "active": "激活", "paused": "暂停"}
 COLORS = {"asking": YELLOW, "running": GREEN, "background": GREEN, "active": CYAN, "paused": GREY}
 
+SCHEMA_STATUS = 2  # daemon 从这一版起下发 status（PROTOCOL「版本兼容」）
+
 def status_of(s):
-    st = S(s, "state")
-    if st == "exited": return "paused"
-    if s.get("asking"): return "asking"
-    if st == "running": return "running"
-    if s.get("background"): return "background"
-    return "active"
+    """会话此刻是五态里的哪一个。**只有 daemon 说了算**（history::status_of）：
+    这个判断以前 daemon、mac、Android、CLI 各写一遍，同一时刻能给出不同的答案。
+    daemon 太旧（没有这个字段）时只能退到「退出了没有」这一点点信息，并由调用方
+    明说一句 daemon 该升级了——不在这里偷偷补一套阶梯。"""
+    st = s.get("status")
+    if st in STATES:
+        return st
+    return "paused" if S(s, "state") == "exited" else "active"
+
+def schema_warn(h):
+    """daemon 比 CLI 旧：状态、标题这些都不下发了，说一声，别让人对着错的数字纳闷。"""
+    if int(S(h, "schema", 0) or 0) >= SCHEMA_STATUS:
+        return
+    out("%sdaemon 版本过旧（v%s）：会话状态不可用，先 %saaa restart%s%s 更新" %
+        (YELLOW, S(h, "version") or "?", BOLD, RESET + YELLOW, RESET))
 
 def epoch(iso):
     """ISO 时间串 → unix 秒；解不出给 0。两处各写过一遍正则 + calendar.timegm"""
@@ -242,14 +253,16 @@ def cmd_status(conn, args):
     out("  项目根   %s %s" % (S(h, "project_root"), note))
     out("  运行时长 %s" % uptime(int(S(h, "uptime_s", 0) or 0)))
     out("  会话     " + " · ".join("%s%s %d%s" % (COLORS[k], LABELS[k], counts[k], RESET) for k in STATES))
+    schema_warn(h)
     if rs == "denied":
         out("\n%s项目根读不了%s：launchd 起的 daemon 没有可移动卷访问权。\n  系统设置 → 隐私与安全性 → 完全磁盘访问权限，加入 %s~/.local/bin/aaa-daemon%s，\n  然后 %saaa service uninstall && aaa service install%s"
             % (YELLOW, RESET, DIM, RESET, BOLD, RESET))
 
 def cmd_ls(conn, args):
-    conn.probe()
+    h = conn.probe()
     sessions = call(conn, "GET", "/api/v1/sessions")
     if "--json" in args: out(pretty(sessions)); return
+    schema_warn(h)
     show_all = "-a" in args or "--all" in args
     rows = [s for s in sorted_sessions(sessions) if show_all or status_of(s) != "paused"]
     if not rows: out(DIM + "没有会话" + RESET); return

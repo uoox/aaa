@@ -85,7 +85,7 @@ impl RootView {
             self.terminals.remove(&id);
             let fut = self.net.delete_session(&id);
             // 删失败只记日志：daemon 侧 200 条上限兜底，不值得弹错
-            self.spawn_fetch(fut, |_, _: serde_json::Value, _| {}, false, cx);
+            self.spawn_fetch_ignore(fut, false, cx);
         }
     }
 
@@ -154,6 +154,8 @@ impl RootView {
         self.terminals.remove(id);
         let net = self.net.clone();
         let sid = id.to_string();
+        // 不走 spawn_fetch：这里是两个请求串起来，前一个失败要吞掉、后一个失败
+        // 才报错，spawn_fetch 一个 future 一个结果的形状装不下
         cx.spawn(async move |this, cx| {
             // 先 kill 再 DELETE：DELETE 本身也会终止存活会话，但分两步走
             // kill 的 TERM→KILL 时序更稳；kill 失败（已经退了）不影响删除
@@ -205,6 +207,8 @@ impl RootView {
     /// 侧栏里的终端小节：一条分隔线 + 「终端」小标题 + 一终端一行 + 「＋ 新增终端」。
     /// 2026-09-08 用户拍板：终端与对话同级——和项目行排在同一列里、同一套行样式，
     /// 点一行就是那一个终端。以前它是底部一个入口行，后面还藏着一条标签条。
+    /// 同日用户「终端列表前面不需要三道杠」：行首那个记号（连同项目行的指示位）一起
+    /// 拿掉了——终端没有状态可言，一个记号只是占着行首；标题现在顶格起，和项目行对齐。
     pub(super) fn render_terminal_rows(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let mut col = div()
             .flex()
@@ -212,16 +216,13 @@ impl RootView {
             .gap(px(1.))
             .mt(px(10.))
             .child(
-                div()
+                meta()
                     .mx(px(6.))
                     .px(px(10.))
                     .pt(px(8.))
                     .pb(px(4.))
                     .border_t_1()
                     .border_color(c(theme::edge()))
-                    .font_family("Menlo")
-                    .text_size(px(10.))
-                    .text_color(c(theme::faint()))
                     .child("终端"),
             );
         for (ix, (id, label)) in self.live_terminal_tabs().into_iter().enumerate() {
@@ -230,18 +231,13 @@ impl RootView {
             let id_click = id.clone();
             let id_close = id;
             col = col.child(
-                super::sidebar_row(("sb-term", ix).into())
+                sidebar_row(("sb-term", ix).into())
                     .group("sb-row")
                     .when(active, |el| el.bg(c(theme::surface_raised())))
                     .hover(|st| st.bg(c(theme::surface_raised())))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.focus_terminal(id_click.clone(), cx);
                     }))
-                    .child(super::indicator_slot(super::mark_lines(if active {
-                        theme::accent()
-                    } else {
-                        theme::dim()
-                    })))
                     .child(
                         div()
                             .flex_1()
@@ -254,17 +250,8 @@ impl RootView {
                     )
                     // × 关终端：当前行常显，其余悬停才现身（与项目行一致）
                     .child(
-                        div()
-                            .id(("sb-term-close", ix))
-                            .flex_none()
-                            .px(px(3.))
-                            .rounded(px(4.))
-                            .text_size(px(10.))
-                            .text_color(c(theme::faint()))
+                        row_btn(("sb-term-close", ix), active)
                             .hover(|st| st.text_color(c(theme::red())).bg(c(theme::edge_light())))
-                            .when(!active, |el| {
-                                el.invisible().group_hover("sb-row", |st| st.visible())
-                            })
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
                                 this.close_terminal(&id_close, cx);
@@ -274,10 +261,9 @@ impl RootView {
             );
         }
         col.child(
-            super::sidebar_row("sb-term-new".into())
+            sidebar_row("sb-term-new".into())
                 .hover(|st| st.bg(c(theme::surface_raised())))
                 .on_click(cx.listener(|this, _, _, cx| this.new_terminal(cx)))
-                .child(super::indicator_slot(div()))
                 .child(
                     div()
                         .flex_1()

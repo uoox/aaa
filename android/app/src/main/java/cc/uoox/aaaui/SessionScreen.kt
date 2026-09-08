@@ -36,8 +36,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DrawerDefaults
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
@@ -53,6 +53,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -61,6 +62,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.zIndex
@@ -88,6 +90,15 @@ import kotlin.math.roundToInt
 // 会话屏：消息流 ⇄ 终端 双视图 + 共用 composer
 // ============================================================
 
+/**
+ * 会话屏。同一条会话有两种看法——消息流（[MessagesView]）与终端（[TerminalHost]），顶栏点
+ * 一下换一种，输入区（[SessionComposer]）两边共用；左上角 ☰ 拉出 [ProjectPanel] 换会话。
+ *
+ * 画出来的四块各自成函数：顶栏 [SessionTopBar]、快捷键条 [TerminalKeyBar]、主体、输入区。
+ * 留在本函数里的是**状态**：草稿、attach、消息流分页、待发送队列、「正盯着看」的生命周期
+ * 观察——它们要么跨两个视图共用，要么必须活到整屏被销毁为止，往下挪就会跟着某一块的显示与
+ * 否被建了又丢。
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SessionScreen(
@@ -121,8 +132,8 @@ fun SessionScreen(
         if (composer.isEmpty() && saved.isNotEmpty()) composer = saved
     }
     LaunchedEffect(sessionId) { snapshotFlow { composer }.collect { store.setDraft(sessionId, it) } }
+    // 粘性 Ctrl：键位条按下、终端与键位条共读，所以状态留在这一层（两块都不拥有它）
     val ctrlStickyState = remember { mutableStateOf(false) }
-    var ctrlSticky by ctrlStickyState
     // 终端视图的键位条 + 输入框：默认收起，右下角 ⌨ 放出来；不持久化，每次进来都是收起的
     var keysOpen by rememberSaveable { mutableStateOf(false) }
 
@@ -144,6 +155,24 @@ fun SessionScreen(
     val s = session ?: helloSession
 
     LaunchedEffect(sessionId) { if (session == null) store.refreshSessions() }
+    // 「正盯着看」：这一屏在最上面、且 app 在前台。眼皮底下跑完的东西不再响一声、也不打黄点
+    // （mac 侧一直有这条抑制，Android 以前没有）。用 lifecycle 而不是组合的生死判：切到桌面时
+    // 组合还在，只是不 RESUMED——那时候该正常通知。
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    DisposableEffect(sessionId, lifecycleOwner) {
+        val obs = androidx.lifecycle.LifecycleEventObserver { _, e ->
+            when (e) {
+                androidx.lifecycle.Lifecycle.Event.ON_RESUME -> store.setWatching(sessionId)
+                androidx.lifecycle.Lifecycle.Event.ON_PAUSE -> store.clearWatching(sessionId)
+                else -> {}
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(obs)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(obs)
+            store.clearWatching(sessionId)
+        }
+    }
     // 黄点：进来就清掉，人在这一屏时又跑完一轮也当场清（2026-09-08）——
     // 黄点说的是「这台设备还没看」，正看着就不算没看
     LaunchedEffect(s?.project_path, s?.updated_at, s?.asking) { store.seenProject(s?.project_path) }
@@ -177,21 +206,12 @@ fun SessionScreen(
         }
     }
 
-    // 待发送：项目收件箱里的条目，就画在消息流末尾。agent 还在跑时点「发送」进这里，
-    // daemon 在它这轮跑完（或此刻已空着）时自动写进去——和终端里先敲好等它一样
+    // 待发送：**Claude Code 自己排着的那些**（会话对象上的 `queued`，daemon 从 transcript
+    // 读出来），画在消息流末尾。v1.22 用户拍板「排队发送按照 claude code 逻辑，不需要另外
+    // 实现这个功能」——AAA 那套「还在跑就 POST /inbox」就此拆掉：模型在跑时往 TUI 里敲字，
+    // Claude Code 本来就会排队、跑完自己送进去，我们只把队列画出来。
     val projectPath = s?.project_path
-    val pending = remember(sessionId) { mutableStateOf<List<InboxItem>>(emptyList()) }
-    suspend fun fetchPending() {
-        val api = store.client ?: return
-        val path = projectPath ?: return
-        try { pending.value = api.inbox(path) } catch (_: Exception) { }
-    }
-    LaunchedEffect(projectPath) { fetchPending() }
-    LaunchedEffect(projectPath) {
-        store.frames.collectLatest { f ->
-            if (f is EventFrame.InboxChanged && f.path == projectPath) fetchPending()
-        }
-    }
+    val pending = s?.queued ?: emptyList()
 
     fun sendInput(text: String, enter: Boolean) {
         scope.launch {
@@ -199,31 +219,17 @@ fun SessionScreen(
             catch (e: Exception) { Toast.makeText(context, "发送失败：${e.message}", Toast.LENGTH_SHORT).show() }
         }
     }
-    /** 输入框「发送」：agent 空着就直接写进去；还在跑（或弹着问题）就排成待发送。 */
+    /**
+     * 输入框「发送」：**一律写进 PTY**，不再按会话状态分流（v1.22）。模型在跑的时候，
+     * 排不排队是 Claude Code 的事——它自己排、自己在这一轮结束后送进去，和你在终端里
+     * 先敲好等它完全一样；信任对话框弹着这种写进去会被吞掉的情形，daemon 侧的 /input
+     * 自己会兜底收进箱里。客户端不再做这个判断。
+     */
     fun submitComposer() {
         val text = composer
         if (text.isBlank()) return
         composer = ""
-        val path = projectPath
-        if (queueInsteadOfSend(s?.state, s?.asking == true) && path != null) {
-            scope.launch {
-                try { store.client?.inboxAdd(path, text); fetchPending() }
-                catch (e: Exception) {
-                    composer = text // 没排上：字还给输入框
-                    Toast.makeText(context, "排队失败：${e.message}", Toast.LENGTH_SHORT).show()
-                }
-            }
-        } else {
-            sendInput(text, enter = true)
-        }
-    }
-    fun deletePending(item: InboxItem) {
-        pending.value = pending.value.filter { it.id != item.id }
-        scope.launch {
-            runCatching { store.client?.inboxDelete(item.id) }
-                .onFailure { Toast.makeText(context, "撤回失败：${it.message}", Toast.LENGTH_SHORT).show() }
-            fetchPending()
-        }
+        sendInput(text, enter = true)
     }
     /**
      * 粘贴：剪贴板文本走 daemon 的 /input——它在 TUI 开了 DECSET 2004 时会补 bracketed-paste
@@ -259,8 +265,12 @@ fun SessionScreen(
     ModalNavigationDrawer(
         drawerState = drawerState,
         drawerContent = {
+            // 小屏铺满、大屏半屏（sidebarFraction）；铺满时把圆角去掉，不然右缘两个角
+            // 会漏出底下的背景，像没盖严
+            val frac = sidebarFraction()
             ModalDrawerSheet(
-                modifier = Modifier.fillMaxWidth(0.92f),
+                modifier = Modifier.fillMaxWidth(frac),
+                drawerShape = if (frac >= 1f) RectangleShape else DrawerDefaults.shape,
                 drawerContainerColor = Tok.Surface, drawerContentColor = Tok.Ink,
             ) {
                 // ☰ 抽屉画的就是 ProjectPanel（首页整块），当前项目高亮；跳转前先关抽屉
@@ -270,93 +280,30 @@ fun SessionScreen(
     ) {
     Box(Modifier.fillMaxSize().background(Tok.Bg).navigationBarsPadding().imePadding()) {
     Column(Modifier.fillMaxSize()) {
-        // 顶栏
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                "☰", color = Tok.Dim, fontSize = 20.sp,
-                modifier = Modifier.clickable { scope.launch { drawerState.open() } }.padding(horizontal = 8.dp, vertical = 2.dp),
-            )
-            // 顶栏只有一行（2026-09-08 用户拍板）：标题 + 模型 + 上下文占比。项目名、resume id、
-            // 缓存命中率、花费都进详情屏——手机顶栏就这么宽，三行叠起来只是把标题挤扁
-            Text(
-                s?.title?.ifBlank { s.project_name } ?: sessionId,
-                color = Tok.Ink, fontSize = 15.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-            )
-            val usageSegs = usageHeaderSegments(s?.usage)
-            if (usageSegs.isNotEmpty()) {
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    segmentsAnnotated(usageSegs, Tok.Dim),
-                    fontSize = 10.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                )
-            }
-            Spacer(Modifier.width(8.dp))
-            // 视图切换：显示当前视图名，点一下换另一种
-            if (messagesSupported != false) {
-                Text(
-                    if (showMessages) "消息流" else "终端",
-                    color = Tok.Accent, fontSize = 12.sp, fontFamily = FontFamily.Monospace,
-                    modifier = Modifier
-                        .clickable { uiMode = if (showMessages) "terminal" else "messages" }
-                        .border(1.dp, Tok.Edge2, RoundedCornerShape(8.dp))
-                        .padding(horizontal = 8.dp, vertical = 4.dp),
-                )
-                Spacer(Modifier.width(8.dp))
-            }
-            StateDot(Tok.stateColor(s?.state ?: ""))
-            // 2026-09-08 用户拍板：⋮ 整个换成详情按钮——里面九项大半一年用一次，而
-            // 子代理 / 后台任务 / 已上传 / 产物 / 技能这些「发生过但翻不出来」的才该占这个位置
-            Text(
-                "ⓘ", color = Tok.Dim, fontSize = 20.sp,
-                modifier = Modifier.clickable { nav.openDetail(sessionId) }.padding(horizontal = 10.dp),
-            )
-        }
+        SessionTopBar(
+            title = s?.title?.ifBlank { s.project_name } ?: sessionId,
+            usage = s?.usage,
+            state = s?.state ?: "",
+            showMessages = showMessages,
+            canSwitchView = messagesSupported != false,
+            onMenu = { scope.launch { drawerState.open() } },
+            onToggleView = { uiMode = if (showMessages) "terminal" else "messages" },
+            onDetail = { nav.openDetail(sessionId) },
+        )
         if (!wsConnected && !showMessages) {
             Text("连接中…", color = Tok.Amber, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 16.dp))
         }
 
         // 快捷键条（仅终端视图，且要先用 ⌨ 放出来）：放在终端上方，软键盘弹起时不会被顶到看不见
         if (!showMessages && keysOpen) {
-            Row(
-                Modifier.fillMaxWidth().background(Tok.Surface).horizontalScroll(rememberScrollState())
-                    .padding(horizontal = 8.dp, vertical = 5.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                // 键码交给 libvterm 的 dispatchKey，它按当前 keypad / cursor 模式给出正确的
-                // 转义序列；字面符号直接写进 PTY。粘性 Ctrl 用一次就松开。
-                fun key(code: Int) = {
-                    vtermKeyFor(code)?.let { k ->
-                        attachment?.emulator?.dispatchKey(if (ctrlSticky) VTERM_MOD_CTRL else 0, k)
-                        ctrlSticky = false
-                    }
-                    Unit
-                }
-                fun lit(ch: String) = { attachment?.write(ch); Unit }
-                KeyChip("⌨", active = true) { keysOpen = false }
-                KeyChip("键盘") { inputRef.value?.showKeyboard() }
-                // 回车放最前面：条会横向滚，排后面在手机上根本看不见
-                KeyChip("⏎", onClick = key(KeyEvent.KEYCODE_ENTER))
-                KeyChip("选择", active = selectMode.value) { selectMode.value = !selectMode.value }
-                KeyChip("Esc", onClick = key(KeyEvent.KEYCODE_ESCAPE))
-                KeyChip("Ctrl", active = ctrlSticky) { ctrlSticky = !ctrlSticky }
-                KeyChip("↑", onClick = key(KeyEvent.KEYCODE_DPAD_UP))
-                KeyChip("↓", onClick = key(KeyEvent.KEYCODE_DPAD_DOWN))
-                KeyChip("←", onClick = key(KeyEvent.KEYCODE_DPAD_LEFT))
-                KeyChip("→", onClick = key(KeyEvent.KEYCODE_DPAD_RIGHT))
-                // Claude Code 的输入框里换行：`\` + Return（官方的「quick escape」，任何终端都认）。
-                // 不用 Shift/Alt+Enter 的转义序列——那要终端和 TUI 两头都配好才不会被当成 Esc。
-                KeyChip("换行", onClick = lit("\\\r"))
-                KeyChip("Home", onClick = key(KeyEvent.KEYCODE_MOVE_HOME))
-                KeyChip("End", onClick = key(KeyEvent.KEYCODE_MOVE_END))
-                // 手机键盘上最难摸到的：路径与 slash 命令的 /（2026-09-06 去掉了 Tab、-、|、~）
-                KeyChip("/", onClick = lit("/"))
-                // 长按选区工具条里也有粘贴，但那要先长按选中；这里给一个直达入口
-                KeyChip("粘贴") { pasteViaDaemon() }
-            }
+            TerminalKeyBar(
+                attachment = attachment,
+                ctrlStickyState = ctrlStickyState,
+                selectMode = selectMode,
+                onHideBar = { keysOpen = false },
+                onShowKeyboard = { inputRef.value?.showKeyboard() },
+                onPaste = { pasteViaDaemon() },
+            )
         }
 
         // 主体
@@ -365,9 +312,8 @@ fun SessionScreen(
                 MessagesView(
                     messages.value, messagesSupported, live = s?.state == "running",
                     sessionAlive = s?.state != "exited",
-                    sessionCreatedAt = s?.created_at,
-                    pending = pending.value,
-                    onDeletePending = { deletePending(it) },
+                    askingSeq = s?.asking_seq,
+                    pending = pending,
                     permission = s?.permission,
                     onPermission = { b -> store.client?.permission(sessionId, b) },
                     onAnswer = { _, answers ->
@@ -396,33 +342,13 @@ fun SessionScreen(
 
         // composer：消息流视图始终在；终端视图下跟键位条一起收放
         if (showMessages || keysOpen) {
-            Row(
-                Modifier.fillMaxWidth().background(Tok.Surface).padding(horizontal = 8.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("📎", fontSize = 18.sp, modifier = Modifier.clickable { filePicker.launch("*/*") }.padding(6.dp))
-                // 无边框的矮输入框：一块圆角底色，单行时一行高，最多长到 4 行。
-                // 键盘回车是换行；多行文本 daemon 会包成一次粘贴发进去，不会在第一行就提交
-                Box(
-                    Modifier.weight(1f).background(Tok.Raised, RoundedCornerShape(10.dp)).padding(horizontal = 12.dp, vertical = 8.dp),
-                    contentAlignment = Alignment.CenterStart,
-                ) {
-                    if (composer.isEmpty()) Text("输入消息，可多行", color = Tok.Faint, fontSize = 14.sp)
-                    BasicTextField(
-                        composer, { composer = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        maxLines = 4,
-                        textStyle = androidx.compose.ui.text.TextStyle(color = Tok.Ink, fontSize = 14.sp),
-                        cursorBrush = SolidColor(Tok.Accent),
-                    )
-                }
-                Spacer(Modifier.width(6.dp))
-                TextButton(
-                    enabled = composer.isNotBlank() && s?.state != "exited",
-                    onClick = { submitComposer() },
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                ) { Text("发送", color = if (composer.isNotBlank() && s?.state != "exited") Tok.Accent else Tok.Faint, fontSize = 14.sp) }
-            }
+            SessionComposer(
+                text = composer,
+                onTextChange = { composer = it },
+                canSend = composer.isNotBlank() && s?.state != "exited",
+                onAttach = { filePicker.launch("*/*") },
+                onSend = { submitComposer() },
+            )
         }
     }
     // 终端视图下键位条收起时：右下角一枚 ⌨ 把它放出来（悬浮在终端上，不占一行；
@@ -435,6 +361,158 @@ fun SessionScreen(
 
 }
 
+/**
+ * 会话顶栏：一行画完 ☰、标题、用量、视图切换、状态点、ⓘ 详情。
+ *
+ * 只有一行（2026-09-08 用户拍板）：标题 + 模型 + 上下文占比。项目名、resume id、缓存命中率、
+ * 花费都进详情屏——手机顶栏就这么宽，三行叠起来只是把标题挤扁。
+ *
+ * 收的全是画出来的东西，会话对象本身不传进来：顶栏要的只是几个字段和三个动作，传整个
+ * `Session` 会让它跟着会话的任何一次刷新（哪怕只是 updated_at 变了）重组。
+ */
+@Composable
+private fun SessionTopBar(
+    title: String,
+    usage: SessionUsage?,
+    state: String,
+    showMessages: Boolean,
+    /** 消息流探测下来是否可切换：老 daemon 没有消息流端点，那就不画切换按钮 */
+    canSwitchView: Boolean,
+    onMenu: () -> Unit,
+    onToggleView: () -> Unit,
+    onDetail: () -> Unit,
+) {
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            "☰", color = Tok.Dim, fontSize = 20.sp,
+            modifier = Modifier.clickable(onClick = onMenu).padding(horizontal = 8.dp, vertical = 2.dp),
+        )
+        Text(
+            title,
+            color = Tok.Ink, fontSize = 15.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        val usageSegs = usageHeaderSegments(usage)
+        if (usageSegs.isNotEmpty()) {
+            Spacer(Modifier.width(8.dp))
+            Text(
+                segmentsAnnotated(usageSegs, Tok.Dim),
+                fontSize = 10.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Spacer(Modifier.width(8.dp))
+        // 视图切换：显示当前视图名，点一下换另一种
+        if (canSwitchView) {
+            Text(
+                if (showMessages) "消息流" else "终端",
+                color = Tok.Accent, fontSize = 12.sp, fontFamily = FontFamily.Monospace,
+                modifier = Modifier
+                    .clickable(onClick = onToggleView)
+                    .border(1.dp, Tok.Edge2, RoundedCornerShape(8.dp))
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+            )
+            Spacer(Modifier.width(8.dp))
+        }
+        StateDot(Tok.stateColor(state))
+        // 2026-09-08 用户拍板：⋮ 整个换成详情按钮——里面九项大半一年用一次，而
+        // 子代理 / 后台任务 / 已上传 / 产物 / 技能这些「发生过但翻不出来」的才该占这个位置
+        Text(
+            "ⓘ", color = Tok.Dim, fontSize = 20.sp,
+            modifier = Modifier.clickable(onClick = onDetail).padding(horizontal = 10.dp),
+        )
+    }
+}
+
+/**
+ * 终端视图的快捷键条：手机键盘上摸不到的那些键（Esc / Ctrl / 方向 / Home / End / ⏎ / /）
+ * 横排一条，条自己能横向滚。
+ *
+ * 横滚位置是这条自己的事，所以 `rememberScrollState` 留在这儿：条一收起（调用点那个 if
+ * 不成立）状态就该跟着没，下次放出来从头开始——和收进 SessionScreen 时的行为一样。
+ * 粘性 Ctrl 与「选择」两个状态则是跟终端共用的，从外面传 [MutableState] 进来。
+ */
+@Composable
+private fun TerminalKeyBar(
+    attachment: TerminalAttachment?,
+    ctrlStickyState: MutableState<Boolean>,
+    selectMode: MutableState<Boolean>,
+    onHideBar: () -> Unit,
+    onShowKeyboard: () -> Unit,
+    onPaste: () -> Unit,
+) {
+    var ctrlSticky by ctrlStickyState
+    Row(
+        Modifier.fillMaxWidth().background(Tok.Surface).horizontalScroll(rememberScrollState())
+            .padding(horizontal = 8.dp, vertical = 5.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        // 键码交给 libvterm 的 dispatchKey，它按当前 keypad / cursor 模式给出正确的
+        // 转义序列；字面符号直接写进 PTY。粘性 Ctrl 用一次就松开。
+        fun key(code: Int) = {
+            vtermKeyFor(code)?.let { k ->
+                attachment?.emulator?.dispatchKey(if (ctrlSticky) VTERM_MOD_CTRL else 0, k)
+                ctrlSticky = false
+            }
+            Unit
+        }
+        fun lit(ch: String) = { attachment?.write(ch); Unit }
+        KeyChip("⌨", active = true, onClick = onHideBar)
+        KeyChip("键盘", onClick = onShowKeyboard)
+        // 回车放最前面：条会横向滚，排后面在手机上根本看不见
+        KeyChip("⏎", onClick = key(KeyEvent.KEYCODE_ENTER))
+        KeyChip("选择", active = selectMode.value) { selectMode.value = !selectMode.value }
+        KeyChip("Esc", onClick = key(KeyEvent.KEYCODE_ESCAPE))
+        KeyChip("Ctrl", active = ctrlSticky) { ctrlSticky = !ctrlSticky }
+        KeyChip("↑", onClick = key(KeyEvent.KEYCODE_DPAD_UP))
+        KeyChip("↓", onClick = key(KeyEvent.KEYCODE_DPAD_DOWN))
+        KeyChip("←", onClick = key(KeyEvent.KEYCODE_DPAD_LEFT))
+        KeyChip("→", onClick = key(KeyEvent.KEYCODE_DPAD_RIGHT))
+        // Claude Code 的输入框里换行：`\` + Return（官方的「quick escape」，任何终端都认）。
+        // 不用 Shift/Alt+Enter 的转义序列——那要终端和 TUI 两头都配好才不会被当成 Esc。
+        KeyChip("换行", onClick = lit("\\\r"))
+        KeyChip("Home", onClick = key(KeyEvent.KEYCODE_MOVE_HOME))
+        KeyChip("End", onClick = key(KeyEvent.KEYCODE_MOVE_END))
+        // 手机键盘上最难摸到的：路径与 slash 命令的 /（2026-09-06 去掉了 Tab、-、|、~）
+        KeyChip("/", onClick = lit("/"))
+        // 长按选区工具条里也有粘贴，但那要先长按选中；这里给一个直达入口
+        KeyChip("粘贴", onClick = onPaste)
+    }
+}
+
+/**
+ * 输入区：📎 附件、圆角输入框、发送。消息流视图里常驻，终端视图里跟键位条一起收放。
+ *
+ * 字仍旧存在调用点（它要落盘成草稿），这里只收「画一行输入」这件事：[canSend] 是算好的，
+ * 因为「能不能发」看的是会话状态，不只是框里有没有字。
+ */
+@Composable
+private fun SessionComposer(
+    text: String,
+    onTextChange: (String) -> Unit,
+    canSend: Boolean,
+    onAttach: () -> Unit,
+    onSend: () -> Unit,
+) {
+    Row(
+        Modifier.fillMaxWidth().background(Tok.Surface).padding(horizontal = 8.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("📎", fontSize = 18.sp, modifier = Modifier.clickable(onClick = onAttach).padding(6.dp))
+        // 无边框的矮输入框：一块圆角底色，单行时一行高，最多长到 4 行。
+        // 键盘回车是换行；多行文本 daemon 会包成一次粘贴发进去，不会在第一行就提交
+        RoundedTextField(text, onTextChange, "输入消息，可多行", Modifier.weight(1f), maxLines = 4)
+        Spacer(Modifier.width(6.dp))
+        TextButton(
+            enabled = canSend,
+            onClick = onSend,
+            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+        ) { Text("发送", color = if (canSend) Tok.Accent else Tok.Faint, fontSize = 14.sp) }
+    }
+}
+
 /** 进度清单的「3/7 完成」。清单本身在详情屏里画（DetailScreen.kt）。 */
 fun checklistProgress(items: List<ChecklistItem>): String = "${items.count { it.done }}/${items.size} 完成"
 
@@ -444,11 +522,11 @@ fun MessagesView(
     supported: Boolean?,
     live: Boolean,
     sessionAlive: Boolean = true,
-    sessionCreatedAt: String? = null,
+    /** 待答的是消息流里的哪一条（会话的 `asking_seq`，daemon 判好的）；null = 没有待答表单 */
+    askingSeq: Long? = null,
     onAnswer: suspend (seq: Long, answers: List<AnswerItem>) -> Unit = { _, _ -> },
-    /** 待发送（项目收件箱），画在末尾；✕ 撤回 */
-    pending: List<InboxItem> = emptyList(),
-    onDeletePending: (InboxItem) -> Unit = {},
+    /** 待发送：Claude Code 自己排着的消息（会话的 `queued`），画在末尾，只读 */
+    pending: List<QueuedMsg> = emptyList(),
     /** v1.16：正在等的权限对话框；浮在列表底部，允许 / 拒绝直接答 */
     permission: PermissionPrompt? = null,
     onPermission: suspend (behavior: String) -> Unit = {},
@@ -459,8 +537,9 @@ fun MessagesView(
     val expanded = remember { mutableStateMapOf<Long, Boolean>() }
     val expandedKeys = expanded.filterValues { it }.keys.toSet()
     val items = remember(messages, live, expandedKeys) { flattenForList(foldTurns(messages, live), expandedKeys) }
-    // 表单状态：只有最新那条没被回答的 question 可交互；其余按「已回答 / 已结束 / 已过期」画成只读
-    val pendingSeq = remember(messages, sessionAlive, sessionCreatedAt) { pendingQuestionSeq(messages, sessionAlive, sessionCreatedAt) }
+    // 表单状态：daemon 说待答的那条可交互（同一个判定 daemon 拿去开 /answer 的门），
+    // 其余按「已回答 / 已结束 / 已过期」画成只读
+    val pendingSeq = askingSeq
     val answeredSeqs = remember(messages) { answeredQuestionSeqs(messages) }
     // 空列表算在底部：没东西可滚，浮动按钮也不该出现
     val atBottom by remember { derivedStateOf { !listState.canScrollForward } }
@@ -528,9 +607,9 @@ fun MessagesView(
                 }
             }
             // 待发送排在最后：还没进对话，但已经是「你说的话」，画在你这一侧
-            itemsIndexed(pending, key = { _, it -> "pending-" + it.id }) { i, item ->
+            itemsIndexed(pending, key = { i, it -> "pending-$i-" + it.ts }) { i, item ->
                 Box(Modifier.padding(top = if (i == 0 && items.isEmpty()) 0.dp else 14.dp)) {
-                    PendingBlock(item) { onDeletePending(item) }
+                    PendingBlock(item)
                 }
             }
             item(key = "tail") { Spacer(Modifier.height(14.dp)) }
@@ -577,30 +656,20 @@ private fun UserBlock(m: ChatMessage) {
 }
 
 /**
- * 待发送：和用户气泡同侧同款，但底色更淡、边框虚一点，小字写「待发送」，右侧 ✕ 撤回。
- * daemon 在 agent 这轮跑完（或此刻已空着）时把它写进去，写进去后它就变成一条普通的用户消息。
+ * 待发送：和用户气泡同侧同款，但底色更淡、小字写「待发送」。**队列是 Claude Code 的**
+ * （模型在跑时敲进去的字它自己排着，这一轮结束就送进去，随后它变成一条普通的用户消息），
+ * 所以这里**没有撤回**——要改主意去 TUI 里改，AAA 不隔着网络替它管队列（v1.22）。
  */
 @Composable
-private fun PendingBlock(item: InboxItem, onDelete: () -> Unit) {
+private fun PendingBlock(item: QueuedMsg) {
     Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End) {
         BubbleCaption("待发送 · 执行完自动发出", Tok.Amber)
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                "✕", color = Tok.Faint, fontSize = 14.sp,
-                modifier = Modifier.clickable(onClick = onDelete).padding(horizontal = 8.dp, vertical = 6.dp),
-            )
-            UserBubble(tint = Tok.Amber) {
-                Text(item.text, color = Tok.Dim, fontSize = 14.5.sp, lineHeight = 21.sp)
-            }
+        UserBubble(tint = Tok.Amber) {
+            Text(item.text, color = Tok.Dim, fontSize = 14.5.sp, lineHeight = 21.sp)
         }
     }
 }
 
-/**
- * 「发送」是直接写进 PTY 还是排成待发送：agent 在跑就排队（和终端里先敲好等它一样）；
- * 弹着问题也排队——自由文本会替你按下高亮项，问题请用表单答。空着才直接发。
- */
-fun queueInsteadOfSend(state: String?, asking: Boolean): Boolean = state == "running" || asking
 
 /** Claude 的回复：左对齐整宽、不画气泡；上方一行强调色的「✻ Claude」小字，正文仍是 Markdown。 */
 @Composable
@@ -712,7 +781,7 @@ private fun ThinkingRow(m: ChatMessage) {
     var expanded by remember { mutableStateOf(false) }
     Column(
         Modifier.fillMaxWidth().padding(vertical = 3.dp)
-            .background(Tok.Inset, RoundedCornerShape(10.dp))
+            .insetPanel(10.dp)
             .clickable { expanded = !expanded }
             .padding(horizontal = 10.dp, vertical = 6.dp),
     ) {
@@ -753,7 +822,7 @@ private fun ToolRow(m: ChatMessage) {
             Text(
                 rememberLinkified(m), color = Tok.Dim, fontSize = 11.sp, fontFamily = FontFamily.Monospace,
                 modifier = Modifier.fillMaxWidth().padding(start = 13.dp, top = 3.dp)
-                    .background(Tok.Inset, RoundedCornerShape(8.dp)).padding(8.dp),
+                    .insetPanel().padding(8.dp),
             )
         }
     }
@@ -846,7 +915,7 @@ private fun QuestionCard(m: ChatMessage, state: FormState, onSubmit: suspend (Li
                         singleLine = true,
                         textStyle = TextStyle(color = Tok.Ink, fontSize = 14.sp),
                         cursorBrush = SolidColor(Tok.Accent),
-                        modifier = Modifier.weight(1f).background(Tok.Inset, RoundedCornerShape(6.dp)).padding(horizontal = 10.dp, vertical = 7.dp),
+                        modifier = Modifier.weight(1f).insetPanel(6.dp).padding(horizontal = 10.dp, vertical = 7.dp),
                         decorationBox = { inner ->
                             if (other.isEmpty()) Text("其它…", color = Tok.Faint, fontSize = 14.sp)
                             inner()
@@ -928,18 +997,6 @@ fun SheetItem(icon: String, label: String, note: String?, danger: Boolean = fals
     }
 }
 
-@Composable
-fun ConfirmDialog(title: String, body: String, confirmLabel: String, onConfirm: () -> Unit, onCancel: () -> Unit) {
-    AlertDialog(
-        onDismissRequest = onCancel,
-        containerColor = Tok.Raised,
-        title = { Text(title, color = Tok.Ink) },
-        text = { Text(body, color = Tok.Dim) },
-        confirmButton = { TextButton(onClick = onConfirm) { Text(confirmLabel, color = Tok.Red) } },
-        dismissButton = { TextButton(onClick = onCancel) { Text("取消", color = Tok.Dim) } },
-    )
-}
-
 // ---------- helpers ----------
 
 fun copyToClipboard(context: Context, text: String) {
@@ -983,9 +1040,9 @@ private fun PermissionCard(p: PermissionPrompt, onDecide: suspend (String) -> Un
         if (p.kind == "elicitation") {
             Text("MCP 服务器要你填表单：这个只能在终端视图里答", color = Tok.Dim, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
         } else Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("允许", color = Tok.Ink, fontSize = 13.sp, modifier = Modifier.background(Tok.Green.copy(alpha = 0.2f), RoundedCornerShape(6.dp)).border(1.dp, Tok.Green.copy(alpha = 0.6f), RoundedCornerShape(6.dp)).clickable(enabled = !busy) { decide("allow") }.padding(horizontal = 14.dp, vertical = 6.dp))
+            TintPillButton("允许", Tok.Green, enabled = !busy) { decide("allow") }
             Spacer(Modifier.width(8.dp))
-            Text("拒绝", color = Tok.Ink, fontSize = 13.sp, modifier = Modifier.background(Tok.Red.copy(alpha = 0.2f), RoundedCornerShape(6.dp)).border(1.dp, Tok.Red.copy(alpha = 0.6f), RoundedCornerShape(6.dp)).clickable(enabled = !busy) { decide("deny") }.padding(horizontal = 14.dp, vertical = 6.dp))
+            TintPillButton("拒绝", Tok.Red, enabled = !busy) { decide("deny") }
             Spacer(Modifier.width(10.dp))
             Text(if (busy) "…" else "在终端里作答也一样", color = Tok.Faint, fontSize = 11.sp)
         }

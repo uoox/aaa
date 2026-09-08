@@ -24,7 +24,10 @@ data class UrlSpan(val start: Int, val end: Int, val url: String)
  * 满屏都是 main.rs、Cargo.toml、a.b.c 这种路径与包名，裸域名规则会把它们统统
  * 变成点不开的假链接，比不识别还难用。
  */
-private val URL_REGEX = Regex("""(?:https?|ftp|file)://[^\s<>"'`\\^{}|]+""", RegexOption.IGNORE_CASE)
+// scheme 前必须是分隔符（v1.22 补）：没有这个左边界，`xhttps://a.com` 会从第二个字符起
+// 被认成链接。mac 侧 `term.rs::is_boundary` 一直是这么判的，两端此前对不上。
+private val URL_REGEX =
+    Regex("""(?<![A-Za-z0-9.\-_+])(?:https?|ftp|file)://[^\s<>"'`\\^{}|]+""", RegexOption.IGNORE_CASE)
 
 /** 句末标点：URL 出现在中英文句子里时它们几乎不可能是地址的一部分。 */
 private const val TRAILING_PUNCT = ".,;:!?'\"“”‘’、。，；：！？…"
@@ -40,8 +43,6 @@ fun findUrls(text: String): List<UrlSpan> =
         else UrlSpan(m.range.first, m.range.first + trimmed.length, trimmed)
     }.toList()
 
-/** 单个词是不是链接（终端点击时用，词由 TerminalBuffer.getWordAtLocation 给出）。 */
-fun urlInWord(word: String): String? = findUrls(word).firstOrNull()?.url
 
 private fun trimUrlTail(raw: String): String {
     var end = raw.length

@@ -11,7 +11,7 @@ daemon 与三个客户端的唯一协调契约。实现与本文冲突时，以�
 │ (Kotlin 原生)│                          └──────────────────┘
 ├─────────────┤                                    ▲
 │  aaa (CLI)  │◄───────────────────────────────────┘
-│ (bash 脚本) │  同一套 API，同一批会话
+│ (py 脚本)   │  同一套 API，同一批会话
 └─────────────┘
 ```
 
@@ -78,7 +78,19 @@ daemon 在启动时用 `zsh -lic` 问一次「终端里应有的 PATH」（带�
   "project_name": "aaa-ui",
   "agent": "claude",             // agent id 或 "shell"
   "state": "waiting",            // running | waiting | exited
+  "status": "active",             // v1.22：五态里的哪一个（asking|running|background|active|paused）。
+                                  // **只此一处**：看板、项目列表、CLI 的分组说的都是这一句；此前
+                                  // daemon 一份、mac `RowStatus::of` 一份、Android `projectStateOf` 一份、
+                                  // CLI `status_of` 一份，同一台机器同一时刻能给出不同的答案
   "asking": false,                // claude：transcript 里有一条 AskUserQuestion 还没被回答（结构化事实，不是猜的）
+  "queued": [],                   // v1.22：此刻排着还没送进去的消息 `[{ts,text}]`——Claude Code 自己的队列
+                                  // （transcript 的 queue-operation）加上信任对话框弹着时 daemon 替你收下的那几条。
+                                  // 客户端只画不管：排队是 Claude Code 的行为，AAA 不另做一套
+  "asking_seq": null,             // v1.22：**待答的就是这一条**（消息流里的 `seq`）；null = 没有待答表单。
+                                  // 判定只在 daemon 做一次（`MsgStore::pending_question`），客户端不再各自从消息流倒着找——
+                                  // 三端此前各写一遍，daemon 整串比 ts、两端取前 19 字符，同一秒内两边会说不同的话，
+                                  // 提交答案就得 409。`asking` 为 true 而这里是 null 的情形是有的：权限对话框 / hook 抢跑
+                                  // （transcript 还没落盘）——那两种本来就不画表单卡
   "hooked": true,                 // v1.3：状态由 Claude Code hooks 驱动（见「Claude Code hooks」）
   "error": null,                  // v1.3：上一轮 StopFailure 的错误类型，下一次提交清空
   "background": false,            // v1.13：waiting 且后台还有任务（run_in_background 的 Bash / 异步子代理 / Monitor）没回来 → 客户端标「后台」
@@ -101,6 +113,10 @@ daemon 在启动时用 `zsh -lic` 问一次「终端里应有的 PATH」（带�
   "resume_id": "9f2c81…",        // 本次启动实际 resume 的会话 id（无则 null）
   "created_at": "…", "last_output_at": "…",
   "summary": "- [x] 修好登录页\n- [ ] 补测试",   // v1.7：整个对话的进度清单（markdown 任务列表），每轮结束后 haiku 重写
+  "checklist": [                  // v1.22：上面那串 markdown 由 daemon 解析好的结果，客户端直接画，不再各自解析
+    {"done": true,  "text": "修好登录页"},
+    {"done": false, "text": "补测试"}
+  ],                              // `summary` 仍是唯一的真相（haiku 重写它、`POST /checklist` 改它），这里只是它的镜像
   "updated_at": "…"               // v1.6：最近一次状态翻转（running ⇄ waiting、exited）或改名的时刻；
                                   // 不随 PTY 字节跳（last_output_at 会），项目列表按它排序
 }
@@ -112,28 +128,45 @@ daemon 在启动时用 `zsh -lic` 问一次「终端里应有的 PATH」（带�
 daemon **不再读屏猜「它在问什么」**：没有 `idle`，没有 `question`，没有提示模式匹配。agent 在等一个具体回答这件事只认一个来源——claude transcript 里的 `AskUserQuestion` 工具调用（结构化，见「消息流」），`asking` 就是它的镜像；其它 agent 没有这种结构化信号，`asking` 恒为 false。
 
 GUI 列表口径（mac 侧栏 / Android 项目面板一致）——**单列，一项目一行，不分栏**：
+- **项目列表顶上那个输入框只用来新建项目，两端都不做搜索（v1.22 用户拍板：「侧栏就不要做搜索框了，双端都不要，就是用来创建项目的」）**：输文件夹名、回车（或右边的 ＋）建项目，**不再边打字边过滤列表**（Android 此前顺手做了过滤，mac 没有——又是一处两端不一样）。要找一个项目就在列表里翻：一行只有标题 + 时间 + 一根线，本来就是给眼睛扫的；看板那边的搜索框留着，那里一屏装不下。
 - **Android 没有独立首页了（v1.13.1，2026-09-07 用户拍板）**：会话页 ☰ 抽屉画的就是完整的项目面板（顶栏一行、新建项目框、项目列表与长按操作、下拉刷新），当前项目高亮；只有「一个会话都没打开」时（首次进入、按返回退出会话）同一块面板铺满屏当落地页。app 起来直接回最近打开的会话（本机记 `last_session`）。
 - **Android 项目面板顶栏只有一行（2026-09-08 用户拍板）**：左边**额度**（套餐用量那串 5h / 7d / 按模型，点开看重置时间），右边 **▦ 看板**、**⚙ 设置**。`AAA` 标题和 `IP · 延迟` 去掉了——app 只有一个，标题是废话；IP 和毫秒数连着好的时候没人看。连接**不**正常时（连接中 / 已断开 / 未配对）左边那一格改写连接状态，断了得说一声，但这不值得常年占一整行；SSD 掉了仍在顶栏加一个 `SSD ✗`。以前额度是顶栏底下单独一行，现在并进这一行。
-- **行首永远是一颗点，颜色说完一切（2026-09-08 用户拍板，状态字整套拿掉；同日第二版把转圈换成蓝点）**：**蓝** = 它还在动（`running`，或 `waiting` 且 `background`——后台 Bash / 异步子代理 / Monitor 还没回来，会自己被叫醒）；**黄** = 跑完了 / 在等你回话，而**这台设备**还没进去看过；**灰** = 已读，没什么要你操心的。三种是同一颗点，行高不随状态跳，也没有任何按帧重画的动画（第一版的转圈动画因此作废）。终端（shell）不算。一行到底：点 + 标题 + 更新时间，没有第二行摘要。
+- **Android 的☰ 左侧栏：小屏铺满，大屏半屏（2026-09-08 用户拍板：「整个左侧栏的宽度：小屏情况下，直接铺满，大屏情况下，半屏」——此前先收对话界面、再给项目列表封顶 400dp，都改错了地方）**：门槛是 `screenWidthDp < 600`（Material 的 compact / medium 分界）——小于就 `fillMaxWidth(1f)` 铺满并去掉抽屉圆角（不然右缘两个角漏出底色），否则 `fillMaxWidth(0.5f)` 占半屏，右半屏留着正在看的那个对话，切之前先看得见要切去哪儿。手机竖屏（343dp）与折叠机外屏走铺满，折叠机内屏（≈674dp）/ 平板 / 横屏走半屏。**宽度只在抽屉那一层定**（会话屏与终端屏各一处 `ModalDrawerSheet`），`ProjectPanel` 自己不管宽度、铺满给它的地方——所以「一个会话都没打开」时它就是整屏。**对话界面、终端、看板都不收**——那几个宽了是有用的。
+- **记号是一根竖线，颜色说完一切；它在行尾（2026-09-08 用户拍板，状态字整套拿掉；同日第二版把转圈换成蓝点、第三版把点换成竖线、第四版把竖线从行首挪到行尾）**：**蓝** = 它还在动（`running`，或 `waiting` 且 `background`——后台 Bash / 异步子代理 / Monitor 还没回来，会自己被叫醒）；**黄** = 跑完了 / 在等你回话，而**这台设备**还没进去看过；**灰** = 已读，没什么要你操心的。三种是同一根线，行高不随状态跳，也没有任何按帧重画的动画（第一版的转圈动画因此作废）。终端（shell）不算。**一行到底：标题 + 更新时间 + 竖线**，没有第二行摘要——标题顶格起（行首不再留指示位，一列扫下来是齐的），时间与线在行尾同一处，两端一致（mac 侧栏 2026-09-08 起也写时间，以前只有 Android 有）。**时间自己会走**：两端各有一个一分钟一次的空转重画——这一屏平时只在 daemon 推东西时重画，整套系统闲着时那行字会一直停在「刚刚」。
   - 「激活 / 未激活 / 暂停」这些字于 2026-09-08 去掉（用户：对着一列项目说不出任何有用的东西）。`asking` / `background` 等状态仍在协议里，它们是「点是不是蓝的」和排序的依据，只是不再写成字。
   - **黄点是客户端本地状态，不进 daemon**（用户 2026-09-08 拍板）：打点的时机与三种系统通知完全一样（`asking` 翻 true / `running→waiting` / 出错），进这个项目的会话就清掉。mac 存 `~/.config/aaa-ui/ui.toml` 的 `unread_projects`，Android 存 DataStore 的 `unread_projects`，**两端各看各的**——黄点说的是「我这台还没看」，跨设备同步反而会替另一台把话说了。静音只关通知，不关黄点。
+  - **终端行不画记号**（2026-09-08 用户拍板拿掉三道横杠）：终端没有状态可言，一个记号只是占着行首那一格；既然项目行的竖线也去了行尾，两端的终端行就此顶格起（Android 还比项目行更矮一档：上下各 6dp、字号小半档、行尾一个 28dp 的小 ×——它那边的行本来就比 mac 高得多；mac 侧栏项目行与终端行共用同一套 `sidebar_row`，本来就只有 5px 的上下内边距，不再另做一档），一列扫下来「项目在上、终端在下」靠的是分节和行高，不是图标。
   - CLI 的 `ls` / 交互菜单仍按五个词分组打印：那是一次性文本输出，词在那里是有用的。
-- **`exited` 会话不代表项目**——进程没了它就只是历史，行首那颗点是灰的（或黄的，若还没看过），点一下即 resume（`POST /sessions` `resume:true`）。
-- **顺序 = 置顶 → 黄点 → 在跑 → 时间**（2026-09-08 用户拍板）：置顶的永远在最前（自己按的顶，别的不该把它挤下去）；然后是有黄点的——蓝点的还在自己往前走，黄点的那个在等你；再按 `asking` > `running` > `background` > `active` > `paused` 的老次序分档；**同档**里才比时间，键是该项目最新一条会话（含已退出）的 `updated_at`（老 daemon 没有 → `created_at`），没有会话的用目录 mtime；同刻按路径 / 标题稳住。`updated_at` 只在状态翻转 / 改名时变，所以几个会话同时在跑时行不互相换位。
+- **`exited` 会话不代表项目**——进程没了它就只是历史，行尾那根线是灰的（或黄的，若还没看过），点一下即 resume（`POST /sessions` `resume:true`）。
+- **顺序 = 置顶 → 黄点 → 在跑 → 时间**（2026-09-08 用户拍板）：置顶的永远在最前（自己按的顶，别的不该把它挤下去）；然后是有黄点的——蓝点的还在自己往前走，黄点的那个在等你；再按 `asking` > `running` > `background` > `active` > `paused` 的老次序分档——**这两样都读 `/projects` 行上的 `status` 与 `updated_at`，客户端只留一张 5 行的 rank 表，不再自己判状态**；**同档**里才比时间，同刻按路径 / 标题稳住。`updated_at` 只在状态翻转 / 改名时变，所以几个会话同时在跑时行不互相换位。
 - **关闭确认只在还在执行时弹**：`running` 且不 `asking` → 确认后 `kill`；`waiting` / `asking` → 直接 `kill`；`exited` → 只收起页面，不删记录。
 
 CLI 的 `ls` / 交互菜单按五组打印（v1.13 起；以前是「执行中 / 待回复 / 已完成」三组），那是一次性文本输出，不存在跳行问题。
+
+## 版本兼容
+
+**一件事只算一次**：凡是 daemon 能算的（五态、代表会话、标题回退、清单解析、待答是哪一条），v1.22 起一律由 daemon 算好下发，客户端只画。此前三端各写一遍，写出来的还不一样——不是「重复」，是**同一个问题三个答案**。
+
+代价是新客户端配老 daemon 时那些字段不在。规矩只有一条：**`GET /health` 的 `schema` 是唯一的闸门，且降级必须说出来，不许悄悄换一套口径**。
+
+- `schema >= 2`：直接用 `status` / `title` / `session_id` / `updated_at` / `asking_seq` / `checklist`。
+- `schema` 缺失或 `< 2`（老 daemon）：客户端**不保留第二套算法**——留着就等于把刚删掉的分歧又养回来。项目行按「没有活会话」画（灰线、标题退到目录名），并在项目列表顶上挂一条**明说的**横幅「daemon 版本过旧（vX.Y.Z），项目状态不可用 —— 请更新 daemon」。这是个几分钟的窗口（daemon 和 mac App 同机同版发布，只有手机可能先更新），值不上养一套影子实现。
+- 反过来（老客户端配新 daemon）照旧能用：新字段都是**增量**，老客户端忽略未知字段，仍走它自己那套。
+
+**三端共享测试向量**（`fixtures/`，一端改口径就得先改这里，两端的测试都读同一份）：`dashboard.json` = 看板（daemon 的输入 → 必须产出的卡片 → 客户端的过滤与分节）；`projects.json` = 项目列表（daemon 算好的一行 + 本机黄点 → 侧栏的顺序 / 蓝线 / 黄线 / 标题 / 路径归一）；`tokens.json` = 设计令牌与 Claude 主题的终端 16 色。**「两端一致」这句话只有被一份共同的向量盯着才成立**——此前两端各测各的一套，所以 A1–A8 那八处口径分歧谁都没发现。
+
+`schema` 只在**语义**变化时 +1（某个判定从客户端搬进 daemon、某个字段改口径），纯粹新增可选字段不动它。当前值：**2**。
 
 ## REST（前缀 `/api/v1`）
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/health` | `{version, ssd_mounted, root_state, project_root, uptime_s}`；`root_state ∈ ok\|unmounted\|denied`，`ssd_mounted = (root_state==ok)`（向后兼容：对客户端它一直就是「能不能用」） |
-| GET | `/projects` | collect 移植：`[{path,name,mtime,dir_size,agent,session_title}]`，按 mtime 降序。**注册表就是项目名册**：根目录下未登记的目录（顺手 clone 的仓库、杂物）不出现在列表里；经 daemon 建项目/开会话的目录都会自动登记 |
+| GET | `/health` | `{version, schema, ssd_mounted, root_state, project_root, uptime_s}`；`root_state ∈ ok\|unmounted\|denied`，`ssd_mounted = (root_state==ok)`（向后兼容：对客户端它一直就是「能不能用」）。**`schema` 是客户端唯一的兼容闸门**（v1.22 起 = `2`，见下方「版本兼容」） |
+| GET | `/projects` | collect 移植：`[{path,name,mtime,dir_size,agent,session_title,pinned}]`，按 mtime 降序。**注册表就是项目名册**：根目录下未登记的目录（顺手 clone 的仓库、杂物）不出现在列表里；经 daemon 建项目/开会话的目录都会自动登记。**v1.22 起每行还带这一项目此刻的样子，daemon 算一次、两端只画**：`session_id`（代表这个项目的那个会话，没有活会话时是最近退出的那个；一个都没有 → null）、`status` ∈ `asking\|running\|background\|active\|paused`（与看板、CLI 同一套五态；没有活会话 = `paused`）、`title`（活会话的标题 → agent 存储读出的 `session_title` → 目录名，这条回退链此前三端各写一遍）、`updated_at`（排序键：该项目最新一条**非终端**会话的 `updated_at`，含已退出的；一个会话都没有 → 目录 mtime）。还有 `registered`：注册表里的项目为 `true`；在别处 `aaa open` 开出来、注册表里没有但**此刻有活会话**的目录，daemon 也补一行（`registered:false`，不能 resume / 删项目），否则它无处可点——这一行 mac 此前自己补、Android 压根没补，同一台 daemon 在两端连行数都不一样。客户端**不得**再自己从 `/sessions` 推这几样——两端此前的推法就不一样（mac 取 `updated_at` 最大，Android 先按 agent 过滤再按 `待回复<执行中<其它` 排），同一个项目在两台设备上会显示不同的标题和状态 |
 | POST | `/projects` | `{name?, agent?}`；name 经 slugify，空则 `YYYY-MM-DD-HHMM`；已存在 → 409；agent 给了就写注册表。**响应 = 完整项目对象（至少 `{path,name,agent}`）**，客户端依赖 `path` 直接开会话 |
 | GET | `/history?limit=<n=200>` | v1.9 会话日志 `{entries:[{id, project_path, project_name, agent, title, created_at, ended_at, exit_code, deleted_at, summary, last_state}]}`：**所有出现过的会话，含已退出、已删除**，最新在前，最多 500 条（`~/.local/state/aaa-daemon/history.json`）。daemon 每秒把池子里的会话同步进去（标题 / 状态 / 清单变了就更新）；`DELETE /sessions/:id`、删项目盖 `deleted_at`。v1.11 起客户端改用 `/history/dashboard`；本接口仍是原始日志（调试 / 兼容旧客户端） |
 | GET | `/history/days` | **已移除（v1.13）**：日历 / haiku 日摘要没人看，daemon 不再每 5 分钟跑 haiku 写日摘要 |
-| GET | `/history/dashboard` | v1.13 **看板 = 所有会话的进度，没有时间维度**（2026-09-07 用户拍板第二版；聚合只在 daemon 算一次，两端只画）。**v1.15 第三版：瀑布流、全展开**——一会话一张卡，全部清单项直接列出（没勾的在前、做完的灰掉），不折叠不分组，卡片按估算高度塞进最短的一列（mac 按窗口宽度算列数，Android `LazyVerticalStaggeredGrid` 自适应 300dp），一眼看全；已删除默认藏起来一个开关；**点清单项直接勾 / 取消勾**（`POST /sessions/:id/checklist`）：`{counts:{open_items}, sessions:[{id, title, project_name, project_path, status, alive, deleted, done, open, items:[{done,text}], updated_at}]}`。`status` ∈ asking/running/background/active/paused 与列表五态同口径（池子里 exited 的 = paused；不在池子里的 = paused 且 `alive:false` 不能点开）；`sessions` 已按 待回复 > 运行 > 后台 > 激活 > 暂停 排好，同状态里已删除的沉到组尾、其余最近更新在前；终端不进；已删除的进（`deleted:true`）但不计数。客户端（v1.17 起）：顶上只有未完成条目数 + 搜索；一会话一张卡：**蓝点**（status ∈ running/background）/ 什么都没有 + 标题 + 项目、进度条 `done/total`、没勾的项直接列、做完的折成「已做 N」；已删除默认不显示。**五态计数条与状态字于 2026-09-08 拿掉**（用户拍板：看板和项目列表要说同一套话），`counts` 因此只剩 `open_items`；`status` 仍在协议里——它是排序和「画不画蓝点」的依据。v1.11 的 today/week/days/spark/date 全部删除 |
+| GET | `/history/dashboard` | v1.13 **看板 = 所有会话的进度，没有时间维度**（2026-09-07 用户拍板第二版；聚合只在 daemon 算一次，两端只画）。**v1.15 第三版：瀑布流、全展开**——一会话一张卡，全部清单项直接列出（没勾的在前、做完的灰掉），不折叠不分组，卡片按估算高度塞进最短的一列（mac 按窗口宽度算列数，Android `LazyVerticalStaggeredGrid` 自适应 300dp），一眼看全；已删除默认藏起来一个开关；**点清单项直接勾 / 取消勾**（`POST /sessions/:id/checklist`）：`{counts:{open_items}, sessions:[{id, title, project_name, project_path, status, alive, deleted, done, open, items:[{done,text}], updated_at}]}`。`status` ∈ asking/running/background/active/paused 与列表五态同口径（池子里 exited 的 = paused；不在池子里的 = paused 且 `alive:false` 不能点开）；`sessions` 已按 待回复 > 运行 > 后台 > 激活 > 暂停 排好，同状态里已删除的沉到组尾、其余最近更新在前；终端不进；已删除的进（`deleted:true`）但不计数。客户端（v1.17 起）：顶上只有未完成条目数 + 搜索；一会话一张卡：**蓝点**（status ∈ running/background）/ 什么都没有 + 标题 + 项目、进度条 `done/total`、没勾的项直接列、做完的折成「已做 N」；已删除默认不显示。**五态计数条与状态字于 2026-09-08 拿掉**（用户拍板：看板和项目列表要说同一套话），`counts` 因此只剩 `open_items`；`status` 仍在协议里——它是排序和「画不画蓝点」的依据。v1.11 的 today/week/days/spark/date 全部删除。**v1.21 两端分成两节**（2026-09-08 用户拍板「看板里东西太多了」）：「**在 AAA 里**」= `alive && status != "paused"`——此刻**还活着**的会话（在跑，或停在输入框等你说话），也就是项目列表上那几行；「**不在 AAA 里**」= 其余全部（进程退出了的，哪怕还在池子里点得开；以及只剩一条记录的），默认**折起来**只写一行「不在 AAA 里 N」，点开才铺。**`alive` 不是这条线**（用户拍板时的实测：318 张卡里 174 张 `alive`，其中 164 张是已退出只为回放留在池子里的，按 `alive` 切等于没切）；`alive` 仍然只管一件事——卡片上有没有「打开」。共享向量 `fixtures/dashboard.json` 里的 `poolpau`（`alive:true` 而 `status:paused`）就是这条线的分水岭，三端测试都盯着它。搜索框里有字时两节都展开——不然搜到的东西藏在折叠节里等于没搜到。分节只在客户端做，daemon 的 `sessions` 顺序不变（分节内部沿用它）。两端的看板都有**滚动条**（mac 右缘一条可拖的细条，Android 一条随内容长短的指示条）：瀑布流全展开之后一屏装不下，没有滚动条就不知道自己在哪儿 |
 | POST | `/projects/pin` | `{path, pinned}`：置顶 / 取消置顶，daemon 侧存（`~/.local/state/aaa-daemon/pins.json`），随后广播 `projects_changed`；`GET /projects` 行多一个 `pinned`。列表口径：置顶的在最前，组内仍按状态 → 时间 |
 | POST | `/projects/delete` | `{paths:[…]}` → `{results:[{path, ok, purged:[{agent_label,count}]}], killed:[标题…]}`；目录删除 + Claude Code 会话存储 purge（`purged` 里只会有 `Claude` 一项）。**v1.11.2 起先收会话**：这些目录下还活着的会话（含终端）一起终止（并行，与 `/restart` 同一套）、摘出池子、在会话日志里盖 `deleted_at`，`killed` 报出它们的标题。此前只删目录不动进程——手机上的「删除项目…」对活着的项目也能按，删完 PTY 还在，cwd 成幽灵，`/sessions` 里赖着，mac 侧栏还会为「有会话但没登记」的目录补一行 |
 | GET | `/sessions` | 全部会话（含 exited） |
@@ -141,7 +174,7 @@ CLI 的 `ls` / 交互菜单按五组打印（v1.13 起；以前是「执行中 /
 | POST | `/sessions/:id/input`（信任对话框在屏上时整句消息改进收件箱，返回 `{"ok":true,"queued":true}`）| `{text, enter}`：写入 PTY（enter 补 `\r`）。composer 用。**多行文本**：TUI 开着 bracketed paste（DECSET 2004）时包成一次粘贴、换行归一为 CR，否则每个换行都是一次提交；没开 2004 的 shell 只做 CR 归一 |
 | POST | `/sessions/:id/answer` | `{answers:[{selected:[0,2], other:"自填文本"|null}, …]}`：回答当前待答的 AskUserQuestion 表单，一项对应一个问题（顺序同 `question.questions`），`selected` 是 0 起的选项下标，`other` 是「其它」自填。daemon 负责把选择翻译成 Claude Code 对话框的按键并确认对话框已关闭（见「回答表单」）。无待答问题 / 非 claude 会话 / 对话框没吃下 → 409；答案形状不对 → 400 |
 | POST | `/sessions/:id/permission` | v1.16 `{behavior: "allow"|"deny"}`：替用户答权限对话框。allow = 按对话框第 1 项（Yes，数字键即选中）再补一个 Return 兜底；deny = Esc（No，回到输入框让用户说要怎么改）。答完等 `permission` 被清掉（PostToolUse / Stop），2 秒还在 → 409「去终端里看一眼」。没有对话框在等 → 409。**根因**：以前 daemon 不订阅 `PermissionRequest`，Bash 授权 / ExitPlanMode 批准弹在终端里，消息流一无所知，用户切到终端才发现在等（2026-09-07 反馈） |
-| POST | `/sessions/:id/checklist` | v1.16 `{text, done}`：看板上直接勾 / 取消勾清单项（按文字匹配）。改 `summary` 里那一行并记进 `checklist_overrides`——haiku 下一轮重写清单时按它盖回去，手工勾的不会被冲掉；会话日志同步 |
+| POST | `/sessions/:id/checklist` | v1.16 `{text, done}`，**v1.22 加 `index`**（这是清单里的第几项，与会话对象上的 `checklist` 同下标）：给了就只翻这一条、文字只用来核对；不给退回「只翻第一条匹配的」。以前按文字匹配且**每一条同文的都跟着翻**——haiku 重写出两条一样的话时，点一条会勾掉两条。改 `summary` 里那一行并记进 `checklist_overrides`——haiku 下一轮重写清单时按它盖回去，手工勾的不会被冲掉；会话日志同步 |
 | POST | `/history/backfill` | v1.16.2：给池子里没有清单的 claude 会话补清单（后台跑，立刻返回 `{missing}`）。transcript 先按 `resume_id` 找，找不到（/clear 过、GC 了）就按项目目录 + 时间窗口（同 cwd 的 transcript 里落在这条会话 [created_at, last_output_at] 的记录最多的那个），按整段对话 haiku 生成一次。daemon 起来 90s 后自动补一轮、之后每小时补 20 条；`aaa backfill` 手动触发。用户 2026-09-07：看板里没显示进度的那些对话要显示进度 |
 | POST | `/sessions/:id/kill` | TERM，2s 后 KILL；记录保留为 exited |
 | DELETE | `/sessions/:id` | 删除记录与回放（活着先 kill） |
@@ -231,7 +264,7 @@ daemon 起 claude 会话时追加 `--settings ~/.local/state/aaa-daemon/claude-h
 |---|---|
 | `SessionStart` | `source≠compact` → `state=waiting`（TUI 就绪停在输入框），触发收件箱投喂 |
 | `UserPromptSubmit` | `state=running`，清 `error` |
-| `Stop` / `Notification(idle_prompt)` | `state=waiting`（精确的「这轮跑完」；触发收件箱投喂）。`Stop` 还触发**进度清单**：daemon 让 haiku（`claude -p --model haiku`，与 namer 同一开关 `namer`）拿「上一版清单 + 这一轮（要求、用过的工具、最后回复）」重写整个对话的 todo list——`- [x] 已做` / `- [ ] 未做`，已做在前，最多 16 项——写进会话的 `summary`；第一份（新会话或 resume 进来还没有清单）看整段对话。mac 详情面板「进度」、Android 会话菜单「进度」渲染成 ☑ / ☐ |
+| `Stop` / `Notification(idle_prompt)` | `state=waiting`（精确的「这轮跑完」；触发收件箱投喂）。`Stop` 还触发**进度清单**：daemon 让 haiku（`claude -p --model haiku`，与 namer 同一开关 `namer`）拿「上一版清单 + 这一轮（要求、用过的工具、最后回复）」重写整个对话的 todo list——`- [x] 已做` / `- [ ] 未做`，已做在前，最多 16 项——写进会话的 `summary`；第一份（新会话或 resume 进来还没有清单）看整段对话。mac 详情面板「进度」、Android 会话菜单「进度」渲染成 ☑ / ☐。**v1.22：所有 haiku 调用（命名 + 清单）走同一个全局闸门，最多两个同时在跑**——并行干活时一批会话会同时 `Stop`，以前一口气拉起十几个 `claude -p`（每个能占 60s），机器卡住、配额一起烧；排队比丢掉好，晚几秒无所谓。每会话仍是「上一次还没写完就跳过这一次」（下一轮覆盖得了） |
 | `StopFailure` | `state=waiting`，`error`=错误类型（rate_limit / overloaded / authentication_failed…） |
 | `PreToolUse`（matcher `AskUserQuestion`） | 立刻 `asking=true`，不等 transcript 落盘 |
 | `PreCompact` / `PostCompact` | `compacting` 开/关（「整理上下文中」） |
@@ -261,7 +294,7 @@ Claude 以 `--dangerously-skip-permissions` 运行，`PermissionRequest` 不会�
 
 - `GET /sessions/:id/messages?after=<seq>&limit=<n=200>` → `{"supported":bool,"source":"claude|none","last_seq":N,"messages":[…]}`
 - 消息结构：`{"seq":N,"ts":"…","role":"user|assistant|tool|system","kind":"text|thinking|tool_use|tool_result|question|answer","text":"…","tool":{"name":"Bash","summary":"cargo build","status":"ok|err|running"}|null,"question":{…}?}`
-- **表单（claude）**：`AskUserQuestion` 工具调用不当普通 tool_use 显示，而是 `kind:"question"`（role assistant）：`text` = 第一题题面，`tool.summary` = 各题 header 用 ` · ` 连接，并附 `"question":{"questions":[{"header":"Color","question":"Pick a color","options":[{"label":"Red","description":"A warm color"}],"multi_select":false}]}`（原样来自工具入参，`multiSelect` 已转 snake_case）。它的 tool_result 变成 `kind:"answer"`（role **user**）：`text` 为用户的回答（单题就是答案本身；多题每行 `题面 → 答案`），`tool.status` 沿用 ok/err。**待答** = 最新一条 question 后面没有 answer，且它不早于本进程 `created_at`（resume 进来的旧 transcript 里悬着的问题，新进程不会再弹框，不算）。这就是会话 `asking` 的定义。
+- **表单（claude）**：`AskUserQuestion` 工具调用不当普通 tool_use 显示，而是 `kind:"question"`（role assistant）：`text` = 第一题题面，`tool.summary` = 各题 header 用 ` · ` 连接，并附 `"question":{"questions":[{"header":"Color","question":"Pick a color","options":[{"label":"Red","description":"A warm color"}],"multi_select":false}]}`（原样来自工具入参，`multiSelect` 已转 snake_case）。它的 tool_result 变成 `kind:"answer"`（role **user**）：`text` 为用户的回答（单题就是答案本身；多题每行 `题面 → 答案`），`tool.status` 沿用 ok/err。**待答** = 最新一条 question 后面没有 answer，且它不早于本进程 `created_at`（resume 进来的旧 transcript 里悬着的问题，新进程不会再弹框，不算）。这就是会话 `asking` 的定义。**这条判定只在 daemon 做**（`MsgStore::pending_question`，整串比 `ts`），结果就是会话对象上的 `asking_seq`；客户端画哪张卡片一律看它，不再自己倒着找消息流。v1.22 前三端各判一次、比法还不同（daemon 整串、两端取前 19 字符），同一秒里 daemon 说「不是待答」而客户端说「是」，点提交就是 409。
 - 客户端渲染约定：`question` 一律**原生对话框**——单选画单选、`multi_select` 画复选、末尾固定一条「其它…」自填；已有 answer 的表单折成已答态；待答且会话存活时才可交互，提交走 `POST /sessions/:id/answer`。不折叠进过程；`answer` 画在用户一侧。
 - daemon 在会话 spawn/resume 后定位该会话的 Claude transcript（resume 已知文件；新会话按 cwd 匹配 + mtime ≥ 启动时刻轮询发现）并增量 tail 解析（jsonl：user/assistant/tool_use/tool_result/thinking，过滤 isSidechain 与注入块）。shell（终端）返回 `supported:false`。resume 场景：旧 id 的 transcript 只是延迟兜底（~30s），发现会话自己写的新文件后自动升级；同目录并发会话不共享同一存储文件（已被认领的候选跳过）。
 - **折叠约定（v1.11 修，2026-09-07）**：assistant 的**每一条** `text` 都是回答，一律露出——Claude 的回答天生分段（说一句 → 干活 → 再说一句）。折叠里只放 `thinking` / `tool_use` / `tool_result` / system；一轮内连续的过程消息并成一个折叠段，夹在各段回答之间，展开状态按段内第一条 `seq` 记。只有会话在跑、且**贴在最后**的那一段画成「进行中 · N 步 · 最近：…」。此前只把一轮的最后一条 text 当回答、其余折进「过程」，中途的真回答看起来就成了思考过程。
@@ -273,13 +306,19 @@ Claude 以 `--dangerously-skip-permissions` 运行，`PermissionRequest` 不会�
 
 按键协议实测于 Claude Code 2.1.258（2026-09-02，pyte 采屏）：表单**有 Review/Submit 页** iff 多于一题或任一题多选；单题单选按下即提交。单选：按选项数字键（自动跳下一页/提交）；单选自填：按「Type something」的数字（= 选项数 + 1）、输入文本、回车。多选：逐个数字键切换（高亮停在第 1 行），自填要 **↓×选项数** 落到「Type something」行再输入（自动打勾；此时**回车会把勾取消**，绝不能按），随后 Tab（文本态下 Tab 移到 Submit/Next 行，再回车前进；非文本态 Tab 直接翻页）。最后 daemon 看屏：出现 `Ready to submit your answers?` 就回车确认；`Enter to select` 提示行消失才算成功，3s 内没消失返回 409，让用户去终端收尾。按键之间留 70–160ms 节拍（Ink 一次 read 当一个事件）。
 
-### 任务收件箱（mac 详情栏 v1.15 起不再画它——消息流里的「待发送」就是这个队列，详情栏再列一遍是重复；Android 也只在消息流里呈现）
+### 待发送 / 任务收件箱
+
+**v1.22 用户拍板：「排队发送按照 claude code 逻辑，不需要另外实现这个功能，只需要在消息流适配 claude code 逻辑」。** 模型正在跑时你照样能往 TUI 里敲字——Claude Code 自己就会把它排进队列、这一轮结束再送进去。AAA 因此**不再自己做一套排队发送**：
+
+- **客户端的「发送」只有一条路**：`POST /sessions/:id/input`，不再按会话状态分流。排不排队是 Claude Code 的事。
+- **消息流末尾画的「待发送」，画的是 Claude Code 自己的队列**：daemon 从 transcript 的 `queue-operation` 读出来（`enqueue` 带 content 进队；`dequeue`（不带 content）弹队头；`remove` / `popAll` 带原文的删那一条、不带的整队清空；排着的那句被送进这一轮时以 `attachment` 的 `prompt` 露面，同样划掉）。`<task-notification>` 与斜杠命令不算——那不是「你打的字在等着发出去」。结果镜在会话对象的 `queued` 上，客户端**只画不管**（没有撤回：那是 TUI 里的事）。
+- **`_inbox` 队列降级成 daemon 的安全兜底**，不再是一个功能：`session_input` 只在**信任对话框弹着**时把整句改收进箱里（那时写进去的字会被对话框吞掉，甚至替用户按下「No, exit」），对话框一被接受，下一个 tick 就送达。它和 Claude Code 的队列合成同一份 `queued` 下发，用户看到的是一件事。
 
 - `GET /inbox?path=<proj>` → `[{"id","text","created_at"}]`；`POST /inbox` `{path,text}`；`DELETE /inbox/:id`。
 - 自动喂入（2026-09-06 起**每秒重试**，不再每会话一次）：项目会话处于 `waiting` 且收件箱非空、门槛放行，daemon 就把条目写入 PTY（+ `\r`）并删除条目——状态翻转、`POST /inbox`、信任对话框刚被接受、表单刚答完，都在下一个 tick 内送达。一条就是那句话本身；多条拼成 `任务清单：\n1. …\n2. …`。`POST /sessions` 可带 `"feed_inbox":false` 禁用。**不喂的两种情形（都是结构化判断，不读屏）**：claude 会话 `asking`（对话框开着，自由文本会替用户按下高亮项）；claude 会话的目录在 `~/.claude.json` 里尚无 `hasTrustDialogAccepted` **且屏幕上正显示信任对话框**（新项目第一屏；父目录已信任时 claude 不问也不写记录，只看文件会永远挡住）。这两种情形条目留在箱里，下一次 waiting 再试。daemon 只读 `~/.claude.json`，永不写它（claude 自己频繁改写，读改写会撞）。
 - **自动信任（2026-09-03，2026-09-07 改为一键一 tick）**：config `auto_trust=true`（默认）时，daemon 在每秒 tick 里看 claude 会话的可见屏幕。新版对话框认「Yes, I trust this folder」+「No, exit」两行（提示行滚出屏幕也行）：高亮在 No → 只按 ↓；**高亮到了 Yes 才按 Enter**，绝不 ↓+Enter 连发——连发时 ↓ 偶尔丢（Ink 还没进 raw mode），Enter 落在「No, exit」上 Claude 就退出了，会话卡成 exited、对话框还画在屏上，只能重进项目再来一次。旧版对话框（Yes, proceed 高亮）直接 Enter。每键至少隔 1s，最多 8 键。用户在 AAA 里已经选定了目录，再问一遍纯属摩擦。信任记录仍由 claude 自己写进 `~/.claude.json`，daemon 不碰。这是 daemon 唯一保留的「读屏行动」，条件刻意收窄（两串同现、仅 claude、有上限）。
 - `POST /sessions` **幂等**：同项目 + 同 agent 已有存活会话时直接返回该会话（不孵第二个进程）；显式并行开第二个用 `"fresh":true`。事件 `{"t":"inbox_changed","path"}`。
-- **客户端呈现（2026-09-06 用户拍板）**：Android 没有单独的收件箱页——收件箱就画在消息流末尾，标「待发送」，✕ 撤回（`DELETE /inbox/:id`）。消息流的「发送」按会话状态分流：会话 `running` 或 `asking` → `POST /inbox`（排成待发送，和终端里先敲好等它一样）；空着 → `POST /sessions/:id/input`。输入框的草稿按会话保存在客户端本地，切出去再回来字还在。会话页左上角是 ☰（不是返回）：拉出与首页同一份项目列表，点一行切会话（回退栈始终 home → 当前会话）。mac 的收件箱仍在详情面板（⌘I）。
+- **客户端呈现**：两端都在消息流末尾画 `queued`（标「待发送」，只读）。**发送一律 `POST /sessions/:id/input`**（v1.22；此前 Android 按 `running` / `asking` 分流去 `POST /inbox`，那是 AAA 自己那套队列）。输入框的草稿按会话保存在客户端本地，切出去再回来字还在。会话页左上角是 ☰（不是返回）：拉出与首页同一份项目列表，点一行切会话（回退栈始终 home → 当前会话）。mac 的收件箱仍在详情面板（⌘I）。
 
 ### 手机→项目文件通道
 
@@ -332,12 +371,14 @@ Claude 以 `--dangerously-skip-permissions` 运行，`PermissionRequest` 不会�
 | surface | `#1a222b` / raised `#212b36` | 卡片/面板 |
 | edge | `#28323e` / `#36434f` | 描边 |
 | ink / dim / faint | `#e3ebf3` / `#8b99a8` / `#5f6d7c` | 文字三级 |
-| term-bg | `#0a0e12` | 终端底 |
+| term-bg / term-fg | `#0a0e12` / `#c9d4de` | 终端底 / 终端字（term-fg = ANSI 7 white，**不是纯白**：满屏白字太刺眼。Android 此前用的是 `#ffffff`，v1.22 对齐） |
 | cyan | `#53c6dd` | 主操作/选中 |
 | magenta | `#c583e0` | 品牌（banner） |
 | green / amber / red | `#5ecb8f` / `#e3b45c` / `#e57373` | 执行中 / 已激活（轮到你）/ 出错、已退出 |
-| blue | `#6c9ef8`（Claude 橙 `#3f6ea8`） | 项目列表行首「在跑」那一点。green/amber/red 各有旧含义，accent 又随主题从青变橙，只有蓝在两套主题里都读作「它自己在动」 |
+| blue | `#6c9ef8`（Claude 橙 `#3f6ea8`） | 项目列表行尾「在跑」那根线。green/amber/red 各有旧含义，accent 又随主题从青变橙，只有蓝在两套主题里都读作「它自己在动」 |
 | agent 色 | 已取消（只有 Claude 一个 agent，不再按 agent 着色） | — |
 
-项目列表行首（2026-09-08 第二版）：一颗 6px/7dp 的圆点，**蓝** = 在跑、**黄** = 未读、**灰**（dim）= 已读；不再有转圈动画。看板卡片同一套（在跑画蓝点，其余不画）。连接状态行、工具步骤等处的小色点照旧。
+项目列表的记号（2026-09-08 第四版）：一根 2px/2.5dp 宽、14px/16dp 高的竖线，**在行尾**，**蓝** = 在跑、**黄** = 未读、**灰**（dim）= 已读；不再有转圈动画，终端行没有记号。看板卡片同一套（在跑画蓝竖线，其余不画；卡片上它仍在标题前——那是一张卡不是一行）。连接状态行、工具步骤等处的小色点照旧。
 终端字体：等宽（mac 端 SF Mono/Menlo 族，Android 端打包 JetBrains Mono 或系统 monospace）。
+Claude 橙主题里两个容易各画各的角色（v1.22 对齐）：**magenta = `#9b6b9e`（哑紫）**——品牌辅色不取强调色的邻色，否则和橙分不开（Android 此前直接等于 accent）；**inset = `#fffefa`**（下沉底比 surface 更亮一点点，Android 此前用的是 surface_raised）。
+两端逐字相同的两处**格式**：文件大小 `human_bytes` / `humanBytes` 一律**一位小数**（`B` / `1.5K` / `2.0M` / `1.2G`；Android 此前 K 不带小数、M 还按大小分两档，同一个文件两端显示不一样）；进度写作 **`3/7 完成`**（斜杠两边不留空格，与看板卡片的 `done/total` 同一种写法；mac 此前写 `3 / 7 完成`）。

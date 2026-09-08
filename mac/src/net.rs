@@ -250,8 +250,13 @@ impl Net {
         self.post_json(&format!("/sessions/{id}/permission"), serde_json::json!({ "behavior": behavior }))
     }
     /// v1.16：看板上勾 / 取消勾清单项
-    pub fn session_checklist(&self, id: &str, text: &str, done: bool) -> impl Future<Output = Result<serde_json::Value>> + use<> {
-        self.post_json(&format!("/sessions/{id}/checklist"), serde_json::json!({ "text": text, "done": done }))
+    /// 勾 / 取消勾一条清单项。`index` 是它在 daemon 给的 `items` 里的**位置**（v1.22）：
+    /// 只按文字匹配的话，清单里有两条一样的（haiku 重写时并不罕见）点一条会勾掉两条。
+    pub fn session_checklist(&self, id: &str, index: usize, text: &str, done: bool) -> impl Future<Output = Result<serde_json::Value>> + use<> {
+        self.post_json(
+            &format!("/sessions/{id}/checklist"),
+            serde_json::json!({ "index": index, "text": text, "done": done }),
+        )
     }
     pub fn session_answer(
         &self,

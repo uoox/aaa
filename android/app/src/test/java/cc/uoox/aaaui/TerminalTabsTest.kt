@@ -19,4 +19,13 @@ class TerminalTabsTest {
         )
         assertEquals(listOf("old", "new"), terminalSessions(sessions).map { it.id })
     }
+
+    /** 尾斜杠：`/a/b/` 与 `/a/b` 是同一个目录，而取叶子名会得到空串——手机上就多出一截「终端 1 · 」。 */
+    @Test fun tabLabelTrimsTrailingSlashes() {
+        val root = "/Volumes/SSD/project"
+        assertEquals("终端 1", terminalTabLabel(0, Session(id = "a", project_path = "$root/"), root))
+        assertEquals("终端 1", terminalTabLabel(0, Session(id = "b", project_path = root), "$root/"))
+        assertEquals("终端 2 · aaa-ui", terminalTabLabel(1, Session(id = "c", project_path = "$root/aaa-ui/"), root))
+        assertEquals("path 为空时不该拼出尾巴", "终端 1", terminalTabLabel(0, Session(id = "d", project_path = ""), root))
+    }
 }

@@ -1,0 +1,142 @@
+{
+  "note": [
+    "三端共享向量：项目列表（GET /projects 的一行 + 本机的黄点）→ 侧栏行。",
+    "v1.22 起 status / title / session_id / updated_at 都是 daemon 算好的（PROTOCOL「版本兼容」），",
+    "客户端只剩两件事：按「置顶 > 黄点 > 状态 > 时间」排，和「线画不画成蓝的」。",
+    "两端的测试都读这一份——此前两端各测各的一套，所以谁都没发现两边推出来的标题和状态不一样。",
+    "改动这个文件要同时跑 mac 与 Android 两边的测试。"
+  ],
+  "projects": [
+    {
+      "path": "/p/ask",
+      "name": "ask",
+      "mtime": "2026-09-01T00:00:00Z",
+      "agent": "claude",
+      "session_title": "旧名字",
+      "pinned": false,
+      "session_id": "s_ask",
+      "status": "asking",
+      "title": "在等你回话",
+      "updated_at": "2026-09-08T12:00:00Z"
+    },
+    {
+      "path": "/p/run",
+      "name": "run",
+      "mtime": "2026-09-01T00:00:00Z",
+      "agent": "claude",
+      "session_title": null,
+      "pinned": false,
+      "session_id": "s_run",
+      "status": "running",
+      "title": "在跑",
+      "updated_at": "2026-09-08T11:00:00Z"
+    },
+    {
+      "path": "/p/bg",
+      "name": "bg",
+      "mtime": "2026-09-01T00:00:00Z",
+      "agent": "claude",
+      "session_title": null,
+      "pinned": false,
+      "session_id": "s_bg",
+      "status": "background",
+      "title": "后台任务没回来",
+      "updated_at": "2026-09-08T10:00:00Z"
+    },
+    {
+      "path": "/p/act",
+      "name": "act",
+      "mtime": "2026-09-01T00:00:00Z",
+      "agent": "claude",
+      "session_title": null,
+      "pinned": false,
+      "session_id": "s_act",
+      "status": "active",
+      "title": "停在输入框",
+      "updated_at": "2026-09-08T09:00:00Z"
+    },
+    {
+      "path": "/p/pin",
+      "name": "pin",
+      "mtime": "2026-09-01T00:00:00Z",
+      "agent": "claude",
+      "session_title": null,
+      "pinned": true,
+      "session_id": "s_pin",
+      "status": "paused",
+      "title": "置顶但已退出",
+      "updated_at": "2026-09-05T00:00:00Z"
+    },
+    {
+      "path": "/p/unread",
+      "name": "unread",
+      "mtime": "2026-09-01T00:00:00Z",
+      "agent": "claude",
+      "session_title": null,
+      "pinned": false,
+      "session_id": "s_unread",
+      "status": "paused",
+      "title": "跑完了还没去看",
+      "updated_at": "2026-09-06T00:00:00Z"
+    },
+    {
+      "path": "/p/fallback",
+      "name": "fallback",
+      "mtime": "2026-09-02T00:00:00Z",
+      "agent": "claude",
+      "session_title": "存储里读出来的名字",
+      "pinned": false,
+      "session_id": null,
+      "status": "paused",
+      "title": "存储里读出来的名字",
+      "updated_at": "2026-09-04T00:00:00Z"
+    },
+    {
+      "path": "/p/bare",
+      "name": "bare",
+      "mtime": "2026-09-03T00:00:00Z",
+      "agent": "claude",
+      "session_title": null,
+      "pinned": false,
+      "session_id": null,
+      "status": "paused",
+      "title": "bare",
+      "updated_at": "2026-09-03T00:00:00Z"
+    }
+  ],
+  "unread": ["/p/unread", "/p/bg/"],
+  "expect": {
+    "order": [
+      "/p/pin",
+      "/p/bg",
+      "/p/unread",
+      "/p/ask",
+      "/p/run",
+      "/p/act",
+      "/p/fallback",
+      "/p/bare"
+    ],
+    "order_why": [
+      "置顶的 /p/pin 在最前，哪怕它已经退出、时间也最旧——自己按的顶，别的不该挤掉它；",
+      "然后是两个有黄点的（/p/bg 在跑、/p/unread 已退出），黄点档内部仍按状态再按时间；",
+      "剩下的按 asking > running > background > active > paused，同档比时间；",
+      "/p/fallback 与 /p/bare 都是 paused，09-04 比 09-03 新。"
+    ],
+    "blue": ["/p/run", "/p/bg"],
+    "blue_why": "蓝线 = status ∈ {running, background}：它还在动，不用你管。asking 不蓝——那是在等你。",
+    "yellow": ["/p/bg", "/p/unread"],
+    "yellow_why": "黄线 = 本机 unread 集合里有它，且不管什么状态都盖过蓝线；黄 > 蓝 > 灰。",
+    "titles": {
+      "/p/ask": "在等你回话",
+      "/p/fallback": "存储里读出来的名字",
+      "/p/bare": "bare"
+    },
+    "titles_why": "标题回退链（活会话标题 → session_title → 目录名）v1.22 起在 daemon 里走完，客户端直接用 title。",
+    "unread_path_normalized": {
+      "/p/bg": true,
+      "/p/bg/": true,
+      "/p/b": false
+    },
+    "unread_path_why": "本机的未读 / 静音集合按路径存，/p/a 与 /p/a/ 必须算同一个项目（前缀相同的 /p/b 不算）。"
+  }
+}

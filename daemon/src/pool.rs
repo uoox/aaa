@@ -80,6 +80,19 @@ pub struct Meta {
     /// here from the message store so `/events` can carry it.
     #[serde(skip)]
     pub asking: bool,
+    /// v1.22：待答的**是哪一条**（消息流里的 `seq`）。`asking` 说「有」，这个说「哪条」——
+    /// 客户端画表单卡片认它，不再各自从消息流倒着找（三端此前各判一次，比法还不一样：
+    /// daemon 整串比 ts、两端取前 19 字符，同一秒里两边会说不同的话，提交答案就 409）。
+    /// `asking` 为 true 而它是 None 是正常的：权限对话框、或 hook 抢在 transcript 落盘前
+    /// 报的 AskUserQuestion——那两种本来就不画表单卡。
+    #[serde(skip)]
+    pub asking_seq: Option<u64>,
+    /// v1.22：此刻排着、还没送进去的消息。**两个来源合成一份**：Claude Code 自己的队列
+    /// （模型在跑时你敲的字，见 `messages::QueuedMsg`），加上 daemon 在信任对话框弹着时
+    /// 替你收下的那几条（`session_input` 的兜底，见 `feed::trust_dialog_up`）。
+    /// 客户端只管画，不再自己维护一份「待发送」
+    #[serde(skip)]
+    pub queued: Vec<crate::messages::QueuedMsg>,
     /// 用户主动 kill：客户端据此不弹「退出」通知（自己动的手，不用报告）
     #[serde(skip)]
     pub user_killed: bool,
@@ -207,6 +220,8 @@ impl Session {
                 screen_hash: 0,
                 screen_changed_inst: None,
                 asking: false,
+                asking_seq: None,
+                queued: Vec::new(),
                 user_killed: false,
                 trust_presses: 0,
                 trust_pressed_inst: None,
@@ -241,6 +256,14 @@ impl Session {
             "agent": meta.agent,
             "state": meta.state,
             "asking": meta.asking,
+            // v1.22：五态里的哪一个（history::status_of）。**只此一处**——此前 daemon 的看板
+            // 一份、mac `RowStatus::of` 一份、Android `projectStateOf` 一份、CLI `status_of`
+            // 一份，同一台机器同一时刻能给出不同的答案
+            "status": crate::history::status_of(&meta),
+            // v1.22：待答的是哪一条（seq）；null = 没有待答表单。判定只在 daemon 做一次
+            "asking_seq": meta.asking_seq,
+            // v1.22：此刻排着的待发送消息（Claude Code 自己的队列 + 信任对话框兜底收下的）
+            "queued": meta.queued,
             // v1.16：正在等的权限对话框（null = 没有）；客户端画成「允许 / 拒绝」卡片
             "permission": meta.permission,
             "rows": meta.rows,
@@ -263,6 +286,9 @@ impl Session {
             "usage": meta.usage,
             // v1.7：整个对话的进度清单（markdown 任务列表）
             "summary": meta.summary,
+            // v1.22：上面那串由 daemon 解析好，客户端直接画（此前 daemon / mac / Android
+            // 各写一份解析，看板明明已经给了 items，详情页还从原文重解析一遍）
+            "checklist": crate::history::parse_checklist(&meta.summary),
         })
     }
 
@@ -635,6 +661,8 @@ impl SessionPool {
             screen_hash: 0,
             screen_changed_inst: None,
             asking: false,
+            asking_seq: None,
+            queued: Vec::new(),
             user_killed: false,
             trust_presses: 0,
             trust_pressed_inst: None,

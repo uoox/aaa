@@ -24,6 +24,53 @@ pub(super) fn qr_encode(payload: &str) -> Option<(usize, Vec<bool>)> {
     Some((w, modules))
 }
 
+/// 设置页的一节：kit 的卡片底 + 这一页统一的 14 内边距
+fn sect() -> gpui::Div {
+    card().w_full().p(px(14.))
+}
+
+/// 一节的标题：元信息小字 + 与正文之间的留白
+fn sect_title(text: &'static str) -> gpui::Div {
+    meta().pb(px(8.)).child(text)
+}
+
+/// 连接信息里的一行「键 · 值」。值可以带颜色（SSD 未挂载是红的）。
+fn kv_row(k: &'static str, v: String, color: Option<u32>) -> gpui::Div {
+    div()
+        .w_full()
+        .flex()
+        .items_center()
+        .gap(px(10.))
+        .py(px(4.))
+        .child(meta().w(px(64.)).flex_none().child(k))
+        .child(
+            div()
+                .flex_1()
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .text_size(px(12.))
+                .text_color(c(color.unwrap_or(theme::ink())))
+                .child(SharedString::from(v)),
+        )
+}
+
+/// 配置区的一个输入格：一行标签压在输入框上面
+fn field(label: &'static str, input: gpui::Entity<super::MiniInput>) -> gpui::Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(4.))
+        .child(
+            div()
+                .font_family("Menlo")
+                .text_size(px(9.5))
+                .text_color(c(theme::faint()))
+                .child(label),
+        )
+        .child(input)
+}
+
 impl RootView {
     /// 「保存到 daemon」：目录变了先问迁移，其余直接提交（daemon 会自我重启）
     fn save_daemon_config(&mut self, cx: &mut Context<Self>) {
@@ -60,64 +107,46 @@ impl RootView {
         }
     }
 
+    /// 三节（配对 / 外观 / 配置）各自一张卡，页面本身只管把它们竖着摞起来。
     pub(super) fn render_settings(
         &self,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let card = || {
-            div()
-                .w_full()
-                .p(px(14.))
-                .rounded(px(10.))
-                .bg(c(theme::surface()))
-                .border_1()
-                .border_color(c(theme::edge()))
-        };
-        let sect_title = |text: &'static str| {
-            div()
-                .font_family("Menlo")
-                .text_size(px(10.))
-                .text_color(c(theme::faint()))
-                .pb(px(8.))
-                .child(text)
-        };
-        let kv_row = |k: &'static str, v: String, color: Option<u32>| {
-            div()
-                .w_full()
-                .flex()
-                .items_center()
-                .gap(px(10.))
-                .py(px(4.))
-                .child(
-                    div()
-                        .w(px(64.))
-                        .flex_none()
-                        .font_family("Menlo")
-                        .text_size(px(10.))
-                        .text_color(c(theme::faint()))
-                        .child(k),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .whitespace_nowrap()
-                        .text_size(px(12.))
-                        .text_color(c(color.unwrap_or(theme::ink())))
-                        .child(SharedString::from(v)),
-                )
-        };
+        div()
+            .id("settings-scroll")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .p(px(18.))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(14.))
+                    .max_w(px(720.))
+                    .child(self.render_pair_section(cx))
+                    .child(self.render_look_section(cx))
+                    .child(self.render_config_section(cx)),
+            )
+    }
 
-        // ── ① 配对 + 连接信息 ───────────────────────────────────────────
-        let ep = self.net.endpoint();
-        let (conn_color, conn_label) = match self.conn {
-            ConnState::Connected => (theme::green(), "已连接"),
-            ConnState::Connecting => (theme::amber(), "连接中…"),
-            ConnState::Disconnected => (theme::red(), "未连接"),
-        };
-        let qr_box = match self.qr_modules.clone() {
+    /// ① 配对：左边二维码，右边连接信息 + 重启按钮
+    fn render_pair_section(&self, cx: &mut Context<Self>) -> gpui::Div {
+        sect()
+            .child(sect_title("配对 · Android 扫码自动填入地址与 TOKEN"))
+            .child(
+                div()
+                    .flex()
+                    .gap(px(16.))
+                    .child(self.render_qr_box())
+                    .child(self.render_conn_info(cx)),
+            )
+    }
+
+    /// 配对二维码本身；还没连上（没有 payload）时画一个同尺寸的空框占住位置
+    fn render_qr_box(&self) -> gpui::Div {
+        match self.qr_modules.clone() {
             Some((w, modules)) => div()
                 .w(px(170.))
                 .h(px(170.))
@@ -164,6 +193,15 @@ impl RootView {
                 .text_size(px(11.))
                 .text_color(c(theme::faint()))
                 .child("连接后生成"),
+        }
+    }
+
+    /// 配对卡右半：连接状态一行 + daemon 报上来的几项 + 重启按钮
+    fn render_conn_info(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let (conn_color, conn_label) = match self.conn {
+            ConnState::Connected => (theme::green(), "已连接"),
+            ConnState::Connecting => (theme::amber(), "连接中…"),
+            ConnState::Disconnected => (theme::red(), "未连接"),
         };
         let mut info = div()
             .flex_1()
@@ -210,7 +248,7 @@ impl RootView {
                     Some(if h.ssd_mounted { theme::green() } else { theme::red() }),
                 ));
         }
-        if let Some(ep) = &ep {
+        if let Some(ep) = &self.net.endpoint() {
             info = info.child(kv_row("地址", format!("{}:{}", ep.host, ep.port), None));
         }
         // 重启：有新构建时用主色提醒，其余时候是个普通次要按钮
@@ -227,11 +265,11 @@ impl RootView {
                 ),
             );
         }
-        let pair_sect = card()
-            .child(sect_title("配对 · Android 扫码自动填入地址与 TOKEN"))
-            .child(div().flex().gap(px(16.)).child(qr_box).child(info));
+        info
+    }
 
-        // ── ② 外观：三套主题，点了立刻整窗换色并落盘 ───────────────────
+    /// ② 外观：三套主题各一个芯片，点了立刻整窗换色并落盘
+    fn render_look_section(&self, cx: &mut Context<Self>) -> gpui::Div {
         let current = self.theme;
         let mut chips = div().flex().flex_wrap().gap(px(8.));
         for kind in ThemeKind::ALL {
@@ -274,27 +312,15 @@ impl RootView {
                     .child(kind.label()),
             );
         }
-        let look_sect = card()
+        sect()
             .child(sect_title("外观 · 即时生效，记在本机 ~/.config/aaa-ui/ui.toml"))
-            .child(chips);
+            .child(chips)
+    }
 
-        // ── ③ 可编辑配置 ────────────────────────────────────────────────
-        let field = |label: &'static str, input: gpui::Entity<super::MiniInput>| {
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(4.))
-                .child(
-                    div()
-                        .font_family("Menlo")
-                        .text_size(px(9.5))
-                        .text_color(c(theme::faint()))
-                        .child(label),
-                )
-                .child(input)
-        };
+    /// ③ 可编辑配置：host/port/token 一行、项目目录一行，外加两个提交按钮
+    fn render_config_section(&self, cx: &mut Context<Self>) -> gpui::Div {
         let token_for_copy = self.token_input.read(cx).text().to_string();
-        let cfg_sect = card()
+        sect()
             .child(sect_title("配置 · 保存会写入 config.toml 并重启 daemon"))
             .child(
                 div()
@@ -355,23 +381,6 @@ impl RootView {
                     .text_size(px(10.5))
                     .text_color(c(theme::faint()))
                     .child("「连接」只改本机指向；「保存」写入 daemon 配置并重启它（有存活会话会被拒绝）。修改项目目录时会先询问是否迁移现有项目。"),
-            );
-
-        div()
-            .id("settings-scroll")
-            .flex_1()
-            .min_h(px(0.))
-            .overflow_y_scroll()
-            .p(px(18.))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(14.))
-                    .max_w(px(720.))
-                    .child(pair_sect)
-                    .child(look_sect)
-                    .child(cfg_sect),
             )
     }
 }

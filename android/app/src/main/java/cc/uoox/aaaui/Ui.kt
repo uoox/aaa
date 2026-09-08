@@ -35,6 +35,7 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -75,7 +76,7 @@ data class Palette(
     val amber: Color,
     val red: Color,
     /**
-     * 项目行首「在跑」那一点。三套主题里都要是**蓝**：green/amber/red 各有旧含义，
+     * 项目行尾「在跑」那根线。三套主题里都要是**蓝**：green/amber/red 各有旧含义，
      * accent 又随主题从青变成橙，只有蓝在三套里都读作「它自己在动」。
      */
     val blue: Color,
@@ -101,16 +102,16 @@ data class Palette(
             ink = Color(0xFFE3EBF3), dim = Color(0xFF8B99A8), faint = Color(0xFF5F6D7C),
             accent = Color(0xFF53C6DD), onAccent = Color(0xFF08252C), magenta = Color(0xFFC583E0),
             green = Color(0xFF5ECB8F), amber = Color(0xFFE3B45C), red = Color(0xFFE57373), blue = Color(0xFF6C9EF8),
-            inset = Color(0xFF0A0E12), termBg = Color(0xFF0A0E12), termFg = Color(0xFFFFFFFF),
+            inset = Color(0xFF0A0E12), termBg = Color(0xFF0A0E12), termFg = Color(0xFFC9D4DE),
         )
         val Claude = Palette(
             name = "claude", label = "Claude 橙", isDark = false,
             bg = Color(0xFFFAF9F5), surface = Color(0xFFF0EEE6), raised = Color(0xFFE8E6DC),
             edge = Color(0xFFDAD8CE), edge2 = Color(0xFFC8C6BC),
             ink = Color(0xFF141413), dim = Color(0xFF5E5D59), faint = Color(0xFF91908A),
-            accent = Color(0xFFD97757), onAccent = Color(0xFF141413), magenta = Color(0xFFD97757),
+            accent = Color(0xFFD97757), onAccent = Color(0xFF141413), magenta = Color(0xFF9B6B9E),
             green = Color(0xFF2F855A), amber = Color(0xFFB8860B), red = Color(0xFFC0392B), blue = Color(0xFF3F6EA8),
-            inset = Color(0xFFE8E6DC), termBg = Color(0xFFFFFDF7), termFg = Color(0xFF141413),
+            inset = Color(0xFFFFFEFA), termBg = Color(0xFFFFFDF7), termFg = Color(0xFF141413),
             // gruvbox-light；与 mac 的 CLAUDE.ansi 逐色相同
             ansi = listOf(
                 0xFF3C3836, 0xFFCC241D, 0xFF98971A, 0xFFD79921, 0xFF458588, 0xFFB16286, 0xFF689D6A, 0xFFA89984,
@@ -320,11 +321,13 @@ object Fonts {
 // ---------- formatting ----------
 
 fun humanBytes(bytes: Long): String {
+    // 规则与 mac `theme.rs::human_bytes` 逐字相同：一律一位小数。以前这边 K 不带小数、
+    // M 还按大小分两档，同一个文件在两端显示成不同的大小（v1.22 对齐）。
     if (bytes < 1024) return "${bytes}B"
     val kb = bytes / 1024.0
-    if (kb < 1024) return "%.0fK".format(kb)
+    if (kb < 1024) return "%.1fK".format(kb)
     val mb = kb / 1024.0
-    if (mb < 1024) return if (mb < 10) "%.1fM".format(mb) else "%.0fM".format(mb)
+    if (mb < 1024) return "%.1fM".format(mb)
     return "%.1fG".format(mb / 1024.0)
 }
 
@@ -345,6 +348,29 @@ fun relativeTime(iso: String): String {
         }
     } catch (_: Exception) { iso }
 }
+
+/**
+ * ☰ 左侧栏（项目面板）占屏幕宽度的比例：**小屏铺满，大屏半屏**（2026-09-08 用户拍板：
+ * 「整个左侧栏的宽度：小屏情况下，直接铺满，大屏情况下，半屏」）。
+ *
+ * 手机竖屏（343dp）本来就只装得下一栏，抽屉再留一条边等于白扔；折叠机内屏 / 平板 /
+ * 横屏上，右半屏是**正在看的那个对话**，抽屉盖住一半、露出一半，切之前先看得见要切去
+ * 哪儿。先前那个固定上限（400dp）两头都不对——小屏偏窄，大屏也偏窄，且和屏幕多宽没关系。
+ *
+ * 门槛取 Material 的 compact / medium 分界 600dp：折叠机内屏（≈674dp）落在大屏一侧，
+ * 外屏和普通手机落在小屏一侧。横屏的手机也算大屏——那时右边确实有半屏内容可看。
+ *
+ * `ModalDrawerSheet` 内部有一句 `sizeIn(maxWidth = 360dp)`，但外层给的是**定宽**约束，
+ * `sizeIn` 会被夹回定宽，所以这里的比例说了算（装机实测过 400dp 那版确实生效）。
+ */
+@Composable
+fun sidebarFraction(): Float = sidebarFraction(LocalConfiguration.current.screenWidthDp)
+
+/** 纯函数那一半，好测：屏幕宽 [screenWidthDp] → 左侧栏占屏比例 */
+fun sidebarFraction(screenWidthDp: Int): Float = if (screenWidthDp < SIDEBAR_WIDE_DP) 1f else 0.5f
+
+/** 「大屏」的门槛，dp。Material 的 compact / medium 分界 */
+const val SIDEBAR_WIDE_DP = 600
 
 /** ISO 时间戳 → 本地 HH:mm（消息流用户块上方的小时间）；解析不了给空串。 */
 fun clockTime(iso: String): String = try {

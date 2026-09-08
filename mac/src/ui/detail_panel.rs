@@ -21,7 +21,7 @@ use gpui::{Context, SharedString, div, prelude::*, px, relative};
 use super::kit::*;
 use super::{Page, RootView};
 use crate::model::{
-    Artifact, PlanUsage, Session, SessionDetailResponse, SessionUsage, is_muted, parse_checklist,
+    Artifact, PlanUsage, Session, SessionDetailResponse, SessionUsage, path_list_contains,
     set_flagged,
 };
 use crate::theme::{self, human_bytes};
@@ -276,6 +276,7 @@ impl RootView {
             Decision::Now => self.fetch_detail_now(id, cx),
             Decision::Defer(delay) => {
                 let id = id.to_string();
+                // 不走 spawn_fetch：这里等的是一个定时器，不是一个请求
                 cx.spawn(async move |this, cx| {
                     cx.background_executor().timer(delay).await;
                     let _ = this.update(cx, |r, cx| {
@@ -348,7 +349,7 @@ impl RootView {
 
     fn toggle_mute_current(&mut self, cx: &mut Context<Self>) {
         if let Some(path) = self.current_project_path() {
-            let on = !is_muted(&self.muted_projects, &path);
+            let on = !path_list_contains(&self.muted_projects, &path);
             set_flagged(&mut self.muted_projects, &path, on);
             self.ui_state().save();
             cx.notify();
@@ -359,10 +360,7 @@ impl RootView {
 
     /// 段标题：与设置页同款的 Menlo 小字
     fn sect_label(text: &'static str) -> gpui::Div {
-        div()
-            .font_family("Menlo")
-            .text_size(px(10.))
-            .text_color(c(theme::faint()))
+        meta()
             .pb(px(6.))
             .child(text)
     }
@@ -398,10 +396,7 @@ impl RootView {
             .border_b_1()
             .border_color(ca(theme::edge(), 0.7))
             .child(
-                div()
-                    .font_family("Menlo")
-                    .text_size(px(10.))
-                    .text_color(c(theme::faint()))
+                meta()
                     .pb(px(6.))
                     .child(SharedString::from(if n == 0 { label.to_string() } else { format!("{label} {n}") })),
             )
@@ -441,11 +436,7 @@ impl RootView {
                         .child(SharedString::from(title)),
                 )
                 .child(
-                    div()
-                        .flex_none()
-                        .font_family("Menlo")
-                        .text_size(px(10.))
-                        .text_color(c(theme::faint()))
+                    meta().flex_none()
                         .child(SharedString::from(trailing)),
                 );
             col = col.child(
@@ -501,10 +492,7 @@ impl RootView {
                     .child("详情"),
             )
             .child(
-                div()
-                    .font_family("Menlo")
-                    .text_size(px(10.))
-                    .text_color(c(theme::faint()))
+                meta()
                     .pr(px(8.))
                     .child("⌘I"),
             )
@@ -552,9 +540,11 @@ impl RootView {
         )
     }
 
-    /// 整个对话的进度清单（daemon 在每次 Stop 后让 haiku 重写）：☑ 已做、☐ 未做
+    /// 整个对话的进度清单（daemon 在每次 Stop 后让 haiku 重写）：☑ 已做、☐ 未做。
+    /// v1.22 起直接用会话上的 `checklist`——那串 markdown 由 daemon 解析一次，看板卡片
+    /// 的 `items` 同源；此前客户端自己解析 `summary`，与看板可能数出不一样的条数。
     fn render_checklist_section(s: &Session) -> gpui::Div {
-        let items = parse_checklist(&s.summary);
+        let items = s.checklist.clone();
         if items.is_empty() {
             return Self::empty_hint("每轮回复结束后这里会更新一份「做了什么 / 还没做什么」");
         }
@@ -566,7 +556,7 @@ impl RootView {
                 .text_size(px(10.5))
                 .text_color(c(theme::faint()))
                 .pb(px(2.))
-                .child(SharedString::from(format!("{done} / {total} 完成"))),
+                .child(SharedString::from(format!("{done}/{total} 完成"))),
         );
         for it in items {
             col = col.child(
@@ -770,11 +760,7 @@ impl RootView {
                                     .child(SharedString::from(title)),
                             )
                             .child(
-                                div()
-                                    .flex_none()
-                                    .font_family("Menlo")
-                                    .text_size(px(10.))
-                                    .text_color(c(theme::faint()))
+                                meta().flex_none()
                                     .child(SharedString::from(time)),
                             ),
                     )
@@ -862,7 +848,7 @@ impl RootView {
     }
 
     fn render_notify_section(&self, s: &Session, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
-        let on = is_muted(&self.muted_projects, &s.project_path);
+        let on = path_list_contains(&self.muted_projects, &s.project_path);
         let knob = div()
             .flex_none()
             .w(px(30.))
@@ -936,10 +922,7 @@ impl RootView {
             .child(line1);
         if !resets.is_empty() {
             block = block.child(
-                div()
-                    .font_family("Menlo")
-                    .text_size(px(10.))
-                    .text_color(c(theme::faint()))
+                meta()
                     .truncate()
                     .child(SharedString::from(resets.join(" · "))),
             );

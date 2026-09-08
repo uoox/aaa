@@ -787,3 +787,68 @@ async fn events_ws_snapshot_and_session_updates() {
     );
     drop(guard);
 }
+
+/// v1.22 的契约：daemon 把「一件事」算好下发，客户端只画（PROTOCOL「版本兼容」）。
+/// 两端删掉了自己那套推导，所以这几个字段少一个都是线上事故——端到端钉死。
+#[tokio::test(flavor = "multi_thread")]
+async fn projects_and_sessions_carry_the_derived_fields() {
+    let env = setup_env();
+    let _guard = spawn_daemon(&env);
+    let port = wait_port(&env);
+
+    // schema 是客户端唯一的兼容闸门：它说 >=2，客户端才敢直接用下面这些字段
+    let (code, health) = http("GET", port, "/api/v1/health", Some(TOKEN), None);
+    assert_eq!(code, 200);
+    assert_eq!(health["schema"], aaa_daemon::SCHEMA, "/health 必须带 schema");
+
+    let (code, proj) = http(
+        "POST",
+        port,
+        "/api/v1/projects",
+        Some(TOKEN),
+        Some(serde_json::json!({"name": "derived", "agent": "shell"})),
+    );
+    assert_eq!(code, 200, "{proj}");
+    let path = proj["path"].as_str().unwrap().to_string();
+
+    let (code, projects) = http("GET", port, "/api/v1/projects", Some(TOKEN), None);
+    assert_eq!(code, 200);
+    let row = projects
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["path"] == path.as_str())
+        .unwrap_or_else(|| panic!("新建的项目不在列表里: {projects}"));
+    // 一个会话都还没有：五态是 paused，标题退到目录名，排序时间退到目录 mtime
+    assert_eq!(row["status"], "paused");
+    assert_eq!(row["title"], "derived");
+    assert!(row["session_id"].is_null(), "还没有会话");
+    assert!(row["updated_at"].as_str().is_some_and(|s| s.contains('T')), "{row}");
+    assert_eq!(row["registered"], true);
+
+    // 会话对象：status / asking_seq / checklist 三样都在（shell 也一样带）
+    let (code, sess) = http(
+        "POST",
+        port,
+        "/api/v1/sessions",
+        Some(TOKEN),
+        Some(serde_json::json!({"project_path": path, "agent": "shell", "resume": false})),
+    );
+    assert_eq!(code, 200, "{sess}");
+    let id = sess["id"].as_str().unwrap().to_string();
+    let (_, list) = http("GET", port, "/api/v1/sessions", Some(TOKEN), None);
+    let s = find_session(&list, &id);
+    assert!(
+        ["running", "waiting", "active", "asking", "background", "paused"]
+            .contains(&s["status"].as_str().unwrap_or("")),
+        "会话要带 status: {s}"
+    );
+    assert!(s["asking_seq"].is_null(), "shell 没有结构化表单");
+    assert_eq!(s["checklist"], serde_json::json!([]), "清单由 daemon 解析好，空的就是空数组");
+
+    // 终端不代表项目：开了 shell 会话，项目行仍然是 paused（PROTOCOL「终端」）
+    let (_, projects) = http("GET", port, "/api/v1/projects", Some(TOKEN), None);
+    let row = projects.as_array().unwrap().iter().find(|p| p["path"] == path.as_str()).unwrap();
+    assert_eq!(row["status"], "paused", "shell 不进项目列表的状态判定");
+    assert!(row["session_id"].is_null(), "shell 不是项目的代表会话");
+}

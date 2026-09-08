@@ -53,9 +53,51 @@ fn take_chars(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
 
+/// 同时最多几个 haiku 子进程（v1.22）。命名和清单重写都走这一个门：一批会话
+/// 同时 `Stop`（并行跑活儿时很常见），以前会一口气拉起十几个 `claude -p`，每个
+/// 都能占到 60s——机器卡住不说，配额也是一起烧。排队比丢掉好：清单是每轮结束
+/// 时写的，晚几秒没关系，但少写一次就得等下一轮或每小时那次补扫。
+const HAIKU_PARALLEL: usize = 2;
+
+static HAIKU_GATE: Gate = Gate::new(HAIKU_PARALLEL);
+
+/// 一个数着的闸门（标准库够用，不值得为它引 semaphore 依赖）。这些调用都在
+/// `spawn_blocking` 线程上，阻塞等待是安全的。
+struct Gate {
+    n: std::sync::Mutex<usize>,
+    cv: std::sync::Condvar,
+    cap: usize,
+}
+
+impl Gate {
+    const fn new(cap: usize) -> Self {
+        Gate { n: std::sync::Mutex::new(0), cv: std::sync::Condvar::new(), cap }
+    }
+
+    fn acquire(&'static self) -> GateGuard {
+        let mut n = self.n.lock().unwrap();
+        while *n >= self.cap {
+            n = self.cv.wait(n).unwrap();
+        }
+        *n += 1;
+        GateGuard(self)
+    }
+}
+
+struct GateGuard(&'static Gate);
+
+impl Drop for GateGuard {
+    fn drop(&mut self) {
+        *self.0.n.lock().unwrap() -= 1;
+        self.0.cv.notify_one();
+    }
+}
+
 /// Run `claude -p --model haiku` with the prompt on stdin, 60s timeout.
 /// Returns None on any failure (silent downgrade).
+/// 全局最多 [`HAIKU_PARALLEL`] 个同时在跑，多的排队。
 pub fn run_haiku(exe: &Path, prompt: &str) -> Option<String> {
+    let _permit = HAIKU_GATE.acquire();
     let mut cmd = std::process::Command::new(exe);
     cmd.args(["-p", "--model", "haiku"]);
     crate::agents::run_with_timeout(cmd, Some(prompt.as_bytes()), std::time::Duration::from_secs(60))
@@ -266,6 +308,29 @@ impl<'a> Namer<'a> {
 
 #[cfg(test)]
 mod tests {
+    /// 闸门：满了就等，放掉一个立刻有人进得来。`Stop` 齐刷刷来的时候，
+    /// 以前会一口气拉起十几个 `claude -p`。
+    #[test]
+    fn haiku_gate_caps_the_parallelism() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static GATE: Gate = Gate::new(2);
+        static NOW: AtomicUsize = AtomicUsize::new(0);
+        static PEAK: AtomicUsize = AtomicUsize::new(0);
+        std::thread::scope(|sc| {
+            for _ in 0..8 {
+                sc.spawn(|| {
+                    let _p = GATE.acquire();
+                    let n = NOW.fetch_add(1, Ordering::SeqCst) + 1;
+                    PEAK.fetch_max(n, Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    NOW.fetch_sub(1, Ordering::SeqCst);
+                });
+            }
+        });
+        assert!(PEAK.load(Ordering::SeqCst) <= 2, "同时进去的不能超过 cap");
+        assert_eq!(NOW.load(Ordering::SeqCst), 0, "都放掉了");
+    }
+
     use super::*;
     use crate::paths::Paths;
 

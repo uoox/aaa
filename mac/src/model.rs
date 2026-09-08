@@ -28,6 +28,15 @@ impl SessionState {
     }
 }
 
+/// 排着还没送进去的一条（会话的 `queued`）。没有 id——它不是 AAA 的队列，撤回要去 TUI 里做。
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct QueuedMsg {
+    #[serde(default)]
+    pub ts: String,
+    #[serde(default)]
+    pub text: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Session {
     pub id: String,
@@ -83,9 +92,24 @@ pub struct Session {
     #[serde(default)]
     pub usage: Option<SessionUsage>,
     /// v1.7：整个对话的进度清单（`- [x] 已做` / `- [ ] 未做` 的 markdown），每轮结束后
-    /// daemon 让 haiku 重写；详情面板「进度」
+    /// daemon 让 haiku 重写。**v1.22 起客户端不再自己解析它**：解析结果在 `checklist`
+    /// 里，原文只留着调试用
     #[serde(default)]
     pub summary: String,
+    /// v1.22：待答的是消息流里的哪一条 `seq`（没有待答 = None）。此前每端自己从消息流
+    /// 尾部倒着找 question/answer、还要拿 `ts` 的前 19 字符跟会话 created_at 比大小去
+    /// 掉「resume 带进来的旧问题」——同一个判定三端各写一遍，答案还不一样。
+    #[serde(default)]
+    pub asking_seq: Option<u64>,
+    /// v1.22：此刻排着还没送进去的消息。**队列是 Claude Code 自己的**（模型在跑时往 TUI
+    /// 里敲的字它自己排着，这一轮结束再送进去），daemon 从 transcript 读出来下发；外加
+    /// 信任对话框弹着时 daemon 替用户收下的那几条。客户端只画不管——用户拍板「排队发送
+    /// 按照 claude code 逻辑，不需要另外实现这个功能」。
+    #[serde(default)]
+    pub queued: Vec<QueuedMsg>,
+    /// v1.22：`summary` 那串 markdown 由 daemon 解析好的清单（看板卡片的 `items` 同源）
+    #[serde(default)]
+    pub checklist: Vec<ChecklistItem>,
 }
 
 /// 权限对话框（会话 JSON 的 `permission`）
@@ -113,16 +137,9 @@ pub struct Dashboard {
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
 pub struct DashCounts {
-    #[serde(default)]
-    pub asking: usize,
-    #[serde(default)]
-    pub running: usize,
-    #[serde(default)]
-    pub background: usize,
-    #[serde(default)]
-    pub active: usize,
-    #[serde(default)]
-    pub paused: usize,
+    /// 未完成的清单条目数——看板顶上就这一个数。五态计数于 2026-09-08 拿掉
+    /// （用户拍板：看板和项目列表要说同一套话），daemon 从此不下发那五个字段，
+    /// 这边却还留着五个恒为 0 的成员，v1.22 一并删掉。
     #[serde(default)]
     pub open_items: usize,
 }
@@ -156,6 +173,32 @@ pub struct SessionCard {
     pub updated_at: String,
 }
 
+// ── 五态（PROTOCOL「/projects」那张 5 行表的镜像）─────────────────────────────
+//
+// `asking | running | background | active | paused` 由 daemon 算出来下发（项目行、看板卡
+// 片、CLI 同一套）。客户端**不判定**状态，只对着这个字符串做两件纯显示的事：排第几、
+// 线画不画成蓝的。所以这里只留两个查表函数，没有枚举——有枚举就会有人往 `of()` 里塞
+// 判定逻辑，v1.22 删掉的正是那个（三端各写一遍，同一个项目在两台设备上状态不一样）。
+
+/// 侧栏 / 看板从上往下的优先级：待回复 > 运行 > 后台 > 激活 > 暂停。
+/// 不认识的状态（新 daemon 加了第六态）排最后，不假装懂它。
+pub fn status_rank(s: &str) -> u8 {
+    match s {
+        "asking" => 0,
+        "running" => 1,
+        "background" => 2,
+        "active" => 3,
+        "paused" => 4,
+        _ => 5,
+    }
+}
+
+/// 蓝线 / 蓝点：它还在动，不用你管（自己在跑，或后台任务还没回来）。
+/// `asking` 不算——那是在等你。
+pub fn status_running(s: &str) -> bool {
+    s == "running" || s == "background"
+}
+
 /// 看板搜索：标题 / 项目 / 任一清单项含关键字（不分大小写）；空串全匹配
 pub fn card_matches(c: &SessionCard, query: &str) -> bool {
     let q = query.trim().to_lowercase();
@@ -165,10 +208,34 @@ pub fn card_matches(c: &SessionCard, query: &str) -> bool {
         || c.items.iter().any(|i| i.text.to_lowercase().contains(&q))
 }
 
+/// 「在 AAA 里」= 这个会话此刻**还活着**：进程在跑、或者停在输入框等你说话。
+/// 2026-09-08 用户拍板的分节口径——`alive`（还在池子里）**不算**：daemon 会把已经退出的
+/// 会话留在池子里供回放，318 张卡里有 164 张是这种，按 `alive` 切等于没切。真正「在 AAA
+/// 里」的就是侧栏项目列表上那几行。已退出的仍可能点得开（`alive`），那是「打开」按钮的事。
+pub fn card_in_aaa(c: &SessionCard) -> bool {
+    c.alive && c.status != "paused"
+}
+
+/// 看板分节（2026-09-08 用户拍板「看板里面东西太多了，要做一下分割，即在 AAA 里面的
+/// 对话，和不在里面的对话」）：**在 AAA 里** 见 [`card_in_aaa`]；**不在 AAA 里** = 其余
+/// （退出了的、只剩记录的），默认折起来。
+/// 过滤（搜索 + 已删除开关）在这里一次做完，daemon 给的顺序在节内原样保留。
+pub fn dashboard_split<'a>(
+    cards: &'a [SessionCard],
+    query: &str,
+    show_deleted: bool,
+) -> (Vec<&'a SessionCard>, Vec<&'a SessionCard>) {
+    cards
+        .iter()
+        .filter(|c| card_matches(c, query))
+        .filter(|c| show_deleted || !c.deleted)
+        .partition(|c| card_in_aaa(c))
+}
+
 /// 卡片上画不画蓝点（2026-09-08 用户拍板：看板和侧栏说同一套话——蓝点 / 什么都没有，
 /// 五个状态字连同顶上的计数条一起去掉）。`status` 本身还留在协议里，它是排序和这个判断的依据。
 pub fn card_running(c: &SessionCard) -> bool {
-    !c.deleted && (c.status == "running" || c.status == "background")
+    !c.deleted && status_running(&c.status)
 }
 
 #[cfg(test)]
@@ -178,29 +245,13 @@ fn card_is_finished(c: &SessionCard) -> bool {
     c.status == "paused" && c.open == 0
 }
 
-/// 进度清单的一项（解析 `summary` 的一行；看板卡片里由 daemon 直接给）
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+/// 进度清单的一项。**只剩 serde 用途**：v1.22 起 `- [x] …` 的解析归 daemon，看板卡片的
+/// `items` 与会话的 `checklist` 都是它解析好的结果——同一串 markdown 三端各解析一遍，
+/// 谁多认一个 `*` 前缀谁就多出一条，条数对不上。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ChecklistItem {
     pub done: bool,
     pub text: String,
-}
-
-/// `- [x] …` / `- [ ] …` 行 → 项；其它行忽略
-pub fn parse_checklist(md: &str) -> Vec<ChecklistItem> {
-    md.lines()
-        .filter_map(|raw| {
-            let l = raw.trim().trim_start_matches(['-', '*']).trim_start();
-            let (done, rest) = if let Some(r) = l.strip_prefix("[x]").or_else(|| l.strip_prefix("[X]")) {
-                (true, r)
-            } else if let Some(r) = l.strip_prefix("[ ]") {
-                (false, r)
-            } else {
-                return None;
-            };
-            let text = rest.trim();
-            (!text.is_empty()).then(|| ChecklistItem { done, text: text.to_string() })
-        })
-        .collect()
 }
 
 /// 会话用量（Session JSON 的 `usage`）。字段全部可缺省：daemon 拿到多少给多少。
@@ -248,9 +299,12 @@ impl ResetsAt {
     /// 统一成 UTC 时刻；解析不了就 None（不猜）
     pub fn to_utc(&self) -> Option<chrono::DateTime<chrono::Utc>> {
         match self {
-            // 1e12 以上的数字只可能是毫秒（秒级要到公元 33658 年才有这么大）
+            // 1e11 以上的数字只可能是毫秒（秒级要到公元 5138 年才有这么大；毫秒从
+            // 1973 年起就超过它了）。**门槛与 Android `Usage.kt::parseResetsAt` 必须
+            // 是同一个数**：v1.22 前这边写 1e12、那边写 1e11，落在这一段区间的时间戳
+            // 两端差一千倍
             ResetsAt::Epoch(n) => {
-                let secs = if *n > 1e12 { *n / 1000.0 } else { *n };
+                let secs = if *n > 1e11 { *n / 1000.0 } else { *n };
                 chrono::DateTime::from_timestamp(secs as i64, 0)
             }
             ResetsAt::Text(s) => chrono::DateTime::parse_from_rfc3339(s.trim())
@@ -419,7 +473,11 @@ impl Session {
 
 // ── 项目 ────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+/// 一行项目。**v1.22 起「这个项目此刻是什么样子」整块由 daemon 算好**（PROTOCOL
+/// 「版本兼容」）：代表会话、五态、标题、排序时间、登记与否，客户端一个都不再自己推。
+/// 此前 mac 取 `updated_at` 最大的会话、Android 先按 agent 过滤再按别的口径排，同一台
+/// daemon 在两端显示的标题和状态不一样，连行数都能不一样。
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
     pub path: String,
     #[serde(default)]
@@ -430,11 +488,53 @@ pub struct Project {
     pub dir_size: u64,
     #[serde(default)]
     pub agent: Option<String>,
+    /// daemon 从 agent 存储里读出的上一次对话名。标题回退链已经在 daemon 里走完
+    /// （见 `title`），这里只剩调试/兼容价值
     #[serde(default)]
     pub session_title: Option<String>,
     /// v1.8：置顶（daemon 侧存，三端一起变）
     #[serde(default)]
     pub pinned: bool,
+    /// v1.22：代表这个项目的那个会话。没有活会话时是**最近退出的那个**（点它是 resume，
+    /// 不是打开），一个都没有 → None
+    #[serde(default)]
+    pub session_id: Option<String>,
+    /// v1.22：五态之一，见 [`status_rank`]。没有活会话 = `paused`；老 daemon 不给 → 空串
+    #[serde(default)]
+    pub status: String,
+    /// v1.22：标题回退链（活会话标题 → session_title → 目录名）daemon 走完的结果
+    #[serde(default)]
+    pub title: Option<String>,
+    /// v1.22：排序键 = 该项目最新一条非终端会话的 `updated_at`（含已退出的），
+    /// 一个会话都没有 → 目录 mtime
+    #[serde(default)]
+    pub updated_at: Option<String>,
+    /// v1.22：在注册表里。`false` = 在别处 `aaa open` 开出来、注册表里没有但此刻有活
+    /// 会话的目录（daemon 自己补的行），只能看，不能 resume / 删项目。
+    /// 默认 `true`：老 daemon 的每一行都来自注册表
+    #[serde(default = "default_true")]
+    pub registered: bool,
+}
+
+// `registered` 的默认是 true，derive 出来的 Default 会给 false —— 手写一份，免得
+// 「构造一个空 Project」时悄悄变成「没登记的目录」（那会连删除按钮都不给画）。
+impl Default for Project {
+    fn default() -> Self {
+        Project {
+            path: String::new(),
+            name: String::new(),
+            mtime: String::new(),
+            dir_size: 0,
+            agent: None,
+            session_title: None,
+            pinned: false,
+            session_id: None,
+            status: String::new(),
+            title: None,
+            updated_at: None,
+            registered: true,
+        }
+    }
 }
 
 // ── 其它 REST 响应 ──────────────────────────────────────────────────────────
@@ -443,6 +543,10 @@ pub struct Project {
 pub struct Health {
     #[serde(default)]
     pub version: String,
+    /// v1.22：**客户端唯一的兼容闸门**（PROTOCOL「版本兼容」）。当前 = 2；缺失（老
+    /// daemon）→ 0，此时项目状态那几个字段不在，客户端挂降级横幅、**不退回自己算**
+    #[serde(default)]
+    pub schema: u32,
     #[serde(default)]
     pub ssd_mounted: bool,
     #[serde(default)]
@@ -717,10 +821,13 @@ impl Default for UiState {
     }
 }
 
-/// 项目是否被静音：路径按去尾斜杠后精确匹配（同一目录写法不同不该算两个项目）
-pub fn is_muted(muted: &[String], project_path: &str) -> bool {
+/// 这个项目路径在不在这份名单里：去尾斜杠后精确匹配（同一目录写法不同不该算两个项目；
+/// 前缀相同的 `/p/b` 与 `/p/bg` 也不许互相命中）。
+/// **本机的两份名单（静音 / 未读）共用它**——原来叫 `is_muted`，未读那两处调用因此看着
+/// 像在判静音，名字和事实对不上，改静音逻辑就会顺手打坏未读。
+pub fn path_list_contains(list: &[String], project_path: &str) -> bool {
     let p = project_path.trim_end_matches('/');
-    !p.is_empty() && muted.iter().any(|m| m.trim_end_matches('/') == p)
+    !p.is_empty() && list.iter().any(|m| m.trim_end_matches('/') == p)
 }
 
 /// 打黄点 / 清黄点；返回集合是否真的变了（没变就不用落盘）
@@ -730,12 +837,12 @@ pub fn set_flagged(flags: &mut Vec<String>, project_path: &str, on: bool) -> boo
         return false;
     }
     if on {
-        if is_muted(flags, p) {
+        if path_list_contains(flags, p) {
             return false;
         }
         flags.push(p.to_string());
     } else {
-        if !is_muted(flags, p) {
+        if !path_list_contains(flags, p) {
             return false;
         }
         flags.retain(|m| m.trim_end_matches('/') != p);
@@ -841,8 +948,20 @@ mod tests {
         assert_eq!(ids(&|c| card_is_finished(c) && !c.deleted), expect("finished"));
         assert_eq!(ids(&|c| card_matches(c, "测试")), expect("match_测试"));
         // 顺序照 daemon 给的，客户端不重排
-        assert_eq!(d.sessions.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["ask", "run", "bg", "act", "pau", "fin", "old", "del"]);
+        assert_eq!(d.sessions.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["ask", "run", "bg", "act", "poolpau", "pau", "fin", "old", "del"]);
         assert_eq!(ids(&|c| !c.deleted), expect("visible_default"));
+        // 2026-09-08 的两节：在 AAA 里（还活着）/ 不在 AAA 里
+        let split = |q: &str, del: bool| {
+            let (a, b) = dashboard_split(&d.sessions, q, del);
+            let f = |v: Vec<&SessionCard>| v.into_iter().map(|c| c.id.clone()).collect::<Vec<_>>();
+            (f(a), f(b))
+        };
+        assert_eq!(split("", false), (expect("in_aaa"), expect("not_in_aaa")));
+        assert_eq!(split("", true).1, expect("not_in_aaa_with_deleted"), "已删除的开关只作用在「不在 AAA 里」这一节（删了的自然不在池子里）");
+        assert_eq!(split("测试", false), (vec!["run".to_string()], vec!["old".to_string()]), "搜索两节都筛");
+        // 分水岭：还在池子里（点得开）但进程已经退出的，算「不在 AAA 里」
+        let pooled = d.sessions.iter().find(|c| c.id == "poolpau").unwrap();
+        assert!(pooled.alive && !card_in_aaa(pooled));
     }
 
     #[test]
@@ -871,15 +990,83 @@ mod tests {
         assert!(serde_json::from_str::<Dashboard>(r#"{"sessions":[]}"#).is_ok());
     }
 
+    /// v1.22：清单和「待答的是哪一条」都由 daemon 给，客户端不再解析 `summary`、
+    /// 也不再从消息流尾部倒着找 question
+    /// 待发送来自会话的 `queued`——**Claude Code 自己的队列**（v1.22 用户拍板：排队发送
+    /// 按 claude code 逻辑，AAA 不另做一套）。老 daemon 不下发 → 空表，不是解码失败。
     #[test]
-    fn session_summary_checklist_parses() {
-        let s: Session = serde_json::from_str(r#"{"id":"s","summary":"- [x] 修好登录页\n- [ ] 补测试\n瞎话"}"#).unwrap();
-        let items = parse_checklist(&s.summary);
-        assert_eq!(items.len(), 2);
-        assert!(items[0].done && items[0].text == "修好登录页");
-        assert!(!items[1].done && items[1].text == "补测试");
-        let old: Session = serde_json::from_str(r#"{"id":"s"}"#).unwrap();
-        assert!(parse_checklist(&old.summary).is_empty(), "老 daemon 没有这个字段");
+    fn session_carries_the_claude_code_queue() {
+        let s: Session = serde_json::from_str(
+            r#"{"id":"s1","queued":[{"ts":"2026-09-08T10:00:00Z","text":"跑一遍测试"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(s.queued.len(), 1);
+        assert_eq!(s.queued[0].text, "跑一遍测试");
+        let old: Session = serde_json::from_str(r#"{"id":"s2"}"#).unwrap();
+        assert!(old.queued.is_empty());
+    }
+
+    #[test]
+    fn session_takes_checklist_and_asking_seq_from_daemon() {
+        let s: Session = serde_json::from_str(
+            r#"{"id":"s","summary":"- [x] 修好登录页\n- [ ] 补测试\n瞎话",
+                "asking_seq":42,
+                "checklist":[{"done":true,"text":"修好登录页"},{"done":false,"text":"补测试"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(s.asking_seq, Some(42));
+        assert_eq!(s.checklist.len(), 2);
+        assert!(s.checklist[0].done && s.checklist[0].text == "修好登录页");
+        assert!(!s.checklist[1].done && s.checklist[1].text == "补测试");
+        // 老 daemon（schema < 2）两样都不给：空清单 + 没有待答，客户端不去 summary 里补算
+        let old: Session =
+            serde_json::from_str(r#"{"id":"s","summary":"- [x] 修好登录页"}"#).unwrap();
+        assert!(old.checklist.is_empty());
+        assert_eq!(old.asking_seq, None);
+    }
+
+    /// 五态查表：PROTOCOL 那张 5 行表的镜像，客户端只拿它排序和决定线的颜色
+    #[test]
+    fn status_rank_and_running_mirror_the_protocol_table() {
+        let order = ["asking", "running", "background", "active", "paused"];
+        let ranks: Vec<u8> = order.iter().map(|s| status_rank(s)).collect();
+        assert_eq!(ranks, vec![0, 1, 2, 3, 4]);
+        // 认不出的（老 daemon 的空串、将来的第六态）排最后，不假装懂它
+        assert_eq!(status_rank(""), 5);
+        assert_eq!(status_rank("teleporting"), 5);
+        assert!(status_running("running") && status_running("background"));
+        // asking 不蓝：那是在等你，不是「它还在动」
+        assert!(!status_running("asking") && !status_running("active") && !status_running("paused"));
+        assert!(!status_running(""));
+    }
+
+    /// 老 daemon 的 /health 没有 schema → 0，闸门关上（客户端挂横幅，不退回自己算）
+    #[test]
+    fn health_schema_gate() {
+        let h: Health = serde_json::from_str(r#"{"version":"1.22.0","schema":2}"#).unwrap();
+        assert_eq!(h.schema, 2);
+        let old: Health = serde_json::from_str(r#"{"version":"1.21.0"}"#).unwrap();
+        assert_eq!(old.schema, 0);
+    }
+
+    /// v1.22：项目行上「此刻是什么样子」那几样全部来自 daemon
+    #[test]
+    fn project_carries_daemon_computed_row() {
+        let p: Project = serde_json::from_str(
+            r#"{"path":"/p/a","name":"a","session_id":"s_1","status":"asking",
+                "title":"在等你回话","updated_at":"2026-09-08T12:00:00Z","registered":false}"#,
+        )
+        .unwrap();
+        assert_eq!(p.session_id.as_deref(), Some("s_1"));
+        assert_eq!(p.status, "asking");
+        assert_eq!(p.title.as_deref(), Some("在等你回话"));
+        assert_eq!(p.updated_at.as_deref(), Some("2026-09-08T12:00:00Z"));
+        assert!(!p.registered);
+        // 老 daemon 的行：状态空串（排最后）、标题/时间为 None（退到 name/mtime），
+        // registered 默认 true —— 它那儿每一行都来自注册表
+        let old: Project = serde_json::from_str(r#"{"path":"/p/b","name":"b"}"#).unwrap();
+        assert!(old.status.is_empty() && old.title.is_none() && old.updated_at.is_none());
+        assert!(old.registered && Project::default().registered);
     }
 
     #[test]
@@ -1053,19 +1240,19 @@ mod tests {
     }
 
     #[test]
-    fn mute_lookup_and_toggle() {
+    fn path_list_lookup_and_toggle() {
         let mut muted: Vec<String> = vec!["/p/a/".into()];
         // 尾斜杠不影响匹配
-        assert!(is_muted(&muted, "/p/a"));
-        assert!(is_muted(&muted, "/p/a/"));
-        assert!(!is_muted(&muted, "/p/ab"));
-        assert!(!is_muted(&muted, ""));
+        assert!(path_list_contains(&muted, "/p/a"));
+        assert!(path_list_contains(&muted, "/p/a/"));
+        assert!(!path_list_contains(&muted, "/p/ab"));
+        assert!(!path_list_contains(&muted, ""));
         // 切换（详情面板直接调 set_flagged 取反）；返回值是「有没有变」
         assert!(set_flagged(&mut muted, "/p/a", false));
         assert!(muted.is_empty());
         assert!(set_flagged(&mut muted, "/p/b/", true));
         assert_eq!(muted, vec!["/p/b".to_string()]);
-        assert!(is_muted(&muted, "/p/b"));
+        assert!(path_list_contains(&muted, "/p/b"));
         // 空路径不记
         assert!(!set_flagged(&mut muted, "", true));
         assert_eq!(muted.len(), 1);

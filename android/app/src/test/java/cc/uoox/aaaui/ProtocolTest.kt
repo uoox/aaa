@@ -10,6 +10,10 @@ import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Test
 
 class ProtocolTest {
+    /** 「已完成」= 暂停且清单全勾完。v1.17 取消「做完的折起来」之后生产代码不再问这个问题，
+     *  只有看板分组的测试还拿它当参照——所以 v1.22 从生产代码搬到这里（mac 那边一直挂着 `#[cfg(test)]`）。 */
+    private fun cardIsFinished(c: SessionCard): Boolean = c.status == "paused" && c.open == 0
+
     private val json = ProtocolJson.instance
 
     @Test fun pairPayloadParsesHostsAndToken() {
@@ -78,12 +82,18 @@ class ProtocolTest {
         assertTrue(resp.messages.isEmpty())
     }
 
-    @Test fun inboxItemsParse() {
-        val items = json.decodeFromString<List<InboxItem>>(
-            """[{"id":"i_1","text":"跑一遍测试","created_at":"2026-08-30T10:00:00Z"},{"id":"i_2","text":"更新文档","created_at":"2026-08-30T11:00:00Z"}]""",
+    /**
+     * 待发送来自会话对象的 `queued`——**Claude Code 自己的队列**（v1.22 用户拍板：
+     * 排队发送按 claude code 逻辑，AAA 不另做一套）。以前这里测的是 `/inbox` 的条目。
+     */
+    @Test fun sessionCarriesClaudeCodeQueue() {
+        val s = json.decodeFromString<Session>(
+            """{"id":"s_1","queued":[{"ts":"2026-09-08T10:00:00Z","text":"跑一遍测试"},{"ts":"2026-09-08T10:01:00Z","text":"更新文档"}]}""",
         )
-        assertEquals(2, items.size)
-        assertEquals("跑一遍测试", items[0].text)
+        assertEquals(2, s.queued.size)
+        assertEquals("跑一遍测试", s.queued[0].text)
+        // 老 daemon 不下发这个字段：空队列，不是崩
+        assertTrue(json.decodeFromString<Session>("""{"id":"s_2"}""").queued.isEmpty())
     }
 
     @Test fun dashboardCardsParseSearchAndFinished() {
@@ -106,11 +116,44 @@ class ProtocolTest {
         assertTrue(runCatching { json.decodeFromString<Dashboard>("""{"today":{"sessions":1},"days":[]}""") }.isFailure)
     }
 
-    @Test fun sessionChecklistParses() {
-        val s = json.decodeFromString<Session>("""{"id":"s","summary":"- [x] 修好登录页\n- [ ] 补测试\n瞎话"}""")
-        val items = parseChecklist(s.summary)
-        assertEquals(listOf(ChecklistItem(true, "修好登录页"), ChecklistItem(false, "补测试")), items)
-        assertTrue(parseChecklist(json.decodeFromString<Session>("""{"id":"s"}""").summary).isEmpty())
+    /** v1.22：清单由 daemon 解析好下发；客户端不再自己拆 `summary` 那串 markdown */
+    @Test fun sessionChecklistAndAskingSeqComeFromDaemon() {
+        val s = json.decodeFromString<Session>(
+            """{"id":"s","summary":"- [x] 修好登录页\n- [ ] 补测试\n瞎话","asking_seq":42,
+                "checklist":[{"done":true,"text":"修好登录页"},{"done":false,"text":"补测试"}]}""",
+        )
+        assertEquals(listOf(ChecklistItem(true, "修好登录页"), ChecklistItem(false, "补测试")), s.checklist)
+        assertEquals(42L, s.asking_seq)
+        // 老 daemon 不给这两样：清单空、没有待答（界面据此不画可答的表单卡片）
+        val old = json.decodeFromString<Session>("""{"id":"s","summary":"- [ ] 补测试"}""")
+        assertTrue(old.checklist.isEmpty())
+        assertNull(old.asking_seq)
+    }
+
+    /** v1.22：项目行自带状态 / 代表会话 / 标题 / 排序时间；老 daemon 少这些字段，解码不能炸 */
+    @Test fun projectRowCarriesDaemonComputedState() {
+        val p = json.decodeFromString<Project>(
+            """{"path":"/p/a","name":"a","mtime":"2026-09-01T00:00:00Z","session_id":"s_1","status":"asking",
+                "title":"在等你回话","updated_at":"2026-09-08T12:00:00Z","registered":false}""",
+        )
+        assertEquals("s_1", p.session_id)
+        assertEquals("asking", p.status)
+        assertEquals("在等你回话", p.title)
+        assertEquals("2026-09-08T12:00:00Z", p.updated_at)
+        assertFalse(p.registered)
+        val old = json.decodeFromString<Project>("""{"path":"/p/b","name":"b"}""")
+        assertNull(old.session_id)
+        assertEquals("", old.status)
+        assertNull(old.title)
+        // 老 daemon 不给 registered：注册表里的项目才会出现在它的 /projects 里，默认 true
+        assertTrue(old.registered)
+    }
+
+    /** schema 是唯一的兼容闸门：缺了就是 0，界面挂降级横幅 */
+    @Test fun healthSchemaGate() {
+        assertEquals(2, json.decodeFromString<Health>("""{"version":"1.22.0","schema":2}""").schema)
+        assertEquals(0, json.decodeFromString<Health>("""{"version":"1.21.0"}""").schema)
+        assertTrue(json.decodeFromString<Health>("""{"version":"1.21.0"}""").schema < SCHEMA_PROJECT_STATUS)
     }
 
     @Test fun uploadResultParses() {
@@ -138,8 +181,8 @@ class ProtocolTest {
         val mc = EventFrame.parse("""{"t":"messages_changed","id":"s_4","last_seq":99}""")
         assertTrue(mc is EventFrame.MessagesChanged && mc.id == "s_4" && mc.lastSeq == 99L)
 
-        val ic = EventFrame.parse("""{"t":"inbox_changed","path":"/p/x"}""")
-        assertTrue(ic is EventFrame.InboxChanged && ic.path == "/p/x")
+        // inbox_changed：v1.22 起没人读了（待发送随会话对象来），当未知帧忽略
+        assertTrue(EventFrame.parse("""{"t":"inbox_changed","path":"/p/x"}""") is EventFrame.Unknown)
 
         // 2026-09-02 移除的帧：老 daemon 还会发，当未知帧忽略
         assertTrue(EventFrame.parse("""{"t":"session_stalled","id":"s_5","quiet_s":900}""") is EventFrame.Unknown)
@@ -162,7 +205,7 @@ class ProtocolTest {
         fun expect(k: String) = fx["expect"]!!.jsonObject[k]!!.jsonArray.map { it.jsonPrimitive.content }
         assertEquals(expect("finished"), d.sessions.filter { cardIsFinished(it) && !it.deleted }.map { it.id })
         assertEquals(expect("match_测试"), d.sessions.filter { cardMatches(it, "测试") }.map { it.id })
-        assertEquals(listOf("ask", "run", "bg", "act", "pau", "fin", "old", "del"), d.sessions.map { it.id })
+        assertEquals(listOf("ask", "run", "bg", "act", "poolpau", "pau", "fin", "old", "del"), d.sessions.map { it.id })
         assertEquals(expect("visible_default"), d.sessions.filter { !it.deleted }.map { it.id })
     }
 }

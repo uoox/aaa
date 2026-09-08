@@ -135,8 +135,12 @@ class DaemonClient(
         post("/sessions/$sessionId/permission", buildJsonObject { put("behavior", behavior) }.toString())
     }
     /** v1.16：看板上勾 / 取消勾清单项 */
-    suspend fun checklist(sessionId: String, text: String, done: Boolean) {
-        post("/sessions/$sessionId/checklist", buildJsonObject { put("text", text); put("done", done) }.toString())
+    /**
+     * 勾 / 取消勾一条清单项。[index] 是它在 daemon 给的 `items` 里的**位置**（v1.22）：
+     * 只按文字匹配的话，清单里有两条一样的（haiku 重写时并不罕见）点一条会勾掉两条。
+     */
+    suspend fun checklist(sessionId: String, index: Int, text: String, done: Boolean) {
+        post("/sessions/$sessionId/checklist", buildJsonObject { put("index", index); put("text", text); put("done", done) }.toString())
     }
     suspend fun answer(sessionId: String, answers: List<AnswerItem>) {
         val body = buildJsonObject {
@@ -150,14 +154,6 @@ class DaemonClient(
         post("/sessions/$sessionId/answer", body.toString())
     }
 
-    suspend fun inbox(path: String): List<InboxItem> =
-        json.decodeFromString(ListSerializer(InboxItem.serializer()), get("/inbox?path=" + urlEncode(path)))
-
-    suspend fun inboxAdd(path: String, text: String) {
-        post("/inbox", buildJsonObject { put("path", path); put("text", text) }.toString())
-    }
-
-    suspend fun inboxDelete(id: String) { delete("/inbox/$id") }
 
     /** 看板：待办 + 按天流水 + 数字（daemon 一次算好） */
     suspend fun historyDashboard(): Dashboard =

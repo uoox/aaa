@@ -40,21 +40,19 @@ import java.net.URLDecoder
     val usage: SessionUsage? = null,
     /** v1.7：整个对话的进度清单（`- [x] 已做` / `- [ ] 未做` 的 markdown），每轮结束后 daemon 重写 */
     val summary: String = "",
+    /**
+     * v1.22：**待答的就是这一条**（消息流里的 `seq`），null = 没有待答表单。
+     * 此前三端各自倒着找消息流判「最新一条 question 后面没有 answer」，比 `ts` 的方式还不一样
+     * （daemon 整串比、两端取前 19 字符），同一秒里 daemon 说不是待答、客户端说是，点提交就是 409。
+     */
+    val queued: List<QueuedMsg> = emptyList(),
+    val asking_seq: Long? = null,
+    /** v1.22：[summary] 那串 markdown 由 daemon 解析好的结果；客户端直接画，不再各自解析 */
+    val checklist: List<ChecklistItem> = emptyList(),
 )
 
-/** 进度清单的一项（[parseChecklist] 解析 `summary` 的一行） */
+/** 进度清单的一项（daemon 解析 `summary` 得到，见 [Session.checklist]） */
 @Serializable data class ChecklistItem(val done: Boolean, val text: String)
-
-/** `- [x] …` / `- [ ] …` 行 → 项；其它行忽略 */
-fun parseChecklist(md: String): List<ChecklistItem> = md.lines().mapNotNull { raw ->
-    val l = raw.trim().trimStart('-', '*').trimStart()
-    val (done, rest) = when {
-        l.startsWith("[x]") || l.startsWith("[X]") -> true to l.substring(3)
-        l.startsWith("[ ]") -> false to l.substring(3)
-        else -> return@mapNotNull null
-    }
-    rest.trim().takeIf { it.isNotEmpty() }?.let { ChecklistItem(done, it) }
-}
 
 @Serializable data class SessionUsage(
     val model: String? = null,
@@ -114,7 +112,21 @@ fun parseChecklist(md: String): List<ChecklistItem> = md.lines().mapNotNull { ra
     val version: String = "", val ssd_mounted: Boolean = false, val project_root: String = "", val uptime_s: Long = 0,
     /** 二进制被重新构建过、跑的还是旧进程：设置页亮「需重启」 */
     val update_pending: Boolean = false,
+    /**
+     * v1.22：**客户端唯一的兼容闸门**（PROTOCOL「版本兼容」）。老 daemon 不给这个字段 → 0，
+     * 小于 [SCHEMA_PROJECT_STATUS] 时项目列表顶上挂降级横幅；不许悄悄退回自己算一套。
+     */
+    val schema: Int = 0,
 )
+
+/** 项目行的 `status` / `title` / `session_id` / `updated_at` 与会话的 `asking_seq` / `checklist` 从这一版起由 daemon 下发 */
+const val SCHEMA_PROJECT_STATUS = 2
+/**
+ * 项目列表的一行。**v1.22 起这一行就是「这个项目此刻的样子」**：状态、代表会话、标题、排序时间
+ * 全由 daemon 算好（PROTOCOL「版本兼容」），客户端只画。此前 mac 取 `updated_at` 最大的会话、
+ * Android 先按 agent 过滤再按「待回复 < 执行中 < 其它」挑，同一个项目在两台设备上显示的标题和
+ * 状态能不一样——那不是重复，是同一个问题三个答案。
+ */
 @Serializable data class Project(
     val path: String,
     val name: String,
@@ -124,6 +136,19 @@ fun parseChecklist(md: String): List<ChecklistItem> = md.lines().mapNotNull { ra
     val session_title: String? = null,
     /** v1.8：置顶（daemon 侧存，三端一起变） */
     val pinned: Boolean = false,
+    /** v1.22：代表这个项目的会话；没有活会话时是最近退出的那个，一个都没有 → null */
+    val session_id: String? = null,
+    /** v1.22：`asking|running|background|active|paused` 五态之一；没有活会话 = `paused`。老 daemon 不给 → 空串 */
+    val status: String = "",
+    /** v1.22：标题回退链（活会话标题 → `session_title` → 目录名）daemon 已走完；老 daemon 不给 → null */
+    val title: String? = null,
+    /** v1.22：排序键——该项目最新一条非终端会话的 `updated_at`（含已退出的），一个会话都没有 → 目录 mtime */
+    val updated_at: String? = null,
+    /**
+     * v1.22：在注册表里。`false` = 在别处 `aaa open` 开出来、注册表没登记但此刻有活会话的目录，
+     * daemon 补的一行——能点开它的会话，但不能 resume / 删项目。老 daemon 不给这类行 → 默认 true。
+     */
+    val registered: Boolean = true,
 )
 /** kind：permission（能替答）| elicitation（MCP 表单，只能去终端） */
 @Serializable data class PermissionPrompt(val kind: String = "permission", val tool_name: String = "", val summary: String = "", val since: String = "")
@@ -195,17 +220,30 @@ fun parseChecklist(md: String): List<ChecklistItem> = md.lines().mapNotNull { ra
  */
 fun cardRunning(c: SessionCard): Boolean = !c.deleted && (c.status == "running" || c.status == "background")
 
+/**
+ * 「在 AAA 里」= 这个会话此刻**还活着**：进程在跑、或者停在输入框等你说话（2026-09-08
+ * 用户拍板的看板分节口径）。`alive`（还在 daemon 池子里）**不算**——daemon 会把已经退出的
+ * 会话留在池子里供回放，真实数据里 318 张卡有 164 张是这种，按 `alive` 切等于没切。真正
+ * 「在 AAA 里」的就是项目列表上那几行。已退出的仍可能点得开（`alive`），那是「打开」的事。
+ */
+fun cardInAaa(c: SessionCard): Boolean = c.alive && c.status != "paused"
+
 /** 看板搜索：标题 / 项目 / 任一清单项含关键字（不分大小写）；空串全匹配 */
 fun cardMatches(c: SessionCard, query: String): Boolean {
     val q = query.trim().lowercase()
     return q.isEmpty() || c.title.lowercase().contains(q) || c.project_name.lowercase().contains(q) || c.items.any { it.text.lowercase().contains(q) }
 }
 
-/** 「已完成」= 暂停且清单全勾完（或没清单）：真正结束的活儿，看板默认收起来 */
-fun cardIsFinished(c: SessionCard): Boolean = c.status == "paused" && c.open == 0
 
-// v1.1 inbox
-@Serializable data class InboxItem(val id: String, val text: String, val created_at: String = "")
+/**
+ * 排着还没送进去的一条（会话的 `queued`）。**这是 Claude Code 自己的队列**：模型在跑时
+ * 往 TUI 里敲的字它自己会排队，这一轮结束再送进去；daemon 从 transcript 读出来下发，
+ * 外加信任对话框弹着时它替用户收下的那几条。
+ *
+ * v1.22 用户拍板「排队发送按照 claude code 逻辑，不需要另外实现这个功能」——AAA 那套
+ * 「发送时按状态分流去 POST /inbox」就此拆掉，客户端只画不管，也没有撤回（那是 TUI 里的事）。
+ */
+@Serializable data class QueuedMsg(val ts: String = "", val text: String = "")
 
 @Serializable data class UploadResult(val saved_path: String)
 
@@ -249,7 +287,6 @@ sealed class EventFrame {
     data object ProjectsChanged : EventFrame()
     data class HealthUpdate(val ssdMounted: Boolean) : EventFrame()
     data class MessagesChanged(val id: String, val lastSeq: Long) : EventFrame()
-    data class InboxChanged(val path: String) : EventFrame()
     /** 套餐用量变了：plan 为 null 表示 daemon 暂时拿不到 */
     data class UsageUpdate(val plan: PlanUsage?) : EventFrame()
     data class Unknown(val type: String) : EventFrame()
@@ -266,7 +303,6 @@ sealed class EventFrame {
                     "projects_changed" -> ProjectsChanged
                     "health" -> HealthUpdate(obj["ssd_mounted"]?.jsonPrimitive?.booleanOrNull ?: true)
                     "messages_changed" -> MessagesChanged(obj["id"]!!.jsonPrimitive.content, obj["last_seq"]?.jsonPrimitive?.longOrNull ?: 0)
-                    "inbox_changed" -> InboxChanged(obj["path"]?.jsonPrimitive?.contentOrNull ?: "")
                     "usage" -> UsageUpdate(obj["plan"]?.takeIf { it !is kotlinx.serialization.json.JsonNull }?.let { ProtocolJson.instance.decodeFromJsonElement(PlanUsage.serializer(), it) })
                     else -> Unknown(t)
                 }
@@ -284,7 +320,18 @@ data class NotifySettings(
 
 object NotifyFilter {
     fun shouldNotify(projectPath: String, settings: NotifySettings): Boolean {
-        if (projectPath in settings.mutedProjects) return false
+        if (pathListContains(settings.mutedProjects, projectPath)) return false
         return settings.doneEnabled
     }
+}
+
+/**
+ * 本机按路径存的集合（黄点 / 静音）里有没有这个项目。**两边都去掉尾斜杠再比**：daemon、
+ * 通知、`/projects` 三处给的同一个目录可能一个带尾斜杠一个不带，裸字符串相等会把 `/p/a` 和
+ * `/p/a/` 当成两个项目——黄点打在带斜杠的那份上，进会话时按不带斜杠的那份去清，清不掉。
+ * 只削尾斜杠，不做前缀匹配：`/p/b` 不是 `/p/bg`。
+ */
+fun pathListContains(list: Set<String>, path: String): Boolean {
+    val p = path.trimEnd('/')
+    return list.any { it.trimEnd('/') == p }
 }

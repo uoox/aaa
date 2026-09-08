@@ -121,7 +121,7 @@ class SettingsStore(private val context: Context) {
 
     suspend fun setProjectMuted(path: String, muted: Boolean) = context.dataStore.edit { p ->
         val cur = p[K.MUTED_PROJECTS] ?: emptySet()
-        p[K.MUTED_PROJECTS] = if (muted) cur + path else cur - path
+        p[K.MUTED_PROJECTS] = if (muted) cur + path else withoutPath(cur, path)
     }
 
     /** 打黄点 / 清黄点。path 为空（老 daemon 没给项目路径）时什么都不做。 */
@@ -129,9 +129,18 @@ class SettingsStore(private val context: Context) {
         if (path.isBlank()) return
         context.dataStore.edit { p ->
             val cur = p[K.UNREAD_PROJECTS] ?: emptySet()
-            val next = if (unread) cur + path else cur - path
+            val next = if (unread) cur + path else withoutPath(cur, path)
             if (next != cur) p[K.UNREAD_PROJECTS] = next
         }
+    }
+
+    /**
+     * 撤下这个项目。**去掉尾斜杠再比**（与 [pathListContains] 同一口径）：以前是裸的 `cur - path`，
+     * 集合里存着 `/p/a/` 而进会话时拿到的是 `/p/a`，黄点就永远消不掉。
+     */
+    private fun withoutPath(cur: Set<String>, path: String): Set<String> {
+        val p = path.trimEnd('/')
+        return cur.filterNot { it.trimEnd('/') == p }.toSet()
     }
 }
 

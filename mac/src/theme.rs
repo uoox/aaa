@@ -171,9 +171,8 @@ impl Palette {
     }
 
     /// xterm-256 调色板（本主题版）：0-15 主题色，16-231 色立方，232-255 灰阶。
-    /// 终端渲染接调色板时用它替换模块级的 `indexed_color`——那一步在另一条
-    /// 改 terminal_view / term 的线上，这里先把接口备好。
-    #[allow(dead_code)]
+    /// 终端渲染（`term.rs`、`ui/terminal_view.rs`）接的就是它。
+    /// （`#[allow(dead_code)]` 于 v1.22 拿掉：接线早就做完了，标记一直留着。）
     pub fn indexed_color(&self, idx: u8) -> u32 {
         match idx {
             0..=15 => self.ansi[idx as usize],
@@ -400,6 +399,50 @@ pub fn human_bytes(n: u64) -> String {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    /// 设计令牌的三端共享向量 `fixtures/tokens.json`（Android 那边有一份对着同一个文件的
+    /// 测试）。「两端 UI 必须一致」这句话此前只写在 PROTOCOL 里，没有任何东西盯着——
+    /// 深色终端前景一边 `#c9d4de` 一边纯白、Claude 主题的 magenta 一边哑紫一边直接等于
+    /// accent，两端各测各的一套，所以谁都没发现。
+    #[test]
+    fn tokens_match_the_shared_fixture() {
+        let fx: serde_json::Value =
+            serde_json::from_str(include_str!("../../fixtures/tokens.json")).unwrap();
+        let hex = |v: u32| format!("#{v:06x}");
+        for (name, p) in [("dark", &DARK), ("claude", &CLAUDE)] {
+            let roles = &fx["themes"][name]["roles"];
+            for (role, got) in [
+                ("bg", p.bg),
+                ("surface", p.surface),
+                ("surface_raised", p.surface_raised),
+                ("edge", p.edge),
+                ("edge_light", p.edge_light),
+                ("ink", p.ink),
+                ("dim", p.dim),
+                ("faint", p.faint),
+                ("term_bg", p.term_bg),
+                ("term_fg", p.term_fg),
+                ("accent", p.accent),
+                ("magenta", p.magenta),
+                ("green", p.green),
+                ("amber", p.amber),
+                ("red", p.red),
+                ("blue", p.blue),
+                ("inset", p.inset),
+            ] {
+                assert_eq!(roles[role].as_str().unwrap(), hex(got), "{name}.{role}");
+            }
+        }
+        // Claude 主题的终端 16 色（gruvbox-light）两端逐色相同——PROTOCOL 明写的。
+        // 深色那 16 色两端**故意不同**（Android 沿用 xterm / termux 默认），见 fixture 的 ansi_note。
+        let want: Vec<String> = fx["themes"]["claude"]["ansi"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(want, CLAUDE.ansi.iter().map(|c| hex(*c)).collect::<Vec<_>>());
+    }
 
     /// 动到进程级 CURRENT 的测试串行跑，别让并行的兄弟测试读到半路换掉的主题
     static CURRENT_LOCK: Mutex<()> = Mutex::new(());

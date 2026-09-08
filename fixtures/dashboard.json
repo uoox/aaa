@@ -1,5 +1,5 @@
 {
-  "note": "三端共享的看板测试向量（2026-09-07）：entries+live 是 daemon 的输入，sessions 是 daemon 必须产出的卡片（顺序即断言），expect 是客户端过滤逻辑（finished / 搜索）必须得到的结果。任何一端改口径先改这里。",
+  "note": "三端共享的看板测试向量（2026-09-07）：entries+live 是 daemon 的输入，sessions 是 daemon 必须产出的卡片（顺序即断言），expect 是客户端过滤逻辑（finished / 搜索 / 2026-09-08 起的「在 AAA 里」分节）必须得到的结果。任何一端改口径先改这里。poolpau 这条是「还在池子里但进程已经退出」（alive 却 paused）——它就是「在 AAA 里」那条线的分水岭，不许删。",
   "entries": [
     {
       "id": "ask",
@@ -117,6 +117,19 @@
       "deleted_at": null,
       "summary": "- [ ] 终端不进看板",
       "last_state": "running"
+    },
+    {
+      "id": "poolpau",
+      "project_path": "/p/blog",
+      "project_name": "Blog",
+      "agent": "claude",
+      "title": "退出了还在池子里",
+      "created_at": "2026-09-06T02:00:00Z",
+      "ended_at": "2026-09-06T06:00:00Z",
+      "exit_code": 0,
+      "deleted_at": null,
+      "summary": "- [ ] 还没做完就退了",
+      "last_state": "exited"
     }
   ],
   "live": {
@@ -135,6 +148,10 @@
     "act": {
       "status": "active",
       "updated_at": "2026-09-07T06:00:00Z"
+    },
+    "poolpau": {
+      "status": "paused",
+      "updated_at": "2026-09-06T13:00:00Z"
     }
   },
   "sessions": [
@@ -214,6 +231,24 @@
       "updated_at": "2026-09-07T06:00:00Z"
     },
     {
+      "id": "poolpau",
+      "title": "退出了还在池子里",
+      "project_name": "Blog",
+      "project_path": "/p/blog",
+      "status": "paused",
+      "alive": true,
+      "deleted": false,
+      "done": 0,
+      "open": 1,
+      "items": [
+        {
+          "done": false,
+          "text": "还没做完就退了"
+        }
+      ],
+      "updated_at": "2026-09-06T13:00:00Z"
+    },
+    {
       "id": "pau",
       "title": "另一台上的活",
       "project_name": "Old",
@@ -288,7 +323,7 @@
   ],
   "expect": {
     "counts": {
-      "open_items": 4
+      "open_items": 5
     },
     "finished": [
       "fin"
@@ -302,9 +337,29 @@
       "run",
       "bg",
       "act",
+      "poolpau",
       "pau",
       "fin",
       "old"
+    ],
+    "in_aaa": [
+      "ask",
+      "run",
+      "bg",
+      "act"
+    ],
+    "not_in_aaa": [
+      "poolpau",
+      "pau",
+      "fin",
+      "old"
+    ],
+    "not_in_aaa_with_deleted": [
+      "poolpau",
+      "pau",
+      "fin",
+      "old",
+      "del"
     ]
   }
 }

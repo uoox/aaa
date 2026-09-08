@@ -6,6 +6,7 @@ mod kit;
 mod messages_view;
 mod mini_input;
 mod modals;
+mod scrollbar;
 mod settings;
 mod stream_fold;
 mod terminal_panel;
@@ -51,9 +52,9 @@ fn page_after_close(current: &Page, closed: &str, open_order: &[String]) -> Page
         .unwrap_or(Page::Home)
 }
 
-/// 存活的项目会话（running / waiting，含 asking）。**exited 会话不进侧栏**——进程没了
-/// 它就只是历史，项目行标「未激活」，点一下即 resume。终端（shell）不是项目会话，
-/// 归终端面板管（PROTOCOL「终端」）。
+/// 会话进程还在（running / waiting，含 asking）。**exited 的不算**——进程没了它就只是
+/// 历史，项目行画成灰的、点一下即 resume。终端（shell）不是项目会话，归终端面板管
+/// （PROTOCOL「终端」）。
 fn is_active(s: &Session) -> bool {
     !s.is_terminal() && s.state != SessionState::Exited
 }
@@ -64,61 +65,23 @@ fn kill_needs_confirm(s: &Session) -> bool {
     s.state == SessionState::Running && !s.asking
 }
 
-/// 项目行的内部状态。**2026-09-08 用户拍板：侧栏不再写状态字**（「激活 / 未激活」这类词
-/// 对着一列项目说不出任何有用的东西）——行首只有一根竖线，颜色说完一切：**蓝 = 在跑**，
-/// **黄 = 跑完了 / 在等你回话且这台机器还没进去看**，**灰 = 已读**。（同一天稍后两次改形：
-/// 先用蓝点替掉转圈动画，再把点换成竖线。）这个枚举因此只剩两个职责：决定线是不是蓝的，
-/// 以及侧栏从上往下的顺序。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RowStatus {
-    Running,
-    Asking,
-    Background,
-    Active,
-    Inactive,
-}
-
-impl RowStatus {
-    fn of(session: Option<&Session>) -> RowStatus {
-        match session {
-            Some(s) if is_active(s) && s.asking => RowStatus::Asking,
-            Some(s) if is_active(s) && s.state == SessionState::Running => RowStatus::Running,
-            Some(s) if is_active(s) && s.background => RowStatus::Background,
-            Some(s) if is_active(s) => RowStatus::Active,
-            _ => RowStatus::Inactive,
-        }
-    }
-
-    /// 蓝点：自己在跑，或后台任务还没回来——都是「它还在动，你不用管」
-    fn running(self) -> bool {
-        matches!(self, RowStatus::Running | RowStatus::Background)
-    }
-
-    /// 同为「没黄点」时侧栏从上往下的优先级；黄点的一律排在它们之前（见 project_rows）。
-    fn rank(self) -> u8 {
-        match self {
-            RowStatus::Asking => 0,
-            RowStatus::Running => 1,
-            RowStatus::Background => 2,
-            RowStatus::Active => 3,
-            RowStatus::Inactive => 4,
-        }
-    }
-
-}
-
 /// 侧栏一行：一个项目（2026-09-06 起单列，不再分「激活 / 未激活」两栏）。
+/// **2026-09-08 用户拍板：侧栏不再写状态字**——行首（后来挪到行尾）只有一根竖线，颜色
+/// 说完一切：**蓝 = 在跑**，**黄 = 跑完了 / 在等你回话且这台机器还没进去看**，**灰 = 已读**。
 #[derive(Debug, Clone)]
 struct ProjectRow {
     path: String,
     title: String,
-    status: RowStatus,
-    /// 存活的项目会话（点行即打开）；None = 未激活，点行 resume
+    /// daemon 给的五态字符串（`model::status_rank` / `status_running`）。v1.22 之前这里是
+    /// 个本地枚举，由会话的 state/asking/background 现推——三端各推一套，同一个项目在
+    /// mac 和手机上能显示成两种状态，所以整条阶梯删掉了。
+    status: String,
+    /// 代表这个项目的会话（按 `Project::session_id` 查得）。**可能是已退出的那一条**：
+    /// 没有活会话时 daemon 给的是最近退出的一个，点它仍是 resume，见 [`ProjectRow::live`]
     session: Option<Session>,
     /// 注册表里的项目；只有会话、没登记的目录为 None（只能看，不能 resume / 删）
     project: Option<Project>,
-    /// 排序键：该项目最新一条会话的 `updated_at`（老 daemon 退到 created_at），
-    /// 没有会话的用目录 mtime。都是 ISO 时间串，字典序即时间序。
+    /// 排序键：daemon 的 `updated_at`（没给就退到目录 mtime）。ISO 时间串，字典序即时间序
     sort_key: String,
     /// 置顶的排在最前（组内仍按 sort_key）
     pinned: bool,
@@ -126,99 +89,89 @@ struct ProjectRow {
     unread: bool,
 }
 
-fn session_updated(s: &Session) -> &str {
-    if !s.updated_at.is_empty() {
-        &s.updated_at
-    } else if !s.created_at.is_empty() {
-        &s.created_at
-    } else {
-        &s.last_output_at
+impl ProjectRow {
+    /// 还活着的那个会话：点行直接打开、行尾给 ✕。`None` = 点行 resume、行尾给「删」。
+    /// `session` 本身可能是已退出的会话（daemon 拿它当代表），死没死是会话自己的
+    /// `state` 说了算——这一条不归五态管，也不随 v1.22 变。
+    fn live(&self) -> Option<&Session> {
+        self.session.as_ref().filter(|s| is_active(s))
     }
 }
 
-/// 项目 × 会话 → 侧栏行，按状态排（待回复 > 执行中 > 已激活 > 未激活），同状态里
-/// 最近更新的在前（同刻按名字稳住）。一个项目一行：
-/// 存活的项目会话代表它（几个同时活着取最近更新的）；退出的会话只贡献排序时间。
-/// 有存活会话但注册表里没有的目录也给一行（别处 `aaa open` 开的），否则它无处可点。
+/// 项目 → 侧栏行。**v1.22：一行的内容全部现成**——标题、五态、代表会话、排序时间都由
+/// daemon 算好放在 `Project` 上（PROTOCOL「版本兼容」），这里只做两件纯本机的事：
+/// 把 `session_id` 换成手里的 `Session` 对象，和按「置顶 > 黄点 > 状态 > 时间」排。
+///
+/// 删掉的旧做法（别再加回来）：① 遍历 `sessions` 按 project_path 挑「最近更新的活会话」
+/// 当代表、顺带算最新时间——Android 挑法不同，两端标题和状态对不上；② 标题回退链
+/// （活会话标题 → session_title → 目录名）自己走一遍；③ 为「有活会话但没登记」的目录
+/// 补一行——daemon 现在自己补（`registered:false`），客户端再补就是两行。
 fn project_rows(projects: &[Project], sessions: &[Session], unread: &[String]) -> Vec<ProjectRow> {
-    let mut rows: Vec<ProjectRow> = Vec::with_capacity(projects.len());
-    let mut seen: HashSet<&str> = HashSet::new();
-    let by_path = |path: &str| -> (Option<&Session>, Option<&str>) {
-        let mut live: Option<&Session> = None;
-        let mut latest: Option<&str> = None;
-        for s in sessions.iter().filter(|s| !s.is_terminal() && s.project_path == path) {
-            let t = session_updated(s);
-            if latest.is_none_or(|l| t > l) {
-                latest = Some(t);
-            }
-            if is_active(s) && live.is_none_or(|l| t > session_updated(l)) {
-                live = Some(s);
-            }
-        }
-        (live, latest)
-    };
-    for p in projects {
-        seen.insert(p.path.as_str());
-        let (live, latest) = by_path(&p.path);
-        // 活着的会话的名字 → daemon 从 agent 存储读出的对话名 → 文件夹名
-        let title = live
-            .map(|s| s.title.clone())
-            .filter(|t| !t.is_empty())
-            .or_else(|| p.session_title.clone().filter(|t| !t.is_empty()))
-            .unwrap_or_else(|| p.name.clone());
-        rows.push(ProjectRow {
+    let mut rows: Vec<ProjectRow> = projects
+        .iter()
+        .map(|p| ProjectRow {
             path: p.path.clone(),
-            title,
-            status: RowStatus::of(live),
-            session: live.cloned(),
-            project: Some(p.clone()),
-            sort_key: latest.unwrap_or(p.mtime.as_str()).to_owned(),
+            title: p
+                .title
+                .clone()
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| p.name.clone()),
+            status: p.status.clone(),
+            session: p
+                .session_id
+                .as_deref()
+                .and_then(|id| sessions.iter().find(|s| s.id == id))
+                .cloned(),
+            // 没登记的目录（别处 `aaa open` 开的）不给 project：resume / 删项目都得有注册表
+            project: p.registered.then(|| p.clone()),
+            sort_key: p
+                .updated_at
+                .clone()
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| p.mtime.clone()),
             pinned: p.pinned,
-            unread: is_muted(unread, &p.path),
-        });
-    }
-    for s in sessions.iter().filter(|s| is_active(s)) {
-        if seen.contains(s.project_path.as_str()) {
-            continue;
-        }
-        seen.insert(s.project_path.as_str());
-        let (live, latest) = by_path(&s.project_path);
-        rows.push(ProjectRow {
-            path: s.project_path.clone(),
-            title: live.map(Session::display_title).unwrap_or_else(|| s.display_title()),
-            status: RowStatus::of(live),
-            session: live.cloned(),
-            project: None,
-            sort_key: latest.unwrap_or("").to_owned(),
-            pinned: false,
-            unread: is_muted(unread, &s.project_path),
-        });
-    }
+            unread: path_list_contains(unread, &p.path),
+        })
+        .collect();
     // 2026-09-08 用户拍板：置顶 > 有黄点 > 在跑 > 其余，同一档里最近更新的在前，同刻按标题稳住。
     // 置顶是自己按的，黄线也挤不掉它；黄线排在蓝线前面——蓝线的还在自己往前走，黄线的那个在等你。
     rows.sort_by(|a, b| {
         b.pinned
             .cmp(&a.pinned)
             .then_with(|| b.unread.cmp(&a.unread))
-            .then_with(|| a.status.rank().cmp(&b.status.rank()))
+            .then_with(|| status_rank(&a.status).cmp(&status_rank(&b.status)))
             .then_with(|| b.sort_key.cmp(&a.sort_key))
             .then_with(|| a.title.cmp(&b.title))
     });
     rows
 }
 
-/// 侧栏行首那一格的宽度。行首永远是一根竖线，这一格只要放得下线 + 一点余白
-const INDICATOR_W: f32 = 12.0;
-/// 行首竖线的粗细与长度（看板卡片同一套）
-pub(super) const MARK_W: f32 = 2.0;
-pub(super) const MARK_H: f32 = 14.0;
+/// 行尾那个时间（2026-09-08 用户：「MacOS 这边也显示出来时间」——Android 项目列表
+/// 一直有，mac 侧栏没有）。口径与 Android 的 `relativeTime` 一字不差：一分钟内「刚刚」，
+/// 一小时内「N 分钟前」，一天内「N 小时前」，再远就是本地时区的 `MM-DD HH:mm`。
+fn relative_time(iso: &str, now: chrono::DateTime<chrono::Local>) -> String {
+    let Ok(t) = chrono::DateTime::parse_from_rfc3339(iso.trim()) else {
+        return String::new();
+    };
+    let secs = (now.timestamp() - t.timestamp()).max(0);
+    match secs {
+        s if s < 60 => "刚刚".to_string(),
+        s if s < 3600 => format!("{} 分钟前", s / 60),
+        s if s < 86_400 => format!("{} 小时前", s / 3600),
+        _ => t.with_timezone(&chrono::Local).format("%m-%d %H:%M").to_string(),
+    }
+}
 
-/// 行首那根竖线的颜色（2026-09-08 用户拍板，先替掉转圈动画、当天又把点换成竖线）：
+/// 这一版客户端要求的 `/health` schema（PROTOCOL「版本兼容」，当前 = 2）：低于它的
+/// daemon 不下发五态 / 标题 / 代表会话，项目列表顶上挂降级横幅。
+const SCHEMA_MIN: u32 = 2;
+
+/// 那根竖线的颜色（2026-09-08 用户拍板，先替掉转圈动画、当天又把点换成竖线）：
 /// **蓝** = 在跑（含后台任务还没回来）；**黄** = 跑完了 / 在等你回话而这台机器还没进去看；
 /// **灰** = 已读，没什么要你操心的。三种情况都是同一根线，行高不随状态跳，也不再有动画
 /// 带着整个侧栏按帧重画。竖线比圆点更贴着行走，一列扫下来是条节奏线而不是一串珠子。
 fn row_mark_color(row: &ProjectRow) -> u32 {
-    if row.status.running() {
+    if status_running(&row.status) {
         theme::blue()
     } else if row.unread {
         theme::amber()
@@ -227,51 +180,11 @@ fn row_mark_color(row: &ProjectRow) -> u32 {
     }
 }
 
-/// 行首竖线本体。看板卡片也用它，所以给了个名字。
-pub(super) fn mark_bar(color: u32) -> gpui::Div {
-    div().flex_none().w(px(MARK_W)).h(px(MARK_H)).rounded(px(MARK_W / 2.)).bg(c(color))
-}
-
-/// 终端那一行的记号：三道横杠（终端 = 一屏文本行）。和项目行的竖线成一对。
-pub(super) fn mark_lines(color: u32) -> gpui::Div {
-    let bar = move || div().w(px(11.)).h(px(1.5)).rounded(px(0.75)).bg(c(color));
-    div().flex().flex_col().gap(px(3.)).child(bar()).child(bar()).child(bar())
-}
-
-/// 行首那一格：记号居中放进固定宽度里，项目行的竖线和终端行的三道杠才对得齐。
-pub(super) fn indicator_slot(mark: gpui::Div) -> gpui::Div {
-    div()
-        .flex_none()
-        .w(px(INDICATOR_W))
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(mark)
-}
-
-/// 侧栏一行的底子：项目行和终端行共用——同一套内边距和圆角，才看得出是平级的。
-pub(super) fn sidebar_row(id: gpui::ElementId) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .flex()
-        .items_center()
-        .gap(px(8.))
-        .px(px(10.))
-        .py(px(5.))
-        .mx(px(6.))
-        .rounded(px(6.))
-        .cursor_pointer()
-}
-
-fn row_indicator(row: &ProjectRow) -> gpui::AnyElement {
-    indicator_slot(mark_bar(row_mark_color(row))).into_any_element()
-}
-
 /// ⌃Tab 循环的候选：存活的项目会话，按侧栏顺序。
 fn cyclable_ids(projects: &[Project], sessions: &[Session]) -> Vec<String> {
     project_rows(projects, sessions, &[])
         .into_iter()
-        .filter_map(|r| r.session.map(|s| s.id))
+        .filter_map(|r| r.live().map(|s| s.id.clone()))
         .collect()
 }
 
@@ -441,6 +354,10 @@ pub struct RootView {
     pub history_input: Entity<MiniInput>,
     /// 看板：显示已删除的
     pub dash_show_deleted: bool,
+    /// 看板：「不在 AAA 里」那一节展开与否（默认折起来，2026-09-08 用户「东西太多了」）
+    pub dash_show_gone: bool,
+    /// 看板的滚动条（瀑布流一屏装不下，滚起来得知道自己在哪儿）
+    dash_scroll: scrollbar::Scrollbar,
     /// 窗口宽度（render 开头刷新；看板按它算瀑布流列数）
     pub win_w: f32,
     /// 每会话的产物 / 改动状态（含各自的拉取节流器）
@@ -489,6 +406,18 @@ impl RootView {
                 }
             }
         });
+        // 一分钟一次的空转重画：侧栏行尾写的是「N 分钟前」，而这个 App 只在 daemon
+        // 有事推过来时重画——整套系统都闲着的时候，那行字会一直停在「刚刚」。
+        // 一分钟一帧的代价可以忽略，时间说的是真话更要紧。
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_secs(60)).await;
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
         // 系统通知点击 → 回到 App、打开那条会话（notify.rs 把会话 id 丢进这条通道）
         let mut clicks = crate::notify::install();
         cx.spawn(async move |this, cx| {
@@ -562,6 +491,8 @@ impl RootView {
             dashboard: Dashboard::default(),
             history_input,
             dash_show_deleted: false,
+            dash_show_gone: false,
+            dash_scroll: scrollbar::Scrollbar::default(),
             win_w: 1200.,
             detail: HashMap::new(),
             new_input,
@@ -686,17 +617,17 @@ impl RootView {
             let sid = id.clone();
             // 新建的视图默认当会话活着；这里立刻用真实状态校准，已退出的会话
             // 里悬着的表单不能是可交互的
-            let (alive, running, perm, created) = self
+            let (alive, running, perm, asking_seq, queued) = self
                 .session(&id)
-                .map(|s| (s.state != SessionState::Exited, s.state == SessionState::Running, s.permission.clone(), s.created_at.clone()))
-                .unwrap_or((false, false, None, String::new()));
+                .map(|s| (s.state != SessionState::Exited, s.state == SessionState::Running, s.permission.clone(), s.asking_seq, s.queued.clone()))
+                .unwrap_or((false, false, None, None, Vec::new()));
             let project_path = self.session(&id).map(|s| s.project_path.clone()).unwrap_or_default();
             self.msg_views
                 .entry(id.clone())
                 .or_insert_with(|| cx.new(|cx| MessagesView::new(sid, net, cx)))
                 .update(cx, |v, cx| {
                     v.set_project_path(project_path);
-                    v.set_session(alive, running, perm, Some(&created), cx);
+                    v.set_session(alive, running, perm, asking_seq, queued.clone(), cx);
                     v.fetch(cx);
                     v.request_focus(cx);
                 });
@@ -730,7 +661,7 @@ impl RootView {
         // 眼皮底下跑完的东西再弹一条只是噪音
         let watching = self.page == Page::Session(new.id.clone()) && cx.active_window().is_some();
         // 详情面板里静音了这个项目：一条都不弹
-        let muted = is_muted(&self.muted_projects, &new.project_path);
+        let muted = path_list_contains(&self.muted_projects, &new.project_path);
         // 标记无论如何都要消耗掉
         let killed_here = self.user_killed.remove(&new.id);
         // 黄点（2026-09-08）：打点的时机和三种通知完全一样——响一声、列表上留一个点，是同一
@@ -783,14 +714,15 @@ impl RootView {
         let alive = session.state != SessionState::Exited;
         let running = session.state == SessionState::Running;
         let perm = session.permission.clone();
-        let created = session.created_at.clone();
+        let asking_seq = session.asking_seq;
+        let queued = session.queued.clone();
         match self.sessions.iter_mut().find(|s| s.id == session.id) {
             Some(slot) => *slot = session,
             None => self.sessions.push(session),
         }
         self.sort_sessions();
         if let Some(v) = self.msg_views.get(&id) {
-            v.update(cx, |v, cx| v.set_session(alive, running, perm, Some(&created), cx));
+            v.update(cx, |v, cx| v.set_session(alive, running, perm, asking_seq, queued.clone(), cx));
         }
         self.sessions_changed(cx);
         cx.notify();
@@ -800,13 +732,13 @@ impl RootView {
     /// 列表里没有的会话按已死处理（对话框随进程一起没了）
     fn sync_msg_alive_all(&self, cx: &mut Context<Self>) {
         for (id, view) in &self.msg_views {
-            let (alive, running, perm, created) = self
+            let (alive, running, perm, asking_seq, queued) = self
                 .sessions
                 .iter()
                 .find(|s| &s.id == id)
-                .map(|s| (s.state != SessionState::Exited, s.state == SessionState::Running, s.permission.clone(), s.created_at.clone()))
-                .unwrap_or((false, false, None, String::new()));
-            view.update(cx, |v, cx| v.set_session(alive, running, perm, Some(&created), cx));
+                .map(|s| (s.state != SessionState::Exited, s.state == SessionState::Running, s.permission.clone(), s.asking_seq, s.queued.clone()))
+                .unwrap_or((false, false, None, None, Vec::new()));
+            view.update(cx, |v, cx| v.set_session(alive, running, perm, asking_seq, queued.clone(), cx));
         }
     }
 
@@ -837,6 +769,19 @@ impl RootView {
             }
         })
         .detach();
+    }
+
+    /// 只管发出去、不看返回体的请求（重命名 / 终止 / 置顶 / 关终端）：四处以前
+    /// 各写一遍同一个 `|_, _: serde_json::Value, _| {}`，那个闭包里没有一个字是
+    /// 某一处独有的。`toast_error` 留着——「删失败只记日志」和「终止失败要弹」
+    /// 是两个不同的决定，不能一起写死。
+    fn spawn_fetch_ignore(
+        &self,
+        fut: impl Future<Output = anyhow::Result<serde_json::Value>> + 'static,
+        toast_error: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.spawn_fetch(fut, |_, _: serde_json::Value, _| {}, toast_error, cx);
     }
 
     pub fn fetch_all(&mut self, cx: &mut Context<Self>) {
@@ -983,7 +928,7 @@ impl RootView {
             p.pinned = pinned;
         }
         let fut = self.net.set_pinned(&path, pinned);
-        self.spawn_fetch(fut, |_, _: serde_json::Value, _| {}, true, cx);
+        self.spawn_fetch_ignore(fut, true, cx);
         cx.notify();
     }
 
@@ -1091,122 +1036,13 @@ impl RootView {
     // 更新的在前）→ 终端一节（同一列里，与项目行平级）。没有大标题、没有总览页
     // ——侧栏本身就是全部导航。
 
+    /// daemon 老到不下发项目状态（`/health` 的 `schema < 2`，PROTOCOL「版本兼容」）。
+    /// `health` 还没到（刚启动 / 断线）时不算过旧——那会儿只是不知道，别先吓人一跳。
+    fn schema_too_old(&self) -> bool {
+        self.health.as_ref().is_some_and(|h| h.schema < SCHEMA_MIN)
+    }
+
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        // ── 项目列表：单列（2026-09-06 用户拍板）──
-        //   行首只有一根竖线：蓝 = 在跑 / 黄 = 未读 / 灰 = 已读（2026-09-08 用户拍板，状态字整套去掉）。
-        //   问题本身不在侧栏画：进消息流，表单原生呈现、原地作答。exited 会话不代表项目
-        //   （点一下 resume）；终端（shell）不在这里（归终端面板）。
-        let rows = project_rows(&self.projects, &self.sessions, &self.unread_projects);
-        let mut list_col = div().flex().flex_col().gap(px(1.));
-        for row in rows {
-            let active = row
-                .session
-                .as_ref()
-                .is_some_and(|s| self.page == Page::Session(s.id.clone()));
-            let status = row.status;
-            let open_session = row.session.as_ref().map(|s| s.id.clone());
-            let open_project = row.project.clone();
-            let kill = row.session.as_ref().map(|s| (s.id.clone(), kill_needs_confirm(s)));
-            let del_path = row.project.as_ref().map(|p| p.path.clone());
-            let pin = row.project.as_ref().map(|p| (p.path.clone(), p.pinned));
-            let indicator = row_indicator(&row);
-            let unread = row.unread;
-            let title = row.title;
-            // 元素 id 用路径而不是序号：排序变了悬停 / 点击态跟着行走，不留在原位
-            let row_id = SharedString::from(format!("sb-proj:{}", row.path));
-            let act_id = SharedString::from(format!("sb-act:{}", row.path));
-            let mut el = sidebar_row(row_id.into())
-                .group("sb-row")
-                // 置顶不挂图标，整行一层淡淡的强调色底就够了（2026-09-08 用户拍板）；
-                // 当前打开的那一行更重，压过置顶底
-                .when(row.pinned && !active, |el| el.bg(ca(theme::accent(), 0.12)))
-                .when(active, |el| el.bg(c(theme::surface_raised())))
-                .hover(|st| st.bg(c(theme::surface_raised())))
-                // 点一下：活着的会话直接进；未激活的 resume（daemon 幂等，找不到旧对话开新的）
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if let Some(id) = &open_session {
-                        this.open_session(id.clone(), cx);
-                    } else if let Some(p) = &open_project {
-                        this.open_project(p, cx);
-                    }
-                }))
-                .child(indicator)
-                .child(
-                    div()
-                        .flex_1()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .whitespace_nowrap()
-                        .text_size(px(12.5))
-                        .text_color(c(if status == RowStatus::Inactive && !unread {
-                            theme::dim()
-                        } else {
-                            theme::ink()
-                        }))
-                        .child(SharedString::from(title)),
-                );
-            // 行尾按钮（非当前行悬停才现身；invisible 连命中盒一起去掉）：
-            // 「顶 / 取消」= 置顶开关（daemon 侧存，三端一起变）；
-            // 活着的 × = 结束会话（只有执行中的才确认，被顺手点掉最伤）；未激活的「删」= 删项目
-            let hover_btn = |id: SharedString| {
-                div()
-                    .id(id)
-                    .flex_none()
-                    .px(px(3.))
-                    .rounded(px(4.))
-                    .text_size(px(10.))
-                    .text_color(c(theme::faint()))
-                    .when(!active, |el| el.invisible().group_hover("sb-row", |st| st.visible()))
-            };
-            if let Some((pin_path, pinned)) = pin {
-                el = el.child(
-                    hover_btn(SharedString::from(format!("sb-pin:{}", row.path)))
-                        .hover(|st| st.text_color(c(theme::accent())).bg(c(theme::edge_light())))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.set_pinned(pin_path.clone(), !pinned, cx);
-                        }))
-                        .child(if pinned { "取消顶" } else { "顶" }),
-                );
-            }
-            let button = div()
-                .id(act_id)
-                .flex_none()
-                .px(px(3.))
-                .rounded(px(4.))
-                .text_size(px(10.))
-                .text_color(c(theme::faint()))
-                .hover(|st| st.text_color(c(theme::red())).bg(c(theme::edge_light())))
-                .when(!active, |el| el.invisible().group_hover("sb-row", |st| st.visible()));
-            if let Some((id_close, confirm)) = kill {
-                el = el.child(
-                    button
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.request_kill(id_close.clone(), confirm, cx);
-                        }))
-                        .child("✕"),
-                );
-            } else if let Some(del_path) = del_path {
-                el = el.child(
-                    button
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.modal = Modal::DeleteConfirm {
-                                paths: vec![del_path.clone()],
-                                report: None,
-                                busy: false,
-                            };
-                            cx.notify();
-                        }))
-                        .child("删"),
-                );
-            }
-            list_col = list_col.child(el);
-        }
-        // 终端与对话同级（2026-09-08 用户拍板）：终端不再是侧栏底部通往标签页的
-        // 一个入口，而是接着项目行排在同一列里，点一行就是那一个终端。
-        list_col = list_col.child(self.render_terminal_rows(cx));
         let (conn_color, conn_text) = match self.conn {
             ConnState::Connected => (
                 theme::green(),
@@ -1230,39 +1066,8 @@ impl RootView {
             .flex_col()
             .overflow_hidden() // 拖窄时标题按 ellipsis 收，不许挤出侧栏
             .bg(c(theme::surface()))
-            // 新建项目就是一个输入框：字即文件夹名，回车或 ＋ 创建；⌘N 把光标放进来
-            .child(
-                div()
-                    .mt(px(10.))
-                    .mb(px(4.))
-                    .mx(px(8.))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .child(div().flex_1().min_w(px(0.)).child(self.new_input.clone()))
-                    .child(
-                        div()
-                            .id("sb-new")
-                            .flex_none()
-                            .h(px(28.))
-                            .w(px(28.))
-                            .rounded(px(6.))
-                            .border_1()
-                            .border_color(c(theme::edge_light()))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .cursor_pointer()
-                            .hover(|st| st.bg(c(theme::surface_raised())).border_color(c(theme::accent())))
-                            .on_click(cx.listener(|this, _, _, cx| this.create_project(cx)))
-                            .child(
-                                div()
-                                    .text_size(px(14.))
-                                    .text_color(c(if self.creating { theme::faint() } else { theme::accent() }))
-                                    .child(if self.creating { "…" } else { "＋" }),
-                            ),
-                    ),
-            )
+            .child(self.render_new_project_row(cx))
+            .when(self.schema_too_old(), |el| el.child(self.render_schema_banner()))
             .child(
                 div()
                     .id("sb-scroll")
@@ -1270,51 +1075,241 @@ impl RootView {
                     .min_h(px(0.))
                     .overflow_y_scroll()
                     .pt(px(4.))
-                    .child(list_col),
+                    .child(self.render_sidebar_list(cx)),
             )
             // 会话日志入口
             .child(self.render_history_entry(cx))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(7.))
-                    .px(px(16.))
-                    .py(px(9.))
-                    .border_t_1()
-                    .border_color(c(theme::edge()))
-                    .child(dot(conn_color))
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_size(px(11.))
-                            .font_family("Menlo")
-                            .text_color(c(theme::dim()))
-                            .child(SharedString::from(conn_text)),
-                    )
-                    .child(
-                        div()
-                            .id("sb-settings")
-                            .cursor_pointer()
-                            .text_size(px(13.))
-                            .text_color(if self.page == Page::Settings {
-                                c(theme::accent())
-                            } else {
-                                c(theme::dim())
-                            })
-                            .hover(|st| st.text_color(c(theme::accent())))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.page = Page::Settings;
-                                cx.notify();
-                            }))
-                            .child("⚙"),
-                    ),
-            )
+            .child(self.render_sidebar_footer(conn_color, conn_text, cx))
             // 套餐用量：最底下两行小字（没有套餐信息就整块不画）
             .when_some(self.render_plan_usage(), |el, block| el.child(block))
     }
 
-    /// 侧栏右边缘的拖拽把手：兼作原来的分隔线，所以侧栏本身不再画 border_r。
+    /// 侧栏主体那一列：项目行一条条排下来，终端行接在同一列后面。
+    ///
+    /// ── 项目列表：单列（2026-09-06 用户拍板）──
+    ///   行首只有一根竖线：蓝 = 在跑 / 黄 = 未读 / 灰 = 已读（2026-09-08 用户拍板，状态字整套去掉）。
+    ///   问题本身不在侧栏画：进消息流，表单原生呈现、原地作答。exited 会话不代表项目
+    ///   （点一下 resume）；终端（shell）不在这里（归终端面板）。
+    fn render_sidebar_list(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let rows = project_rows(&self.projects, &self.sessions, &self.unread_projects);
+        let now = chrono::Local::now();
+        let mut list_col = div().flex().flex_col().gap(px(1.));
+        for row in rows {
+            list_col = list_col.child(self.render_project_row(row, now, cx));
+        }
+        // 终端与对话同级（2026-09-08 用户拍板）：终端不再是侧栏底部通往标签页的
+        // 一个入口，而是接着项目行排在同一列里，点一行就是那一个终端。
+        list_col.child(self.render_terminal_rows(cx))
+    }
+
+    /// 侧栏的一个项目行：标题 + 行尾按钮（悬停才现身）+ 更新时间 + 那根竖线。
+    fn render_project_row(
+        &self,
+        row: ProjectRow,
+        now: chrono::DateTime<chrono::Local>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        // 代表会话可能是已退出的那一条（daemon 在没有活会话时给的就是它）：
+        // 点它 resume、行尾给「删」，一如既往——所以这几处一律走 live()
+        let active = row
+            .live()
+            .is_some_and(|s| self.page == Page::Session(s.id.clone()));
+        // 灰标题 = 暂停（没有活会话）且没有黄点
+        let dim_title = row.status == "paused" && !row.unread;
+        let open_session = row.live().map(|s| s.id.clone());
+        let open_project = row.project.clone();
+        let kill = row.live().map(|s| (s.id.clone(), kill_needs_confirm(s)));
+        let del_path = row.project.as_ref().map(|p| p.path.clone());
+        let pin = row.project.as_ref().map(|p| (p.path.clone(), p.pinned));
+        let mark = row_mark_color(&row);
+        let time = relative_time(&row.sort_key, now);
+        let title = row.title;
+        // 元素 id 用路径而不是序号：排序变了悬停 / 点击态跟着行走，不留在原位
+        let row_id = SharedString::from(format!("sb-proj:{}", row.path));
+        let act_id = SharedString::from(format!("sb-act:{}", row.path));
+        let mut el = sidebar_row(row_id.into())
+            .group("sb-row")
+            // 置顶不挂图标，整行一层淡淡的强调色底就够了（2026-09-08 用户拍板）；
+            // 当前打开的那一行更重，压过置顶底
+            .when(row.pinned && !active, |el| el.bg(ca(theme::accent(), 0.12)))
+            .when(active, |el| el.bg(c(theme::surface_raised())))
+            .hover(|st| st.bg(c(theme::surface_raised())))
+            // 点一下：活着的会话直接进；未激活的 resume（daemon 幂等，找不到旧对话开新的）
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if let Some(id) = &open_session {
+                    this.open_session(id.clone(), cx);
+                } else if let Some(p) = &open_project {
+                    this.open_project(p, cx);
+                }
+            }))
+            .child(
+                div()
+                    .flex_1()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .text_size(px(12.5))
+                    .text_color(c(if dim_title { theme::dim() } else { theme::ink() }))
+                    .child(SharedString::from(title)),
+            );
+        // 行尾按钮（非当前行悬停才现身；invisible 连命中盒一起去掉）：
+        // 「顶 / 取消」= 置顶开关（daemon 侧存，三端一起变）；
+        // 活着的 × = 结束会话（只有执行中的才确认，被顺手点掉最伤）；未激活的「删」= 删项目
+        if let Some((pin_path, pinned)) = pin {
+            el = el.child(
+                row_btn(SharedString::from(format!("sb-pin:{}", row.path)), active)
+                    .hover(|st| st.text_color(c(theme::accent())).bg(c(theme::edge_light())))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.set_pinned(pin_path.clone(), !pinned, cx);
+                    }))
+                    .child(if pinned { "取消顶" } else { "顶" }),
+            );
+        }
+        let button = row_btn(act_id, active)
+            .hover(|st| st.text_color(c(theme::red())).bg(c(theme::edge_light())));
+        if let Some((id_close, confirm)) = kill {
+            el = el.child(
+                button
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.request_kill(id_close.clone(), confirm, cx);
+                    }))
+                    .child("✕"),
+            );
+        } else if let Some(del_path) = del_path {
+            el = el.child(
+                button
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.modal = Modal::DeleteConfirm {
+                            paths: vec![del_path.clone()],
+                            report: None,
+                            busy: false,
+                        };
+                        cx.notify();
+                    }))
+                    .child("删"),
+            );
+        }
+        // 行尾（2026-09-08 用户拍板）：更新时间 + 那根竖线。时间是「这个项目上一次
+        // 有动静」，和线说的是同一件事的两面，所以并排放在右边同一处
+        if !time.is_empty() {
+            el = el.child(
+                div()
+                    .flex_none()
+                    .text_size(px(10.5))
+                    .text_color(c(theme::faint()))
+                    .child(SharedString::from(time)),
+            );
+        }
+        el.child(mark_bar(mark))
+    }
+
+    /// 侧栏顶上的新建项目行：一个输入框（字即文件夹名，回车或 ＋ 创建；⌘N 把光标放进来）
+    fn render_new_project_row(&self, cx: &mut Context<Self>) -> gpui::Div {
+        div()
+            .mt(px(10.))
+            .mb(px(4.))
+            .mx(px(8.))
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .child(div().flex_1().min_w(px(0.)).child(self.new_input.clone()))
+            .child(
+                div()
+                    .id("sb-new")
+                    .flex_none()
+                    .h(px(28.))
+                    .w(px(28.))
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(c(theme::edge_light()))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .hover(|st| st.bg(c(theme::surface_raised())).border_color(c(theme::accent())))
+                    .on_click(cx.listener(|this, _, _, cx| this.create_project(cx)))
+                    .child(
+                        div()
+                            .text_size(px(14.))
+                            .text_color(c(if self.creating { theme::faint() } else { theme::accent() }))
+                            .child(if self.creating { "…" } else { "＋" }),
+                    ),
+            )
+    }
+
+    /// schema 闸门（PROTOCOL「版本兼容」）：老 daemon 不下发项目状态，客户端
+    /// **不保留第二套算法**——留着就等于把 v1.22 刚删掉的分歧又养回来。
+    /// 所以这里只说实话：列表照画（灰线、标题退到目录名），顶上明写「不可用」。
+    fn render_schema_banner(&self) -> gpui::Div {
+        div()
+            .flex_none()
+            .mx(px(6.))
+            .mb(px(4.))
+            .px(px(8.))
+            .py(px(5.))
+            .rounded(px(6.))
+            .bg(ca(theme::amber(), 0.1))
+            .border_1()
+            .border_color(ca(theme::amber(), 0.4))
+            .text_size(px(11.))
+            .text_color(c(theme::amber()))
+            .child(SharedString::from(format!(
+                "daemon 版本过旧（v{}），项目状态不可用 —— 请更新 daemon",
+                self.health
+                    .as_ref()
+                    .map(|h| h.version.as_str())
+                    .filter(|v| !v.is_empty())
+                    .unwrap_or("?")
+            )))
+    }
+
+    /// 侧栏最底下那条：连接状态点 + daemon 版本 + ⚙ 设置入口
+    fn render_sidebar_footer(
+        &self,
+        conn_color: u32,
+        conn_text: String,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(7.))
+            .px(px(16.))
+            .py(px(9.))
+            .border_t_1()
+            .border_color(c(theme::edge()))
+            .child(dot(conn_color))
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(px(11.))
+                    .font_family("Menlo")
+                    .text_color(c(theme::dim()))
+                    .child(SharedString::from(conn_text)),
+            )
+            .child(
+                div()
+                    .id("sb-settings")
+                    .cursor_pointer()
+                    .text_size(px(13.))
+                    .text_color(if self.page == Page::Settings {
+                        c(theme::accent())
+                    } else {
+                        c(theme::dim())
+                    })
+                    .hover(|st| st.text_color(c(theme::accent())))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.page = Page::Settings;
+                        cx.notify();
+                    }))
+                    .child("⚙"),
+            )
+    }
+
+
     fn render_sidebar_resizer(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let dragging = self.sidebar_drag.is_some();
         div()
@@ -1437,30 +1432,8 @@ impl RootView {
                         )
                         .when_some(resume_part, |bar, t| bar.child(SharedString::from(t)));
 
-                    // 消息流 ⇄ 终端 切换（shell 无消息流；探明不支持后隐藏）
-                    let msg_supported = self
-                        .msg_views
-                        .get(&sid)
-                        .map(|v| v.read(cx).supported)
-                        .unwrap_or(None);
-                    if s.agent != "shell" && msg_supported != Some(false) {
-                        let on = self.msg_mode_active(&sid, cx);
-                        bar = bar.child(
-                            div()
-                                .id("view-toggle")
-                                .px(px(6.))
-                                .rounded(px(4.))
-                                .cursor_pointer()
-                                .text_color(c(if on { theme::accent() } else { theme::faint() }))
-                                .hover(|st| st.bg(c(theme::surface_raised())))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.toggle_msg_mode(cx);
-                                }))
-                                .child(if on { "⌘E 终端" } else { "⌘E 消息流" }),
-                        );
-                    }
-
-                    // 会话操作
+                    // 状态栏右侧那一排文字按钮（视图切换 + 会话操作）：一个样式，
+                    // 只有字和颜色不同
                     let act = |id: &'static str, label: &'static str, color: u32| {
                         div()
                             .id(id)
@@ -1471,6 +1444,28 @@ impl RootView {
                             .hover(|st| st.bg(c(theme::surface_raised())))
                             .child(label)
                     };
+
+                    // 消息流 ⇄ 终端 切换（shell 无消息流；探明不支持后隐藏）
+                    let msg_supported = self
+                        .msg_views
+                        .get(&sid)
+                        .map(|v| v.read(cx).supported)
+                        .unwrap_or(None);
+                    if s.agent != "shell" && msg_supported != Some(false) {
+                        let on = self.msg_mode_active(&sid, cx);
+                        bar = bar.child(
+                            act(
+                                "view-toggle",
+                                if on { "⌘E 终端" } else { "⌘E 消息流" },
+                                if on { theme::accent() } else { theme::faint() },
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.toggle_msg_mode(cx);
+                            })),
+                        );
+                    }
+
+                    // 会话操作
                     let sid_rename = sid.clone();
                     let sid_kill = sid.clone();
                     let sid_del = sid.clone();
@@ -1685,6 +1680,27 @@ mod tests {
         v.iter().map(|s| s.to_string()).collect()
     }
 
+    /// 行尾那个时间（2026-09-08 用户「MacOS 这边也显示出来时间」）与 Android
+    /// `relativeTime` 同口径：刚刚 / N 分钟前 / N 小时前 / MM-DD HH:mm
+    #[test]
+    fn row_time_reads_like_android() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-08T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Local);
+        assert_eq!(relative_time("2026-09-08T11:59:31Z", now), "刚刚");
+        assert_eq!(relative_time("2026-09-08T11:30:00Z", now), "30 分钟前");
+        assert_eq!(relative_time("2026-09-08T09:00:00Z", now), "3 小时前");
+        // 超过一天写日期，按**本地**时区（跑在哪个时区都得对，所以期望值也让 chrono 算）
+        let far = "2026-09-05T09:00:00Z";
+        let local = chrono::DateTime::parse_from_rfc3339(far).unwrap().with_timezone(&chrono::Local);
+        assert_eq!(relative_time(far, now), local.format("%m-%d %H:%M").to_string());
+        // 解析不了 / 没有时间戳就整块不画
+        assert_eq!(relative_time("", now), "");
+        assert_eq!(relative_time("不是时间", now), "");
+        // daemon 的时钟稍微快一点也不该写成负数
+        assert_eq!(relative_time("2026-09-08T12:00:30Z", now), "刚刚");
+    }
+
     #[test]
     fn closing_other_tab_does_not_switch_page() {
         let cur = Page::Session("s_1".into());
@@ -1817,160 +1833,128 @@ mod tests {
         assert_eq!(tie_ids, ids(&["t_a", "t_b"]));
     }
 
-    fn proj(path: &str, name: &str, mtime: &str, title: Option<&str>) -> Project {
+    /// 造一行 daemon 已经算好的项目（v1.22 的 `/projects` 一行）
+    fn proj(path: &str, title: &str, status: &str, updated_at: &str) -> Project {
         Project {
             path: path.into(),
-            name: name.into(),
-            mtime: mtime.into(),
-            session_title: title.map(str::to_owned),
+            name: path.rsplit('/').next().unwrap_or(path).into(),
+            title: Some(title.into()),
+            status: status.into(),
+            updated_at: Some(updated_at.into()),
             ..Default::default()
         }
     }
 
+    /// 一行的内容整块来自 daemon：标题、五态、排序时间、代表会话都不再自己推
     #[test]
-    fn rows_are_one_per_project_ordered_by_status_then_update() {
+    fn rows_take_everything_from_the_daemon_row() {
         use SessionState::*;
-        let projects = vec![
-            proj("/p/a", "a", "2026-09-01T00:00:00Z", Some("旧对话")),
-            proj("/p/b", "b", "2026-09-05T00:00:00Z", None),
-            proj("/p/c", "c", "2026-09-02T00:00:00Z", None),
-        ];
-        let mut run = tsess("a1", "claude", Running, "/p/a", "2026-09-03T00:00:00Z");
-        run.updated_at = "2026-09-04T00:00:00Z".into();
-        run.title = "改登录页".into();
-        // 早开、后来又退出的会话只贡献排序时间，不代表项目
-        let mut old = tsess("a0", "claude", Exited, "/p/a", "2026-09-02T00:00:00Z");
-        old.updated_at = "2026-09-06T00:00:00Z".into();
-        let mut ask = tsess("c1", "claude", Waiting, "/p/c", "2026-09-03T12:00:00Z");
-        ask.updated_at = "2026-09-03T12:00:00Z".into();
-        ask.asking = true;
-        let shell = tsess("t1", "shell", Running, "/p/b", "2026-09-06T12:00:00Z");
-        let rows = project_rows(&projects, &[run.clone(), old, ask, shell], &[]);
-        let got: Vec<(&str, RowStatus, &str)> =
-            rows.iter().map(|r| (r.path.as_str(), r.status, r.title.as_str())).collect();
-        assert_eq!(
-            got,
-            vec![
-                // 2026-09-07 用户拍板：待回复 > 执行中 > 已激活 > 未激活，时间只在同状态里比
-                // c：在问 = 待回复（不选就卡住），哪怕它 03 最旧也排第一
-                ("/p/c", RowStatus::Asking, "c"),
-                // a：最新一条会话（退出的那条）06 更新；活着的会话代表它
-                ("/p/a", RowStatus::Running, "改登录页"),
-                // b：只有终端——终端不算，按目录 mtime 05
-                ("/p/b", RowStatus::Inactive, "b"),
-            ]
-        );
-        assert_eq!(rows[1].session.as_ref().map(|s| s.id.as_str()), Some("a1"));
-        assert!(rows[2].session.is_none(), "终端不代表项目");
-        // ⌃Tab 只在存活的项目会话里转，顺序跟侧栏
-        assert_eq!(cyclable_ids(&projects, &[run, ]), ids(&["a1"]));
+        let mut p = proj("/p/a", "改登录页", "running", "2026-09-04T00:00:00Z");
+        p.session_id = Some("a1".into());
+        let run = tsess("a1", "claude", Running, "/p/a", "2026-09-03T00:00:00Z");
+        // 同项目下别的会话（已退出的、终端）不再参与任何判定：daemon 已经挑好代表了
+        let old = tsess("a0", "claude", Exited, "/p/a", "2026-09-02T00:00:00Z");
+        let shell = tsess("t1", "shell", Running, "/p/a", "2026-09-06T12:00:00Z");
+        let rows = project_rows(&[p], &[run, old, shell], &[]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].title, "改登录页");
+        assert_eq!(rows[0].status, "running");
+        assert_eq!(rows[0].sort_key, "2026-09-04T00:00:00Z");
+        assert_eq!(rows[0].live().map(|s| s.id.as_str()), Some("a1"));
+        assert_eq!(cyclable_ids(&[rows[0].project.clone().unwrap()], &[rows[0].session.clone().unwrap()]), ids(&["a1"]));
     }
 
+    /// 代表会话可能是**已退出**的那一条（daemon 在没有活会话时给最近退出的一个）：
+    /// 点它仍是 resume、行尾仍是「删」，所以 `live()` 只认还活着的
     #[test]
-    fn rows_fall_back_when_daemon_has_no_updated_at() {
+    fn exited_representative_session_is_not_live() {
         use SessionState::*;
-        let projects = vec![proj("/p/a", "a", "2026-09-01T00:00:00Z", None), proj("/p/b", "b", "2026-09-01T00:00:00Z", None)];
-        // 老 daemon：updated_at 为空 → created_at；b 后开 → 在前
-        let a = tsess("a1", "claude", Waiting, "/p/a", "2026-09-02T00:00:00Z");
-        let b = tsess("b1", "claude", Waiting, "/p/b", "2026-09-03T00:00:00Z");
-        let rows = project_rows(&projects, &[a, b], &[]);
-        assert_eq!(rows.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(), ["/p/b", "/p/a"]);
-        assert!(rows.iter().all(|r| r.status == RowStatus::Active));
-        // 没登记的目录里有活会话：也给一行，但没有 project（不能删 / resume）
-        let stray = tsess("s1", "claude", Running, "/elsewhere/x", "2026-09-09T00:00:00Z");
-        let rows = project_rows(&projects, &[stray], &[]);
-        assert_eq!(rows[0].path, "/elsewhere/x");
-        assert!(rows[0].project.is_none());
-        assert_eq!(rows[0].status, RowStatus::Running);
-        // 未激活的标题：daemon 读出的对话名，没有才是文件夹名
-        let rows = project_rows(&[proj("/p/z", "z", "", Some("上次聊的"))], &[], &[]);
-        assert_eq!(rows[0].title, "上次聊的");
-        assert_eq!(rows[0].status, RowStatus::Inactive);
-        // 置顶的排最前，哪怕它最久没动、状态还更靠后
-        let mut old = proj("/p/old", "old", "2026-01-01T00:00:00Z", None);
-        old.pinned = true;
-        let fresh = proj("/p/new", "new", "2026-09-01T00:00:00Z", None);
-        let ask = tsess("n1", "claude", Waiting, "/p/new", "2026-09-09T00:00:00Z");
-        let mut ask = ask;
-        ask.asking = true;
-        let rows = project_rows(&[fresh, old], &[ask], &[]);
-        assert_eq!(rows.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(), ["/p/old", "/p/new"]);
-        assert!(rows[0].pinned && !rows[1].pinned);
-        assert_eq!(rows[1].status, RowStatus::Asking, "置顶是自己按的，待回复也挤不掉它");
+        let mut p = proj("/p/a", "上次聊的", "paused", "2026-09-04T00:00:00Z");
+        p.session_id = Some("a0".into());
+        let gone = tsess("a0", "claude", Exited, "/p/a", "2026-09-02T00:00:00Z");
+        let rows = project_rows(&[p.clone()], &[gone.clone()], &[]);
+        assert!(rows[0].session.is_some(), "回放还要用它");
+        assert!(rows[0].live().is_none(), "已退出：点行 resume，不是打开");
+        // 会话根本不在手里（还没拉到 / 已被 GC）：查不到就是 None，不猜
+        let rows = project_rows(&[p], &[], &[]);
+        assert!(rows[0].session.is_none());
+        // kill_needs_confirm 仍看会话自己的 state，与五态无关
+        assert!(!kill_needs_confirm(&gone));
     }
 
-    /// 2026-09-08 用户拍板：置顶 > 有黄点 > 在跑 > 其余
+    /// 没登记的目录（别处 `aaa open` 开的）daemon 自己补一行，客户端只是不给它
+    /// resume / 删项目——**不再自己为「有会话没登记」补行**，那会补出重复的一行
     #[test]
-    fn unread_rows_float_above_running_ones_but_not_above_pinned() {
+    fn unregistered_rows_come_from_daemon_and_cannot_be_deleted() {
         use SessionState::*;
-        let run_p = proj("/p/run", "run", "2026-09-01T00:00:00Z", None);
-        let unread_p = proj("/p/unread", "unread", "2026-09-01T00:00:00Z", None);
-        let mut top_p = proj("/p/top", "top", "2026-09-01T00:00:00Z", None);
-        top_p.pinned = true;
-        let run = tsess("s1", "claude", Running, "/p/run", "2026-09-09T00:00:00Z");
-        let done = tsess("s2", "claude", Waiting, "/p/unread", "2026-09-01T00:00:00Z");
-        let projects = [run_p, unread_p, top_p];
-        let rows = project_rows(&projects, &[run.clone(), done.clone()], &["/p/unread".to_string()]);
-        assert_eq!(rows.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(), ["/p/top", "/p/unread", "/p/run"]);
-        assert!(rows[1].unread && !rows[2].unread);
-        // 没有黄点时顺序回到「在跑的在前」
-        let rows = project_rows(&projects, &[run, done], &[]);
-        assert_eq!(rows.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(), ["/p/top", "/p/run", "/p/unread"]);
+        let mut stray = proj("/elsewhere/x", "在别处开的", "running", "2026-09-09T00:00:00Z");
+        stray.registered = false;
+        stray.session_id = Some("s1".into());
+        let sess = tsess("s1", "claude", Running, "/elsewhere/x", "2026-09-09T00:00:00Z");
+        let rows = project_rows(&[stray], &[sess.clone()], &[]);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].project.is_none(), "没注册表就没有 resume / 删项目");
+        assert!(rows[0].live().is_some(), "但点得开");
+        // 列表里没有这个目录时，客户端不会凭一个活会话变出一行来
+        assert!(project_rows(&[], &[sess], &[]).is_empty());
     }
 
-    /// 2026-09-07 用户拍板的从上往下：待回复 > 运行 > 后台 > 激活 > 暂停
+    /// 老 daemon（schema < 2）不给 title / updated_at：退到目录名和目录 mtime。
+    /// 状态是空串 → 排最后、线是灰的（横幅另说，见 schema_too_old）
     #[test]
-    fn status_decides_the_order_before_time() {
-        use SessionState::*;
-        let projects: Vec<Project> = ["ask", "run", "bg", "act", "idle"]
-            .iter()
-            .enumerate()
-            // 目录 mtime 递增：只按时间排的话顺序会正好反过来
-            .map(|(i, n)| proj(&format!("/p/{n}"), n, &format!("2026-09-0{}T00:00:00Z", i + 1), None))
-            .collect();
-        let mut ask = tsess("s_ask", "claude", Waiting, "/p/ask", "2026-09-01T00:00:00Z");
-        ask.asking = true;
-        let run = tsess("s_run", "claude", Running, "/p/run", "2026-09-02T00:00:00Z");
-        let mut bg = tsess("s_bg", "claude", Waiting, "/p/bg", "2026-09-02T12:00:00Z");
-        bg.background = true;
-        let act = tsess("s_act", "claude", Waiting, "/p/act", "2026-09-03T00:00:00Z");
-        let rows = project_rows(&projects, &[ask, run, bg, act], &[]);
-        assert_eq!(
-            rows.iter().map(|r| (r.status, r.path.as_str())).collect::<Vec<_>>(),
-            vec![
-                (RowStatus::Asking, "/p/ask"),
-                (RowStatus::Running, "/p/run"),
-                (RowStatus::Background, "/p/bg"),
-                (RowStatus::Active, "/p/act"),
-                (RowStatus::Inactive, "/p/idle"),
-            ]
-        );
-        // 同状态里仍是最近更新的在前
-        let a = tsess("s_a", "claude", Running, "/p/ask", "2026-09-08T00:00:00Z");
-        let b = tsess("s_b", "claude", Running, "/p/run", "2026-09-09T00:00:00Z");
-        let rows = project_rows(&projects[..2], &[a, b], &[]);
-        assert_eq!(rows.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(), ["/p/run", "/p/ask"]);
+    fn falls_back_to_dir_name_and_mtime_when_fields_missing() {
+        let bare = Project {
+            path: "/p/bare".into(),
+            name: "bare".into(),
+            mtime: "2026-09-03T00:00:00Z".into(),
+            ..Default::default()
+        };
+        let rows = project_rows(&[bare], &[], &[]);
+        assert_eq!(rows[0].title, "bare");
+        assert_eq!(rows[0].sort_key, "2026-09-03T00:00:00Z");
+        assert!(!status_running(&rows[0].status));
+        // title 给了空串也退回目录名（空标题的行等于没有行）
+        let mut empty = proj("/p/x", "", "paused", "");
+        empty.name = "x".into();
+        empty.mtime = "2026-09-01T00:00:00Z".into();
+        let rows = project_rows(&[empty], &[], &[]);
+        assert_eq!((rows[0].title.as_str(), rows[0].sort_key.as_str()), ("x", "2026-09-01T00:00:00Z"));
     }
 
+    /// 三端共享向量 fixtures/projects.json：同一份 `/projects` + 同一份本机黄点，
+    /// 两端必须排出同一个顺序、同一批蓝线黄线。此前两端各测各的，所以谁都没发现
+    /// 两边推出来的标题和状态不一样。
     #[test]
-    fn row_status_and_running() {
-        use SessionState::*;
-        assert_eq!(RowStatus::of(Some(&sess("a", Running, false, ""))), RowStatus::Running);
-        // 在问：哪怕屏幕还在变也是「待回复」
-        assert_eq!(RowStatus::of(Some(&sess("a", Running, true, ""))), RowStatus::Asking);
-        assert_eq!(RowStatus::of(Some(&sess("a", Waiting, true, ""))), RowStatus::Asking);
-        assert_eq!(RowStatus::of(Some(&sess("a", Waiting, false, ""))), RowStatus::Active);
-        assert_eq!(RowStatus::of(Some(&sess("a", Exited, false, ""))), RowStatus::Inactive);
-        assert_eq!(RowStatus::of(None), RowStatus::Inactive);
-        // 2026-09-08：侧栏不再写状态字，枚举只管「竖线是不是蓝的」和排序
-        assert!(RowStatus::Running.running() && RowStatus::Background.running());
-        assert!(!RowStatus::Asking.running() && !RowStatus::Active.running() && !RowStatus::Inactive.running());
-        // 后台：waiting 且 background 标志；在问的仍是待回复
-        let mut bg = sess("b", SessionState::Waiting, false, "2026-09-02T12:00:00Z");
-        bg.background = true;
-        assert_eq!(RowStatus::of(Some(&bg)), RowStatus::Background);
-        bg.asking = true;
-        assert_eq!(RowStatus::of(Some(&bg)), RowStatus::Asking);
+    fn shared_fixture_project_rows() {
+        let fx: serde_json::Value =
+            serde_json::from_str(include_str!("../../../fixtures/projects.json")).unwrap();
+        let projects: Vec<Project> = serde_json::from_value(fx["projects"].clone()).unwrap();
+        let unread: Vec<String> = serde_json::from_value(fx["unread"].clone()).unwrap();
+        let strs = |k: &str| -> Vec<String> {
+            fx["expect"][k].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect()
+        };
+        // 会话一个都没给：行只靠 daemon 那几个字段就能画全
+        let rows = project_rows(&projects, &[], &unread);
+        assert_eq!(rows.iter().map(|r| r.path.clone()).collect::<Vec<_>>(), strs("order"));
+        // 蓝线 = status ∈ {running, background}；asking 不蓝，那是在等你
+        let blue = strs("blue");
+        for r in &rows {
+            assert_eq!(status_running(&r.status), blue.contains(&r.path), "蓝线: {}", r.path);
+        }
+        // 黄线 = 本机 unread 集合里有它（路径去尾斜杠比较）
+        let yellow = strs("yellow");
+        for r in &rows {
+            assert_eq!(r.unread, yellow.contains(&r.path), "黄线: {}", r.path);
+        }
+        // 标题回退链已在 daemon 里走完，客户端直接用
+        for (path, want) in fx["expect"]["titles"].as_object().unwrap() {
+            let row = rows.iter().find(|r| &r.path == path).unwrap();
+            assert_eq!(row.title, want.as_str().unwrap());
+        }
+        // 未读集合里存的是 /p/bg/（带尾斜杠）：查 /p/bg 命中、前缀相同的 /p/b 不命中
+        for (path, want) in fx["expect"]["unread_path_normalized"].as_object().unwrap() {
+            assert_eq!(path_list_contains(&unread, path), want.as_bool().unwrap(), "未读: {path}");
+        }
     }
 
     #[test]

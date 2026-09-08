@@ -77,31 +77,15 @@ pub fn form_complete(spec: &QuestionSpec, drafts: &[Draft]) -> bool {
             .all(|(q, d)| d.complete(q.multi_select))
 }
 
-/// 待答表单：从尾部找最近一条 question / answer——question 在后 = 还没人答。
-/// 会话已退出就没有可答的了（对话框随进程一起没了）。`since` 是会话进程的
-/// created_at：resume 进来的旧 transcript 里可能悬着上个进程没答完的问题，
-/// 新进程不会再弹框，比 created_at 早的问题不算待答（与 daemon 同一口径）。
-pub fn pending_question_seq(msgs: &[ChatMessage], alive: bool, since: Option<&str>) -> Option<u64> {
-    if !alive {
-        return None;
-    }
-    for m in msgs.iter().rev() {
-        match m.kind.as_str() {
-            "question" => {
-                if let Some(since) = since {
-                    // 秒级前缀比较：created_at 是整秒、transcript 时间戳带毫秒
-                    let older = m.ts.len() >= 19 && since.len() >= 19 && m.ts[..19] < since[..19];
-                    if older {
-                        return None;
-                    }
-                }
-                return Some(m.seq);
-            }
-            "answer" => return None,
-            _ => {}
-        }
-    }
-    None
+/// 这张表单此刻能不能作答：**daemon 说待答的正是这一条**（会话的 `asking_seq`），
+/// 而且本端还没把它提交出去（answer 消息还在路上时先按已答画，免得空表单闪一下）。
+///
+/// v1.22 之前这里是一整套本地判定：从消息流尾部倒着找最近的 question / answer，再拿
+/// 消息 `ts` 的前 19 个字符跟会话 created_at 比大小，判掉「resume 把上个进程没答完的
+/// 问题带了进来」。它错在同一个问题三端各有一份答案——daemon 有 transcript 的结构化
+/// 事实，客户端却在拿字符串比时间猜，边界（同一秒、缺毫秒、会话刚 resume）谁都不一样。
+pub fn form_interactive(asking_seq: Option<u64>, seq: u64, answered_here: bool) -> bool {
+    asking_seq == Some(seq) && !answered_here
 }
 
 /// 某条 question 之后紧跟的是不是 answer（已答态标签用）
@@ -178,8 +162,10 @@ pub struct MessagesView {
     /// 项目目录：附件上传的去处（`_inbox/`）
     project_path: String,
     uploading: bool,
-    /// 会话进程的 created_at（ISO 秒级）；早于它的悬置问题不算待答
-    since: Option<String>,
+    /// v1.22：待答的是消息流里的哪一条（daemon 给，见 [`form_interactive`]）
+    asking_seq: Option<u64>,
+    /// 此刻排着还没送进去的消息（会话的 `queued`）：Claude Code 自己的队列，只画不管
+    queued: Vec<crate::model::QueuedMsg>,
     /// 表单草稿：question 消息 seq → 每题一份
     drafts: HashMap<u64, Vec<Draft>>,
     /// 每题的「其它」自填框，(question seq, 题号) 按需创建，表单不再待答时回收
@@ -217,7 +203,8 @@ impl MessagesView {
             running: false,
             project_path: String::new(),
             uploading: false,
-            since: None,
+            asking_seq: None,
+            queued: Vec::new(),
             drafts: HashMap::new(),
             other_inputs: HashMap::new(),
             submitting: HashSet::new(),
@@ -234,8 +221,7 @@ impl MessagesView {
         cx.notify();
     }
 
-    /// 上层在 session / snapshot 事件里同步：进程退了，表单就不能再交互；
-    /// created_at 用来判掉 resume 带进来的旧问题
+    /// 上层在 session / snapshot 事件里同步：进程退了，表单就不能再交互
     pub fn set_project_path(&mut self, p: String) {
         self.project_path = p;
     }
@@ -293,11 +279,24 @@ impl MessagesView {
         .detach();
     }
 
-    pub fn set_session(&mut self, alive: bool, running: bool, permission: Option<PermissionPrompt>, created_at: Option<&str>, cx: &mut Context<Self>) {
-        let since = created_at.filter(|s| !s.is_empty()).map(str::to_string);
-        if self.alive == alive && self.running == running && self.since == since && self.permission == permission {
+    pub fn set_session(
+        &mut self,
+        alive: bool,
+        running: bool,
+        permission: Option<PermissionPrompt>,
+        asking_seq: Option<u64>,
+        queued: Vec<crate::model::QueuedMsg>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.alive == alive
+            && self.running == running
+            && self.asking_seq == asking_seq
+            && self.permission == permission
+            && self.queued == queued
+        {
             return;
         }
+        self.queued = queued;
         if self.permission != permission {
             // 对话框换了 / 没了：上一次的忙碌与错误都作废
             self.perm_busy = false;
@@ -306,7 +305,7 @@ impl MessagesView {
         self.permission = permission;
         self.alive = alive;
         self.running = running;
-        self.since = since;
+        self.asking_seq = asking_seq;
         self.ensure_form_state(cx);
         cx.notify();
     }
@@ -456,7 +455,7 @@ impl MessagesView {
     /// 让草稿 / 输入框 / 错误只围着「当前待答的那张表单」存在：
     /// 表单被答掉（无论从哪端）或会话退出，相关状态一并回收。
     fn ensure_form_state(&mut self, cx: &mut Context<Self>) {
-        let pending = pending_question_seq(&self.msgs, self.alive, self.since.as_deref());
+        let pending = self.asking_seq;
         self.drafts.retain(|k, _| Some(*k) == pending);
         self.other_inputs.retain(|(k, _), _| Some(*k) == pending);
         self.errors.retain(|k, _| Some(*k) == pending);
@@ -691,119 +690,8 @@ impl MessagesView {
     ) -> gpui::AnyElement {
         let text: SharedString = m.text.clone().into();
         match () {
-            _ if m.kind == "thinking" => {
-                let expanded = self.expanded.contains(&m.seq);
-                let seq = m.seq;
-                let first_line: SharedString = if expanded {
-                    m.text.clone().into()
-                } else {
-                    m.text.lines().next().unwrap_or("").to_string().into()
-                };
-                div()
-                    .id(("think", m.seq as usize))
-                    .w_full()
-                    .px(px(10.))
-                    .py(px(5.))
-                    .rounded(px(8.))
-                    .bg(c(theme::inset()))
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |v: &mut Self, _, _, cx| v.toggle_expand(seq, cx)))
-                    .child(
-                        div()
-                            .text_size(px(10.5))
-                            .italic()
-                            .text_color(c(theme::faint()))
-                            .child(if expanded { "▾ 思考" } else { "▸ 思考" }),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.5))
-                            .italic()
-                            .text_color(c(theme::faint()))
-                            .when(!expanded, |el| {
-                                el.overflow_hidden().text_ellipsis().whitespace_nowrap()
-                            })
-                            .child(first_line),
-                    )
-                    .into_any_element()
-            }
-            _ if m.kind == "tool_use" || m.kind == "tool_result" => {
-                let (name, summary, status) = m
-                    .tool
-                    .as_ref()
-                    .map(|t| (t.name.clone(), t.summary.clone(), t.status.clone()))
-                    .unwrap_or_default();
-                let status_color = match status.as_str() {
-                    "ok" => theme::green(),
-                    "err" => theme::red(),
-                    "running" => theme::amber(),
-                    _ => theme::dim(),
-                };
-                let label: SharedString = if m.kind == "tool_result" {
-                    "⎿ 结果".into()
-                } else if name.is_empty() {
-                    "tool".into()
-                } else {
-                    name.into()
-                };
-                let expanded = self.expanded.contains(&m.seq) && !m.text.is_empty();
-                let seq = m.seq;
-                div()
-                    .id(("tool", m.seq as usize))
-                    .w_full()
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |v: &mut Self, _, _, cx| v.toggle_expand(seq, cx)))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(7.))
-                            .child(
-                                div()
-                                    .w(px(6.))
-                                    .h(px(6.))
-                                    .flex_none()
-                                    .rounded_full()
-                                    .bg(c(status_color)),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(11.5))
-                                    .font_family("Menlo")
-                                    .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(c(theme::ink()))
-                                    .child(label),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w(px(0.))
-                                    .overflow_hidden()
-                                    .text_ellipsis()
-                                    .whitespace_nowrap()
-                                    .text_size(px(11.5))
-                                    .font_family("Menlo")
-                                    .text_color(c(theme::dim()))
-                                    .child(SharedString::from(summary)),
-                            ),
-                    )
-                    .when(expanded, |el| {
-                        el.child(
-                            div()
-                                .ml(px(13.))
-                                .mt(px(3.))
-                                .px(px(8.))
-                                .py(px(6.))
-                                .rounded(px(8.))
-                                .bg(c(theme::inset()))
-                                .text_size(px(11.))
-                                .font_family("Menlo")
-                                .text_color(c(theme::dim()))
-                                .child(text),
-                        )
-                    })
-                    .into_any_element()
-            }
+            _ if m.kind == "thinking" => self.thinking_row(m, cx),
+            _ if m.kind == "tool_use" || m.kind == "tool_result" => self.tool_row(m, cx),
             // claude 的 AskUserQuestion：结构化表单原生画；没带 question（不该发生）
             // 就退回普通 assistant 气泡，至少把题面露出来
             _ if m.kind == "question" => match &m.question {
@@ -834,6 +722,124 @@ impl MessagesView {
             // assistant 文本 = CommonMark：通栏块列，上方「✻ Claude」小字
             _ => assistant_block(self.assistant_body(m, 12.5, theme::ink())),
         }
+    }
+
+    /// 「思考」块：折起来只留第一行，点一下展开全文。
+    fn thinking_row(&self, m: &ChatMessage, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let expanded = self.expanded.contains(&m.seq);
+        let seq = m.seq;
+        let first_line: SharedString = if expanded {
+            m.text.clone().into()
+        } else {
+            m.text.lines().next().unwrap_or("").to_string().into()
+        };
+        div()
+            .id(("think", m.seq as usize))
+            .w_full()
+            .px(px(10.))
+            .py(px(5.))
+            .rounded(px(8.))
+            .bg(c(theme::inset()))
+            .cursor_pointer()
+            .on_click(cx.listener(move |v: &mut Self, _, _, cx| v.toggle_expand(seq, cx)))
+            .child(
+                div()
+                    .text_size(px(10.5))
+                    .italic()
+                    .text_color(c(theme::faint()))
+                    .child(if expanded { "▾ 思考" } else { "▸ 思考" }),
+            )
+            .child(
+                div()
+                    .text_size(px(11.5))
+                    .italic()
+                    .text_color(c(theme::faint()))
+                    .when(!expanded, |el| {
+                        el.overflow_hidden().text_ellipsis().whitespace_nowrap()
+                    })
+                    .child(first_line),
+            )
+            .into_any_element()
+    }
+
+    /// 工具调用 / 工具结果一行：状态点 + 名字 + 摘要，点开才把正文露出来。
+    fn tool_row(&self, m: &ChatMessage, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let text: SharedString = m.text.clone().into();
+        let (name, summary, status) = m
+            .tool
+            .as_ref()
+            .map(|t| (t.name.clone(), t.summary.clone(), t.status.clone()))
+            .unwrap_or_default();
+        let status_color = match status.as_str() {
+            "ok" => theme::green(),
+            "err" => theme::red(),
+            "running" => theme::amber(),
+            _ => theme::dim(),
+        };
+        let label: SharedString = if m.kind == "tool_result" {
+            "⎿ 结果".into()
+        } else if name.is_empty() {
+            "tool".into()
+        } else {
+            name.into()
+        };
+        let expanded = self.expanded.contains(&m.seq) && !m.text.is_empty();
+        let seq = m.seq;
+        div()
+            .id(("tool", m.seq as usize))
+            .w_full()
+            .cursor_pointer()
+            .on_click(cx.listener(move |v: &mut Self, _, _, cx| v.toggle_expand(seq, cx)))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(7.))
+                    .child(
+                        div()
+                            .w(px(6.))
+                            .h(px(6.))
+                            .flex_none()
+                            .rounded_full()
+                            .bg(c(status_color)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .font_family("Menlo")
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(c(theme::ink()))
+                            .child(label),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .text_size(px(11.5))
+                            .font_family("Menlo")
+                            .text_color(c(theme::dim()))
+                            .child(SharedString::from(summary)),
+                    ),
+            )
+            .when(expanded, |el| {
+                el.child(
+                    div()
+                        .ml(px(13.))
+                        .mt(px(3.))
+                        .px(px(8.))
+                        .py(px(6.))
+                        .rounded(px(8.))
+                        .bg(c(theme::inset()))
+                        .text_size(px(11.))
+                        .font_family("Menlo")
+                        .text_color(c(theme::dim()))
+                        .child(text),
+                )
+            })
+            .into_any_element()
     }
 
     /// assistant 文本的正文：缓存里的 Markdown 块列；缓存未命中（理论上不会）就现场
@@ -960,7 +966,7 @@ impl MessagesView {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let seq = m.seq;
-        let interactive = pending == Some(seq) && !self.answered.contains(&seq);
+        let interactive = form_interactive(pending, seq, self.answered.contains(&seq));
         let submitting = self.submitting.contains(&seq);
         let mode = match (interactive, submitting) {
             (false, _) => FormMode::ReadOnly,
@@ -1032,16 +1038,7 @@ impl MessagesView {
         if interactive {
             let complete = form_complete(spec, &drafts);
             let label = if submitting { "…" } else { "提交" };
-            let mut btn = div()
-                .id(("q-submit", seq))
-                .px(px(12.))
-                .py(px(4.))
-                .rounded(px(6.))
-                .bg(c(theme::accent()))
-                .text_size(px(12.))
-                .font_weight(gpui::FontWeight::BOLD)
-                .text_color(c(theme::on_accent()))
-                .child(label);
+            let mut btn = accent_btn(("q-submit", seq)).child(label);
             if complete && !submitting {
                 btn = btn
                     .cursor_pointer()
@@ -1185,6 +1182,24 @@ impl MessagesView {
 }
 
 /// Claude 的一段：左侧、通栏、不再有气泡底；上方一行「✻ Claude」主色小字标明说话的人
+/// 消息流里的实心主色小按钮：底部「发送」和表单「提交」两处骨架逐字相同。
+/// 没用 kit 的 `btn_primary`——那是模态里的尺寸（px14/py5/12.5），消息流这两个
+/// 小一号，硬合成一个就得给 kit 加尺寸参数。
+///
+/// cursor / hover / on_click 不收进来：表单提交在「填不全」时是禁用态，
+/// 只画不接事件。
+fn accent_btn(id: impl Into<ElementId>) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .px(px(12.))
+        .py(px(4.))
+        .rounded(px(6.))
+        .bg(c(theme::accent()))
+        .text_size(px(12.))
+        .font_weight(gpui::FontWeight::BOLD)
+        .text_color(c(theme::on_accent()))
+}
+
 fn assistant_block(body: AnyElement) -> AnyElement {
     div()
         .w_full()
@@ -1252,6 +1267,24 @@ fn user_column(caption: Option<(SharedString, u32)>, bubble: gpui::Div) -> AnyEl
 
 /// 用户一侧的气泡（调用方负责靠右）：主色淡底 + 主色描边，右下角收小一点像
 /// 「说出去的话」；浅色主题底再淡一档，免得糊成一块
+/// 待发送的气泡：和用户气泡同侧同款，只是底色换成琥珀、字用二级色——它还没进对话，
+/// 但已经是「你说的话」。
+fn pending_bubble(text: SharedString) -> gpui::Div {
+    let p = theme::palette();
+    div()
+        .max_w(relative(0.78))
+        .px(px(12.))
+        .py(px(7.))
+        .rounded(px(12.))
+        .rounded_br(px(5.))
+        .bg(ca(p.amber, if p.is_dark { 0.14 } else { 0.12 }))
+        .border_1()
+        .border_color(ca(p.amber, 0.35))
+        .text_size(px(12.5))
+        .text_color(c(p.dim))
+        .child(text)
+}
+
 fn user_bubble(text: SharedString) -> gpui::Div {
     let p = theme::palette();
     div()
@@ -1590,8 +1623,32 @@ impl Render for MessagesView {
             let fh = self.input.read(cx).focus_handle.clone();
             fh.focus(window, cx);
         }
-        let placeholder = |msg: &'static str| {
-            div()
+        let mut root = div()
+            .size_full()
+            .bg(c(theme::bg()))
+            .flex()
+            .flex_col()
+            .on_key_down(cx.listener(Self::on_key_down))
+            .child(self.render_stream(cx));
+        // 底部 composer：终端仍是权威输入，但看着消息流就能直接回话
+        if self.supported != Some(false) {
+            root = root.child(self.render_composer(cx));
+        }
+        root
+    }
+}
+
+impl MessagesView {
+    /// 消息流本体：没消息时是一行居中的占位字，有消息时是可滚动的行列
+    /// （外加右下角那个「回到底部」的浮动圆钮）。
+    fn render_stream(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        if self.msgs.is_empty() && self.queued.is_empty() {
+            let msg = match self.supported {
+                None => "加载消息流…",
+                Some(false) => "该会话不支持消息流（已回落终端）",
+                Some(true) => "暂无消息",
+            };
+            return div()
                 .flex_1()
                 .flex()
                 .items_center()
@@ -1599,142 +1656,138 @@ impl Render for MessagesView {
                 .text_color(c(theme::faint()))
                 .text_size(px(12.))
                 .child(msg)
-        };
-        let body: gpui::AnyElement = if self.msgs.is_empty() {
-            let msg = match self.supported {
-                None => "加载消息流…",
-                Some(false) => "该会话不支持消息流（已回落终端）",
-                Some(true) => "暂无消息",
-            };
-            placeholder(msg).into_any_element()
-        } else {
-            let pending = pending_question_seq(&self.msgs, self.alive, self.since.as_deref());
-            // live = 会话活着且最后一轮还没有回复：过程行画成「进行中」
-            let msgs = self.msgs.clone();
-            let live = stream_fold::tail_is_live(&msgs, self.running);
-            let turns = stream_fold::fold_turns(&msgs, live);
-            let items = stream_fold::flatten(&turns, &self.fold_open);
-            let mut rows: Vec<gpui::AnyElement> = items
-                .iter()
-                .enumerate()
-                .map(|(i, item)| {
-                    let el = match item {
-                        StreamItem::Fold {
-                            fold_key,
-                            steps,
-                            live_tail,
-                            live,
-                        } => self.fold_row(*fold_key, steps, *live_tail, *live, cx),
-                        StreamItem::Step(m) => self.step_row(m, pending, cx),
-                        StreamItem::User(m)
-                        | StreamItem::Reply(m)
-                        | StreamItem::Question(m)
-                        | StreamItem::Answer(m) => self.row(m, pending, cx),
-                    };
-                    div().w_full().mt(px(item_gap(i, item))).child(el).into_any_element()
-                })
-                .collect();
-            // v1.16：权限对话框挂在流末尾——以前它只弹在终端里，消息流一无所知
-            if let Some(p) = self.permission.clone().filter(|_| self.alive) {
-                rows.push(self.permission_card(&p, cx));
-            }
-            let list = div()
-                .id("msgs-scroll")
-                .size_full()
-                .overflow_y_scroll()
-                .track_scroll(&self.scroll)
-                .px(px(16.))
-                .py(px(10.))
-                .flex()
-                .flex_col()
-                .children(rows);
-            // 右下角浮动 ↓：没在底部时出现，点一下滚到底。滚轮事件会触发重绘，
-            // 所以这里按上一帧的 offset 判定就够了
-            let show_jump = !self.near_bottom();
-            div()
-                .relative()
-                .flex_1()
-                .min_h(px(0.))
-                .child(list)
-                .when(show_jump, |el| {
-                    el.child(
-                        div()
-                            .id("msgs-jump-end")
-                            .absolute()
-                            .bottom(px(14.))
-                            .right(px(18.))
-                            .w(px(32.))
-                            .h(px(32.))
-                            .rounded_full()
-                            .bg(c(theme::surface_raised()))
-                            .border_1()
-                            .border_color(c(theme::edge()))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_size(px(15.))
-                            .text_color(c(theme::accent()))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(c(theme::surface())))
-                            .on_click(cx.listener(|v: &mut Self, _, _, cx| v.scroll_to_end(cx)))
-                            .child("↓"),
-                    )
-                })
-                .into_any_element()
-        };
-        let mut root = div()
-            .size_full()
-            .bg(c(theme::bg()))
-            .flex()
-            .flex_col()
-            .on_key_down(cx.listener(Self::on_key_down))
-            .child(body);
-        // 底部 composer：终端仍是权威输入，但看着消息流就能直接回话
-        if self.supported != Some(false) {
-            let send_label = if self.sending { "…" } else { "发送" };
-            root = root.child(
+                .into_any_element();
+        }
+        let pending = self.asking_seq;
+        // live = 会话活着且最后一轮还没有回复：过程行画成「进行中」
+        let msgs = self.msgs.clone();
+        let live = stream_fold::tail_is_live(&msgs, self.running);
+        let turns = stream_fold::fold_turns(&msgs, live);
+        let items = stream_fold::flatten(&turns, &self.fold_open);
+        let mut rows: Vec<gpui::AnyElement> = items
+            .iter()
+            .enumerate()
+            .map(|(i, item)| {
+                let el = match item {
+                    StreamItem::Fold {
+                        fold_key,
+                        steps,
+                        live_tail,
+                        live,
+                    } => self.fold_row(*fold_key, steps, *live_tail, *live, cx),
+                    StreamItem::Step(m) => self.step_row(m, pending, cx),
+                    StreamItem::User(m)
+                    | StreamItem::Reply(m)
+                    | StreamItem::Question(m)
+                    | StreamItem::Answer(m) => self.row(m, pending, cx),
+                };
+                div().w_full().mt(px(item_gap(i, item))).child(el).into_any_element()
+            })
+            .collect();
+        // v1.22：待发送挂在流末尾——**Claude Code 自己排着的那些**（模型在跑时敲进去的字，
+        // 它这一轮结束会自己送进去）。没有撤回：队列是 TUI 的，AAA 只把它画出来。
+        for q in &self.queued {
+            rows.push(
                 div()
-                    .flex_none()
+                    .w_full()
+                    .mt(px(14.))
                     .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .px(px(12.))
-                    .py(px(8.))
-                    .border_t_1()
-                    .border_color(c(theme::edge()))
-                    .bg(c(theme::surface()))
+                    .flex_col()
+                    .items_end()
                     .child(
                         div()
-                            .id("msg-attach")
-                            .px(px(6.))
-                            .py(px(4.))
-                            .rounded(px(6.))
-                            .text_size(px(13.))
-                            .text_color(c(if self.uploading { theme::faint() } else { theme::dim() }))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(ca(theme::ink(), 0.06)))
-                            .on_click(cx.listener(|v: &mut Self, _, _, cx| v.attach(cx)))
-                            .child(if self.uploading { "…" } else { "📎" }),
+                            .text_size(px(10.))
+                            .text_color(c(theme::amber()))
+                            .mb(px(3.))
+                            .child("待发送 · 执行完自动发出"),
                     )
-                    .child(div().flex_1().child(self.input.clone()))
-                    .child(
-                        div()
-                            .id("msg-send")
-                            .px(px(12.))
-                            .py(px(4.))
-                            .rounded(px(6.))
-                            .bg(c(theme::accent()))
-                            .text_size(px(12.))
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(c(theme::on_accent()))
-                            .cursor_pointer()
-                            .hover(|s| s.opacity(0.85))
-                            .on_click(cx.listener(|v: &mut Self, _, _, cx| v.send(cx)))
-                            .child(send_label),
-                    ),
+                    .child(pending_bubble(SharedString::from(q.text.clone())))
+                    .into_any_element(),
             );
         }
-        root
+        // v1.16：权限对话框挂在流末尾——以前它只弹在终端里，消息流一无所知
+        if let Some(p) = self.permission.clone().filter(|_| self.alive) {
+            rows.push(self.permission_card(&p, cx));
+        }
+        let list = div()
+            .id("msgs-scroll")
+            .size_full()
+            .overflow_y_scroll()
+            .track_scroll(&self.scroll)
+            .px(px(16.))
+            .py(px(10.))
+            .flex()
+            .flex_col()
+            .children(rows);
+        // 右下角浮动 ↓：没在底部时出现，点一下滚到底。滚轮事件会触发重绘，
+        // 所以这里按上一帧的 offset 判定就够了
+        let show_jump = !self.near_bottom();
+        div()
+            .relative()
+            .flex_1()
+            .min_h(px(0.))
+            .child(list)
+            .when(show_jump, |el| {
+                el.child(
+                    div()
+                        .id("msgs-jump-end")
+                        .absolute()
+                        .bottom(px(14.))
+                        .right(px(18.))
+                        .w(px(32.))
+                        .h(px(32.))
+                        .rounded_full()
+                        .bg(c(theme::surface_raised()))
+                        .border_1()
+                        .border_color(c(theme::edge()))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(15.))
+                        .text_color(c(theme::accent()))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(c(theme::surface())))
+                        .on_click(cx.listener(|v: &mut Self, _, _, cx| v.scroll_to_end(cx)))
+                        .child("↓"),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// 底部输入条：📎 上传 + 输入框 + 发送
+    fn render_composer(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let send_label = if self.sending { "…" } else { "发送" };
+        div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .px(px(12.))
+            .py(px(8.))
+            .border_t_1()
+            .border_color(c(theme::edge()))
+            .bg(c(theme::surface()))
+            .child(
+                div()
+                    .id("msg-attach")
+                    .px(px(6.))
+                    .py(px(4.))
+                    .rounded(px(6.))
+                    .text_size(px(13.))
+                    .text_color(c(if self.uploading { theme::faint() } else { theme::dim() }))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(ca(theme::ink(), 0.06)))
+                    .on_click(cx.listener(|v: &mut Self, _, _, cx| v.attach(cx)))
+                    .child(if self.uploading { "…" } else { "📎" }),
+            )
+            .child(div().flex_1().child(self.input.clone()))
+            .child(
+                accent_btn("msg-send")
+                    .cursor_pointer()
+                    .hover(|s| s.opacity(0.85))
+                    .on_click(cx.listener(|v: &mut Self, _, _, cx| v.send(cx)))
+                    .child(send_label),
+            )
     }
 }
 
@@ -1776,29 +1829,16 @@ mod tests {
         }
     }
 
+    /// v1.22：待答的是哪一条只有一个来源——daemon 给的 `asking_seq`
     #[test]
-    fn pending_is_latest_unanswered_question() {
-        let msgs = vec![msg(1, "text"), msg(2, "question"), msg(3, "tool_use")];
-        assert_eq!(pending_question_seq(&msgs, true, None), Some(2));
-        // 答过了就没有待答
-        let msgs = vec![msg(2, "question"), msg(3, "answer"), msg(4, "text")];
-        assert_eq!(pending_question_seq(&msgs, true, None), None);
-        // 新问题盖过旧问题：只有最新那条待答
-        let msgs = vec![msg(2, "question"), msg(3, "answer"), msg(5, "question")];
-        assert_eq!(pending_question_seq(&msgs, true, None), Some(5));
-        let msgs = vec![msg(2, "question"), msg(5, "question")];
-        assert_eq!(pending_question_seq(&msgs, true, None), Some(5));
-        // 没有问题 / 空列表
-        assert_eq!(pending_question_seq(&[msg(1, "text")], true, None), None);
-        assert_eq!(pending_question_seq(&[], true, None), None);
-        // 会话退出：对话框随进程没了，什么都不待答
-        assert_eq!(pending_question_seq(&[msg(2, "question")], false, None), None);
-        // resume 带进来的旧问题：早于会话 created_at 的不算待答（秒级前缀比较）
-        let mut old = msg(2, "question");
-        old.ts = "2026-09-02T09:59:59.900Z".into();
-        assert_eq!(pending_question_seq(&[old.clone()], true, Some("2026-09-02T10:00:00Z")), None);
-        old.ts = "2026-09-02T10:00:00.500Z".into();
-        assert_eq!(pending_question_seq(&[old], true, Some("2026-09-02T10:00:00Z")), Some(2));
+    fn only_the_seq_daemon_named_is_answerable() {
+        // 流里有好几张表单，能作答的只有 daemon 点名的那一条
+        assert!(form_interactive(Some(5), 5, false));
+        assert!(!form_interactive(Some(5), 2, false), "旧表单：agent 自己跳过了，只读");
+        // 没有待答（答完了 / 会话退了 / 老 daemon 不给）：一张都不能动
+        assert!(!form_interactive(None, 5, false));
+        // 本端刚提交、answer 消息还没到：先按已答画，免得空表单闪一下
+        assert!(!form_interactive(Some(5), 5, true));
     }
 
     #[test]

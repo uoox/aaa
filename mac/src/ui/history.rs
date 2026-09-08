@@ -4,14 +4,19 @@
 //! 顶上是未完成条目数 + 搜索（2026-09-08 用户拍板：五态计数条和状态字跟着侧栏一起去掉——
 //! 看板和项目列表要说同一套话）。主体是**瀑布流、全展开**（2026-09-07 第三版，用户要一眼
 //! 看全）：一会话一张卡——在跑就一根蓝竖线、否则什么都没有 + 标题 + 项目，一根进度条 `done/total`，全部
-//! 清单项直接列出（没勾的在前、做完的灰掉），不折叠、不分组；卡片按估算高度塞进最短的一
+//! 清单项直接列出（没勾的在前、做完的灰掉），不折叠；卡片按估算高度塞进最短的一
 //! 列，列数随窗口宽度变。已删除的默认不显示，一个开关切出来。会话还在就能点开。
+//!
+//! 2026-09-08 用户报「看板里面东西太多了，要做一下分割」：分**两节**——「在 AAA 里」
+//! （`alive`，还在池子里、点一下就进得去）铺开，「不在 AAA 里」（只剩记录）默认折起来
+//! 只留一行表头，点开才铺；搜索框里有字时两节都展开，不然搜到的东西藏在折叠节里等于
+//! 没搜到。同一天用户还要一根滑动条：全展开之后一屏根本装不下（见 [`super::scrollbar`]）。
 
 use gpui::{Context, SharedString, div, prelude::*, px};
 
 use super::RootView;
 use super::kit::*;
-use crate::model::{Dashboard, SessionCard, card_matches, card_running};
+use crate::model::{Dashboard, SessionCard, card_running, dashboard_split};
 use crate::theme;
 
 impl RootView {
@@ -22,8 +27,8 @@ impl RootView {
     }
 
     /// 看板上点清单项 = 勾 / 取消勾：POST /sessions/:id/checklist，然后重拉看板
-    pub(super) fn toggle_checklist(&mut self, id: String, text: String, done: bool, cx: &mut Context<Self>) {
-        let fut = self.net.session_checklist(&id, &text, done);
+    pub(super) fn toggle_checklist(&mut self, id: String, index: usize, text: String, done: bool, cx: &mut Context<Self>) {
+        let fut = self.net.session_checklist(&id, index, &text, done);
         self.spawn_fetch(fut, |r, _: serde_json::Value, cx| r.fetch_history(cx), true, cx);
     }
 
@@ -47,16 +52,12 @@ impl RootView {
         let id_open = card.id.clone();
         let alive = card.alive;
         let dimmed = card.deleted;
-        let mut el = div()
+        let mut el = super::kit::card()
             .id(SharedString::from(format!("card:{}", card.id)))
             .flex()
             .flex_col()
             .gap(px(5.))
             .p(px(12.))
-            .rounded(px(10.))
-            .bg(c(theme::surface()))
-            .border_1()
-            .border_color(c(theme::edge()))
             .when(dimmed, |el| el.opacity(0.6))
             .child(
                 div()
@@ -64,14 +65,10 @@ impl RootView {
                     .items_start()
                     .gap(px(8.))
                     // 蓝竖线 = 还在跑；已删除的写一个字；其余什么都不画（和项目列表同一套话）
-                    .when(card_running(card), |el| el.child(super::mark_bar(theme::blue()).mt(px(1.))))
+                    .when(card_running(card), |el| el.child(mark_bar(theme::blue()).mt(px(1.))))
                     .when(card.deleted, |el| {
                         el.child(
-                            div()
-                                .flex_none()
-                                .font_family("Menlo")
-                                .text_size(px(10.))
-                                .text_color(c(theme::faint()))
+                            meta().flex_none()
                                 .child("已删除"),
                         )
                     })
@@ -105,10 +102,7 @@ impl RootView {
                     }),
             )
             .child(
-                div()
-                    .font_family("Menlo")
-                    .text_size(px(10.))
-                    .text_color(c(theme::faint()))
+                meta()
                     .child(SharedString::from(card.project_name.clone())),
             );
         if total > 0 {
@@ -137,8 +131,16 @@ impl RootView {
         } else {
             el = el.child(div().text_size(px(11.)).text_color(c(theme::faint())).child("没有进度清单"));
         }
-        // 全部清单项：没勾的在前，做完的灰掉；会话还在池子里就能点着勾 / 取消勾
-        for (i, it) in card.items.iter().filter(|i| !i.done).chain(card.items.iter().filter(|i| i.done)).enumerate() {
+        // 全部清单项：没勾的在前，做完的灰掉；会话还在池子里就能点着勾 / 取消勾。
+        // 带着**原下标**一起走（`enumerate` 在重排之前）：POST 回去要说清是第几条，
+        // 光给文字的话，清单里有两条一样的就会一起被翻过去。
+        for (i, it) in card
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, i)| !i.done)
+            .chain(card.items.iter().enumerate().filter(|(_, i)| i.done))
+        {
             let (sid, text, done) = (card.id.clone(), it.text.clone(), it.done);
             el = el.child(
                 div()
@@ -151,7 +153,7 @@ impl RootView {
                             .hover(|st| st.bg(ca(theme::accent(), 0.08)))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
-                                this.toggle_checklist(sid.clone(), text.clone(), !done, cx);
+                                this.toggle_checklist(sid.clone(), i, text.clone(), !done, cx);
                             }))
                     })
                     .child(div().flex_none().text_size(px(11.5)).text_color(c(if it.done { theme::green() } else { theme::amber() })).child(if it.done { "☑" } else { "☐" }))
@@ -165,13 +167,10 @@ impl RootView {
         let query = self.history_input.read(cx).text().to_string();
         let d = &self.dashboard;
 
-        // 过滤：搜索 → 状态组 → 已删除开关
-        let matched: Vec<&SessionCard> = d
-            .sessions
-            .iter()
-            .filter(|c| card_matches(c, &query))
-            .filter(|c| self.dash_show_deleted || !c.deleted)
-            .collect();
+        // 两节：在 AAA 里（还在池子里）/ 不在 AAA 里（只剩记录）。搜索 + 已删除开关先筛过
+        let (here, gone) = dashboard_split(&d.sessions, &query, self.dash_show_deleted);
+        // 搜索时第二节强制展开：搜到的东西藏在折叠节里等于没搜到
+        let gone_open = self.dash_show_gone || !query.trim().is_empty();
 
         let toggle = |id: &'static str, label: String, on: bool| {
             div()
@@ -208,9 +207,41 @@ impl RootView {
             }
             grid
         };
-        let mut grid = div().flex().flex_col().gap(px(10.)).child(masonry(&matched, cx));
-        if matched.is_empty() {
-            grid = grid.child(div().text_size(px(12.)).text_color(c(theme::faint())).child(if d.sessions.is_empty() {
+        // 节表头：一行小字 + 条数。颜色和 hover 都长在这一层——套一个外壳再在外壳上写
+        // hover 是没用的，子元素自己的 text_color 会把父层的 hover 盖掉。
+        let head = |label: String, clickable: bool| {
+            div()
+                .font_family("Menlo")
+                .text_size(px(10.5))
+                .text_color(c(theme::dim()))
+                .when(clickable, |el| el.cursor_pointer().hover(|st| st.text_color(c(theme::ink()))))
+                .child(SharedString::from(label))
+        };
+
+        let mut body = div().flex().flex_col().gap(px(12.)).pb(px(16.));
+        if !here.is_empty() {
+            // 只有一节时不写表头：「在 AAA 里 7」单独挂在那儿是句废话，它只在
+            // 「和下面那节相对」时才有意义
+            body = body
+                .when(!gone.is_empty(), |el| el.child(head(format!("在 AAA 里 {}", here.len()), false)))
+                .child(masonry(&here, cx));
+        }
+        if !gone.is_empty() {
+            let arrow = if gone_open { "▾" } else { "▸" };
+            body = body
+                .child(
+                    div()
+                        .id("dash-gone")
+                        .child(head(format!("{arrow} 不在 AAA 里 {}", gone.len()), true))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.dash_show_gone = !this.dash_show_gone;
+                            cx.notify();
+                        })),
+                )
+                .when(gone_open, |el| el.child(masonry(&gone, cx)));
+        }
+        if here.is_empty() && gone.is_empty() {
+            body = body.child(div().text_size(px(12.)).text_color(c(theme::faint())).child(if d.sessions.is_empty() {
                 "还没有记录（daemon 每秒把会话同步进日志）"
             } else {
                 "没有匹配的会话"
@@ -225,15 +256,16 @@ impl RootView {
 
         div()
             .size_full()
-            .p(px(16.))
             .flex()
             .flex_col()
-            .gap(px(12.))
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(10.))
+                    .px(px(16.))
+                    .pt(px(16.))
+                    .pb(px(12.))
                     .child(div().text_size(px(14.)).font_weight(gpui::FontWeight::BOLD).text_color(c(theme::ink())).child("看板"))
                     .child(open_items)
                     .child(div().flex_1())
@@ -247,6 +279,12 @@ impl RootView {
                     })
                     .child(div().w(px(220.)).child(self.history_input.clone())),
             )
-            .child(div().id("dash-scroll").flex_1().min_h(px(0.)).overflow_y_scroll().child(grid))
+            // 页边距留在滚动区里：滚动条那条命中带压着的就是这 16px，底下没有能点的东西
+            .child(
+                div()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .child(super::scrollbar::scroll_area("dash-scroll", &self.dash_scroll, div().px(px(16.)).child(body))),
+            )
     }
 }

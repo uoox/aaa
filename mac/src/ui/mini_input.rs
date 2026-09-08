@@ -5,14 +5,23 @@
 //! 2026-09-07 之前只有光标没有选区：⌘X / ⌘C / ⌘A / Shift+方向键统统不存在，
 //! 用户报「新建项目的框不能剪切」就是这个原因。现在：Shift+← → Home End 拉选区，
 //! ⌘A 全选，⌘C 复制（没选区就复制整行），⌘X 剪切选区，⌘V 粘贴替换选区，打字 /
-//! 退格 / 输入法组字都先吃掉选区，双击全选。
+//! 退格 / 输入法组字都先吃掉选区。
+//!
+//! 2026-09-08 用户报「消息流的输入框很奇怪，无法选中文字，无法通过鼠标移动光标」：
+//! 那之前鼠标只有两个动作——单击收起选区、双击全选，**按哪儿都一样**，因为
+//! 画字的 canvas 里拿得到字形位置，事件回调里拿不到。现在每帧把 shape 出来的
+//! [`ShapedLine`] 连同它的左缘与横向滚动量记在 [`Metrics`] 里（`Rc<RefCell<…>>`，
+//! 渲染闭包写、事件回调读），鼠标就能按 x 反查字节下标：**单击定位光标**（按住
+//! Shift 是拉到这儿）、**按住拖拽拉选区**、**双击选一个词**、**三击全选**。
 
+use std::cell::RefCell;
 use std::ops::Range;
+use std::rc::Rc;
 
 use gpui::{
     App, Bounds, ClipboardItem, ContentMask, Context, ElementInputHandler, EntityInputHandler,
-    FocusHandle, Focusable, KeyDownEvent, MouseButton, SharedString, UTF16Selection, Window,
-    canvas, div, fill, point, prelude::*, px, size,
+    FocusHandle, Focusable, KeyDownEvent, MouseButton, MouseMoveEvent, Pixels, SharedString,
+    ShapedLine, UTF16Selection, Window, canvas, div, fill, point, prelude::*, px, size,
 };
 
 use super::kit::{c, ca};
@@ -186,6 +195,72 @@ impl Editor {
             None => None,
         }
     }
+
+    /// 落回最近的 char 边界（往左退）。鼠标反查来的下标由字形给出，本该已经在边界上；
+    /// 这里兜一道，多字节字符上切一刀就是 panic。
+    fn boundary(&self, i: usize) -> usize {
+        let mut i = i.min(self.text.len());
+        while !self.text.is_char_boundary(i) {
+            i -= 1;
+        }
+        i
+    }
+
+    /// 鼠标点在 `pos`（字节偏移）：定位光标，`extend`（按着 Shift）= 从原处拉到这儿
+    pub fn click_at(&mut self, pos: usize, extend: bool) {
+        let pos = self.boundary(pos);
+        self.move_to(pos, extend);
+    }
+
+    /// 双击：选中 `pos` 处的一个「词」。三类字符各成一片——字母数字（含中日韩，
+    /// `is_alphanumeric` 覆盖）、空白、其余标点；点在两片之间取右边那片（末尾取左边）。
+    pub fn select_word_at(&mut self, pos: usize) {
+        if self.text.is_empty() {
+            return;
+        }
+        let pos = self.boundary(pos);
+        let class = |c: char| {
+            if c.is_alphanumeric() || c == '_' {
+                2
+            } else if c.is_whitespace() {
+                1
+            } else {
+                0
+            }
+        };
+        // 点在末尾就看左边那个字符，否则看右边那个
+        let here = self.text[pos..].chars().next().or_else(|| self.text[..pos].chars().next_back());
+        let Some(k) = here.map(class) else { return };
+        let mut start = pos;
+        for (i, ch) in self.text[..pos].char_indices().rev() {
+            if class(ch) != k {
+                break;
+            }
+            start = i;
+        }
+        let mut end = pos;
+        for (i, ch) in self.text[pos..].char_indices() {
+            if class(ch) != k {
+                break;
+            }
+            end = pos + i + ch.len_utf8();
+        }
+        if start == end {
+            return; // 不该发生（点在末尾时取的是左边那片），真发生了就当没点
+        }
+        self.anchor = Some(start);
+        self.cursor = end;
+    }
+}
+
+/// 这一帧画出来的那行字：反查「鼠标点在第几个字节」要的全部东西。
+/// 渲染闭包（canvas 的 paint）写，鼠标回调读——两边都在主线程，`Rc<RefCell<…>>` 足够。
+struct Metrics {
+    line: ShapedLine,
+    /// 文本区左缘（窗口坐标）
+    left: Pixels,
+    /// 长文本时的横向滚动量（见 [`text_scroll_shift`]）
+    shift: Pixels,
 }
 
 pub struct MiniInput {
@@ -193,6 +268,10 @@ pub struct MiniInput {
     marked: Option<Range<usize>>,
     placeholder: SharedString,
     pub focus_handle: FocusHandle,
+    /// 上一帧的字形位置；空文本（画的是 placeholder）为 None
+    metrics: Rc<RefCell<Option<Metrics>>>,
+    /// 鼠标按住拖选中
+    dragging: bool,
 }
 
 /// 单行框的事件：输入法以文本形式送来的回车 = 提交（键盘回车由根节点直接接）
@@ -209,7 +288,16 @@ impl MiniInput {
             marked: None,
             placeholder: placeholder.into(),
             focus_handle: cx.focus_handle(),
+            metrics: Rc::new(RefCell::new(None)),
+            dragging: false,
         }
+    }
+
+    /// 窗口坐标 x → 字节偏移；这一帧还没画过（或框是空的）就没有答案
+    fn index_at(&self, x: Pixels) -> Option<usize> {
+        let m = self.metrics.borrow();
+        let m = m.as_ref()?;
+        Some(self.ed.boundary(m.line.closest_index_for_x(x - m.left + m.shift)))
     }
 
     pub fn text(&self) -> &str {
@@ -437,6 +525,7 @@ impl Render for MiniInput {
         let cursor_byte = self.ed.cursor;
         let selection = self.ed.selection();
         let marked = self.marked.clone();
+        let metrics = self.metrics.clone();
 
         div()
             .id("mini-input")
@@ -454,16 +543,38 @@ impl Render for MiniInput {
             .cursor_text()
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::on_key_down))
+            // 单击定位光标（Shift = 拉到这儿）、双击选词、三击全选；按住不放接着拖就是拉选区
             .on_mouse_down(MouseButton::Left, cx.listener(|this, ev: &gpui::MouseDownEvent, window, cx| {
                 this.focus_handle.focus(window, cx);
-                // 双击全选；单击收起选区（没有按点定位光标，canvas 里拿不到字形位置）
-                if ev.click_count >= 2 {
-                    this.ed.select_all();
-                } else {
-                    this.ed.anchor = None;
+                let at = this.index_at(ev.position.x);
+                match (ev.click_count, at) {
+                    (1, Some(i)) => {
+                        this.ed.click_at(i, ev.modifiers.shift);
+                        this.dragging = true;
+                    }
+                    (2, Some(i)) => this.ed.select_word_at(i),
+                    // 三击 = 整行；空框 / 还没画过就只收起选区
+                    (n, _) if n >= 3 => this.ed.select_all(),
+                    _ => this.ed.anchor = None,
                 }
                 cx.notify();
             }))
+            // 拖到哪儿选到哪儿。指针出了框就收不到 move 了（gpui 只把事件给悬停的元素），
+            // 松开时的位置因此不一定是最后一次 move——够用：框就这么宽，里面拖得完。
+            .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
+                if !this.dragging {
+                    return;
+                }
+                if ev.pressed_button != Some(MouseButton::Left) {
+                    this.dragging = false;
+                    return;
+                }
+                if let Some(i) = this.index_at(ev.position.x) {
+                    this.ed.click_at(i, true);
+                    cx.notify();
+                }
+            }))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| this.dragging = false))
             .child(
                 canvas(
                     |_, _, _| (),
@@ -507,6 +618,12 @@ impl Render for MiniInput {
                             f32::from(caret),
                             f32::from(bounds.size.width),
                         ));
+                        // 鼠标反查要的就是这三样（空框画的是 placeholder，不能拿它反查）
+                        *metrics.borrow_mut() = (!empty).then(|| Metrics {
+                            line: line.clone(),
+                            left: bounds.origin.x,
+                            shift,
+                        });
                         window.with_content_mask(Some(ContentMask { bounds }), |window| {
                             let origin =
                                 point(bounds.origin.x - shift, bounds.origin.y + px(6.));
@@ -633,6 +750,45 @@ mod tests {
         e.left(false);
         assert!(e.delete_forward());
         assert_eq!(e.text, "ll");
+    }
+
+    // 2026-09-08 用户报「消息流的输入框无法选中文字、无法用鼠标移动光标」：
+    // 鼠标按 x 反查到的字节偏移交给这两个方法，它们是纯的，这里直接验。
+    #[test]
+    fn click_places_the_caret_and_shift_click_extends() {
+        let mut e = Editor::with_text("hello 世界");
+        e.click_at(2, false);
+        assert_eq!((e.cursor, e.selection()), (2, None));
+        e.click_at(5, true); // Shift+点：从 2 拉到 5
+        assert_eq!(e.selected_text(), Some("llo"));
+        e.click_at(0, false); // 不按 Shift：收起选区
+        assert_eq!((e.cursor, e.selection()), (0, None));
+        // 落在多字节字符中间的下标退回边界，不 panic（"世" 在 6..9）
+        e.click_at(7, false);
+        assert_eq!(e.cursor, 6);
+        e.click_at(999, false);
+        assert_eq!(e.cursor, e.text.len());
+    }
+
+    #[test]
+    fn double_click_selects_one_word() {
+        let mut e = Editor::with_text("aaa bbb-ccc 中文字");
+        e.select_word_at(1);
+        assert_eq!(e.selected_text(), Some("aaa"));
+        e.select_word_at(3); // 空白自成一片（macOS 惯例）
+        assert_eq!(e.selected_text(), Some(" "));
+        e.select_word_at(5);
+        assert_eq!(e.selected_text(), Some("bbb"));
+        e.select_word_at(7); // 标点自成一片
+        assert_eq!(e.selected_text(), Some("-"));
+        e.select_word_at(12); // 中日韩按 is_alphanumeric 归到「字」那一片
+        assert_eq!(e.selected_text(), Some("中文字"));
+        e.select_word_at(e.text.len()); // 点在末尾：选左边那片
+        assert_eq!(e.selected_text(), Some("中文字"));
+        // 空框双击什么都不选
+        let mut empty = Editor::default();
+        empty.select_word_at(0);
+        assert!(empty.selection().is_none());
     }
 
     #[test]

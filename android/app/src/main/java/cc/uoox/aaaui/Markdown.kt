@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
@@ -184,7 +183,7 @@ private fun MarkdownBlock(block: MdBlock, size: TextUnit, color: Color, mono: Fo
             lineHeight = size.plus(when (block.level) { 1 -> 3f; 2 -> 1.5f; else -> 0.5f }).times(1.35f),
         )
         is MdBlock.Paragraph -> Text(styled(block.spans, mono, onLink), color = color, fontSize = size, lineHeight = size.times(1.45f))
-        is MdBlock.Code -> Box(Modifier.fillMaxWidth().background(Tok.Inset, RoundedCornerShape(8.dp)).padding(horizontal = 10.dp, vertical = 8.dp)) {
+        is MdBlock.Code -> Box(Modifier.fillMaxWidth().insetPanel().padding(horizontal = 10.dp, vertical = 8.dp)) {
             Row(Modifier.horizontalScroll(rememberScrollState())) {
                 Text(block.text, color = Tok.Ink, fontFamily = mono, fontSize = size.plus(-1.5f), lineHeight = size.plus(-1.5f).times(1.4f), softWrap = false)
             }
@@ -271,7 +270,7 @@ private fun MarkdownTable(table: MdBlock.Table, size: TextUnit, mono: FontFamily
             }
         }
     }
-    Column(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).background(Tok.Inset, RoundedCornerShape(8.dp)).padding(vertical = 4.dp)) {
+    Column(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).insetPanel().padding(vertical = 4.dp)) {
         line(table.header, head = true, zebra = false)
         Box(Modifier.width(widths.fold(0.dp) { a, b -> a + b }).height(1.dp).background(Tok.Edge2))
         table.rows.forEachIndexed { i, r -> line(r, head = false, zebra = i % 2 == 1) }

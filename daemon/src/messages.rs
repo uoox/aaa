@@ -106,6 +106,19 @@ pub struct Artifact {
     pub ts: String,
 }
 
+/// Claude Code **自己**的待发送队列里的一条（transcript 的 `queue-operation`）。
+///
+/// 模型正在跑时你照样能往 TUI 里敲字，Claude Code 把它排进队列、这一轮结束再送进去——
+/// 这本来就是它的行为，AAA 不再另做一套「待发送」（v1.22 用户拍板：「排队发送按照
+/// claude code 逻辑，不需要另外实现这个功能，只需要在消息流适配 claude code 逻辑」）。
+/// 客户端因此只管把字写进 PTY，队列长什么样看这里。
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QueuedMsg {
+    /// 排进队列的时刻（ISO）
+    pub ts: String,
+    pub text: String,
+}
+
 pub struct MsgStore {
     pub source: &'static str, // claude | none
     pub supported: bool,
@@ -129,6 +142,9 @@ pub struct MsgStore {
     subagent_ix: HashMap<String, usize>,
     /// v1.17 详情屏：用过的技能，按名字合并（首次出现的顺序）
     pub skills: Vec<SkillUse>,
+    /// v1.22：Claude Code 此刻排着的待发送消息（见 [`QueuedMsg`]）。`<task-notification>`
+    /// 和斜杠命令不算——那些不是「你打的字在等着发出去」
+    pub queued: Vec<QueuedMsg>,
     /// 发出去还没等到 tool_result 的**前台**工具调用：有它在就说明模型还在等结果，
     /// 60s 兜底不许把会话压回 waiting（gpt-6 审阅：长编译期间会被误判成静止）
     awaiting_result: HashSet<String>,
@@ -169,6 +185,7 @@ impl MsgStore {
             subagents: Vec::new(),
             subagent_ix: HashMap::new(),
             skills: Vec::new(),
+            queued: Vec::new(),
             awaiting_result: HashSet::new(),
             last_activity_ts: String::new(),
             dirty: false,
@@ -241,6 +258,16 @@ impl MsgStore {
     /// 任务时往消息流塞一行 system：「后台任务完成：<summary>」
     /// （v1.16 用户要求：不然「后台」→「运行」的翻转看不出是什么触发的）。同一个任务的
     /// enqueue / remove / attachment 三条记录只会有第一条真的销掉，天然去重
+    /// 队列里划掉与 `text` 相同的那一条（送出去了，或被撤回）。按原文比：Claude Code
+    /// 的 `remove` / `attachment` 给的就是原文，队列里没有别的 id 可认。
+    fn drop_queued(&mut self, text: &str) {
+        let t = text.trim();
+        if let Some(i) = self.queued.iter().position(|q| q.text == cap(t, TEXT_CAP)) {
+            self.queued.remove(i);
+            self.dirty = true;
+        }
+    }
+
     fn settle_background_at(&mut self, ts: &str, text: &str) {
         if !text.contains("<task-notification") {
             return;
@@ -464,10 +491,40 @@ pub fn parse_claude_line(store: &mut MsgStore, v: &Value) {
     // （`queue-operation` 的 content），再作为 `attachment`（queued_command 的 prompt）
     // 并进这一轮——实测 Bash run_in_background 回来就是这条路，只认 user 消息会漏销
     match ty {
+        // v1.22：这条同时也是**用户排队的消息**的来源。模型在跑时往 TUI 里敲的字，
+        // Claude Code 记成 `enqueue`，这一轮结束送进去时记 `remove` / `dequeue`
+        // （或作为 `attachment` 的 prompt 并进下一轮）。三种收尾都见过实测样本。
         "queue-operation" => {
             let ts = v.get("timestamp").and_then(|t| t.as_str()).unwrap_or("");
-            if let Some(c) = v.get("content").and_then(|c| c.as_str()) {
+            let content = v.get("content").and_then(|c| c.as_str());
+            if let Some(c) = content {
                 store.settle_background_at(ts, c);
+            }
+            match v.get("operation").and_then(|o| o.as_str()).unwrap_or("") {
+                // `<task-notification>` 与斜杠命令都被 usable_user_text 挡在外面：
+                // 队列里要显示的只有「你打的那句话在等着发出去」
+                "enqueue" => {
+                    if let Some(c) = content.filter(|c| usable_user_text(c)) {
+                        store.queued.push(QueuedMsg { ts: ts.to_string(), text: cap(c.trim(), TEXT_CAP) });
+                        store.dirty = true;
+                    }
+                }
+                "dequeue" => {
+                    if !store.queued.is_empty() {
+                        store.queued.remove(0);
+                        store.dirty = true;
+                    }
+                }
+                // remove 带着被删掉的那条原文；popAll 见过带 content 的样本（`/model`），
+                // 没有 content 就是整队清空
+                "remove" | "popAll" => match content {
+                    Some(c) => store.drop_queued(c),
+                    None => {
+                        store.dirty |= !store.queued.is_empty();
+                        store.queued.clear();
+                    }
+                },
+                _ => {}
             }
             return;
         }
@@ -475,6 +532,8 @@ pub fn parse_claude_line(store: &mut MsgStore, v: &Value) {
             let ts = v.get("timestamp").and_then(|t| t.as_str()).or_else(|| v.pointer("/attachment/timestamp").and_then(|t| t.as_str())).unwrap_or("");
             if let Some(p) = v.pointer("/attachment/prompt").and_then(|c| c.as_str()) {
                 store.settle_background_at(ts, p);
+                // 排着的那句话正被送进这一轮：从队列里划掉（它马上就以 user 消息露面）
+                store.drop_queued(p);
             }
             return;
         }
@@ -1206,6 +1265,45 @@ mod tests {
         // 挂超过 max_age 的物理清掉
         store.prune_background("2026-09-07T00:00:00.000Z", "2026-09-07T04:00:00.000Z", chrono::Duration::hours(2));
         assert_eq!(store.pending_background(None), 0);
+    }
+
+    /// Claude Code 自己的待发送队列（v1.22）：模型在跑时敲进去的字，transcript 记成
+    /// `queue-operation`。AAA 不再另做一套「待发送」，消息流画的就是这一份。
+    /// 形状全部照实测样本：enqueue 带 content，dequeue 不带，remove 还带 reason，
+    /// 送进这一轮时以 `attachment(prompt)` 露面。
+    #[test]
+    fn claude_code_queue_shows_up_and_clears() {
+        let mut store = MsgStore::for_agent("claude");
+        let enq = |t: &str, ts: &str| json!({"type":"queue-operation","operation":"enqueue","sessionId":"s","timestamp":ts,"content":t});
+        parse_claude_line(&mut store, &enq("先把宽度改回来", "2026-09-08T10:00:00.000Z"));
+        parse_claude_line(&mut store, &enq("顺便看下测试", "2026-09-08T10:00:05.000Z"));
+        assert_eq!(store.queued.iter().map(|q| q.text.as_str()).collect::<Vec<_>>(), ["先把宽度改回来", "顺便看下测试"]);
+        assert_eq!(store.queued[0].ts, "2026-09-08T10:00:00.000Z");
+
+        // `<task-notification>` 与斜杠命令不是「你打的字在等着发出去」
+        parse_claude_line(&mut store, &enq("<task-notification>\n<tool-use-id>x</tool-use-id>\n</task-notification>", "2026-09-08T10:00:06.000Z"));
+        parse_claude_line(&mut store, &enq("/model", "2026-09-08T10:00:07.000Z"));
+        assert_eq!(store.queued.len(), 2, "通知和斜杠命令不进队列");
+
+        // 送进这一轮：Claude Code 记一条 remove（带 reason），队列里少一条
+        parse_claude_line(&mut store, &json!({"type":"queue-operation","operation":"remove","reason":"consumed","sessionId":"s","timestamp":"2026-09-08T10:01:00.000Z","content":"先把宽度改回来"}));
+        assert_eq!(store.queued.iter().map(|q| q.text.as_str()).collect::<Vec<_>>(), ["顺便看下测试"]);
+
+        // 另一条走 attachment(prompt) 并进下一轮，同样要划掉
+        parse_claude_line(&mut store, &json!({"type":"attachment","attachment":{"type":"queued_command","commandMode":"prompt","prompt":"顺便看下测试"},"timestamp":"2026-09-08T10:02:00.000Z"}));
+        assert!(store.queued.is_empty(), "送出去了就不该还挂着");
+    }
+
+    #[test]
+    fn queue_dequeue_and_pop_all() {
+        let mut store = MsgStore::for_agent("claude");
+        for t in ["a", "b", "c"] {
+            parse_claude_line(&mut store, &json!({"type":"queue-operation","operation":"enqueue","timestamp":"2026-09-08T10:00:00.000Z","content":t}));
+        }
+        parse_claude_line(&mut store, &json!({"type":"queue-operation","operation":"dequeue","timestamp":"2026-09-08T10:00:01.000Z"}));
+        assert_eq!(store.queued.iter().map(|q| q.text.as_str()).collect::<Vec<_>>(), ["b", "c"], "dequeue 不带 content，弹队头");
+        parse_claude_line(&mut store, &json!({"type":"queue-operation","operation":"popAll","timestamp":"2026-09-08T10:00:02.000Z"}));
+        assert!(store.queued.is_empty(), "popAll 不带 content = 整队清空");
     }
 
     #[test]

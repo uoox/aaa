@@ -1080,19 +1080,7 @@ impl Render for TerminalView {
             .as_ref()
             .map(|l| (l.row, l.start, l.end));
 
-        // 4 个字体变体一次构建（seg 循环内只 clone，不重复走 font()/SharedString 分配）
-        let fonts: [gpui::Font; 4] = std::array::from_fn(|i| {
-            let mut f = gpui::font("Menlo");
-            if i & 1 != 0 {
-                f.weight = gpui::FontWeight::BOLD;
-            }
-            if i & 2 != 0 {
-                f.style = gpui::FontStyle::Italic;
-            }
-            f
-        });
-        let mono =
-            move |bold: bool, italic: bool| fonts[(bold as usize) | ((italic as usize) << 1)].clone();
+        let mono = mono_fonts();
 
         div()
             .id("terminal")
@@ -1109,246 +1097,43 @@ impl Render for TerminalView {
             .child(
                 canvas(
                     move |bounds, _window, cx| {
-                        // 尺寸 → 行列，变化则 defer 到绘制结束后应用 + 发 resize 帧；
-                        // 同时回写内容区原点（鼠标选区换算用）
-                        let cols =
-                            (((f32::from(bounds.size.width) - PAD * 2.0) / f32::from(cell_w)).floor() as i32).max(2)
-                                as u16;
-                        let rows =
-                            (((f32::from(bounds.size.height) - PAD * 2.0) / f32::from(line_h)).floor() as i32).max(2)
-                                as u16;
-                        let origin = bounds.origin;
-                        let bsize = bounds.size;
-                        if last_sent != Some((cols, rows))
-                            || last_origin != Some(origin)
-                            || last_size != Some(bsize)
-                        {
-                            let e = entity2.clone();
-                            cx.defer(move |cx| {
-                                e.update(cx, |t, cx| {
-                                    t.last_origin = Some(origin);
-                                    t.last_size = Some(bsize);
-                                    t.apply_view_size(cols, rows, cx);
-                                });
-                            });
-                        }
+                        sync_view_size(
+                            bounds, cell_w, line_h, last_sent, last_origin, last_size, &entity2, cx,
+                        );
                     },
                     move |bounds, _, window, cx| {
                         window.handle_input(&handle, ElementInputHandler::new(bounds, entity), cx);
                         let ox = bounds.origin.x + px(PAD);
                         let oy = bounds.origin.y + px(PAD);
-                        let font_size = px(FONT_SIZE);
 
-                        // 背景块
-                        for (row, line) in snap.lines.iter().enumerate() {
-                            let y = oy + line_h * (row as f32);
-                            for (s, e, color) in &line.bgs {
-                                window.paint_quad(fill(
-                                    Bounds::new(
-                                        point(ox + cell_w * (*s as f32), y),
-                                        size(cell_w * ((*e - *s) as f32), line_h),
-                                    ),
-                                    c(*color),
-                                ));
-                            }
-                            // 选区高亮
-                            for (s, e) in &line.sels {
-                                window.paint_quad(fill(
-                                    Bounds::new(
-                                        point(ox + cell_w * (*s as f32), y),
-                                        size(cell_w * ((*e - *s) as f32), line_h),
-                                    ),
-                                    ca(theme::accent(), 0.24),
-                                ));
-                            }
+                        paint_backgrounds(&snap.lines, ox, oy, cell_w, line_h, window);
+                        paint_cursor(snap.cursor, focused, ox, oy, cell_w, line_h, window);
+                        paint_text(
+                            snap.lines, snap.cursor, focused, ox, oy, cell_w, line_h, &mono, window,
+                            cx,
+                        );
+                        if let Some(hover) = hover {
+                            paint_link_underline(hover, ox, oy, cell_w, line_h, window);
                         }
-                        // 光标块（字下面先铺色）
-                        if let Some((row, col, _, shape)) = snap.cursor {
-                            let x = ox + cell_w * (col as f32);
-                            let y = oy + line_h * (row as f32);
-                            let (b, color) = match shape {
-                                CursorShape::Block => (
-                                    Bounds::new(point(x, y), size(cell_w, line_h)),
-                                    ca(theme::accent(), if focused { 0.9 } else { 0.35 }),
-                                ),
-                                CursorShape::Beam => (
-                                    Bounds::new(point(x, y), size(px(2.), line_h)),
-                                    ca(theme::accent(), 0.9),
-                                ),
-                                CursorShape::Underline => (
-                                    Bounds::new(
-                                        point(x, y + line_h - px(2.)),
-                                        size(cell_w, px(2.)),
-                                    ),
-                                    ca(theme::accent(), 0.9),
-                                ),
-                                _ => (
-                                    Bounds::new(point(x, y), size(cell_w, line_h)),
-                                    ca(theme::accent(), 0.35),
-                                ),
-                            };
-                            window.paint_quad(fill(b, color));
-                        }
-                        // 文本（lines 按值消费：seg.text 直接转 SharedString，不再逐帧 clone）
-                        for (row, line) in snap.lines.into_iter().enumerate() {
-                            let y = oy + line_h * (row as f32);
-                            for seg in line.segs {
-                                let cursor_here = matches!(snap.cursor,
-                                    Some((crow, ccol, _, CursorShape::Block))
-                                        if crow as usize == row
-                                            && ccol >= seg.col
-                                            && ccol < seg.col + seg.chars * seg.cell_w);
-                                let mut color: gpui::Hsla = c(seg.style.fg).into();
-                                color.a = seg.style.alpha;
-                                if cursor_here && focused && seg.chars == 1 {
-                                    // 单字符 seg 且光标在其上：反色
-                                    color = c(theme::term_bg()).into();
-                                }
-                                let run = gpui::TextRun {
-                                    len: seg.text.len(),
-                                    font: mono(seg.style.bold, seg.style.italic),
-                                    color,
-                                    background_color: None,
-                                    underline: seg.style.underline.then(|| gpui::UnderlineStyle {
-                                        thickness: px(1.),
-                                        color: Some(color),
-                                        wavy: false,
-                                    }),
-                                    strikethrough: seg.style.strike.then(|| {
-                                        gpui::StrikethroughStyle {
-                                            thickness: px(1.),
-                                            color: Some(color),
-                                        }
-                                    }),
-                                };
-                                // 全部按格宽强制推进（窄 1 格 / 宽 2 格）：
-                                // ASCII 消除长串累计漂移，CJK 合并段逐字对齐格点
-                                let force = Some(cell_w * (seg.cell_w as f32));
-                                let line_shaped = window.text_system().shape_line(
-                                    seg.text.into(),
-                                    font_size,
-                                    &[run],
-                                    force,
-                                );
-                                let _ = line_shaped.paint(
-                                    point(ox + cell_w * (seg.col as f32), y),
-                                    line_h,
-                                    gpui::TextAlign::Left,
-                                    None,
-                                    window,
-                                    cx,
-                                );
-                            }
-                        }
-                        // 悬停链接的下划线（画在格底，不动 seg 的 TextRun：
-                        // 一改 style 整段就得重新合并，悬停不值这个代价）
-                        if let Some((row, s, e)) = hover {
-                            window.paint_quad(fill(
-                                Bounds::new(
-                                    point(
-                                        ox + cell_w * (s as f32),
-                                        oy + line_h * (row as f32) + line_h - px(2.),
-                                    ),
-                                    size(cell_w * ((e - s) as f32), px(1.)),
-                                ),
-                                c(theme::accent()),
-                            ));
-                        }
-                        // IME 组字预览
-                        if let Some(m) = &marked
-                            && let Some((row, col, _, _)) = snap.cursor
-                        {
-                            let x = ox + cell_w * (col as f32);
-                            let y = oy + line_h * (row as f32);
-                            let run = gpui::TextRun {
-                                len: m.len(),
-                                font: mono(false, false),
-                                color: c(theme::ink()).into(),
-                                background_color: Some(c(theme::surface_raised()).into()),
-                                underline: Some(gpui::UnderlineStyle {
-                                    thickness: px(1.5),
-                                    color: Some(c(theme::accent()).into()),
-                                    wavy: false,
-                                }),
-                                strikethrough: None,
-                            };
-                            let shaped = window.text_system().shape_line(
-                                m.clone().into(),
-                                font_size,
-                                &[run],
-                                None,
-                            );
-                            window.paint_quad(fill(
-                                Bounds::new(point(x, y), size(shaped.width, line_h)),
-                                c(theme::surface_raised()),
-                            ));
-                            let _ = shaped.paint(
-                                point(x, y),
-                                line_h,
-                                gpui::TextAlign::Left,
-                                None,
-                                window,
-                                cx,
+                        if let Some(m) = &marked {
+                            paint_ime_preview(
+                                m, snap.cursor, ox, oy, cell_w, line_h, &mono, window, cx,
                             );
                         }
-                        // 右侧滚动条（有回滚历史才画；备用屏 history=0 自然无）
-                        if let Some((top, h)) = scrollbar_thumb(
-                            f32::from(bounds.size.height),
+                        paint_scrollbar(
+                            bounds,
                             term_rows,
                             snap.history,
                             snap.display_offset,
-                        ) {
-                            let track_x =
-                                bounds.origin.x + bounds.size.width - px(16.);
-                            window.paint_quad(fill(
-                                Bounds::new(
-                                    point(track_x, bounds.origin.y),
-                                    size(px(14.), bounds.size.height),
-                                ),
-                                ca(theme::edge_light(), 0.35),
-                            ));
-                            window.paint_quad(fill(
-                                Bounds::new(
-                                    point(track_x + px(2.), bounds.origin.y + px(top)),
-                                    size(px(10.), px(h)),
-                                ),
-                                ca(theme::dim(), if sb_dragging { 0.85 } else { 0.45 }),
-                            ));
-                        }
-                        // 回看指示
+                            sb_dragging,
+                            window,
+                        );
                         if snap.display_offset > 0 {
-                            let label: SharedString = format!(
-                                "回看 {}/{} 行 · 任意输入回到底部",
-                                snap.display_offset, snap.history
-                            )
-                            .into();
-                            let run = gpui::TextRun {
-                                len: label.len(),
-                                font: mono(false, false),
-                                color: c(theme::amber()).into(),
-                                background_color: None,
-                                underline: None,
-                                strikethrough: None,
-                            };
-                            let shaped = window.text_system().shape_line(
-                                label,
-                                px(11.),
-                                &[run],
-                                None,
-                            );
-                            let x = bounds.origin.x + bounds.size.width - shaped.width - px(16.);
-                            window.paint_quad(fill(
-                                Bounds::new(
-                                    point(x - px(8.), bounds.origin.y + px(4.)),
-                                    size(shaped.width + px(16.), px(20.)),
-                                ),
-                                ca(theme::surface_raised(), 0.92),
-                            ));
-                            let _ = shaped.paint(
-                                point(x, bounds.origin.y + px(7.)),
-                                px(14.),
-                                gpui::TextAlign::Left,
-                                None,
+                            paint_backscroll_badge(
+                                bounds,
+                                snap.display_offset,
+                                snap.history,
+                                &mono,
                                 window,
                                 cx,
                             );
@@ -1357,24 +1142,356 @@ impl Render for TerminalView {
                 )
                 .size_full(),
             )
-            .when(conn_down, |el| {
-                el.child(
-                    div()
-                        .absolute()
-                        .top(px(8.))
-                        .left(px(8.))
-                        .px(px(10.))
-                        .py(px(3.))
-                        .rounded(px(6.))
-                        .bg(ca(theme::red(), 0.15))
-                        .border_1()
-                        .border_color(c(theme::red()))
-                        .text_size(px(11.))
-                        .text_color(c(theme::red()))
-                        .child("连接已断开 · 自动重连中…"),
-                )
-            })
+            .when(conn_down, |el| el.child(down_badge()))
     }
+}
+
+/// 4 个字体变体（正/粗/斜/粗斜）一次构建，seg 循环内只 clone——
+/// 每段都走一趟 `font()` + SharedString 分配是已知热点。
+fn mono_fonts() -> impl Fn(bool, bool) -> gpui::Font {
+    let fonts: [gpui::Font; 4] = std::array::from_fn(|i| {
+        let mut f = gpui::font("Menlo");
+        if i & 1 != 0 {
+            f.weight = gpui::FontWeight::BOLD;
+        }
+        if i & 2 != 0 {
+            f.style = gpui::FontStyle::Italic;
+        }
+        f
+    });
+    move |bold: bool, italic: bool| fonts[(bold as usize) | ((italic as usize) << 1)].clone()
+}
+
+/// 视图尺寸 → 行列：变了就发一帧 WS resize，并回写内容区原点与尺寸
+/// （鼠标换算、滚动条命中都读它）。prepaint 里不能直接改 self，所以走 cx.defer
+/// 推到这一帧画完之后。
+#[allow(clippy::too_many_arguments)]
+fn sync_view_size(
+    bounds: Bounds<Pixels>,
+    cell_w: Pixels,
+    line_h: Pixels,
+    last_sent: Option<(u16, u16)>,
+    last_origin: Option<gpui::Point<Pixels>>,
+    last_size: Option<gpui::Size<Pixels>>,
+    view: &gpui::Entity<TerminalView>,
+    cx: &mut App,
+) {
+    let cols = (((f32::from(bounds.size.width) - PAD * 2.0) / f32::from(cell_w)).floor() as i32)
+        .max(2) as u16;
+    let rows = (((f32::from(bounds.size.height) - PAD * 2.0) / f32::from(line_h)).floor() as i32)
+        .max(2) as u16;
+    let origin = bounds.origin;
+    let bsize = bounds.size;
+    if last_sent == Some((cols, rows)) && last_origin == Some(origin) && last_size == Some(bsize) {
+        return;
+    }
+    let e = view.clone();
+    cx.defer(move |cx| {
+        e.update(cx, |t, cx| {
+            t.last_origin = Some(origin);
+            t.last_size = Some(bsize);
+            t.apply_view_size(cols, rows, cx);
+        });
+    });
+}
+
+// ── canvas 绘制的各层 ──────────────────────────────────────────────────
+//
+// 一帧终端是几层叠上去的：背景块 → 光标块 → 文本 → 链接下划线 → IME 预览
+// → 滚动条 → 回看指示。每层一个函数，名字就是「这一层画的是什么」。
+// 都是自由函数而不是方法：canvas 的绘制闭包是 `move` 的，拿不到 &self，
+// 需要的几何量（内容区原点 ox/oy、格宽 cell_w、行高 line_h）显式传。
+
+/// 背景块与选区高亮：一行里若干列区间刷成一块底色。
+fn paint_backgrounds(
+    lines: &[LineSnap],
+    ox: Pixels,
+    oy: Pixels,
+    cell_w: Pixels,
+    line_h: Pixels,
+    window: &mut Window,
+) {
+    for (row, line) in lines.iter().enumerate() {
+        let y = oy + line_h * (row as f32);
+        for (s, e, color) in &line.bgs {
+            window.paint_quad(fill(
+                Bounds::new(
+                    point(ox + cell_w * (*s as f32), y),
+                    size(cell_w * ((*e - *s) as f32), line_h),
+                ),
+                c(*color),
+            ));
+        }
+        // 选区高亮
+        for (s, e) in &line.sels {
+            window.paint_quad(fill(
+                Bounds::new(
+                    point(ox + cell_w * (*s as f32), y),
+                    size(cell_w * ((*e - *s) as f32), line_h),
+                ),
+                ca(theme::accent(), 0.24),
+            ));
+        }
+    }
+}
+
+/// 光标块（字下面先铺色）：形状随应用要求（块 / 竖线 / 下划线），
+/// 没焦点时块光标淡下来。
+fn paint_cursor(
+    cursor: Option<(u16, u16, char, CursorShape)>,
+    focused: bool,
+    ox: Pixels,
+    oy: Pixels,
+    cell_w: Pixels,
+    line_h: Pixels,
+    window: &mut Window,
+) {
+    let Some((row, col, _, shape)) = cursor else {
+        return;
+    };
+    let x = ox + cell_w * (col as f32);
+    let y = oy + line_h * (row as f32);
+    let (b, color) = match shape {
+        CursorShape::Block => (
+            Bounds::new(point(x, y), size(cell_w, line_h)),
+            ca(theme::accent(), if focused { 0.9 } else { 0.35 }),
+        ),
+        CursorShape::Beam => (
+            Bounds::new(point(x, y), size(px(2.), line_h)),
+            ca(theme::accent(), 0.9),
+        ),
+        CursorShape::Underline => (
+            Bounds::new(point(x, y + line_h - px(2.)), size(cell_w, px(2.))),
+            ca(theme::accent(), 0.9),
+        ),
+        _ => (
+            Bounds::new(point(x, y), size(cell_w, line_h)),
+            ca(theme::accent(), 0.35),
+        ),
+    };
+    window.paint_quad(fill(b, color));
+}
+
+/// 文本：一行里合并好的若干 seg，各自一次 shape_line。
+/// `lines` 按值消费——seg.text 直接转 SharedString，不再逐帧 clone。
+///
+/// 参数多是因为几何量（原点 + 格宽行高）本来就得一路传下来；
+/// 把它们打包成一个结构体只是把同样的东西换个地方放。
+#[allow(clippy::too_many_arguments)]
+fn paint_text(
+    lines: Vec<LineSnap>,
+    cursor: Option<(u16, u16, char, CursorShape)>,
+    focused: bool,
+    ox: Pixels,
+    oy: Pixels,
+    cell_w: Pixels,
+    line_h: Pixels,
+    mono: &dyn Fn(bool, bool) -> gpui::Font,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let font_size = px(FONT_SIZE);
+    for (row, line) in lines.into_iter().enumerate() {
+        let y = oy + line_h * (row as f32);
+        for seg in line.segs {
+            let cursor_here = matches!(cursor,
+                Some((crow, ccol, _, CursorShape::Block))
+                    if crow as usize == row
+                        && ccol >= seg.col
+                        && ccol < seg.col + seg.chars * seg.cell_w);
+            let mut color: gpui::Hsla = c(seg.style.fg).into();
+            color.a = seg.style.alpha;
+            if cursor_here && focused && seg.chars == 1 {
+                // 单字符 seg 且光标在其上：反色
+                color = c(theme::term_bg()).into();
+            }
+            let run = gpui::TextRun {
+                len: seg.text.len(),
+                font: mono(seg.style.bold, seg.style.italic),
+                color,
+                background_color: None,
+                underline: seg.style.underline.then(|| gpui::UnderlineStyle {
+                    thickness: px(1.),
+                    color: Some(color),
+                    wavy: false,
+                }),
+                strikethrough: seg.style.strike.then(|| gpui::StrikethroughStyle {
+                    thickness: px(1.),
+                    color: Some(color),
+                }),
+            };
+            // 全部按格宽强制推进（窄 1 格 / 宽 2 格）：
+            // ASCII 消除长串累计漂移，CJK 合并段逐字对齐格点
+            let force = Some(cell_w * (seg.cell_w as f32));
+            let line_shaped =
+                window
+                    .text_system()
+                    .shape_line(seg.text.into(), font_size, &[run], force);
+            let _ = line_shaped.paint(
+                point(ox + cell_w * (seg.col as f32), y),
+                line_h,
+                gpui::TextAlign::Left,
+                None,
+                window,
+                cx,
+            );
+        }
+    }
+}
+
+/// 悬停链接的下划线：画在格底，不动 seg 的 TextRun——
+/// 一改 style 整段就得重新合并，悬停不值这个代价。
+fn paint_link_underline(
+    hover: (u16, u16, u16),
+    ox: Pixels,
+    oy: Pixels,
+    cell_w: Pixels,
+    line_h: Pixels,
+    window: &mut Window,
+) {
+    let (row, s, e) = hover;
+    window.paint_quad(fill(
+        Bounds::new(
+            point(
+                ox + cell_w * (s as f32),
+                oy + line_h * (row as f32) + line_h - px(2.),
+            ),
+            size(cell_w * ((e - s) as f32), px(1.)),
+        ),
+        c(theme::accent()),
+    ));
+}
+
+/// IME 组字预览：光标处压一块 surface 底，把还没上屏的拼音/汉字画上去。
+#[allow(clippy::too_many_arguments)]
+fn paint_ime_preview(
+    marked: &str,
+    cursor: Option<(u16, u16, char, CursorShape)>,
+    ox: Pixels,
+    oy: Pixels,
+    cell_w: Pixels,
+    line_h: Pixels,
+    mono: &dyn Fn(bool, bool) -> gpui::Font,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some((row, col, _, _)) = cursor else {
+        return;
+    };
+    let x = ox + cell_w * (col as f32);
+    let y = oy + line_h * (row as f32);
+    let run = gpui::TextRun {
+        len: marked.len(),
+        font: mono(false, false),
+        color: c(theme::ink()).into(),
+        background_color: Some(c(theme::surface_raised()).into()),
+        underline: Some(gpui::UnderlineStyle {
+            thickness: px(1.5),
+            color: Some(c(theme::accent()).into()),
+            wavy: false,
+        }),
+        strikethrough: None,
+    };
+    let shaped =
+        window
+            .text_system()
+            .shape_line(marked.to_string().into(), px(FONT_SIZE), &[run], None);
+    window.paint_quad(fill(
+        Bounds::new(point(x, y), size(shaped.width, line_h)),
+        c(theme::surface_raised()),
+    ));
+    let _ = shaped.paint(point(x, y), line_h, gpui::TextAlign::Left, None, window, cx);
+}
+
+/// 右侧滚动条（有回滚历史才画；备用屏 history=0 自然无）
+fn paint_scrollbar(
+    bounds: Bounds<Pixels>,
+    term_rows: usize,
+    history: usize,
+    display_offset: usize,
+    dragging: bool,
+    window: &mut Window,
+) {
+    let Some((top, h)) = scrollbar_thumb(
+        f32::from(bounds.size.height),
+        term_rows,
+        history,
+        display_offset,
+    ) else {
+        return;
+    };
+    let track_x = bounds.origin.x + bounds.size.width - px(16.);
+    window.paint_quad(fill(
+        Bounds::new(
+            point(track_x, bounds.origin.y),
+            size(px(14.), bounds.size.height),
+        ),
+        ca(theme::edge_light(), 0.35),
+    ));
+    window.paint_quad(fill(
+        Bounds::new(
+            point(track_x + px(2.), bounds.origin.y + px(top)),
+            size(px(10.), px(h)),
+        ),
+        ca(theme::dim(), if dragging { 0.85 } else { 0.45 }),
+    ));
+}
+
+/// 回看指示：往上翻了历史时，右上角挂一行「回看 N/M 行」
+fn paint_backscroll_badge(
+    bounds: Bounds<Pixels>,
+    display_offset: usize,
+    history: usize,
+    mono: &dyn Fn(bool, bool) -> gpui::Font,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let label: SharedString =
+        format!("回看 {display_offset}/{history} 行 · 任意输入回到底部").into();
+    let run = gpui::TextRun {
+        len: label.len(),
+        font: mono(false, false),
+        color: c(theme::amber()).into(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let shaped = window
+        .text_system()
+        .shape_line(label, px(11.), &[run], None);
+    let x = bounds.origin.x + bounds.size.width - shaped.width - px(16.);
+    window.paint_quad(fill(
+        Bounds::new(
+            point(x - px(8.), bounds.origin.y + px(4.)),
+            size(shaped.width + px(16.), px(20.)),
+        ),
+        ca(theme::surface_raised(), 0.92),
+    ));
+    let _ = shaped.paint(
+        point(x, bounds.origin.y + px(7.)),
+        px(14.),
+        gpui::TextAlign::Left,
+        None,
+        window,
+        cx,
+    );
+}
+
+/// attach 断线时左上角那块红提示（重连成功自己消失）
+fn down_badge() -> gpui::Div {
+    div()
+        .absolute()
+        .top(px(8.))
+        .left(px(8.))
+        .px(px(10.))
+        .py(px(3.))
+        .rounded(px(6.))
+        .bg(ca(theme::red(), 0.15))
+        .border_1()
+        .border_color(c(theme::red()))
+        .text_size(px(11.))
+        .text_color(c(theme::red()))
+        .child("连接已断开 · 自动重连中…")
 }
 
 #[cfg(test)]

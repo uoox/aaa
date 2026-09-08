@@ -22,9 +22,7 @@ data class Turn(
     /** 轮内所有会被折叠的消息（思考 / 工具 / system） */
     val steps: List<ChatMessage> get() = body.filter { it.isStep() }
 
-    /** 轮内所有回答（assistant text），按顺序 */
-    val replies: List<ChatMessage> get() = body.filter { it.isAssistantText() }
-}
+    }
 
 /** LazyColumn 的一项。key 带类型前缀，同一条消息从 Reply 变成 Step 时 key 跟着变。 */
 sealed class StreamItem {
@@ -153,23 +151,9 @@ fun flattenForList(turns: List<Turn>, expanded: Set<Long>): List<StreamItem> = b
     }
 }
 
-/**
- * 待答的表单：会话还活着，且最新一条 question 后面没有 answer，且不早于会话进程的
- * created_at（与 daemon 同一口径）。客户端若仍判错，提交会得到 409，卡上会显示原因。
- */
-fun pendingQuestionSeq(messages: List<ChatMessage>, alive: Boolean, since: String? = null): Long? {
-    if (!alive) return null
-    for (m in messages.asReversed()) {
-        if (m.kind == "question") {
-            // 早于本进程 created_at 的悬置问题（resume 带进来的）不算待答；秒级前缀比较，
-            // created_at 是整秒、transcript 时间戳带毫秒
-            if (since != null && since.length >= 19 && m.ts.length >= 19 && m.ts.substring(0, 19) < since.substring(0, 19)) return null
-            return m.seq
-        }
-        if (m.kind == "answer") return null
-    }
-    return null
-}
+// 待答是哪一条不在这里判了（v1.22）：会话对象上的 `asking_seq` 就是答案。以前这边倒着找消息流、
+// 拿前 19 个字符和 created_at 比，daemon 那头是整串比 ts——同一秒里两边结论能相反，客户端画出
+// 可答的卡片、点提交却是 409。
 
 /** 已被回答的 question：每条 answer 归到它前面最近的那条 question。 */
 fun answeredQuestionSeqs(messages: List<ChatMessage>): Set<Long> {

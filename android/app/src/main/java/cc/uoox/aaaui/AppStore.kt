@@ -34,6 +34,27 @@ sealed class NotifyEvent {
     data class Error(val session: Session, val error: String) : NotifyEvent()
 }
 
+/**
+ * 一次会话更新该响哪一声，**最多一声**（PROTOCOL「通知策略」：待回复 / 运行结束 / 出错）。
+ *
+ * v1.22 改成阶梯，先中先出。以前是四个平铺的 `if`：一次更新里 `asking` 翻 true、状态又从
+ * running 落到 waiting（同一拍里常有的事），会一口气弹两条说同一件事。mac 侧一直是 return
+ * 式的阶梯，两端说的话对不上。
+ *
+ * [prev] 是这个会话上一次的 `state`，[killedHere] = 这台设备自己按的「结束」（自己动的手不用报告）。
+ * 纯函数，好测；「正盯着看就不响」和「静音只关通知不关黄点」在调用方（[AppStore]）。
+ */
+fun notifyEventFor(s: Session, old: Session?, prev: String?, killedHere: Boolean): NotifyEvent? = when {
+    s.agent == "shell" -> null // 终端没有「一轮跑完了」这回事
+    s.asking && old?.asking != true && s.state != "exited" -> NotifyEvent.Asking(s)
+    !s.error.isNullOrBlank() && old?.error != s.error -> NotifyEvent.Error(s, s.error)
+    prev == "running" && s.state == "waiting" -> NotifyEvent.Done(s, exited = false)
+    // 退出：只有非 0 退出码算「出错」；正常退出不弹；本机手动终止的不弹
+    prev == "running" && s.state == "exited" && !killedHere && (s.exit_code ?: 0) != 0 ->
+        NotifyEvent.Done(s, exited = true)
+    else -> null
+}
+
 /** Process-wide repository: settings, connection loop, /events WS → StateFlows. */
 class AppStore private constructor(context: Context) {
     companion object {
@@ -64,7 +85,7 @@ class AppStore private constructor(context: Context) {
     /** Session-state transition notifications (running → waiting / exited). */
     private val _notifyEvents = MutableSharedFlow<NotifyEvent>(extraBufferCapacity = 32)
     val notifyEvents = _notifyEvents.asSharedFlow()
-    /** Raw v1.1 frames screens care about (messages_changed / inbox_changed). */
+    /** 屏幕要的原始帧（messages_changed）。 */
     private val _frames = MutableSharedFlow<EventFrame>(extraBufferCapacity = 64)
     val frames = _frames.asSharedFlow()
 
@@ -216,10 +237,41 @@ class AppStore private constructor(context: Context) {
         scope.launch { settings.setProjectUnread(path, true) }
     }
 
+    /**
+     * 正盯着看的那个会话（会话屏在最上面、且 app 在前台）。眼皮底下跑完的东西再弹一条
+     * 只是噪音——mac 侧一直有这条抑制（`watching`），Android 以前没有：手机开着会话屏，
+     * 同一件事照样响一声、还留个黄点。
+     */
+    @Volatile private var watching: String? = null
+
+    /** 会话屏进入前台时登记；[clearWatching] 离开时销掉（比对 id，防切会话时后销的把先登记的清了）。 */
+    fun setWatching(id: String) { watching = id }
+
+    fun clearWatching(id: String) { if (watching == id) watching = null }
+
     /** 进了这个项目的会话：黄点消失。 */
     fun seenProject(path: String?) {
         if (path.isNullOrBlank()) return
         scope.launch { settings.setProjectUnread(path, false) }
+    }
+
+    /**
+     * 一次会话更新最多响**一声**（PROTOCOL「通知策略」：待回复 / 运行结束 / 出错，三种）。
+     * v1.22 改成阶梯，先中先出：以前是四个平铺的 `if`，一次更新里 `asking` 翻 true 而状态
+     * 又从 running 落到 waiting（这是同一拍里常有的事），会一口气弹两条说同一件事；mac 侧
+     * 一直是 return 式的阶梯，两端说的话对不上。
+     *
+     * 「标记」（黄点）与「响一声」是同一件事的两种说法，所以判定共用这一处；区别只有：
+     * 静音只关通知、不关黄点（静音是「别吵我」不是「别记着」，在 NotificationService 里滤），
+     * 而**正盯着这个会话看**的时候两样都不做——已经看见了。
+     */
+    private fun notifyForUpdate(s: Session, old: Session?, prev: String?) {
+        // 标记要无条件消耗掉（哪怕这次不响）
+        val killedHere = userKilled.remove(s.id)
+        val ev = notifyEventFor(s, old, prev, killedHere) ?: return
+        if (watching == s.id) return
+        _notifyEvents.tryEmit(ev)
+        markUnread(s)
     }
 
     private fun handleFrame(frame: EventFrame) {
@@ -238,22 +290,7 @@ class AppStore private constructor(context: Context) {
                 val old = _sessions.value.find { it.id == s.id }
                 _sessions.value = _sessions.value.filter { it.id != s.id } + s
                 if (s.agent == "shell" && s.state == "exited") cleanupExitedShell(s)
-                // 待回复：asking 翻 true（弹着选项 / 授权等你）
-                if (s.agent != "shell" && s.asking && old?.asking != true && s.state != "exited") {
-                    _notifyEvents.tryEmit(NotifyEvent.Asking(s)); markUnread(s)
-                }
-                // 出错：StopFailure 报的错误（rate limit / 认证…）
-                val err = s.error
-                if (s.agent != "shell" && !err.isNullOrBlank() && old?.error != err) {
-                    _notifyEvents.tryEmit(NotifyEvent.Error(s, err)); markUnread(s)
-                }
-                if (s.agent != "shell" && s.state == "waiting" && prev == "running") {
-                    _notifyEvents.tryEmit(NotifyEvent.Done(s, exited = false)); markUnread(s)
-                }
-                // 退出：只有非 0 退出码算「出错」；正常退出不弹；本机手动终止的不弹
-                if (s.agent != "shell" && s.state == "exited" && prev == "running" && !userKilled.remove(s.id) && (s.exit_code ?: 0) != 0) {
-                    _notifyEvents.tryEmit(NotifyEvent.Done(s, exited = true)); markUnread(s)
-                }
+                notifyForUpdate(s, old, prev)
             }
             is EventFrame.SessionRemoved -> {
                 synchronized(prevStates) { prevStates.remove(frame.id) }
@@ -264,7 +301,7 @@ class AppStore private constructor(context: Context) {
             is EventFrame.HealthUpdate -> {
                 _health.value = (_health.value ?: Health()).copy(ssd_mounted = frame.ssdMounted)
             }
-            is EventFrame.MessagesChanged, is EventFrame.InboxChanged -> _frames.tryEmit(frame)
+            is EventFrame.MessagesChanged -> _frames.tryEmit(frame)
             is EventFrame.UsageUpdate -> _planUsage.value = frame.plan
             is EventFrame.Unknown -> { }
         }

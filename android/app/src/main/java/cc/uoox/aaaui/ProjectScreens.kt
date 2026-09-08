@@ -3,7 +3,6 @@ package cc.uoox.aaaui
 import android.widget.Toast
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -15,11 +14,12 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.IconButton
@@ -44,6 +44,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -65,152 +66,89 @@ import kotlinx.coroutines.launch
 /** 这个 app 只跑 Claude Code：新建项目、没登记 agent 的旧项目都用它。 */
 const val DEFAULT_AGENT = "claude"
 
-/**
- * 项目行的内部状态。**2026-09-08 用户拍板：列表上不再写状态字**（「激活 / 未激活」这类词
- * 对着一屏项目说不出任何有用的东西）——行首只有一根竖线，颜色说完一切：**蓝 = 在跑**，
- * **黄 = 跑完了 / 在等你回话且这台设备还没进去看**，**灰 = 已读**。（同一天稍后两次改形：
- * 先用蓝点替掉转圈动画，再把点换成竖线。）这个枚举因此只剩两个职责：决定线是不是蓝的，
- * 以及列表从上往下的顺序。
- *
- * 一个项目只有一个 agent（建项目时定死，从不切换），项目 ↔ 会话事实上一对一，所以
- * 会话状态直接挂在项目行上，首页不再单开会话页。终端永远不代表项目。全部由客户端把
- * projects × sessions 两个流拼出来。
- */
-enum class ProjectState(val rank: Int) {
-    // rank = 同为「没黄点」时列表从上往下的优先级；黄点的一律排在它们之前（见 projectRows）
-    NEEDS_REPLY(0),
-    RUNNING(1),
-    /** 停在输入框但后台还有任务（后台 Bash / 异步子代理 / Monitor）没回来，会自己被叫醒 */
-    BACKGROUND(2),
-    ACTIVE(3),
-    INACTIVE(4);
-
-    /** 蓝线：自己在跑，或后台任务还没回来——都是「它还在动，你不用管」 */
-    val running: Boolean get() = this == RUNNING || this == BACKGROUND
-}
-
 /** 首页一行要的全部东西，纯数据，方便单测。 */
 data class ProjectRow(
     val project: Project,
-    /** 该项目的主会话；一个都没有时为 null。 */
+    /**
+     * daemon 指名的代表会话（`session_id`）在 `/sessions` 里的那一条；不在池子里就是 null。
+     * 「点这行开哪个会话」看的是 `project.session_id`，不是这个对象——它只是拿来读会话细节的。
+     */
     val primary: Session?,
-    val state: ProjectState,
     /**
      * 黄点：跑完一轮 / 在等你回话，而这台设备还没进去看过（本地状态，见 SettingsStore
      * 的 unreadProjects）。进会话就没了。
      */
     val unread: Boolean = false,
-    /**
-     * 排序键 = 该项目最近更新的会话的 `updated_at`（状态翻转 / 改名的时刻；老 daemon
-     * 没有 → created_at），包括已退出的会话；没有会话的用目录 mtime。ISO 串，字典序即时间序。
-     */
-    val updatedIso: String,
 ) {
+    /** 五态之一，daemon 算好的；老 daemon 不给 → 空串（未知，排最后、线是灰的） */
+    val status: String get() = project.status
+
     /**
-     * 标题，与 mac 侧栏同一口径：活着的会话的 title，退出后 daemon 从 agent 存储读出的
-     * session_title，没有才退到文件夹名。文件夹名不是标题——它是地址。
+     * 标题。回退链（活会话标题 → agent 存储的 session_title → 目录名）v1.22 起在 daemon 里走完，
+     * 这边只兜一下空：老 daemon 不给 `title`，退到目录名——文件夹名不是标题，它是地址。
      */
-    val title: String get() =
-        primary?.takeIf { it.state != "exited" }?.title?.takeIf { it.isNotBlank() }
-            ?: project.session_title?.takeIf { it.isNotBlank() }
-            ?: project.name
-    /** 激活 = 主会话活着。exited 的会话只是历史，点一行即 resume。 */
-    val alive: Boolean get() = primary != null && primary.state != "exited"
+    val title: String get() = project.title?.takeIf { it.isNotBlank() } ?: project.name
+
+    /** 排序键：daemon 的 `updated_at`（状态翻转 / 改名的时刻），一个会话都没有时是目录 mtime */
+    val updatedIso: String get() = project.updated_at?.takeIf { it.isNotBlank() } ?: project.mtime
+
+    /** 激活 = 此刻还有活会话。`paused`（含没有会话）之外的四态都算。 */
+    val alive: Boolean get() = status.isNotBlank() && status != "paused"
 }
 
-/** 用户拍板口径：待回复 = asking，与 state 无关。 */
-fun Session.needsReply(): Boolean = asking
-
-/** 会话最近一次有意义的变化：updated_at（v1.5）→ created_at（老 daemon）→ 最近输出。 */
-fun Session.updatedIso(): String = updated_at.ifBlank { created_at.ifBlank { last_output_at } }
-
 /**
- * 主会话：优先活着的（非 exited），待回复 < 执行中 < 其它，同级按最近输出；
- * 全都退出了就取最近退出的那个；终端永远不进入候选池。
+ * 五态的先后，PROTOCOL「项目列表：顺序 = 置顶 → 黄点 → 在跑 → 时间」那张表的镜像。
+ * 认不出来的状态（老 daemon 的空串、以后新增的词）沉到最后：宁可排在底下，也不假装懂它。
  */
-fun primarySessionFor(project: Project, sessions: List<Session>): Session? {
-    val all = sessions.filter { it.project_path == project.path && it.agent != "shell" }
-    if (all.isEmpty()) return null
-    // 项目的 agent 建项目时就定了；同目录里另开的终端（shell）不能替它代表项目状态，
-    // 只有项目 agent 的会话一个都没有时才退到其它会话
-    val mine = all.filter { it.agent == project.agent }.ifEmpty { all }
-    val live = mine.filter { it.state != "exited" }
-    if (live.isNotEmpty()) {
-        return live.minWithOrNull(
-            compareBy<Session> { when { it.needsReply() -> 0; it.state == "running" -> 1; else -> 2 } }
-                .thenByDescending { it.last_output_at },
-        )
-    }
-    return mine.maxByOrNull { it.last_output_at }
-}
+private val STATUS_RANK = mapOf("asking" to 0, "running" to 1, "background" to 2, "active" to 3, "paused" to 4)
 
-/** 四态之一。在问 = 待回复，哪怕屏幕还在变也不算「执行中」。 */
-fun projectStateOf(primary: Session?): ProjectState = when {
-    primary == null || primary.state == "exited" -> ProjectState.INACTIVE
-    primary.needsReply() -> ProjectState.NEEDS_REPLY
-    primary.state == "running" -> ProjectState.RUNNING
-    primary.background -> ProjectState.BACKGROUND
-    else -> ProjectState.ACTIVE
-}
+/** 排序档位，见 [STATUS_RANK]。 */
+fun statusRank(status: String): Int = STATUS_RANK[status] ?: STATUS_RANK.size
+
+/** 蓝线：它还在动，你不用管（自己在跑，或后台任务还没回来）。`asking` 不蓝——那是在等你。 */
+fun statusRunning(s: String) = s == "running" || s == "background"
 
 /**
- * 一项目一行。排序（2026-09-08 用户拍板）：**置顶 > 有黄点 > 在跑 > 其余**，同一档里
- * **最近更新的在前**。置顶是自己按的，黄线也挤不掉它；黄线排在蓝线前面——蓝线的还在自己
- * 往前走，黄点的那个是在等你。
- * 时间看的是 daemon 的 `updated_at`（状态翻转 / 改名），不是每个字节都动的 last_output_at
- * ——几个会话同时在跑时行才不会互相换位。同刻按路径稳住。
+ * 一项目一行。排序（2026-09-08 用户拍板）：**置顶 > 有黄点 > 状态 > 时间倒序 > 路径**。置顶是
+ * 自己按的，黄线也挤不掉它；黄线排在蓝线前面——蓝线的还在自己往前走，黄点的那个是在等你。
+ * 状态和时间都读 `/projects` 行上 daemon 算好的 `status` / `updated_at`：`updated_at` 只在状态
+ * 翻转 / 改名时变，几个会话同时在跑时行才不会互相换位。同刻按路径稳住。
+ *
+ * v1.22 删掉了这里的 `primarySessionFor` / `projectStateOf`：那两个函数各自实现了一遍「谁代表
+ * 这个项目」和「它是五态里的哪一个」，mac 的实现又是另一套（mac 取 updated_at 最大，Android 先
+ * 按 agent 过滤再按「待回复 < 执行中 < 其它」排），同一台 daemon 在两端能显示出不同的标题和状态。
  */
-fun projectRows(projects: List<Project>, sessions: List<Session>, unread: Set<String> = emptySet()): List<ProjectRow> = projects.map { p ->
-    val primary = primarySessionFor(p, sessions)
-    val latest = sessions
-        .filter { it.project_path == p.path && it.agent != "shell" }
-        .maxOfOrNull { it.updatedIso() }
-        ?.takeIf { it.isNotBlank() }
-    ProjectRow(p, primary, projectStateOf(primary), p.path in unread, latest ?: p.mtime)
-}.sortedWith(
-    compareByDescending<ProjectRow> { it.project.pinned }
-        .thenByDescending { it.unread }
-        .thenBy { it.state.rank }
-        .thenByDescending { it.updatedIso }
-        .thenBy { it.project.path },
-)
-
-/** 行首那一格的宽度。项目行是一根竖线、终端行是三道横杠，这一格放得下较宽的那个 */
-private val INDICATOR_W = 16.dp
+fun projectRows(projects: List<Project>, sessions: List<Session>, unread: Set<String> = emptySet()): List<ProjectRow> {
+    val byId = sessions.associateBy { it.id }
+    return projects.map { p ->
+        ProjectRow(p, p.session_id?.let { byId[it] }, pathListContains(unread, p.path))
+    }.sortedWith(
+        compareByDescending<ProjectRow> { it.project.pinned }
+            .thenByDescending { it.unread }
+            .thenBy { statusRank(it.status) }
+            .thenByDescending { it.updatedIso }
+            .thenBy { it.project.path },
+    )
+}
 
 /**
- * 行首那根竖线的颜色（2026-09-08 用户拍板，先替掉转圈动画、当天又把点换成竖线）：
- * **蓝** = 在跑（含后台任务没回来，以及本行正在 resume）；**黄** = 跑完了 / 在等你回话
- * 而这台设备还没进去看；**灰** = 已读，没什么要你操心的。三种情况同一根线，行高不随状态
- * 跳，也不再为一个 24fps 的圆圈让整列跟着重组。竖线比圆点更贴着行走，一列扫下来是条
+ * 那根竖线的颜色（2026-09-08 用户拍板，先替掉转圈动画、当天又把圆点换成竖线，同一天又把线
+ * 从行首挪到行尾）：**蓝** = 在跑（含后台任务没回来，以及本行正在 resume）；**黄** = 跑完了 /
+ * 在等你回话而这台设备还没进去看；**灰** = 已读，没什么要你操心的。三种情况同一根线，行高不
+ * 随状态跳，也不再为一个 24fps 的圆圈让整列跟着重组。竖线比圆点更贴着行走，一列扫下来是条
  * 节奏线而不是一串珠子。
  */
 @Composable
-private fun rowMarkColor(state: ProjectState, unread: Boolean, busy: Boolean): Color = when {
-    busy || state.running -> Tok.Blue
+private fun rowMarkColor(status: String, unread: Boolean, busy: Boolean): Color = when {
+    busy || statusRunning(status) -> Tok.Blue
     unread -> Tok.Amber
     else -> Tok.Dim
 }
 
-/** 行首竖线本体（看板卡片同一套） */
+/** 竖线本体：项目行行尾一根，看板卡片同一套 */
 @Composable
 fun MarkBar(color: Color, modifier: Modifier = Modifier) {
     Box(modifier.width(2.5.dp).height(16.dp).background(color, RoundedCornerShape(1.25.dp)))
-}
-
-/** 终端那一行的记号：三道横杠（终端 = 一屏文本行）。和项目行的竖线成一对。 */
-@Composable
-private fun MarkLines(color: Color) {
-    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-        repeat(3) { Box(Modifier.width(12.dp).height(1.5.dp).background(color, RoundedCornerShape(0.75.dp))) }
-    }
-}
-
-@Composable
-private fun RowIndicator(state: ProjectState, unread: Boolean, busy: Boolean) {
-    Box(Modifier.width(INDICATOR_W), contentAlignment = Alignment.Center) {
-        MarkBar(rowMarkColor(state, unread, busy))
-    }
 }
 
 /** 新建项目：POST /projects + /sessions，返回新会话。名字留空 = 按日期命名。 */
@@ -258,17 +196,20 @@ fun NewProjectField(
 }
 
 /**
- * 首页：项目列表本身。点一行进该项目的消息流——会话活着直接进，退出了/没有就
- * `POST /sessions`（daemon 幂等，且 resume 找不到旧对话会自动开新会话）再进。
- * 长按出项目操作单。顶部输入框既过滤列表也新建项目（与 mac 侧栏一致）；设置入口在顶栏。
- */
-@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
-/**
  * 项目面板 = 以前的首页整块（2026-09-07 用户拍板：☰ 抽屉要有首页所有按钮和功能，首页就没
  * 必要单独存在了）。会话页的 ☰ 抽屉和「一个会话都没打开」时的落地页画的都是它：顶栏
  * 一行（额度 / 看板 / 设置，2026-09-08 用户拍板砍到这三样）、新建项目框、项目列表（点开、长按操作）、
  * 下拉刷新。`currentPath` 高亮当前会话的项目；`onBeforeNavigate` 在抽屉里就是「先关抽屉」。
+ *
+ * 点一行进该项目的消息流——会话活着直接进，退出了/没有就 `POST /sessions`（daemon 幂等，
+ * 且 resume 找不到旧对话会自动开新会话）再进；长按出项目操作单。顶部输入框既过滤列表也
+ * 新建项目（与 mac 侧栏一致）。
+ *
+ * 面板本身画的东西分成四块：降级横幅 [SchemaTooOldBanner]、顶栏 [ProjectPanelHeader]、
+ * 新建框 [NewProjectField]、列表（[projectSection] + [terminalSection]）。留在这里的是
+ * **状态和动作**——建项目 / 开终端 / 开会话都要 store 与导航，收不进任何一块里。
  */
+@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? = null, onBeforeNavigate: () -> Unit = {}) {
     val scope = rememberCoroutineScope()
@@ -281,7 +222,8 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
     val plan by store.planUsage.collectAsState()
     val settings by store.settings.flow.collectAsState(initial = AppSettings())
     var planDialog by remember { mutableStateOf(false) }
-    var query by rememberSaveable { mutableStateOf("") }
+    /** 顶上那个框里的字：**只是新项目的文件夹名**，不是搜索词（v1.22 用户拍板） */
+    var newName by rememberSaveable { mutableStateOf("") }
     var refreshing by remember { mutableStateOf(false) }
     // 正在 POST /sessions 的项目路径：挡双击（daemon 虽幂等，但两次并发到达仍可能各开一个）
     var busy by remember { mutableStateOf(setOf<String>()) }
@@ -291,19 +233,24 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
     var creating by remember { mutableStateOf(false) }
     var creatingTerminal by remember { mutableStateOf(false) }
     val root = health?.project_root?.takeIf { it.isNotBlank() } ?: "/Volumes/SSD/project"
+    // 行尾那个「N 分钟前」得自己会走：这一屏只在 daemon 推了东西时重组，整套系统闲着
+    // 的时候那行字会一直停在「刚刚」。一分钟一跳，只有时间那一个 Text 跟着重组。
+    val minuteTick by produceState(0L) {
+        while (true) {
+            kotlinx.coroutines.delay(60_000)
+            value++
+        }
+    }
     val terminals = remember(sessions) { terminalSessions(sessions) }
     val focusManager = LocalFocusManager.current
 
     LaunchedEffect(Unit) { store.refreshProjects() }
 
-    // 只在输入变化时重算，不跟着 conn 延迟数字的重组一起算
+    // 只在项目 / 会话 / 黄点变化时重算，不跟着 conn 延迟数字的重组一起算。
+    // v1.22 用户拍板：**顶上那个框只用来新建项目，不当搜索框**（「侧栏就不要做搜索框了，
+    // 双端都不要」）——所以这里不再按框里的字过滤，mac 侧本来也没有过滤，两端就此一致。
     val unread = settings.unreadProjects
-    val rows = remember(projects, sessions, query, unread) {
-        projectRows(projects, sessions, unread).filter { r ->
-            query.isBlank() || r.project.name.contains(query, true) ||
-                r.project.session_title.orEmpty().contains(query, true)
-        }
-    }
+    val rows = remember(projects, sessions, unread) { projectRows(projects, sessions, unread) }
 
     fun toast(msg: String) = Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
 
@@ -311,11 +258,11 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
     fun create() {
         if (creating) return
         creating = true
-        val name = query.trim().ifBlank { null }
+        val name = newName.trim().ifBlank { null }
         scope.launch {
             try {
                 val sess = createProjectSession(store, name)
-                query = ""
+                newName = ""
                 focusManager.clearFocus()
                 onBeforeNavigate(); openSession(sess.id, "")
             } catch (e: Exception) {
@@ -343,11 +290,13 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
 
     fun open(row: ProjectRow) {
         val p = row.project
-        val primary = row.primary
-        if (primary != null && primary.state != "exited") { onBeforeNavigate(); openSession(primary.id, ""); return }
+        // 还活着就直接进；进哪一个由 daemon 的 session_id 说了算，客户端不再自己从 /sessions 里挑代表
+        if (row.alive) p.session_id?.let { onBeforeNavigate(); openSession(it, ""); return }
+        // 注册表里没有这个目录（在别处 aaa open 开出来的），daemon 不认它，resume 只会建错东西
+        if (!p.registered) { toast("这个目录不在项目注册表里，只能在它还有会话时打开"); return }
         // 注册表里登记了什么就跑什么（旧项目可能还是别的 agent，daemon 那头照样认）；
         // 没登记的一律 claude——这个 app 只跑 Claude Code，没有别的可选
-        val agent = p.agent ?: primary?.agent ?: DEFAULT_AGENT
+        val agent = p.agent ?: row.primary?.agent ?: DEFAULT_AGENT
         if (p.path in busy) return
         busy = busy + p.path
         scope.launch {
@@ -368,39 +317,23 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
     // 标题是废话；IP 和 ms 连着好的时候没人看。留下的三样是真会用的：额度、看板、设置。
     // 连接**不**正常时那一格改写连接状态：断了得说一声，但这不值得常年占一整行。
     val planSegs = planLineSegments(plan)
+    // 面板本身不管宽度：它铺满给它的地方。宽度由**外面那层**定——☰ 抽屉按
+    // [sidebarFraction] 小屏铺满 / 大屏半屏，没打开会话时它就是整屏。
     Column(Modifier.fillMaxSize()) {
-        Row(
-            Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp, top = 2.dp, bottom = 2.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Box(Modifier.weight(1f)) {
-                when (conn) {
-                    is ConnState.Connected ->
-                        // 套餐用量：5h / 7d / 按模型，最高的那个 ≥70 琥珀、≥90 红；点开看重置时间
-                        if (planSegs.isNotEmpty()) Text(
-                            segmentsAnnotated(planSegs, Tok.Faint),
-                            fontSize = 11.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.fillMaxWidth().clickable { planDialog = true },
-                        )
-                    is ConnState.Connecting -> DotWithText(Tok.Amber, "连接中…")
-                    is ConnState.Failed -> DotWithText(Tok.Red, "已断开")
-                    ConnState.NoServer -> DotWithText(Tok.Dim, "未配对")
-                }
-            }
-            // SSD 掉了是事故，才值得占顶栏；正常时不显示
-            if (health?.ssd_mounted == false) {
-                Text("SSD ✗", color = Tok.Red, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.width(4.dp))
-            }
-            IconButton(onClick = { onBeforeNavigate(); nav.navigate("history") }) {
-                Text("▦", color = Tok.Dim, fontSize = 17.sp)
-            }
-            IconButton(onClick = { onBeforeNavigate(); nav.navigate("settings") }) {
-                Text("⚙", color = Tok.Dim, fontSize = 20.sp)
-            }
-        }
+        // 降级横幅（PROTOCOL「版本兼容」）：schema 是唯一的闸门，且降级必须说出来。老 daemon 不给
+        // status / title / session_id，这一屏就画不出项目状态——**不留第二套算法**，留着就等于把
+        // 刚删掉的分歧又养回来（daemon 与 mac App 同机同版发布，只有手机可能先更新，是几分钟的窗口）
+        health?.takeIf { it.schema < SCHEMA_PROJECT_STATUS }?.let { h -> SchemaTooOldBanner(h.version) }
+        ProjectPanelHeader(
+            conn = conn,
+            planSegs = planSegs,
+            ssdMissing = health?.ssd_mounted == false,
+            onPlanClick = { planDialog = true },
+            onHistory = { onBeforeNavigate(); nav.navigate("history") },
+            onSettings = { onBeforeNavigate(); nav.navigate("settings") },
+        )
         // 与 mac 侧栏同一件东西：边输入边过滤列表，回车或右边 ＋ 就按这个名字新建项目
-        NewProjectField(query, { query = it }, creating, onCreate = { create() }, modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp))
+        NewProjectField(newName, { newName = it }, creating, onCreate = { create() }, modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp))
 
         PullToRefreshBox(
             isRefreshing = refreshing,
@@ -411,66 +344,29 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
             modifier = Modifier.fillMaxSize(),
         ) {
             LazyColumn(Modifier.fillMaxSize().padding(top = 6.dp)) {
-                // 空态也是列表里的一项：下面还有终端一节，浮一层居中文字会盖住它
-                if (rows.isEmpty()) item(key = "projects-empty") {
-                    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 28.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                        if (projects.isEmpty()) {
-                            Text("暂无项目", color = Tok.Faint)
-                            Text("在上方输入文件夹名，回车新建", color = Tok.Faint, fontSize = 12.sp)
-                        } else {
-                            Text("没有匹配的项目", color = Tok.Faint)
-                        }
-                    }
-                }
-                items(rows, key = { it.project.path }) { row ->
-                    // 顺序随最近更新变：Compose 按 key 做位移过渡，上移/下移都有动画
-                    ProjectRowItem(
-                        row,
-                        modifier = Modifier.animateItem(),
-                        busy = row.project.path in busy,
-                        current = row.project.path == currentPath,
-                        onClick = { open(row) },
-                        onLongClick = { actionsFor = row.project },
-                    )
-                }
-                if (rows.isNotEmpty()) item(key = "projects-hint") {
-                    Text(
-                        "点一行进入消息流 · 长按查看项目操作",
-                        color = Tok.Faint, fontSize = 11.sp,
-                        modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 4.dp),
-                    )
-                }
+                projectSection(
+                    rows = rows,
+                    anyProject = projects.isNotEmpty(),
+                    minuteTick = minuteTick,
+                    busy = busy,
+                    currentPath = currentPath,
+                    onOpen = { row -> open(row) },
+                    onLongPress = { p -> actionsFor = p },
+                )
                 // 终端与会话平级（2026-09-08 用户拍板）：项目列表下面直接是终端列表，
                 // 底部一行「新增终端」。以前它藏在顶栏一个 `>_` 按钮后面，是另一个世界。
-                item(key = "terminals-hdr") {
-                    HorizontalDivider(color = Tok.Edge, thickness = 1.dp, modifier = Modifier.padding(top = 10.dp))
-                    Text(
-                        "终端",
-                        color = Tok.Dim, fontSize = 11.sp, fontFamily = FontFamily.Monospace,
-                        modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 4.dp),
-                    )
-                }
-                itemsIndexed(terminals, key = { _, t -> "term-" + t.id }) { i, t ->
-                    TerminalRowItem(
-                        terminalTabLabel(i, t, root),
-                        modifier = Modifier.animateItem(),
-                        onClick = {
-                            // 点下去就把 attach 拉起来，等屏幕组合完 replay 往往已经到了
-                            store.prewarmAttachment(t.id)
-                            onBeforeNavigate(); nav.openTerminal(t.id)
-                        },
-                        onClose = { store.closeTerminal(t.id) },
-                    )
-                }
-                item(key = "terminal-new") {
-                    Text(
-                        if (creatingTerminal) "＋ 新增终端…" else "＋ 新增终端",
-                        color = if (creatingTerminal) Tok.Faint else Tok.Accent, fontSize = 14.sp,
-                        modifier = Modifier.fillMaxWidth().clickable(enabled = !creatingTerminal) { newTerminal() }
-                            .padding(horizontal = 16.dp, vertical = 13.dp),
-                    )
-                    Spacer(Modifier.height(80.dp))
-                }
+                terminalSection(
+                    terminals = terminals,
+                    root = root,
+                    creatingTerminal = creatingTerminal,
+                    onOpen = { t ->
+                        // 点下去就把 attach 拉起来，等屏幕组合完 replay 往往已经到了
+                        store.prewarmAttachment(t.id)
+                        onBeforeNavigate(); nav.openTerminal(t.id)
+                    },
+                    onClose = { t -> store.closeTerminal(t.id) },
+                    onNew = { newTerminal() },
+                )
             }
         }
     }
@@ -482,6 +378,180 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
     if (planDialog) plan?.let { PlanUsageDialog(it) { planDialog = false } }
 }
 
+/**
+ * 列表的项目一节：空态 / 一项目一行 / 底下一句用法提示。
+ *
+ * 写成 `LazyListScope` 的扩展而不是 `@Composable`：这一节是**若干个 item**（空态一项、项目
+ * 若干项、提示一项），包进一个 composable 会把它们压成列表里的一项，行的复用和
+ * `animateItem` 的位移过渡都跟着没了。
+ *
+ * [minuteTick] 一分钟跳一次，只为让「N 分钟前」那一个 Text 自己会走：整套系统闲着时没有
+ * 任何推送，时间字会一直停在「刚刚」。
+ */
+private fun LazyListScope.projectSection(
+    rows: List<ProjectRow>,
+    /** 有没有项目（区分「一个都没有」和「被搜索词滤没了」两种空） */
+    anyProject: Boolean,
+    minuteTick: Long,
+    /** 正在 POST /sessions 的项目路径，行尾的线先按「在跑」画 */
+    busy: Set<String>,
+    currentPath: String?,
+    onOpen: (ProjectRow) -> Unit,
+    onLongPress: (Project) -> Unit,
+) {
+    // 空态也是列表里的一项：下面还有终端一节，浮一层居中文字会盖住它
+    if (rows.isEmpty()) item(key = "projects-empty") { ProjectsEmpty(anyProject = anyProject) }
+    items(rows, key = { it.project.path }) { row ->
+        // 顺序随最近更新变：Compose 按 key 做位移过渡，上移/下移都有动画
+        ProjectRowItem(
+            row,
+            timeText = remember(row.updatedIso, minuteTick) { relativeTime(row.updatedIso) },
+            modifier = Modifier.animateItem(),
+            busy = row.project.path in busy,
+            current = row.project.path == currentPath,
+            onClick = { onOpen(row) },
+            onLongClick = { onLongPress(row.project) },
+        )
+    }
+    if (rows.isNotEmpty()) item(key = "projects-hint") {
+        Text(
+            "点一行进入消息流 · 长按查看项目操作",
+            color = Tok.Faint, fontSize = 11.sp,
+            modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 4.dp),
+        )
+    }
+}
+
+/** 列表的终端一节：表头 / 一终端一行 / 最后一行「＋ 新增终端」。分节的理由同 [projectSection]。 */
+private fun LazyListScope.terminalSection(
+    terminals: List<Session>,
+    /** 项目根，用来把终端的工作目录缩成一个短名字 */
+    root: String,
+    creatingTerminal: Boolean,
+    onOpen: (Session) -> Unit,
+    onClose: (Session) -> Unit,
+    onNew: () -> Unit,
+) {
+    item(key = "terminals-hdr") { TerminalsHeader() }
+    itemsIndexed(terminals, key = { _, t -> "term-" + t.id }) { i, t ->
+        TerminalRowItem(
+            terminalTabLabel(i, t, root),
+            modifier = Modifier.animateItem(),
+            onClick = { onOpen(t) },
+            onClose = { onClose(t) },
+        )
+    }
+    item(key = "terminal-new") { NewTerminalRow(creatingTerminal, onNew) }
+}
+
+/**
+ * 降级横幅（PROTOCOL「版本兼容」）：schema 是唯一的闸门，且降级必须说出来。老 daemon 不给
+ * status / title / session_id，这一屏就画不出项目状态——**不留第二套算法**，留着就等于把刚
+ * 删掉的分歧又养回来（daemon 与 mac App 同机同版发布，只有手机可能先更新，是几分钟的窗口）。
+ */
+@Composable
+private fun SchemaTooOldBanner(version: String) {
+    Text(
+        "daemon 版本过旧（v$version），项目状态不可用 —— 请更新 daemon",
+        color = Tok.Amber, fontSize = 12.sp,
+        modifier = Modifier.fillMaxWidth()
+            .background(Tok.Amber.copy(alpha = 0.10f))
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+    )
+}
+
+/**
+ * 面板顶栏一行（2026-09-08 用户拍板砍到三样）：额度 / 看板 / 设置。去掉了 "AAA" 标题和
+ * IP · 延迟——app 只有一个，标题是废话；IP 和 ms 连着好的时候没人看。连接**不**正常时左边
+ * 那一格改写连接状态：断了得说一声，但这不值得常年占一整行。
+ */
+@Composable
+private fun ProjectPanelHeader(
+    conn: ConnState,
+    /** 套餐用量的各段，空 = 没数据（或 daemon 不给），那一格就空着 */
+    planSegs: List<UsageSegment>,
+    /** SSD 掉了是事故，才值得占顶栏；正常时不显示 */
+    ssdMissing: Boolean,
+    onPlanClick: () -> Unit,
+    onHistory: () -> Unit,
+    onSettings: () -> Unit,
+) {
+    Row(
+        Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp, top = 2.dp, bottom = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.weight(1f)) {
+            when (conn) {
+                is ConnState.Connected ->
+                    // 套餐用量：5h / 7d / 按模型，最高的那个 ≥70 琥珀、≥90 红；点开看重置时间
+                    if (planSegs.isNotEmpty()) Text(
+                        segmentsAnnotated(planSegs, Tok.Faint),
+                        fontSize = 11.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.fillMaxWidth().clickable(onClick = onPlanClick),
+                    )
+                is ConnState.Connecting -> DotWithText(Tok.Amber, "连接中…")
+                is ConnState.Failed -> DotWithText(Tok.Red, "已断开")
+                ConnState.NoServer -> DotWithText(Tok.Dim, "未配对")
+            }
+        }
+        if (ssdMissing) {
+            Text("SSD ✗", color = Tok.Red, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.width(4.dp))
+        }
+        IconButton(onClick = onHistory) {
+            Text("▦", color = Tok.Dim, fontSize = 17.sp)
+        }
+        IconButton(onClick = onSettings) {
+            Text("⚙", color = Tok.Dim, fontSize = 20.sp)
+        }
+    }
+}
+
+/**
+ * 项目列表的空态。它是列表里的**一项**而不是浮在中间的一层字：下面还有终端一节，
+ * 居中浮层会盖住它。[anyProject] 分开两种空：一个项目都没有，还是搜索词把它们滤没了。
+ */
+@Composable
+private fun ProjectsEmpty(anyProject: Boolean) {
+    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 28.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        if (!anyProject) {
+            Text("暂无项目", color = Tok.Faint)
+            Text("在上方输入文件夹名，回车新建", color = Tok.Faint, fontSize = 12.sp)
+        } else {
+            Text("没有匹配的项目", color = Tok.Faint)
+        }
+    }
+}
+
+/**
+ * 终端一节的表头：一条分隔线 + 「终端」两个字。终端与会话平级（2026-09-08 用户拍板），
+ * 所以它只是项目列表下面的一节，不是另一个页面。
+ */
+@Composable
+private fun TerminalsHeader() {
+    HorizontalDivider(color = Tok.Edge, thickness = 1.dp, modifier = Modifier.padding(top = 10.dp))
+    Text(
+        "终端",
+        color = Tok.Dim, fontSize = 11.sp, fontFamily = FontFamily.Monospace,
+        modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 4.dp),
+    )
+}
+
+/**
+ * 列表最后一行「＋ 新增终端」，以及它下面那 80dp 留白——留白是给会话页右下角那枚悬浮
+ * 按钮让位的，滚到底时最后一行不该被它盖住。
+ */
+@Composable
+private fun NewTerminalRow(creating: Boolean, onClick: () -> Unit) {
+    Text(
+        if (creating) "＋ 新增终端…" else "＋ 新增终端",
+        color = if (creating) Tok.Faint else Tok.Accent, fontSize = 13.5.sp,
+        modifier = Modifier.fillMaxWidth().clickable(enabled = !creating, onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 9.dp),
+    )
+    Spacer(Modifier.height(80.dp))
+}
+
 /** 每个窗口一行：名称 + 百分比（按级别着色）+ 重置时间 */
 @Composable
 fun PlanUsageDialog(plan: PlanUsage, onDismiss: () -> Unit) {
@@ -491,36 +561,34 @@ fun PlanUsageDialog(plan: PlanUsage, onDismiss: () -> Unit) {
         plan.seven_day?.let { add(Line("7 天", it.used_percentage, it.resets_at)) }
         plan.model_scoped.orEmpty().forEach { add(Line(it.display_name.ifBlank { "模型" }, it.utilization, it.resets_at)) }
     }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        containerColor = Tok.Raised,
-        title = { Text("套餐用量", color = Tok.Ink) },
-        text = {
-            Column {
-                lines.forEach { l ->
-                    Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text(l.name, color = Tok.Ink, fontSize = 14.sp, modifier = Modifier.weight(1f))
-                        Text(
-                            l.pct?.let { pctText(it) } ?: "—",
-                            color = pctColor(pctColorLevel(l.pct), Tok.Ink), fontSize = 14.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold,
-                        )
-                        resetLabel(parseResetsAt(l.resetsAt))?.let {
-                            Spacer(Modifier.width(12.dp))
-                            Text(it, color = Tok.Faint, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
-                        }
+    AaaDialog("套餐用量", onDismiss, confirmLabel = "关闭", confirmColor = Tok.Dim) {
+        Column {
+            lines.forEach { l ->
+                Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(l.name, color = Tok.Ink, fontSize = 14.sp, modifier = Modifier.weight(1f))
+                    Text(
+                        l.pct?.let { pctText(it) } ?: "—",
+                        color = pctColor(pctColorLevel(l.pct), Tok.Ink), fontSize = 14.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold,
+                    )
+                    resetLabel(parseResetsAt(l.resetsAt))?.let {
+                        Spacer(Modifier.width(12.dp))
+                        Text(it, color = Tok.Faint, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
                     }
                 }
-                if (lines.isEmpty()) Text("暂无数据", color = Tok.Faint)
             }
-        },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭", color = Tok.Dim) } },
-    )
+            if (lines.isEmpty()) Text("暂无数据", color = Tok.Faint)
+        }
+    }
 }
 
-/** 一行到底：记号 + 标题 + 更新时间。不再有第二行——目录大小等细节在长按单里。 */
+/**
+ * 一行到底：标题 + 更新时间 + 竖线。不再有第二行——目录大小等细节在长按单里。
+ * 2026-09-08 用户拍板「竖条放在项目列表后面而不是前面」：记号挪到行尾，标题就此顶格起，
+ * 一列扫下来左边是齐的；分隔线也跟着文字的 16dp 走，不再为行首那一格缩进 40dp。
+ */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ProjectRowItem(row: ProjectRow, busy: Boolean, current: Boolean = false, onClick: () -> Unit, onLongClick: () -> Unit, modifier: Modifier = Modifier) {
+private fun ProjectRowItem(row: ProjectRow, timeText: String, busy: Boolean, current: Boolean = false, onClick: () -> Unit, onLongClick: () -> Unit, modifier: Modifier = Modifier) {
     Column(modifier) {
         Row(
             Modifier.fillMaxWidth()
@@ -537,69 +605,63 @@ private fun ProjectRowItem(row: ProjectRow, busy: Boolean, current: Boolean = fa
                 .padding(horizontal = 16.dp, vertical = 11.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            RowIndicator(row.state, row.unread, busy)
-            Spacer(Modifier.width(8.dp))
             Text(
                 row.title, color = if (row.alive) Tok.Ink else Tok.Dim, fontSize = 15.sp, fontWeight = FontWeight.Bold,
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
             )
             Spacer(Modifier.width(8.dp))
-            Text(relativeTime(row.updatedIso), color = Tok.Faint, fontSize = 11.sp)
+            Text(timeText, color = Tok.Faint, fontSize = 11.sp)
+            Spacer(Modifier.width(8.dp))
+            MarkBar(rowMarkColor(row.status, row.unread, busy))
         }
-        HorizontalDivider(color = Tok.Edge, thickness = 1.dp, modifier = Modifier.padding(start = 40.dp))
+        HorizontalDivider(color = Tok.Edge, thickness = 1.dp, modifier = Modifier.padding(start = 16.dp))
     }
 }
 
 /**
- * 终端一行：`终端 N · 目录名` + 行尾 ×。与项目行同一套排版（左边 48dp 的指示位空着，
- * 标题才和上面对得齐），但终端不是项目——没有状态、没有长按单。
+ * 终端一行：`终端 N · 目录名` + 行尾一个小 ×。2026-09-08 用户拍板「终端列表前面不需要三道杠」
+ * 「android终端列表高度太高了」：记号拿掉——终端没有状态可言，三道横杠只是占着行首那一格；
+ * 标题就此顶格起，上下各 6dp、字号降一档，终端不是项目，它该比项目行更矮。行尾的 × 换成一个
+ * 28dp 见方的可点 Box，IconButton 那 48dp 的触摸区本身就把整行撑得比项目行还高。
  */
 @Composable
 private fun TerminalRowItem(label: String, onClick: () -> Unit, onClose: () -> Unit, modifier: Modifier = Modifier) {
     Column(modifier) {
         Row(
-            Modifier.fillMaxWidth().clickable(onClick = onClick).padding(start = 16.dp, end = 8.dp, top = 11.dp, bottom = 11.dp),
+            Modifier.fillMaxWidth().clickable(onClick = onClick).padding(start = 16.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Box(Modifier.width(INDICATOR_W), contentAlignment = Alignment.Center) {
-                MarkLines(Tok.Dim)
-            }
-            Spacer(Modifier.width(8.dp))
             Text(
-                label, color = Tok.Ink, fontSize = 15.sp,
+                label, color = Tok.Ink, fontSize = 13.5.sp,
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
             )
-            IconButton(onClick = onClose) { Text("×", color = Tok.Faint, fontSize = 18.sp) }
+            Box(Modifier.size(28.dp).clickable(onClick = onClose), contentAlignment = Alignment.Center) {
+                Text("×", color = Tok.Faint, fontSize = 16.sp)
+            }
         }
-        HorizontalDivider(color = Tok.Edge, thickness = 1.dp, modifier = Modifier.padding(start = 40.dp))
+        HorizontalDivider(color = Tok.Edge, thickness = 1.dp, modifier = Modifier.padding(start = 16.dp))
     }
 }
 
 /** A8 删除结果（purge 报告渲染） */
 @Composable
 fun PurgeReportDialog(results: List<ProjectDeleteResult>, onDismiss: () -> Unit) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        containerColor = Tok.Raised,
-        title = { Text("删除完成", color = Tok.Ink) },
-        text = {
-            Column {
-                results.forEach { r ->
-                    Text(
-                        (if (r.ok) "✓ " else "✗ ") + r.path.substringAfterLast('/'),
-                        color = if (r.ok) Tok.Green else Tok.Red, fontSize = 14.sp, fontWeight = FontWeight.Bold,
-                    )
-                    val purged = r.purged.filter { it.count > 0 }
-                    Text(
-                        if (purged.isEmpty()) "无会话存储残留" else purged.joinToString(" · ") { "${it.agent_label} ${it.count} 条" },
-                        color = Tok.Dim, fontSize = 12.sp, fontFamily = FontFamily.Monospace,
-                        modifier = Modifier.padding(bottom = 6.dp),
-                    )
-                }
+    AaaDialog("删除完成", onDismiss, confirmLabel = "好") {
+        Column {
+            results.forEach { r ->
+                Text(
+                    (if (r.ok) "✓ " else "✗ ") + r.path.substringAfterLast('/'),
+                    color = if (r.ok) Tok.Green else Tok.Red, fontSize = 14.sp, fontWeight = FontWeight.Bold,
+                )
+                val purged = r.purged.filter { it.count > 0 }
+                Text(
+                    if (purged.isEmpty()) "无会话存储残留" else purged.joinToString(" · ") { "${it.agent_label} ${it.count} 条" },
+                    color = Tok.Dim, fontSize = 12.sp, fontFamily = FontFamily.Monospace,
+                    modifier = Modifier.padding(bottom = 6.dp),
+                )
             }
-        },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("好") } },
-    )
+        }
+    }
 }
 
 // ---------- A7 项目操作 ----------
@@ -619,16 +681,18 @@ fun ProjectActionsSheet(
     val openSession = LocalOpenSession.current
     val settings by store.settings.flow.collectAsState(initial = AppSettings())
     val sessions by store.sessions.collectAsState()
-    val primary = primarySessionFor(p, sessions)
+    // 代表会话是 daemon 指的（`session_id`）；这里只按 id 去池子里取那条会话，取不到就当它不在池子里
+    val primary = p.session_id?.let { id -> sessions.firstOrNull { it.id == id } }
     var deleteConfirm by remember { mutableStateOf(false) }
     var killConfirm by remember { mutableStateOf(false) }
 
     fun toast(msg: String) = Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-    val muted = p.path in settings.mutedProjects
-    val alive = primary != null && primary.state != "exited"
+    val muted = pathListContains(settings.mutedProjects, p.path)
+    // 激活与否读 daemon 的 status（没有活会话 = paused），不再自己看会话的 state
+    val alive = p.status.isNotBlank() && p.status != "paused"
     /** 结束会话 = 项目回到未激活栏。用户自己动的手，随后的 exited 不弹通知。 */
     fun killPrimary() {
-        val id = primary?.id ?: return
+        val id = p.session_id ?: return
         scope.launch {
             store.markUserKilled(id)
             runCatching { store.client?.kill(id) }.onFailure { toast("失败：${it.message}") }
@@ -649,10 +713,12 @@ fun ProjectActionsSheet(
             if (alive) {
                 // 与 mac 侧栏的 × 同一规则：只有执行中的才确认（被顺手点掉最伤），等你的直接结束
                 SheetItem("■", "结束会话", "项目变为未激活", danger = true) {
-                    if (primary.state == "running") killConfirm = true else killPrimary()
+                    if (p.status == "running") killConfirm = true else killPrimary()
                 }
             }
-            if (!alive) SheetItem("▶", "继续会话", "resume") {
+            // 注册表里没有的目录不能 resume（daemon 不认它），置顶 / 删项目同理——都收起来，
+            // 只留「它此刻这个会话」能做的事
+            if (!alive && p.registered) SheetItem("▶", "继续会话", "resume") {
                 val agent = p.agent ?: DEFAULT_AGENT
                 scope.launch {
                     try {
@@ -661,11 +727,11 @@ fun ProjectActionsSheet(
                     } catch (e: Exception) { toast("失败：${e.message}") }
                 }
             }
-            if (primary != null && primary.state == "exited") {
-                // 点行 = resume 新会话；上一条已退出的会话仍留着 transcript 回放入口
+            if (!alive && primary != null) {
+                // 点行 = resume 新会话；上一条已退出的会话只要还在池子里就留着 transcript 回放入口
                 SheetItem("↺", "上次会话回放", "消息流 · 终端回放") { onDismiss(); onBeforeNavigate(); openSession(primary.id, "") }
             }
-            SheetItem("📌", if (p.pinned) "取消置顶" else "置顶", "列表最前") {
+            if (p.registered) SheetItem("📌", if (p.pinned) "取消置顶" else "置顶", "列表最前") {
                 scope.launch {
                     runCatching { store.client?.setPinned(p.path, !p.pinned) }.onFailure { toast("失败：${it.message}") }
                     store.refreshProjects()
@@ -688,7 +754,12 @@ fun ProjectActionsSheet(
                 Text("静音此项目通知", color = Tok.Ink, fontSize = 15.sp, modifier = Modifier.weight(1f))
                 Switch(muted, { v -> scope.launch { store.settings.setProjectMuted(p.path, v) } })
             }
-            SheetItem("🗑", "删除项目…", "目录 + 全部会话", danger = true) { deleteConfirm = true }
+            if (p.registered) SheetItem("🗑", "删除项目…", "目录 + 全部会话", danger = true) { deleteConfirm = true }
+            else Text(
+                "这个目录不在项目注册表里（在别处 aaa open 开出来的），只能操作它此刻的会话",
+                color = Tok.Faint, fontSize = 11.sp,
+                modifier = Modifier.padding(horizontal = 18.dp, vertical = 6.dp),
+            )
             TextButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) { Text("取消", color = Tok.Dim) }
         }
     }

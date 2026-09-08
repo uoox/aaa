@@ -10,6 +10,9 @@ import org.junit.Test
  * 长得像域名但不是链接的路径与包名。
  */
 class LinksTest {
+    /** 单个词是不是链接（终端点击的判定形状）。生产代码走 `findUrls`，这个壳只有测试用。 */
+    private fun urlInWord(word: String): String? = findUrls(word).firstOrNull()?.url
+
 
     private fun urls(text: String) = findUrls(text).map { it.url }
 
@@ -64,5 +67,14 @@ class LinksTest {
             urls("http://a.dev 和 http://b.dev"),
         )
         assertEquals(emptyList<String>(), urls("完全没有链接的一行输出"))
+    }
+
+    /** scheme 前必须是分隔符：没有左边界，`xhttps://a.com` 会从第二个字符起被认成链接。 */
+    @Test
+    fun 半截词里的scheme不算链接() {
+        assertEquals(emptyList<String>(), findUrls("xhttps://a.com").map { it.url })
+        assertEquals(emptyList<String>(), findUrls("a.https://a.com").map { it.url })
+        assertEquals(listOf("https://a.com"), findUrls("见 https://a.com").map { it.url })
+        assertEquals(listOf("https://a.com"), findUrls("(https://a.com)").map { it.url })
     }
 }

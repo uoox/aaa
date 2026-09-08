@@ -1,7 +1,6 @@
 package cc.uoox.aaaui
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -12,12 +11,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
-import androidx.compose.material3.AlertDialog
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -68,20 +65,19 @@ fun SettingsScreen(store: AppStore, nav: NavHostController) {
     }
     if (restartDialog) {
         val alive = sessions.count { it.state != "exited" }
-        AlertDialog(
-            onDismissRequest = { restartDialog = false },
-            containerColor = Tok.Raised,
-            title = { Text("重启 daemon？", color = Tok.Ink) },
-            text = { Text("有 $alive 个会话还活着。daemon 的 PTY 都是它的子进程，重启会把它们一起终止；屏幕回放保留，之后可从项目行继续。", color = Tok.Dim) },
-            confirmButton = { TextButton(onClick = { restartDialog = false; restartDaemon(true) }) { Text("终止并重启", color = Tok.Red) } },
-            dismissButton = { TextButton(onClick = { restartDialog = false }) { Text("取消", color = Tok.Dim) } },
+        ConfirmDialog(
+            "重启 daemon？",
+            "有 $alive 个会话还活着。daemon 的 PTY 都是它的子进程，重启会把它们一起终止；屏幕回放保留，之后可从项目行继续。",
+            "终止并重启",
+            onConfirm = { restartDialog = false; restartDaemon(true) },
+            onCancel = { restartDialog = false },
         )
     }
 
     Column(Modifier.fillMaxSize().background(Tok.Bg)) {
         // 顶栏：与 InboxScreen / SessionScreen 同一套「‹ + 标题」写法，不引 TopAppBar
         Row(Modifier.fillMaxWidth().padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("‹", color = Tok.Dim, fontSize = 26.sp, modifier = Modifier.clickable { nav.popBackStack() }.padding(horizontal = 8.dp))
+            BackArrow(onClick = { nav.popBackStack() })
             Text("设置", color = Tok.Ink, fontSize = 17.sp, fontWeight = FontWeight.Bold)
         }
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 24.dp)) {
@@ -198,8 +194,7 @@ fun SettingsScreen(store: AppStore, nav: NavHostController) {
 private fun Group(content: @Composable () -> Unit) {
     Column(
         Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
-            .background(Tok.Surface, RoundedCornerShape(12.dp))
-            .border(1.dp, Tok.Edge, RoundedCornerShape(12.dp))
+            .surfaceCard(12.dp)
             .padding(vertical = 6.dp),
     ) { content() }
 }

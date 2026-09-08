@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.Button
+import androidx.compose.material3.DrawerDefaults
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
@@ -28,6 +29,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -37,7 +39,14 @@ import androidx.navigation.NavHostController
 import kotlinx.coroutines.launch
 
 fun terminalTabLabel(index: Int, s: Session, root: String): String =
-    "终端 " + (index + 1) + if (s.project_path != root) " · " + s.project_path.substringAfterLast('/') else ""
+    // 尾斜杠要先去掉再比、再取叶子名（v1.22 补）：`/a/b/` 与 `/a/b` 是同一个目录，
+    // 而 `"/a/b/".substringAfterLast('/')` 是空串——手机上就多出一截「终端 1 · 」的尾巴。
+    // mac 侧 `ui/mod.rs` 的标签一直是 trim 过的。
+    ("终端 " + (index + 1)).let { base ->
+        val path = s.project_path.trimEnd('/')
+        val leaf = path.substringAfterLast('/')
+        if (path.isNotEmpty() && path != root.trimEnd('/') && leaf.isNotEmpty()) "$base · $leaf" else base
+    }
 
 /**
  * 一个终端一屏（2026-09-08 用户拍板：终端列表搬到项目面板里，和会话平级，这里就不再需要
@@ -71,14 +80,16 @@ fun TerminalScreen(store: AppStore, nav: NavHostController, focusId: String) {
     }
 
     // 左上角是 ☰ 不是「返回」（2026-09-08 用户拍板）：终端和会话平级，两屏的左上角就该
-    // 是同一个东西——拉出项目面板，从这里直接去任何一个项目或另一个终端。列表里终端行
-    // 那三道横杠，认的也是这个记号。
+    // 是同一个东西——拉出项目面板，从这里直接去任何一个项目或另一个终端。
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     ModalNavigationDrawer(
         drawerState = drawerState,
         drawerContent = {
+            // 与会话屏同一套：小屏铺满、大屏半屏
+            val frac = sidebarFraction()
             ModalDrawerSheet(
-                modifier = Modifier.fillMaxWidth(0.92f),
+                modifier = Modifier.fillMaxWidth(frac),
+                drawerShape = if (frac >= 1f) RectangleShape else DrawerDefaults.shape,
                 drawerContainerColor = Tok.Surface, drawerContentColor = Tok.Ink,
             ) {
                 ProjectPanel(store, nav, currentPath = current?.project_path, onBeforeNavigate = { scope.launch { drawerState.close() } })

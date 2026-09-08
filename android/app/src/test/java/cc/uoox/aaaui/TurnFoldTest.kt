@@ -11,6 +11,10 @@ import org.junit.Test
  * 是 "tool"（daemon 实际如此），用户消息 role=user kind=text，问题 kind=question。
  */
 class TurnFoldTest {
+    /** 一轮里的回答（assistant 的 text）。只有测试在数它，v1.22 从 `Turn` 上搬到这里。 */
+    private val Turn.replies: List<ChatMessage> get() =
+        body.filter { it.role == "assistant" && it.kind == "text" }
+
     private fun msg(seq: Long, role: String, kind: String, text: String = "", tool: ToolInfo? = null) =
         ChatMessage(seq = seq, ts = "", role = role, kind = kind, text = text, tool = tool)
     private fun user(seq: Long, text: String = "做") = msg(seq, "user", "text", text)
@@ -67,22 +71,11 @@ class TurnFoldTest {
         assertEquals(listOf("u1", "q2", "a3", "f4", "r5"), flattenForList(listOf(t), emptySet()).map { it.key })
     }
 
-    // 3c. 待答 = 会话活着且最新 question 后没有 answer
-    @Test fun pendingQuestionIsTheNewestUnanswered() {
+    // 3c. 已回答的表单：answer 归到它前面最近的那条 question。
+    // 「待答的是哪一条」v1.22 起是 daemon 的事（会话的 asking_seq），这边连同它那套
+    // 「取 ts 前 19 个字符和 created_at 比」的判定一起删了——两边比法不同，结论会打架。
+    @Test fun answeredQuestionsAreMatchedToTheirForm() {
         val asked = listOf(user(1), question(2))
-        assertEquals(2L, pendingQuestionSeq(asked, alive = true))
-        assertNull(pendingQuestionSeq(asked, alive = false))
-        assertNull(pendingQuestionSeq(asked + answer(3), alive = true))
-        // 新问题顶掉旧问题：只有最新的待答
-        assertEquals(4L, pendingQuestionSeq(asked + answer(3) + question(4), alive = true))
-        assertEquals(4L, pendingQuestionSeq(asked + question(4), alive = true))
-        assertNull(pendingQuestionSeq(listOf(user(1), say(2)), alive = true))
-        // resume 带进来的旧问题：早于本进程 created_at 的不算待答
-        val old = msg(2, "assistant", "question", "old?").copy(ts = "2026-09-02T09:59:59.900Z")
-        assertNull(pendingQuestionSeq(listOf(user(1), old), alive = true, since = "2026-09-02T10:00:00Z"))
-        val fresh = old.copy(ts = "2026-09-02T10:00:00.500Z")
-        assertEquals(2L, pendingQuestionSeq(listOf(user(1), fresh), alive = true, since = "2026-09-02T10:00:00Z"))
-        // 已回答集合：answer 归到前面最近的 question
         assertEquals(setOf(2L), answeredQuestionSeqs(asked + answer(3) + question(4)))
         assertEquals(emptySet<Long>(), answeredQuestionSeqs(asked))
     }

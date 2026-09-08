@@ -27,10 +27,17 @@ pub struct SessRec {
     pub mtime: f64,
 }
 
+/// 项目路径的**唯一**写法：能 canonicalize 就 canonicalize（解 `..`、软链接、`/var`
+/// vs `/private/var`），目录已经不在了就至少去掉尾斜杠——`/p/a` 与 `/p/a/` 必须是同一个
+/// 项目，否则收件箱、静音、未读、置顶这些以路径为 key 的东西会各存一份（v1.22 补齐尾
+/// 斜杠这一半：以前 canonicalize 失败就原样返回，删掉的目录一带斜杠就分裂成两行）。
+/// 根目录 `/` 不动。
 pub fn realpath(p: &str) -> String {
-    std::fs::canonicalize(p)
-        .map(|x| x.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| p.to_string())
+    if let Ok(x) = std::fs::canonicalize(p) {
+        return x.to_string_lossy().into_owned();
+    }
+    let t = p.trim_end_matches('/');
+    if t.is_empty() { p.to_string() } else { t.to_string() }
 }
 
 pub fn fstat(p: &Path) -> (u64, f64) {
@@ -333,6 +340,16 @@ pub fn purge(paths: &Paths, cache: &mut CwdCache, target: &str) -> u64 {
 #[cfg(test)]
 mod id_exists_tests {
     use super::*;
+
+    /// `/p/a` 与 `/p/a/` 必须是同一个项目：路径是所有本地状态（静音 / 未读 / 收件箱 /
+    /// 置顶）的 key，分裂成两个的后果是黄点消不掉。
+    #[test]
+    fn realpath_trims_the_trailing_slash_when_the_dir_is_gone() {
+        assert_eq!(realpath("/nope/gone/"), "/nope/gone");
+        assert_eq!(realpath("/nope/gone"), "/nope/gone");
+        assert_eq!(realpath("/"), "/", "根目录不动");
+        assert_eq!(realpath(""), "");
+    }
 
     #[test]
     fn claude_id_found_by_filename_scan() {
