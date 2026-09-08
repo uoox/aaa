@@ -154,6 +154,8 @@ class TerminalAttachment(
     @Volatile private var open = false
     @Volatile private var stopped = false
     @Volatile private var everConnected = false
+    @Volatile private var awaitingReplay = false
+    @Volatile private var reconnectScheduled = false
     private var attempt = 0
     private val pendingInput = ByteArrayOutputStream()
 
@@ -194,6 +196,8 @@ class TerminalAttachment(
                 val isReconnect = everConnected
                 everConnected = true
                 open = true
+                awaitingReplay = true
+                reconnectScheduled = false
                 attempt = 0
                 _connected.value = true
                 // hello 后 daemon 必发整屏 replay（含数百行历史 + 当前终端模式）：
@@ -222,15 +226,27 @@ class TerminalAttachment(
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
                 feed(bytes.toByteArray())
+                if (awaitingReplay && webSocket === ws) {
+                    awaitingReplay = false
+                    resendSize()
+                    val queued = synchronized(pendingInput) {
+                        pendingInput.toByteArray().also { pendingInput.reset() }
+                    }
+                    if (queued.isNotEmpty() && !webSocket.send(queued.toByteString())) {
+                        synchronized(pendingInput) { pendingInput.write(queued) }
+                    }
+                }
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                if (webSocket !== ws) return
                 open = false
                 _connected.value = false
                 scheduleReconnect()
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                if (webSocket !== ws) return
                 open = false
                 _connected.value = false
                 scheduleReconnect()
@@ -239,20 +255,21 @@ class TerminalAttachment(
     }
 
     private fun scheduleReconnect() {
-        if (stopped) return
+        if (stopped || reconnectScheduled) return
+        reconnectScheduled = true
         val delay = (1000L shl attempt.coerceAtMost(4)) // 1s..16s
         attempt++
-        handler.postDelayed({ connect() }, delay)
+        handler.postDelayed({
+            reconnectScheduled = false
+            connect()
+        }, delay)
     }
 
     private fun sendBytes(bytes: ByteArray) {
         val socket = ws
-        if (open && socket != null) {
-            socket.send(bytes.toByteString())
-        } else {
-            synchronized(pendingInput) {
-                if (pendingInput.size() < 16 * 1024) pendingInput.write(bytes)
-            }
+        if (open && socket != null && socket.send(bytes.toByteString())) return
+        synchronized(pendingInput) {
+            if (pendingInput.size() + bytes.size <= 16 * 1024) pendingInput.write(bytes)
         }
     }
 

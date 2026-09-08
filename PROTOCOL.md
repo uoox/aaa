@@ -18,7 +18,7 @@ daemon 与三个客户端的唯一协调契约。实现与本文冲突时，以�
 - 端口固定 **2730**（= 0xAAA），监听 `0.0.0.0`（个人内网，安全性由 overlay 网络 + token 提供）。
 - 所有 HTTP/WS 均为明文（链路已有 WireGuard 加密），认证 `Authorization: Bearer <token>`；WS 可用 `?token=` 查询参数。
 - 时间一律 ISO-8601 UTC 字符串；大小一律原始字节数（人性化格式由客户端渲染）。
-- 错误统一 `{"error":{"code":"...","message":"..."}}`，code ∈ `unauthorized | not_found | conflict | agent_unknown | ssd_unmounted | internal`。
+- 错误统一 `{"error":{"code":"...","message":"..."}}`，code ∈ `unauthorized | not_found | conflict | bad_request | agent_unknown | ssd_unmounted | internal`。
 
 ## 目录与文件约定
 

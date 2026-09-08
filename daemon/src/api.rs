@@ -169,11 +169,10 @@ pub fn check_auth(auth_header: Option<&str>, query: Option<&str>, token: &str) -
     }
     if let Some(q) = query {
         for pair in q.split('&') {
-            if let Some(v) = pair.strip_prefix("token=") {
-                if !token.is_empty() && v == token {
-                    return true;
-                }
-            }
+            let Some((key, value)) = pair.split_once('=') else { continue };
+            if key == "token" && !token.is_empty()
+                && percent_encoding::percent_decode_str(value).decode_utf8_lossy() == token
+            { return true; }
         }
     }
     false
@@ -542,10 +541,11 @@ async fn projects_create(
         }
     }
     let dir = app.cfg.project_root.join(&name);
-    if dir.exists() {
-        return Err(ApiError::conflict(format!("already exists: {}", dir.display())));
+    match std::fs::create_dir(&dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(ApiError::conflict(format!("already exists: {}", dir.display()))),
+        Err(e) => return Err(ApiError::internal(format!("mkdir: {e}"))),
     }
-    std::fs::create_dir_all(&dir).map_err(|e| ApiError::internal(format!("mkdir: {e}")))?;
     if let Some(agent) = &body.agent {
         let _reg_lock = crate::registry::lock();
         let mut reg = Registry::load(&app.cfg.project_root);

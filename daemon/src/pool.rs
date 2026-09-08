@@ -179,6 +179,7 @@ pub struct Session {
     /// 手机在后台连着的时候，它一帧 resize 就把桌面那扇窗户按成手机宽，桌面上正在看的
     /// 输出当场重排。
     pub attach_sizes: Mutex<std::collections::HashMap<u64, Option<(u16, u16)>>>,
+    attach_resize_lock: Mutex<()>,
     next_attach: AtomicU64,
     pub parser: Mutex<Option<vt100::Parser>>,
     /// PTY output fan-out. `Bytes` so each chunk is allocated once and every
@@ -215,6 +216,7 @@ impl Session {
         Session {
             id: "s_test".into(),
             attach_sizes: Mutex::new(std::collections::HashMap::new()),
+            attach_resize_lock: Mutex::new(()),
             next_attach: AtomicU64::new(1),
             meta: Mutex::new(Meta {
                 title: "t".into(),
@@ -383,6 +385,7 @@ impl Session {
     /// 登记一个 attach（WS 连上来），返回它的号；断开时用这个号 [`detach`](Self::detach)。
     /// 尺寸先空着——客户端第一帧 resize 到了才算数。
     pub fn attach_size_slot(&self) -> u64 {
+        let _resize = self.attach_resize_lock.lock().unwrap();
         let mut m = self.attach_sizes.lock().unwrap();
         let id = self.next_attach.fetch_add(1, Ordering::Relaxed);
         m.insert(id, None);
@@ -391,6 +394,7 @@ impl Session {
 
     /// 某个 attach 报了新尺寸：记下来，再按「所有连着的里最小的那个」重算 PTY 尺寸。
     pub fn attach_resize(&self, id: u64, cols: u16, rows: u16) {
+        let _resize = self.attach_resize_lock.lock().unwrap();
         {
             let mut m = self.attach_sizes.lock().unwrap();
             if !m.contains_key(&id) {
@@ -404,6 +408,7 @@ impl Session {
     /// attach 断开：去掉它的尺寸，剩下的重新算（一个都不剩就保持现状——
     /// 没人看的时候把 PTY 抖一下没有意义，还会让 TUI 白白重排一次）。
     pub fn detach(&self, id: u64) {
+        let _resize = self.attach_resize_lock.lock().unwrap();
         let had_size = self.attach_sizes.lock().unwrap().remove(&id).flatten().is_some();
         if had_size {
             self.apply_attach_size();
@@ -627,6 +632,7 @@ impl SessionPool {
             let sess = Arc::new(Session {
                 id: id.clone(),
                 attach_sizes: Mutex::new(std::collections::HashMap::new()),
+                attach_resize_lock: Mutex::new(()),
             next_attach: AtomicU64::new(1),
             meta: Mutex::new(meta),
                 parser: Mutex::new(None),
@@ -748,6 +754,7 @@ impl SessionPool {
         let sess = Arc::new(Session {
             id,
             attach_sizes: Mutex::new(std::collections::HashMap::new()),
+            attach_resize_lock: Mutex::new(()),
             next_attach: AtomicU64::new(1),
             meta: Mutex::new(meta),
             parser: Mutex::new(Some(vt100::Parser::new(

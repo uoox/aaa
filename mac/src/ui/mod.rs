@@ -1132,7 +1132,7 @@ impl RootView {
             // 置顶不挂图标，整行一层淡淡的强调色底就够了（2026-09-08 用户拍板）；
             // 当前打开的那一行更重，压过置顶底
             .when(row.pinned && !active, |el| el.bg(ca(theme::accent(), 0.12)))
-            .when(active, |el| el.bg(c(theme::surface_raised())))
+            .when(active, |el| el.bg(ca(theme::accent(), 0.22)).border_1().border_color(ca(theme::accent(), 0.75)))
             .hover(|st| st.bg(c(theme::surface_raised())))
             // 点一下：活着的会话直接进；未激活的 resume（daemon 幂等，找不到旧对话开新的）
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -1149,7 +1149,7 @@ impl RootView {
                     .text_ellipsis()
                     .whitespace_nowrap()
                     .text_size(px(12.5))
-                    .text_color(c(if dim_title { theme::dim() } else { theme::ink() }))
+                    .text_color(c(if active { theme::accent() } else if dim_title { theme::dim() } else { theme::ink() }))
                     .child(SharedString::from(title)),
             );
         // 行尾按钮（非当前行悬停才现身；invisible 连命中盒一起去掉）：
