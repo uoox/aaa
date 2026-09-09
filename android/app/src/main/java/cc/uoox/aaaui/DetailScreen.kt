@@ -3,6 +3,8 @@ package cc.uoox.aaaui
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -159,9 +161,7 @@ fun SessionDetailScreen(store: AppStore, nav: NavHostController, sessionId: Stri
             DetailSection("后台任务", d?.background_tasks?.size) {
                 if (d == null) LoadingRow()
                 else if (d.background_tasks.isEmpty()) EmptyHint("没有挂着的后台任务")
-                else d.background_tasks.forEach { t ->
-                    TwoLineRow(t.tool, t.summary.ifBlank { "（没有摘要）" }, relativeTime(t.ts), accent = true)
-                }
+                else d.background_tasks.forEach { t -> BackgroundRow(t) }
             }
 
             // ── 已上传：项目 _inbox/ 里的文件（📎 和系统分享都落这儿）
@@ -376,9 +376,18 @@ private fun TwoLineRow(title: String, subtitle: String, trailing: String?, accen
     }
 }
 
-/** 一个子代理：类型 + 干什么 + 状态（还在跑的转圈） */
+/**
+ * 一个子代理：类型 + 干什么 + 状态（还在跑的转圈）。**点一下原地展开**派给它的任务书
+ * 与它交回来的报告（2026-09-10 用户拍板：仅预览，不提供插手子代理的口子）。
+ */
 @Composable
 private fun SubagentRow(a: Subagent) {
+    var open by rememberSaveable(a.ts, a.summary) { mutableStateOf(false) }
+    val body = remember(a.prompt, a.result) {
+        listOf(a.prompt, a.result.takeIf { it.isNotBlank() }?.let { "── 它交回来的 ──\n$it" })
+            .filterNot { it.isNullOrBlank() }.joinToString("\n\n")
+    }
+    Column(Modifier.fillMaxWidth().let { if (body.isNotBlank()) it.clickable { open = !open } else it }) {
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 8.dp),
         verticalAlignment = Alignment.Top,
@@ -396,6 +405,32 @@ private fun SubagentRow(a: Subagent) {
         }
         Spacer(Modifier.width(10.dp))
         Text(relativeTime(a.ts), color = Tok.Faint, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+    }
+    if (open && body.isNotBlank()) PreviewBody(body)
+    }
+}
+
+/** 点开一行之后铺在它下面的正文：等宽、可选可复制、只读。 */
+@Composable
+private fun PreviewBody(text: String) {
+    SelectionContainer {
+        Text(
+            text, color = Tok.Dim, fontSize = 11.sp, fontFamily = FontFamily.Monospace, lineHeight = 16.sp,
+            modifier = Modifier.fillMaxWidth()
+                .padding(start = 38.dp, end = 18.dp, bottom = 10.dp)
+                .background(Tok.Inset, RoundedCornerShape(6.dp))
+                .padding(8.dp),
+        )
+    }
+}
+
+/** 一个还挂着的后台任务：点一下展开发起它的那一段原文（只读）。 */
+@Composable
+private fun BackgroundRow(t: BgTask) {
+    var open by rememberSaveable(t.ts, t.summary) { mutableStateOf(false) }
+    Column(Modifier.fillMaxWidth().let { if (t.detail.isNotBlank()) it.clickable { open = !open } else it }) {
+        TwoLineRow(t.tool, t.summary.ifBlank { "（没有摘要）" }, relativeTime(t.ts), accent = true)
+        if (open && t.detail.isNotBlank()) PreviewBody(t.detail)
     }
 }
 

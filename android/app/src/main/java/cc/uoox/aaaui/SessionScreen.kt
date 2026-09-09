@@ -611,6 +611,10 @@ fun MessagesView(
         if (permission != null && sessionAlive) {
             PermissionCard(permission, onPermission, Modifier.align(Alignment.BottomCenter).zIndex(2f))
         }
+        // 整条流一个选区（2026-09-10 用户要求「消息流选择和复制」）：长按起选、可以跨消息拖，
+        // 复制走系统的选择工具条。包在**列表外面**而不是每条消息里面——包在里面时选区
+        // 到消息边界就断了，跨两条消息的一段话得复制两次
+        SelectionContainer {
         LazyColumn(state = listState, modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp)) {
             itemsIndexed(items, key = { _, it -> it.key }, contentType = { _, it -> it::class }) { i, item ->
                 // 轮与轮之间 14dp（新一轮从用户消息开始），同轮内 User→Fold→Reply 8dp，展开的步骤间 3dp
@@ -642,6 +646,7 @@ fun MessagesView(
                 }
             }
             item(key = "tail") { Spacer(Modifier.height(14.dp)) }
+        }
         }
         ScrollToEndButton(
             visible = !atBottom,
@@ -679,7 +684,7 @@ private fun UserBlock(m: ChatMessage) {
     Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End) {
         if (time.isNotEmpty()) BubbleCaption(time, Tok.Faint)
         UserBubble {
-            SelectionContainer { Text(rememberLinkified(m), color = Tok.Ink, fontSize = 14.5.sp, lineHeight = 21.sp) }
+            Text(rememberLinkified(m), color = Tok.Ink, fontSize = 14.5.sp, lineHeight = 21.sp)
         }
     }
 }
@@ -700,17 +705,15 @@ private fun PendingBlock(item: QueuedMsg) {
 }
 
 
-/** Claude 的回复：左对齐整宽、不画气泡；上方一行强调色的「✻ Claude」小字，正文仍是 Markdown。 */
+/**
+ * Claude 的回复：左对齐整宽、不画气泡，正文是 Markdown。
+ *
+ * **不写「Claude」三个字**（2026-09-10 用户拍板）：一边是靠右的气泡、一边是通栏无底，
+ * 这已经把两个人分开了，再挂一行署名只是噪音。选区由外层那一个 SelectionContainer 管。
+ */
 @Composable
 private fun ReplyBlock(m: ChatMessage) {
-    Column(Modifier.fillMaxWidth()) {
-        Text(
-            "✻ Claude", color = Tok.Accent, fontSize = 10.5.sp, fontWeight = FontWeight.Medium,
-            modifier = Modifier.padding(bottom = 4.dp),
-        )
-        // 长按选字复制；链接仍是点一下打开
-        SelectionContainer { MarkdownBody(m.text, 15.sp, Tok.Ink, modifier = Modifier.fillMaxWidth()) }
-    }
+    MarkdownBody(m.text, 15.sp, Tok.Ink, modifier = Modifier.fillMaxWidth())
 }
 
 /** 气泡上方那行小字（时间 / 「回答」），与气泡同在右侧。 */

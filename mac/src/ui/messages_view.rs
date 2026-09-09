@@ -8,7 +8,12 @@
 //! （v1 daemon）→ 上层自动回落终端并隐藏切换入口。
 //!
 //! 谁在说话一眼可辨：用户一侧是靠右的主色淡底气泡（上方一行时间小字）；Claude
-//! 一侧通栏、无底，上方一行「✻ Claude」主色小字。
+//! 一侧通栏、无底。**不写「Claude」三个字**（2026-09-10 用户拍板：气泡本身已经把
+//! 两边分开了，再挂个署名只是噪音）。
+//!
+//! 复制：每条消息右上角一个常显的「复制」。gpui 这一版的文本元素没有选区
+//! （`InteractiveText` 只有点击），跨消息拖选要在渲染层自己做一套命中测试，
+//! 所以这里给的是「整条复制」，不是任意选区。
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -140,6 +145,8 @@ pub struct MessagesView {
     /// assistant text 消息的 Markdown 块缓存（seq → blocks）：fetch 到达时解析一次，
     /// 渲染帧只读。seq 的正文不会变（dedup 保留首次到达的版本），所以不需要失效逻辑。
     md: HashMap<u64, Vec<Block>>,
+    /// 刚按过「复制」的那一条：按钮原地写「已复制」，两秒后自己变回去
+    copied: Option<u64>,
     scroll: ScrollHandle,
     /// 底部输入框：消息流里直接对 agent 说话（POST /input，text+回车）
     input: Entity<MiniInput>,
@@ -191,6 +198,7 @@ impl MessagesView {
             expanded: HashSet::new(),
             fold_open: HashSet::new(),
             md: HashMap::new(),
+            copied: None,
             scroll: ScrollHandle::new(),
             input,
             wants_focus: true,
@@ -689,6 +697,7 @@ impl MessagesView {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let text: SharedString = m.text.clone().into();
+        let copy = self.copy_btn(m.seq, m.text.clone(), cx);
         match () {
             _ if m.kind == "thinking" => self.thinking_row(m, cx),
             _ if m.kind == "tool_use" || m.kind == "tool_result" => self.tool_row(m, cx),
@@ -696,7 +705,7 @@ impl MessagesView {
             // 就退回普通 assistant 气泡，至少把题面露出来
             _ if m.kind == "question" => match &m.question {
                 Some(spec) => self.question_card(m, spec, pending, cx),
-                None => assistant_block(assistant_text(text)),
+                None => assistant_block(assistant_text(text), copy),
             },
             // 表单的回答画在用户一侧，加一行「回答」小字与普通输入区分
             _ if m.kind == "answer" => {
@@ -706,12 +715,13 @@ impl MessagesView {
                 } else {
                     ("回答", theme::FAINT)
                 };
-                user_column(Some((caption.into(), color)), user_bubble(text))
+                user_column(Some((caption.into(), color)), user_bubble(text), copy)
             }
             // 用户的话：靠右气泡，上方压一行发出时间（transcript 带 ts 才有）
             _ if m.role == "user" => user_column(
                 time_caption(&m.ts).map(|t| (SharedString::from(t), theme::FAINT)),
                 user_bubble(text),
+                copy,
             ),
             _ if m.role == "system" => div()
                 .w_full()
@@ -719,9 +729,42 @@ impl MessagesView {
                 .text_color(c(theme::FAINT))
                 .child(text)
                 .into_any_element(),
-            // assistant 文本 = CommonMark：通栏块列，上方「✻ Claude」小字
-            _ => assistant_block(self.assistant_body(m, 12.5, theme::INK)),
+            // assistant 文本 = CommonMark：通栏块列，右上角一个「复制」
+            _ => assistant_block(self.assistant_body(m, 12.5, theme::INK), copy),
         }
+    }
+
+    /// 一条消息的「复制」：常显、最淡的一档，点完原地变「已复制」两秒。
+    /// gpui 这一版没有文本选区，所以复制的粒度是**整条**（见模块头）。
+    fn copy_btn(&self, seq: u64, text: String, cx: &mut Context<Self>) -> AnyElement {
+        let done = self.copied == Some(seq);
+        div()
+            .id(("copy", seq as usize))
+            .flex_none()
+            .px(px(4.))
+            .rounded(px(4.))
+            .text_size(px(9.5))
+            .text_color(c(if done { theme::ACCENT } else { theme::FAINT }))
+            .cursor_pointer()
+            .hover(|st| st.text_color(c(theme::ACCENT)).bg(c(theme::EDGE_LIGHT)))
+            .on_click(cx.listener(move |v: &mut Self, _, _, cx| {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
+                v.copied = Some(seq);
+                cx.notify();
+                // 两秒后自己变回「复制」——不留一个永远亮着的「已复制」
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(Duration::from_secs(2)).await;
+                    let _ = this.update(cx, |v: &mut Self, cx| {
+                        if v.copied == Some(seq) {
+                            v.copied = None;
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach();
+            }))
+            .child(if done { "已复制" } else { "复制" })
+            .into_any_element()
     }
 
     /// 「思考」块：折起来只留第一行，点一下展开全文。
@@ -1200,20 +1243,13 @@ fn accent_btn(id: impl Into<ElementId>) -> gpui::Stateful<gpui::Div> {
         .text_color(c(theme::ON_ACCENT))
 }
 
-fn assistant_block(body: AnyElement) -> AnyElement {
+fn assistant_block(body: AnyElement, copy: AnyElement) -> AnyElement {
+    // 右上角那个「复制」是绝对定位的，正文右边预留出它的宽度，长行才不会压到它底下
     div()
+        .relative()
         .w_full()
-        .flex()
-        .flex_col()
-        .gap(px(3.))
-        .child(
-            div()
-                .text_size(px(10.5))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(c(theme::ACCENT))
-                .child("✻ Claude"),
-        )
-        .child(body)
+        .child(div().w_full().pr(px(32.)).child(body))
+        .child(div().absolute().top(px(-1.)).right(px(0.)).child(copy))
         .into_any_element()
 }
 
@@ -1245,22 +1281,29 @@ fn assistant_text(text: SharedString) -> AnyElement {
 }
 
 /// 用户一侧的一列：可选的小字说明（时间 / 「回答」）靠右压在气泡上方
-fn user_column(caption: Option<(SharedString, u32)>, bubble: gpui::Div) -> AnyElement {
+fn user_column(caption: Option<(SharedString, u32)>, bubble: gpui::Div, copy: AnyElement) -> AnyElement {
     div()
         .w_full()
         .flex()
         .flex_col()
         .items_end()
         .gap(px(2.))
-        .when_some(caption, |el, (text, color)| {
-            el.child(
-                div()
-                    .text_size(px(10.))
-                    .font_family("Menlo")
-                    .text_color(c(color))
-                    .child(text),
-            )
-        })
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .child(copy)
+                .when_some(caption, |el, (text, color)| {
+                    el.child(
+                        div()
+                            .text_size(px(10.))
+                            .font_family("Menlo")
+                            .text_color(c(color))
+                            .child(text),
+                    )
+                }),
+        )
         .child(bubble)
         .into_any_element()
 }

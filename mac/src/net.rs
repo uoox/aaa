@@ -180,14 +180,6 @@ impl Net {
     pub fn agents(&self) -> impl Future<Output = Result<Vec<crate::model::AgentInfo>>> + use<> {
         self.get_json("/agents")
     }
-    /// 换这个项目下次开哪个 agent：只动注册表，活着的会话不碰
-    pub fn set_project_agent(
-        &self,
-        path: String,
-        agent: String,
-    ) -> impl Future<Output = Result<serde_json::Value>> + use<> {
-        self.post_json("/projects/agent", serde_json::json!({"path": path, "agent": agent}))
-    }
     pub fn delete_projects(
         &self,
         paths: Vec<String>,

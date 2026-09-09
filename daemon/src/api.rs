@@ -583,39 +583,6 @@ async fn agents_list(State(app): State<SharedApp>) -> ApiResult<Json<Value>> {
 }
 
 #[derive(Deserialize)]
-struct SetAgent {
-    path: String,
-    agent: String,
-}
-
-/// 换 agent：只动注册表一行。旧对话 id 由 `Registry::set` 顺手清掉——它是**上一个**
-/// agent 的 id，留着下次 resume 就会拿 claude 的 id 去喂 agy。
-/// 已经活着的会话不动：换的是「下次在这个项目开什么」。
-async fn projects_agent(
-    State(app): State<SharedApp>,
-    Json(body): Json<SetAgent>,
-) -> ApiResult<Json<Value>> {
-    let agent = agents::get(&body.agent)
-        .filter(|a| a.id != "shell")
-        .ok_or_else(|| ApiError::agent_unknown(&body.agent))?;
-    let app2 = Arc::clone(&app);
-    let (raw, agent_id) = (body.path.clone(), agent.id);
-    let path = blocking(move || {
-        let _reg_lock = crate::registry::lock();
-        let mut reg = Registry::load(&app2.cfg.project_root);
-        if reg.get(&raw).is_none() {
-            return Err(format!("not registered: {raw}"));
-        }
-        reg.set(&raw, agent_id).map_err(|e| format!("registry: {e}"))?;
-        Ok(Registry::norm(&raw))
-    })
-    .await?
-    .map_err(ApiError::not_found)?;
-    app.hub.projects_changed();
-    Ok(Json(json!({"path": path, "agent": agent.id})))
-}
-
-#[derive(Deserialize)]
 struct HistoryQuery {
     limit: Option<usize>,
 }
@@ -2001,7 +1968,6 @@ pub fn router(app: SharedApp) -> Router {
         .route("/api/v1/health", get(health))
         .route("/api/v1/agents", get(agents_list))
         .route("/api/v1/projects", get(projects_list).post(projects_create))
-        .route("/api/v1/projects/agent", post(projects_agent))
         .route("/api/v1/projects/delete", post(projects_delete))
         .route("/api/v1/history", get(history_list))
         .route("/api/v1/history/backfill", post(history_backfill))

@@ -436,6 +436,12 @@ pub struct Subagent {
     pub status: String,
     #[serde(default)]
     pub ts: String,
+    /// v1.30：派给它的整段任务书（点开看）
+    #[serde(default)]
+    pub prompt: String,
+    /// v1.30：它交回来的报告；还在跑就是空的
+    #[serde(default)]
+    pub result: String,
 }
 
 /// 还没回来的后台任务
@@ -447,6 +453,9 @@ pub struct BgTask {
     pub summary: String,
     #[serde(default)]
     pub ts: String,
+    /// v1.30：发起它的那一段原文（命令 / 任务书），点开看
+    #[serde(default)]
+    pub detail: String,
 }
 
 /// 项目 `_inbox/` 里的一个文件（响应里还有 `path`，mac 侧只显示文件名，不收）

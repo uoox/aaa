@@ -20,6 +20,8 @@ pub const MAX_MESSAGES: usize = 2000;
 const TEXT_CAP: usize = 4000;
 const RESULT_CAP: usize = 2000;
 const SUMMARY_CAP: usize = 160;
+/// 详情屏「点开看」的正文上限（子代理任务书 / 报告、后台任务的命令）
+const PREVIEW_CAP: usize = 6000;
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct ToolInfo {
@@ -68,7 +70,7 @@ pub struct Msg {
 }
 
 /// 一次子代理调用（Agent / Task 工具）。详情屏「子代理」一节（v1.17）。
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct Subagent {
     /// 工具名：Agent（新）/ Task（老）
     pub tool: String,
@@ -79,15 +81,25 @@ pub struct Subagent {
     /// running | ok | err
     pub status: String,
     pub ts: String,
+    /// v1.30 预览：派给它的整段任务书（`input.prompt`）。**只读**——客户端点开一条
+    /// 看的就是这个，AAA 不提供插手子代理的口子（用户 2026-09-10：仅预览）
+    #[serde(default)]
+    pub prompt: String,
+    /// v1.30 预览：它交回来的报告（tool_result 的正文）；还在跑就是空的
+    #[serde(default)]
+    pub result: String,
 }
 
 /// 一个还没回来的后台任务（`run_in_background` 的 Bash / Agent，或 Monitor）。
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct BgTask {
     pub tool: String,
     pub summary: String,
     /// 发起时刻
     pub ts: String,
+    /// v1.30 预览：发起它的那一段原文（命令 / 任务书），摘要那一行放不下的全在这里
+    #[serde(default)]
+    pub detail: String,
 }
 
 /// 会话里用过的技能（Skill 工具），按名字合并计数。
@@ -462,6 +474,25 @@ fn content_text(content: Option<&Value>) -> String {
     }
 }
 
+/// 详情屏点开一条时给人看的那一段：不像 `summarize_tool_input` 那样压成一行，
+/// 但仍要有个上限——一段 Agent 任务书能有几千字，整条会话的详情响应不该被它撑爆。
+fn tool_detail(name: &str, input: Option<&Value>) -> String {
+    let Some(input) = input else { return String::new() };
+    let by_key = |k: &str| input.get(k).and_then(|v| v.as_str()).map(String::from);
+    let s = match name {
+        "Bash" | "BashOutput" => by_key("command"),
+        "Agent" | "Task" => by_key("prompt"),
+        _ => None,
+    }
+    .or_else(|| {
+        input
+            .as_object()
+            .and_then(|o| o.values().find_map(|v| v.as_str().map(String::from)))
+    })
+    .unwrap_or_default();
+    cap(s.trim(), PREVIEW_CAP)
+}
+
 /// Short human summary of a tool invocation input.
 fn summarize_tool_input(name: &str, input: Option<&Value>) -> String {
     let Some(input) = input else { return String::new() };
@@ -585,14 +616,16 @@ pub fn parse_claude_line(store: &mut MsgStore, v: &Value) {
                                 if !is_err && (launched.is_some() || looks_like_background_result(&text)) {
                                     let task = launched.unwrap_or_else(|| BgTask {
                                         tool: name.clone(),
-                                        summary: String::new(),
                                         ts: ts.to_string(),
+                                        ..Default::default()
                                     });
                                     store.bg_pending.insert(id.to_string(), BgTask { ts: ts.to_string(), ..task });
                                 }
                                 if let Some(&ix) = store.subagent_ix.get(id) {
                                     if let Some(a) = store.subagents.get_mut(ix) {
                                         a.status = status.to_string();
+                                        // 它交回来的报告：详情屏点开那一条看的就是这个
+                                        a.result = cap(text.trim(), PREVIEW_CAP);
                                     }
                                 }
                             }
@@ -681,7 +714,12 @@ pub fn parse_claude_line(store: &mut MsgStore, v: &Value) {
                             if is_background_launch(&name, item.get("input")) {
                                 store.bg_launch.insert(
                                     id.to_string(),
-                                    BgTask { tool: name.clone(), summary: summary_for_detail.clone(), ts: ts.to_string() },
+                                    BgTask {
+                                        tool: name.clone(),
+                                        summary: summary_for_detail.clone(),
+                                        ts: ts.to_string(),
+                                        detail: tool_detail(&name, item.get("input")),
+                                    },
                                 );
                             } else {
                                 store.awaiting_result.insert(id.to_string());
@@ -696,6 +734,8 @@ pub fn parse_claude_line(store: &mut MsgStore, v: &Value) {
                                     summary: summary_for_detail.clone(),
                                     status: "running".to_string(),
                                     ts: ts.to_string(),
+                                    prompt: str_field(item.get("input"), "prompt"),
+                                    result: String::new(),
                                 });
                             }
                             if name == SKILL_TOOL {
@@ -975,13 +1015,19 @@ pub fn parse_agy_line(store: &mut MsgStore, v: &Value) {
                 } else {
                     cap(&one_line(desc), SUMMARY_CAP)
                 };
-                store.bg_pending.insert(
-                    id.to_string(),
-                    BgTask { tool: "后台任务".into(), summary: summary.clone(), ts: ts.clone() },
-                );
                 // 后半截「YOU MUST TAKE ONE OF THE FOLLOWING TWO ACTIONS…」是写给模型的
                 // 行动指令，不是发生过的事
                 let shown = body.split("YOU MUST").next().unwrap_or(body).trim_end();
+                store.bg_pending.insert(
+                    id.to_string(),
+                    BgTask {
+                        tool: "后台任务".into(),
+                        summary: summary.clone(),
+                        ts: ts.clone(),
+                        // agy 不记入参，但结果文本里有任务书和日志路径，点开就看这个
+                        detail: cap(shown, PREVIEW_CAP),
+                    },
+                );
                 store.push(
                     &ts,
                     "tool",
@@ -1353,8 +1399,8 @@ mod tests {
         feed_lines(
             &mut st,
             &[
-                use_tool("a1", "Agent", json!({"subagent_type":"Explore","description":"翻一遍协议"}), "2026-09-08T01:00:00.000Z"),
-                result("a1", "找到了", false, "2026-09-08T01:00:10.000Z"),
+                use_tool("a1", "Agent", json!({"subagent_type":"Explore","description":"翻一遍协议","prompt":"去把 PROTOCOL 从头读一遍"}), "2026-09-08T01:00:00.000Z"),
+                result("a1", "读完了，共 403 行", false, "2026-09-08T01:00:10.000Z"),
                 use_tool("a2", "Task", json!({"description":"跑测试"}), "2026-09-08T01:01:00.000Z"),
                 use_tool("s1", "Skill", json!({"skill":"artifact-design"}), "2026-09-08T01:02:00.000Z"),
                 use_tool("s2", "Skill", json!({"skill":"artifact-design"}), "2026-09-08T01:03:00.000Z"),
@@ -1368,6 +1414,9 @@ mod tests {
         assert_eq!(st.subagents[0].kind, "Explore");
         assert_eq!(st.subagents[0].summary, "翻一遍协议");
         assert_eq!(st.subagents[0].status, "ok", "tool_result 回来就落定");
+        assert_eq!(st.subagents[0].prompt, "去把 PROTOCOL 从头读一遍", "派给它的任务书留着，点开能看");
+        assert!(st.subagents[0].result.starts_with("读完了"), "它交回来的报告也留着");
+        assert!(st.subagents[1].result.is_empty(), "还在跑的没有报告");
         assert_eq!(st.subagents[1].status, "running", "还没回来的还在跑");
 
         assert_eq!(
@@ -1379,6 +1428,7 @@ mod tests {
         let bg = st.background_tasks(None);
         assert_eq!(bg.len(), 1);
         assert_eq!(bg[0].tool, "Bash");
+        assert_eq!(bg[0].detail, "cargo build", "点开看的是整条命令，不是压成一行的摘要");
         assert_eq!(bg[0].summary, "cargo build", "后台任务带得上是哪条命令，不只是一个计数");
         assert_eq!(st.pending_background(None), 1);
 

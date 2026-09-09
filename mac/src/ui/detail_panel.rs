@@ -27,6 +27,11 @@ use crate::theme::{self, human_bytes};
 
 /// 面板宽度
 pub(super) const DETAIL_W: f32 = 300.0;
+
+/// 详情栏里的一行：`(行首记号, 标题, 小字, 行尾时间, 点开看的正文)`。
+/// 最后一项 `(key, body)`：`key` 是展开状态的键（会话内唯一），`body` 是正文；
+/// None = 这一行没有可看的正文，也就不可点。
+type DetailRow = (Option<(&'static str, u32)>, String, String, String, Option<(String, String)>);
 /// 面板的最小重拉间隔
 const DETAIL_MIN: Duration = Duration::from_secs(2);
 
@@ -427,16 +432,20 @@ impl RootView {
     }
 
     /// v1.17 的四段（子代理 / 后台任务 / 已上传 / 技能）长得都是「一行标题 + 一行小字」，
-    /// 排版只写一次。`lead` 是行首那一小块（子代理的状态记号），没有就传 None。
+    /// 排版只写一次。`lead` 是行首那一小块（子代理的状态记号），没有就传 None；
+    /// `preview` 有值的行点一下原地展开正文（v1.30，仅预览，没有任何干预的口子）。
     fn detail_rows(
-        rows: Vec<(Option<(&'static str, u32)>, String, String, String)>,
+        &self,
+        rows: Vec<DetailRow>,
         empty: &'static str,
+        cx: &mut Context<Self>,
     ) -> gpui::Div {
         if rows.is_empty() {
             return Self::empty_hint(empty);
         }
         let mut col = div().flex().flex_col().gap(px(4.));
-        for (lead, title, sub, trailing) in rows {
+        let mut ix = 0usize;
+        for (lead, title, sub, trailing, preview) in rows {
             let mut head = div().flex().items_center().gap(px(6.));
             if let Some((mark, color)) = lead {
                 head = head.child(
@@ -462,12 +471,31 @@ impl RootView {
                     meta().flex_none()
                         .child(SharedString::from(trailing)),
                 );
+            // 有正文的行（子代理 / 后台任务）点一下原地展开，**只读**：AAA 不提供
+            // 插手子代理和后台任务的口子（2026-09-10 用户拍板：仅预览）
+            let open = preview.as_ref().is_some_and(|(k, _)| self.detail_open.contains(k));
+            let key = preview.as_ref().map(|(k, _)| k.clone());
+            let body = preview.filter(|_| open).map(|(_, b)| b);
+            ix += 1;
+            let mut row = div()
+                .id(SharedString::from(format!("dt-row:{ix}")))
+                .flex()
+                .flex_col()
+                .gap(px(1.))
+                .py(px(3.));
+            if let Some(k) = key {
+                row = row
+                    .cursor_pointer()
+                    .hover(|st| st.bg(c(theme::SURFACE_RAISED)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.detail_open.remove(&k) {
+                            this.detail_open.insert(k.clone());
+                        }
+                        cx.notify();
+                    }));
+            }
             col = col.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(1.))
-                    .py(px(3.))
+                row
                     .child(head)
                     .when(!sub.is_empty(), |el| {
                         el.child(
@@ -476,6 +504,19 @@ impl RootView {
                                 .text_size(px(11.))
                                 .text_color(c(theme::DIM))
                                 .child(SharedString::from(sub)),
+                        )
+                    })
+                    .when_some(body, |el, b| {
+                        el.child(
+                            div()
+                                .mt(px(4.))
+                                .p(px(8.))
+                                .rounded(px(6.))
+                                .bg(c(theme::INSET))
+                                .font_family("Menlo")
+                                .text_size(px(10.5))
+                                .text_color(c(theme::DIM))
+                                .child(SharedString::from(b)),
                         )
                     }),
             );
@@ -540,11 +581,11 @@ impl RootView {
             .child(Self::section("会话", Self::render_usage_section(s.usage.as_ref())))
             .child(Self::section("进度", Self::render_checklist_section(s)))
             // v1.17：消息流里翻不出来的四样（子代理 / 后台任务 / 已上传 / 技能）
-            .child(Self::section_n("子代理", ex.subagents.len(), Self::render_subagents(ex, &now)))
-            .child(Self::section_n("后台任务", ex.background_tasks.len(), Self::render_background(ex, &now)))
-            .child(Self::section_n("已上传", ex.uploads.len(), Self::render_uploads(ex, &now)))
+            .child(Self::section_n("子代理", ex.subagents.len(), self.render_subagents(ex, &now, cx)))
+            .child(Self::section_n("后台任务", ex.background_tasks.len(), self.render_background(ex, &now, cx)))
+            .child(Self::section_n("已上传", ex.uploads.len(), self.render_uploads(ex, &now, cx)))
             .child(Self::section_n("产物", d.map(|d| d.artifacts.len()).unwrap_or(0), self.render_artifacts_section(d, &now, cx)))
-            .child(Self::section_n("已使用技能", ex.skills.len(), Self::render_skills(ex, &now)))
+            .child(Self::section_n("已使用技能", ex.skills.len(), self.render_skills(ex, &now, cx)))
             .child(Self::section_n(
                 "收件箱",
                 self.current_project_path().and_then(|p| self.inbox.get(&p)).map(Vec::len).unwrap_or(0),
@@ -806,42 +847,55 @@ impl RootView {
     }
 
     /// 子代理：状态记号（跑着 ⋯ / 成了 ✓ / 挂了 ✗）+ 类型 + 它去干什么
-    fn render_subagents(ex: &SessionDetailResponse, now: &DateTime<chrono::Local>) -> gpui::Div {
+    fn render_subagents(&self, ex: &SessionDetailResponse, now: &DateTime<chrono::Local>, cx: &mut Context<Self>) -> gpui::Div {
         let rows = ex
             .subagents
             .iter()
-            .map(|a| {
+            .enumerate()
+            .map(|(i, a)| {
                 let lead = match a.status.as_str() {
                     "running" => ("⋯", theme::ACCENT),
                     "err" => ("✗", theme::RED),
                     _ => ("✓", theme::GREEN),
                 };
                 let title = if a.kind.is_empty() { a.tool.clone() } else { a.kind.clone() };
-                (Some(lead), title, a.summary.clone(), fmt_artifact_time(&a.ts, now, &chrono::Local).unwrap_or_default())
+                // 点开看：派给它的任务书 + 它交回来的报告（还在跑就只有任务书）
+                let mut body = a.prompt.clone();
+                if !a.result.is_empty() {
+                    if !body.is_empty() {
+                        body.push_str("\n\n── 它交回来的 ──\n");
+                    }
+                    body.push_str(&a.result);
+                }
+                let preview = (!body.is_empty()).then(|| (format!("sub:{i}"), body));
+                (Some(lead), title, a.summary.clone(), fmt_artifact_time(&a.ts, now, &chrono::Local).unwrap_or_default(), preview)
             })
             .collect();
-        Self::detail_rows(rows, "这个会话还没开过子代理")
+        self.detail_rows(rows, "这个会话还没开过子代理", cx)
     }
 
     /// 后台任务：还没等到 `<task-notification>` 的那些（会话行上「后台」两个字的来源）
-    fn render_background(ex: &SessionDetailResponse, now: &DateTime<chrono::Local>) -> gpui::Div {
+    fn render_background(&self, ex: &SessionDetailResponse, now: &DateTime<chrono::Local>, cx: &mut Context<Self>) -> gpui::Div {
         let rows = ex
             .background_tasks
             .iter()
-            .map(|t| {
+            .enumerate()
+            .map(|(i, t)| {
+                let preview = (!t.detail.is_empty()).then(|| (format!("bg:{i}"), t.detail.clone()));
                 (
                     Some(("⋯", theme::ACCENT)),
                     t.tool.clone(),
                     t.summary.clone(),
                     fmt_artifact_time(&t.ts, now, &chrono::Local).unwrap_or_default(),
+                    preview,
                 )
             })
             .collect();
-        Self::detail_rows(rows, "没有挂着的后台任务")
+        self.detail_rows(rows, "没有挂着的后台任务", cx)
     }
 
     /// 已上传：项目 `_inbox/` 里的文件（📎 和手机的系统分享都落这儿）
-    fn render_uploads(ex: &SessionDetailResponse, now: &DateTime<chrono::Local>) -> gpui::Div {
+    fn render_uploads(&self, ex: &SessionDetailResponse, now: &DateTime<chrono::Local>, cx: &mut Context<Self>) -> gpui::Div {
         let rows = ex
             .uploads
             .iter()
@@ -851,14 +905,15 @@ impl RootView {
                     u.name.clone(),
                     human_bytes(u.size),
                     fmt_artifact_time(&u.ts, now, &chrono::Local).unwrap_or_default(),
+                    None,
                 )
             })
             .collect();
-        Self::detail_rows(rows, "还没有传过文件进这个项目")
+        self.detail_rows(rows, "还没有传过文件进这个项目", cx)
     }
 
     /// 已使用技能：Skill 工具调用，按名字合并计数
-    fn render_skills(ex: &SessionDetailResponse, now: &DateTime<chrono::Local>) -> gpui::Div {
+    fn render_skills(&self, ex: &SessionDetailResponse, now: &DateTime<chrono::Local>, cx: &mut Context<Self>) -> gpui::Div {
         let rows = ex
             .skills
             .iter()
@@ -868,10 +923,11 @@ impl RootView {
                     u.name.clone(),
                     if u.count > 1 { format!("{} 次", u.count) } else { String::new() },
                     fmt_artifact_time(&u.last_ts, now, &chrono::Local).unwrap_or_default(),
+                    None,
                 )
             })
             .collect();
-        Self::detail_rows(rows, "这个会话还没用过技能")
+        self.detail_rows(rows, "这个会话还没用过技能", cx)
     }
 
     /// 收件箱 = 这个项目排着的几句话。agent 每跑完一轮空下来，daemon 自动喂下一句

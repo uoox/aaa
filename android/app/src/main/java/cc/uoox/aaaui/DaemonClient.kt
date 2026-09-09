@@ -89,9 +89,6 @@ class DaemonClient(
     /** agent 表；老 daemon 没有这个路由，调用方 runCatching 落空即空表 */
     suspend fun agents(): List<AgentInfo> = json.decodeFromString(ListSerializer(AgentInfo.serializer()), get("/agents"))
 
-    /** 换这个项目下次开哪个 agent：只动注册表，活着的会话不碰 */
-    suspend fun setProjectAgent(path: String, agent: String): String =
-        post("/projects/agent", buildJsonObject { put("path", path); put("agent", agent) }.toString())
 
     suspend fun createProject(name: String?, agent: String?): Project {
         val body = buildJsonObject { if (!name.isNullOrBlank()) put("name", name); if (!agent.isNullOrBlank()) put("agent", agent) }
@@ -132,7 +129,6 @@ class DaemonClient(
     suspend fun messages(id: String, after: Long = 0, limit: Int = 200): MessagesResponse =
         json.decodeFromString(get("/sessions/$id/messages?after=$after&limit=$limit"))
 
-    /** v1.16：替用户答权限对话框（allow / deny） */
     /** v1.30 目录浏览：列一个目录（daemon 保证它在项目根底下） */
     suspend fun files(path: String): FileListing =
         json.decodeFromString(FileListing.serializer(), get("/files?path=" + urlEncode(path)))
@@ -157,6 +153,7 @@ class DaemonClient(
     /** 清掉池子里已退出的会话记录（不动项目目录、不动 agent 存储） */
     suspend fun cleanExited(): String = post("/sessions/clean_exited", "{}")
 
+    /** v1.16：替用户答权限对话框（allow / deny） */
     suspend fun permission(sessionId: String, behavior: String) {
         post("/sessions/$sessionId/permission", buildJsonObject { put("behavior", behavior) }.toString())
     }

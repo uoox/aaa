@@ -368,6 +368,9 @@ pub struct RootView {
     files_views: HashMap<String, Entity<FilesView>>,
     view_mode: HashMap<String, SessionView>,
 
+    /// 详情栏里点开了的那几行（`sub:<i>` / `bg:<i>`）：**只预览**，没有干预的口子
+    detail_open: HashSet<String>,
+
     /// 本机手动终止的会话：exited 不弹「已退出」（自己动的手）
     pub user_killed: HashSet<String>,
 
@@ -529,6 +532,7 @@ impl RootView {
             msg_views: HashMap::new(),
             files_views: HashMap::new(),
             view_mode: HashMap::new(),
+            detail_open: HashSet::new(),
             user_killed: HashSet::new(),
             sidebar_w: ui_state.sidebar_w,
             sidebar_drag: None,
@@ -1059,16 +1063,6 @@ impl RootView {
             .unwrap_or_else(|| id.to_string())
     }
 
-    /// 换这个项目下次开哪个 agent。乐观改本地那一行：daemon 会推 projects_changed，
-    /// 但要等一次往返，不先改的话点下去像没反应。
-    fn swap_project_agent(&mut self, path: String, agent: String, cx: &mut Context<Self>) {
-        if let Some(p) = self.projects.iter_mut().find(|p| p.path == path) {
-            p.agent = Some(agent.clone());
-        }
-        cx.notify();
-        self.spawn_fetch_ignore(self.net.set_project_agent(path, agent), true, cx);
-    }
-
     // ── 渲染 ────────────────────────────────────────────────────────────
 
     /// Ctrl-Tab / 双击下分区都会走到的「激活会话」帮手
@@ -1285,39 +1279,19 @@ impl RootView {
                     .text_color(c(if active { theme::ACCENT } else if dim_title { theme::DIM } else { theme::INK }))
                     .child(SharedString::from(title)),
             );
-        // agent 小标兼开关：表里只有一个可用 agent 时整个不画（没得换）。装了两个以上时
-        // **每一行都画**（2026-09-10 用户拍板：不要悬停才显示）——「这个项目下次开谁」
-        // 是一列扫下来就该看得出的事。没登记的行（daemon 给「有活会话但不在名册」的
-        // 目录补的）换不了。
-        // 行上没写 agent（老 daemon / 客户端自己拼的行）时按默认那个算——不然
-        // `agent_label("")` 取不到首字母，每一行都会常驻一个「?」
-        let agent = row
-            .project
-            .as_ref()
-            .and_then(|p| p.agent.clone())
-            .filter(|a| !a.is_empty())
-            .or_else(|| self.agents.iter().find(|a| a.available).map(|a| a.id.clone()))
-            .unwrap_or_default();
-        let swap = row
-            .project
-            .as_ref()
-            .filter(|p| p.registered)
-            .map(|p| p.path.clone())
-            .zip(self.next_agent(&agent));
-        if let Some((path, next)) = swap {
-            let mark = self.agent_label(&agent).chars().next().unwrap_or('?').to_string();
+        // 行尾：更新时间——「这个项目上一次有动静」；状态已经在底色里，这里不再挂记号。
+        // 时间在按钮**前面**（2026-09-10 用户拍板「x/删 放在分钟数后面」）
+        if !time.is_empty() {
             el = el.child(
-                row_btn(SharedString::from(format!("sb-agent:{}", row.path)))
-                    .hover(|st| st.text_color(c(theme::ACCENT)).bg(c(theme::EDGE_LIGHT)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.swap_project_agent(path.clone(), next.clone(), cx);
-                    }))
-                    .child(SharedString::from(mark)),
+                div()
+                    .flex_none()
+                    .text_size(px(10.5))
+                    .text_color(c(theme::FAINT))
+                    .child(SharedString::from(time)),
             );
         }
-        // 行尾按钮：活着的 × = 结束会话（只有执行中的才确认，被顺手点掉最伤）；
-        // 未激活的「删」= 删项目
+        // 最右：活着的 × = 结束会话（只有执行中的才确认，被顺手点掉最伤）；
+        // 未激活的「删」= 删项目。一直画着，不再悬停才现身
         let button = row_btn(act_id)
             .hover(|st| st.text_color(c(theme::RED)).bg(c(theme::EDGE_LIGHT)));
         if let Some((id_close, confirm)) = kill {
@@ -1342,16 +1316,6 @@ impl RootView {
                         cx.notify();
                     }))
                     .child("删"),
-            );
-        }
-        // 行尾：更新时间——「这个项目上一次有动静」；状态已经在底色里，这里不再挂记号
-        if !time.is_empty() {
-            el = el.child(
-                div()
-                    .flex_none()
-                    .text_size(px(10.5))
-                    .text_color(c(theme::FAINT))
-                    .child(SharedString::from(time)),
             );
         }
         el

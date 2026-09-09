@@ -97,8 +97,13 @@ import java.net.URLDecoder
     /** running | ok | err */
     val status: String = "",
     val ts: String = "",
+    /** v1.30：派给它的整段任务书（点开看；只读，AAA 不提供插手子代理的口子） */
+    val prompt: String = "",
+    /** v1.30：它交回来的报告；还在跑就是空的 */
+    val result: String = "",
 )
-@Serializable data class BgTask(val tool: String = "", val summary: String = "", val ts: String = "")
+/** `detail` = 发起它的那一段原文（命令 / 任务书），点开看 */
+@Serializable data class BgTask(val tool: String = "", val summary: String = "", val ts: String = "", val detail: String = "")
 @Serializable data class UploadInfo(val name: String = "", val path: String = "", val size: Long = 0, val ts: String = "")
 @Serializable data class SkillUse(val name: String = "", val count: Int = 0, val last_ts: String = "")
 @Serializable data class SessionDetail(
