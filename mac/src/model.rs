@@ -193,7 +193,7 @@ pub fn status_rank(s: &str) -> u8 {
     }
 }
 
-/// 蓝线 / 蓝点：它还在动，不用你管（自己在跑，或后台任务还没回来）。
+/// 淡蓝底（项目行）/ 蓝线（看板卡片）：它还在动，不用你管（自己在跑，或后台任务还没回来）。
 /// `asking` 不算——那是在等你。
 pub fn status_running(s: &str) -> bool {
     s == "running" || s == "background"
@@ -492,9 +492,6 @@ pub struct Project {
     /// （见 `title`），这里只剩调试/兼容价值
     #[serde(default)]
     pub session_title: Option<String>,
-    /// v1.8：置顶（daemon 侧存，三端一起变）
-    #[serde(default)]
-    pub pinned: bool,
     /// v1.22：代表这个项目的那个会话。没有活会话时是**最近退出的那个**（点它是 resume，
     /// 不是打开），一个都没有 → None
     #[serde(default)]
@@ -527,7 +524,6 @@ impl Default for Project {
             dir_size: 0,
             agent: None,
             session_title: None,
-            pinned: false,
             session_id: None,
             status: String::new(),
             title: None,
@@ -781,22 +777,12 @@ fn default_sidebar_w() -> f32 {
     SIDEBAR_W_DEFAULT
 }
 
-/// 主题默认黑暗（原始设计令牌）；值的解释见 theme::ThemeKind::from_str
-pub const THEME_DEFAULT: &str = "dark";
-
-fn default_theme() -> String {
-    THEME_DEFAULT.to_string()
-}
-
-/// daemon 的 config.toml 是双方的契约，UI 不往里写；窗口布局、主题这类只属于
-/// 本机的偏好另起一个文件。读写失败一律回落默认值——配置坏了也必须能开窗。
+/// daemon 的 config.toml 是双方的契约，UI 不往里写；窗口布局、未读这类只属于
+/// 本机的偏好另起一个文件。老文件里的 `theme` 键（2026-09-10 拿掉主题开关）被忽略。读写失败一律回落默认值——配置坏了也必须能开窗。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UiState {
     #[serde(default = "default_sidebar_w")]
     pub sidebar_w: f32,
-    /// "dark" | "light" | "claude"（认不出的按 dark）
-    #[serde(default = "default_theme")]
-    pub theme: String,
     /// 会话页右侧详情面板是否展开（⌘I 切换；默认展开）
     #[serde(default = "default_true")]
     pub detail_visible: bool,
@@ -813,7 +799,6 @@ impl Default for UiState {
     fn default() -> Self {
         UiState {
             sidebar_w: SIDEBAR_W_DEFAULT,
-            theme: default_theme(),
             detail_visible: true,
             muted_projects: Vec::new(),
             unread_projects: Vec::new(),
@@ -1327,7 +1312,6 @@ mod tests {
     fn ui_state_roundtrip_and_tolerance() {
         let s = UiState {
             sidebar_w: 320.0,
-            theme: "claude".into(),
             detail_visible: false,
             muted_projects: vec!["/p/a".into()],
             unread_projects: vec!["/p/b".into()],
@@ -1335,18 +1319,15 @@ mod tests {
         let text = toml::to_string(&s).unwrap();
         let back: UiState = toml::from_str(&text).unwrap();
         assert_eq!(back.sidebar_w, 320.0);
-        assert_eq!(back.theme, "claude");
         assert!(!back.detail_visible);
         assert_eq!(back.muted_projects, vec!["/p/a".to_string()]);
         // 缺字段（旧版本写的文件）用默认值补齐，不报错；详情面板默认展开
         let empty: UiState = toml::from_str("").unwrap();
         assert_eq!(empty.sidebar_w, SIDEBAR_W_DEFAULT);
-        assert_eq!(empty.theme, THEME_DEFAULT);
         assert!(empty.detail_visible);
         assert!(empty.muted_projects.is_empty());
-        // 只有旧字段的文件：主题回落默认，不报错
-        let old: UiState = toml::from_str("sidebar_w = 250.0\n").unwrap();
-        assert_eq!(old.theme, "dark");
+        // 老版本写过 theme 字段（2026-09-10 拿掉主题开关）：不认识的键忽略，不报错
+        let old: UiState = toml::from_str("sidebar_w = 250.0\ntheme = \"claude\"\n").unwrap();
         assert_eq!(old.sidebar_w, 250.0);
     }
 }

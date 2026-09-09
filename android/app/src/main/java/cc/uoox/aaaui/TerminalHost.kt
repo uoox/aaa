@@ -85,8 +85,6 @@ internal fun TerminalHost(
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     val emulator = attachment.emulator
-    val palette = Tok.current
-    LaunchedEffect(emulator, palette.name) { applyTerminalPalette(palette, emulator) }
     DisposableEffect(attachment) {
         attachment.onClipboardCopy = { copyToClipboard(ctx, it) }
         onDispose { attachment.onClipboardCopy = null }
@@ -116,7 +114,7 @@ internal fun TerminalHost(
     LaunchedEffect(modes.mouseOn) { if (!modes.mouseOn) selecting = false }
     val currentScreenText = rememberUpdatedState(screenText)
 
-    Box(Modifier.fillMaxSize().background(palette.termBg)) {
+    Box(Modifier.fillMaxSize().background(Tok.TermBg)) {
         Terminal(
             terminalEmulator = emulator,
             modifier = Modifier.fillMaxSize(),
@@ -125,10 +123,10 @@ internal fun TerminalHost(
             initialFontSize = TERM_FONT_SP.sp,
             minFontSize = TERM_FONT_SP.sp,
             maxFontSize = TERM_FONT_SP.sp,
-            backgroundColor = palette.termBg,
-            foregroundColor = palette.termFg,
-            selectionBackgroundColor = palette.accent,
-            selectionForegroundColor = palette.onAccent,
+            backgroundColor = Tok.TermBg,
+            foregroundColor = Tok.TermFg,
+            selectionBackgroundColor = Tok.Accent,
+            selectionForegroundColor = Tok.OnAccent,
             keyboardEnabled = false,
             // 点空处：选择模式下是「退出」，平时是「叫键盘」
             onTerminalTap = { if (selecting) selecting = false else input?.showKeyboard() },

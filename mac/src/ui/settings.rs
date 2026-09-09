@@ -1,6 +1,6 @@
-//! 设置页（精简版）：① 配对二维码 + 连接信息 ② 外观（三套主题，即时切换、
-//! 本机落盘）③ 可编辑配置（host/port/token/项目目录；保存写入 daemon 并触发
-//! 它自我重启，项目目录变更先弹迁移确认）。
+//! 设置页（精简版）：① 配对二维码 + 连接信息 ② 可编辑配置（host/port/token/项目目录；
+//! 保存写入 daemon 并触发它自我重启，项目目录变更先弹迁移确认）。
+//! 外观一节 2026-09-10 拿掉：只剩一套主题，没有可切的。
 
 use gpui::{
     Bounds, ClipboardItem, Context, SharedString, Window, canvas, div, fill, point, prelude::*, px,
@@ -10,7 +10,7 @@ use gpui::{
 use super::kit::*;
 use super::{Modal, RootView};
 use crate::net::ConnState;
-use crate::theme::{self, Palette, ThemeKind};
+use crate::theme;
 
 /// 配对 payload → 二维码模块位图（fetch 时调用一次；渲染帧不重复编码）
 pub(super) fn qr_encode(payload: &str) -> Option<(usize, Vec<bool>)> {
@@ -50,7 +50,7 @@ fn kv_row(k: &'static str, v: String, color: Option<u32>) -> gpui::Div {
                 .text_ellipsis()
                 .whitespace_nowrap()
                 .text_size(px(12.))
-                .text_color(c(color.unwrap_or(theme::ink())))
+                .text_color(c(color.unwrap_or(theme::INK)))
                 .child(SharedString::from(v)),
         )
 }
@@ -65,7 +65,7 @@ fn field(label: &'static str, input: gpui::Entity<super::MiniInput>) -> gpui::Di
             div()
                 .font_family("Menlo")
                 .text_size(px(9.5))
-                .text_color(c(theme::faint()))
+                .text_color(c(theme::FAINT))
                 .child(label),
         )
         .child(input)
@@ -107,7 +107,7 @@ impl RootView {
         }
     }
 
-    /// 三节（配对 / 外观 / 配置）各自一张卡，页面本身只管把它们竖着摞起来。
+    /// 两节（配对 / 配置）各自一张卡，页面本身只管把它们竖着摞起来。
     pub(super) fn render_settings(
         &self,
         _window: &mut Window,
@@ -126,7 +126,6 @@ impl RootView {
                     .gap(px(14.))
                     .max_w(px(720.))
                     .child(self.render_pair_section(cx))
-                    .child(self.render_look_section(cx))
                     .child(self.render_config_section(cx)),
             )
     }
@@ -186,12 +185,12 @@ impl RootView {
                 .flex_none()
                 .rounded(px(6.))
                 .border_1()
-                .border_color(c(theme::edge()))
+                .border_color(c(theme::EDGE))
                 .flex()
                 .items_center()
                 .justify_center()
                 .text_size(px(11.))
-                .text_color(c(theme::faint()))
+                .text_color(c(theme::FAINT))
                 .child("连接后生成"),
         }
     }
@@ -199,9 +198,9 @@ impl RootView {
     /// 配对卡右半：连接状态一行 + daemon 报上来的几项 + 重启按钮
     fn render_conn_info(&self, cx: &mut Context<Self>) -> gpui::Div {
         let (conn_color, conn_label) = match self.conn {
-            ConnState::Connected => (theme::green(), "已连接"),
-            ConnState::Connecting => (theme::amber(), "连接中…"),
-            ConnState::Disconnected => (theme::red(), "未连接"),
+            ConnState::Connected => (theme::GREEN, "已连接"),
+            ConnState::Connecting => (theme::AMBER, "连接中…"),
+            ConnState::Disconnected => (theme::RED, "未连接"),
         };
         let mut info = div()
             .flex_1()
@@ -225,7 +224,7 @@ impl RootView {
                         el.child(
                             div()
                                 .text_size(px(11.))
-                                .text_color(c(theme::amber()))
+                                .text_color(c(theme::AMBER))
                                 .child("（未读到本机 config.toml）"),
                         )
                     }),
@@ -234,7 +233,7 @@ impl RootView {
             info = info
                 .child(kv_row("版本", format!("aaa-daemon v{}", h.version), None))
                 .when(h.update_pending, |el| {
-                    el.child(kv_row("更新", "有新构建，需重启才生效".into(), Some(theme::amber())))
+                    el.child(kv_row("更新", "有新构建，需重启才生效".into(), Some(theme::AMBER)))
                 })
                 .child(kv_row("运行", format!("{} 分钟", h.uptime_s / 60), None))
                 .child(kv_row("项目根", h.project_root.clone(), None))
@@ -245,7 +244,7 @@ impl RootView {
                     } else {
                         "未挂载 ✕（创建/删除被禁用）".into()
                     },
-                    Some(if h.ssd_mounted { theme::green() } else { theme::red() }),
+                    Some(if h.ssd_mounted { theme::GREEN } else { theme::RED }),
                 ));
         }
         if let Some(ep) = &self.net.endpoint() {
@@ -268,56 +267,7 @@ impl RootView {
         info
     }
 
-    /// ② 外观：三套主题各一个芯片，点了立刻整窗换色并落盘
-    fn render_look_section(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let current = self.theme;
-        let mut chips = div().flex().flex_wrap().gap(px(8.));
-        for kind in ThemeKind::ALL {
-            let sel = kind == current;
-            let p = Palette::for_kind(kind);
-            // 芯片上带一小条色样（页面底 / 卡片 / 主色），不用切过去就知道长什么样
-            let swatch = div()
-                .flex()
-                .flex_none()
-                .rounded(px(3.))
-                .overflow_hidden()
-                .border_1()
-                .border_color(c(theme::edge_light()))
-                .child(div().w(px(10.)).h(px(14.)).bg(c(p.bg)))
-                .child(div().w(px(10.)).h(px(14.)).bg(c(p.surface)))
-                .child(div().w(px(10.)).h(px(14.)).bg(c(p.accent)));
-            chips = chips.child(
-                div()
-                    .id(("theme-chip", kind as usize))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .px(px(12.))
-                    .py(px(6.))
-                    .rounded(px(8.))
-                    .border_1()
-                    .border_color(c(if sel { theme::accent() } else { theme::edge_light() }))
-                    .bg(if sel {
-                        ca(theme::accent(), 0.12)
-                    } else {
-                        c(theme::surface_raised())
-                    })
-                    .text_size(px(12.5))
-                    .text_color(c(if sel { theme::accent() } else { theme::ink() }))
-                    .when(sel, |el| el.font_weight(gpui::FontWeight::BOLD))
-                    .cursor_pointer()
-                    .hover(|st| st.border_color(c(theme::accent())))
-                    .on_click(cx.listener(move |this, _, _, cx| this.set_theme(kind, cx)))
-                    .child(swatch)
-                    .child(kind.label()),
-            );
-        }
-        sect()
-            .child(sect_title("外观 · 即时生效，记在本机 ~/.config/aaa-ui/ui.toml"))
-            .child(chips)
-    }
-
-    /// ③ 可编辑配置：host/port/token 一行、项目目录一行，外加两个提交按钮
+    /// ② 可编辑配置：host/port/token 一行、项目目录一行，外加两个提交按钮
     fn render_config_section(&self, cx: &mut Context<Self>) -> gpui::Div {
         let token_for_copy = self.token_input.read(cx).text().to_string();
         sect()
@@ -379,7 +329,7 @@ impl RootView {
                 div()
                     .mt(px(8.))
                     .text_size(px(10.5))
-                    .text_color(c(theme::faint()))
+                    .text_color(c(theme::FAINT))
                     .child("「连接」只改本机指向；「保存」写入 daemon 配置并重启它（有存活会话会被拒绝）。修改项目目录时会先询问是否迁移现有项目。"),
             )
     }

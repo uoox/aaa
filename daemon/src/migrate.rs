@@ -1,6 +1,6 @@
 //! 项目根整体迁移（`PUT /config {project_root, migrate:true}`）：把 `<old>` 整个
 //! rename 到 `<new>`，并让**所有会话跟着过去**——注册表、daemon 自己的会话元数据 /
-//! 会话日志 / 置顶、cwd 缓存，以及 Claude Code 那边按 cwd 命名的 transcript 目录
+//! 会话日志、cwd 缓存，以及 Claude Code 那边按 cwd 命名的 transcript 目录
 //! （`~/.claude/projects/<slug>/`，连里面 jsonl 的 `cwd` 字段一起改）和 `~/.claude.json`
 //! 的 `projects` 键。2026-09-07 之前只改注册表，迁完 daemon 里每条会话、每条历史都
 //! 还指着旧路径，Claude 也在旧 slug 目录下找不到「这个目录的对话」。
@@ -22,7 +22,6 @@ use crate::stores;
 pub struct Report {
     pub session_metas: usize,
     pub history: usize,
-    pub pins: usize,
     pub cwd_cache: usize,
     pub claude_dirs: usize,
     pub claude_files: usize,
@@ -182,7 +181,7 @@ fn write_json_like(p: &Path, body: &[u8]) -> std::io::Result<()> {
     std::fs::rename(&tmp, p)
 }
 
-/// daemon 自己的状态：会话元数据（`sessions/*.json` 的 project_path）、会话日志、置顶
+/// daemon 自己的状态：会话元数据（`sessions/*.json` 的 project_path）、会话日志
 fn rewrite_state(paths: &Paths, old: &Path, new: &Path, rep: &mut Report) {
     // 会话元数据：逐文件改 project_path。当 Value 改，不走 Meta 结构体——老版本
     // 多出来的字段也原样保留
@@ -235,22 +234,6 @@ fn rewrite_state(paths: &Paths, old: &Path, new: &Path, rep: &mut Report) {
                 }
             }
             Err(err) => warn(rep, "会话日志", err),
-        }
-    }
-    // 置顶 pins.json：["/path", …]
-    let pins = paths.state_dir().join("pins.json");
-    if pins.is_file() {
-        match read_json(&pins) {
-            Ok(mut v) => {
-                let n = reroot_value(&mut v, old, new);
-                if n > 0 {
-                    match serde_json::to_vec_pretty(&v).map_err(|e| e.to_string()).and_then(|b| write_json_like(&pins, &b).map_err(|e| e.to_string())) {
-                        Ok(()) => rep.pins = n,
-                        Err(err) => warn(rep, "置顶", err),
-                    }
-                }
-            }
-            Err(err) => warn(rep, "置顶", err),
         }
     }
 }
@@ -642,7 +625,6 @@ mod tests {
             format!("[{{\"id\":\"s_1\",\"project_path\":\"{alpha_old}\"}},{{\"id\":\"s_9\",\"project_path\":\"/Volumes/Other/x\"}}]"),
         )
         .unwrap();
-        std::fs::write(paths.state_dir().join("pins.json"), format!("[\"{alpha_old}\",\"/Volumes/Other/x\"]")).unwrap();
         std::fs::create_dir_all(paths.cwd_cache().parent().unwrap()).unwrap();
         std::fs::write(
             paths.cwd_cache(),
@@ -692,8 +674,6 @@ mod tests {
         let hist: Value = read_json(&paths.state_dir().join("history.json")).unwrap();
         assert_eq!(hist[0]["project_path"], alpha_new);
         assert_eq!(hist[1]["project_path"], "/Volumes/Other/x");
-        let pins: Value = read_json(&paths.state_dir().join("pins.json")).unwrap();
-        assert_eq!(pins[0], alpha_new);
         let cache: Value = read_json(&paths.cwd_cache()).unwrap();
         let nk = format!("claude:{}", cnew.join("id-42.jsonl").display());
         assert_eq!(cache[&nk], alpha_new, "缓存键跟着目录改名，值换新根");
@@ -701,8 +681,8 @@ mod tests {
         assert_eq!(cache["claude:/elsewhere/z.jsonl"], "/z");
 
         assert_eq!(
-            (rep.session_metas, rep.history, rep.pins, rep.claude_dirs, rep.claude_files, rep.claude_json),
-            (1, 1, 1, 2, 2, 1)
+            (rep.session_metas, rep.history, rep.claude_dirs, rep.claude_files, rep.claude_json),
+            (1, 1, 2, 2, 1)
         );
         assert!(rep.warnings.is_empty(), "{:?}", rep.warnings);
 

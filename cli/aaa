@@ -427,8 +427,8 @@ def report_migration(v):
     if v.get("killed"): out("  结束的会话：" + "、".join(v["killed"]))
     r = v.get("report")
     if r:
-        out("  改写：会话元数据 %s · 历史 %s · 置顶 %s · cwd 缓存 %s · Claude 目录 %s · transcript %s · ~/.claude.json 键 %s"
-            % tuple(r.get(k) for k in ("session_metas", "history", "pins", "cwd_cache", "claude_dirs", "claude_files", "claude_json")))
+        out("  改写：会话元数据 %s · 历史 %s · cwd 缓存 %s · Claude 目录 %s · transcript %s · ~/.claude.json 键 %s"
+            % tuple(r.get(k) for k in ("session_metas", "history", "cwd_cache", "claude_dirs", "claude_files", "claude_json")))
         w = r.get("warnings") or []
         out("  warnings：%d" % len(w))
         for x in w: out("    - " + x)

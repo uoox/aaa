@@ -1,5 +1,5 @@
-//! 共享 UI 小件：颜色转换、状态点、按钮底座。颜色一律取自当前主题
-//! （`theme::xxx()`），实心按钮上的字色由底色亮度推出（`theme::text_on`）。
+//! 共享 UI 小件：颜色转换、状态点、按钮底座。颜色一律是设计令牌常量
+//! （`theme::XXX`），实心按钮上的字色由底色亮度推出（`theme::text_on`）。
 
 use gpui::{Div, Rgba, SharedString, Stateful, div, prelude::*, px, rgb, rgba};
 
@@ -33,12 +33,12 @@ pub fn tbtn(id: impl Into<gpui::ElementId>, label: impl Into<SharedString>) -> S
         .py(px(4.))
         .rounded(px(6.))
         .border_1()
-        .border_color(c(theme::edge_light()))
-        .bg(c(theme::surface_raised()))
+        .border_color(c(theme::EDGE_LIGHT))
+        .bg(c(theme::SURFACE_RAISED))
         .text_size(px(12.))
-        .text_color(c(theme::ink()))
+        .text_color(c(theme::INK))
         .cursor_pointer()
-        .hover(|s| s.border_color(c(theme::accent())))
+        .hover(|s| s.border_color(c(theme::ACCENT)))
         .child(label.into())
 }
 
@@ -52,10 +52,10 @@ pub fn btn_primary(
         .px(px(14.))
         .py(px(5.))
         .rounded(px(6.))
-        .bg(c(theme::accent()))
+        .bg(c(theme::ACCENT))
         .text_size(px(12.5))
         .font_weight(gpui::FontWeight::BOLD)
-        .text_color(c(theme::on_accent()))
+        .text_color(c(theme::ON_ACCENT))
         .cursor_pointer()
         .hover(|s| s.opacity(0.85))
         .child(label.into())
@@ -72,12 +72,12 @@ pub fn btn_secondary(
         .py(px(5.))
         .rounded(px(6.))
         .border_1()
-        .border_color(c(theme::edge_light()))
-        .bg(c(theme::surface_raised()))
+        .border_color(c(theme::EDGE_LIGHT))
+        .bg(c(theme::SURFACE_RAISED))
         .text_size(px(12.5))
-        .text_color(c(theme::ink()))
+        .text_color(c(theme::INK))
         .cursor_pointer()
-        .hover(|s| s.border_color(c(theme::dim())))
+        .hover(|s| s.border_color(c(theme::DIM)))
         .child(label.into())
 }
 
@@ -88,10 +88,10 @@ pub fn btn_danger(id: impl Into<gpui::ElementId>, label: impl Into<SharedString>
         .px(px(14.))
         .py(px(5.))
         .rounded(px(6.))
-        .bg(c(theme::red()))
+        .bg(c(theme::RED))
         .text_size(px(12.5))
         .font_weight(gpui::FontWeight::BOLD)
-        .text_color(c(theme::text_on(theme::red())))
+        .text_color(c(theme::text_on(theme::RED)))
         .cursor_pointer()
         .hover(|s| s.opacity(0.85))
         .child(label.into())
@@ -102,8 +102,8 @@ pub fn btn_danger(id: impl Into<gpui::ElementId>, label: impl Into<SharedString>
 const MARK_W: f32 = 2.0;
 const MARK_H: f32 = 14.0;
 
-/// 竖线本体（2026-09-08 用户拍板挪到**行尾**：标题顶格起，一列扫下来是齐的；
-/// 状态和时间一起收在右边那一处）。看板卡片也用它，所以给了个名字。
+/// 竖线本体：看板卡片标题前「在跑」那一根。项目行 2026-09-10 起不再画它——
+/// 行的状态改成整行淡底（`theme::ROW_RUNNING` / `ROW_UNREAD`），选中是标题下划线。
 pub fn mark_bar(color: u32) -> Div {
     div().flex_none().w(px(MARK_W)).h(px(MARK_H)).rounded(px(MARK_W / 2.)).bg(c(color))
 }
@@ -122,11 +122,11 @@ pub fn sidebar_row(id: gpui::ElementId) -> Stateful<Div> {
         .cursor_pointer()
 }
 
-/// 侧栏行尾的悬停小按钮（项目行的「顶 / 删 / ✕」、终端行的「✕」）：
+/// 侧栏行尾的悬停小按钮（项目行的「删 / ✕」、终端行的「✕」）：
 /// 三处骨架逐字相同——非当前行平时不画（invisible 连命中盒一起去掉），
 /// 整行悬停才现身。`always_visible` 是「这是当前行」。
 ///
-/// 只收骨架：hover 配色各处不同（红 = 终止、主色 = 置顶），
+/// 只收骨架：hover 配色各处不同（红 = 终止 / 删），
 /// 硬塞成参数就得再传两个颜色，不如让调用方接着 `.hover(..)` 写清楚。
 pub fn row_btn(id: impl Into<gpui::ElementId>, always_visible: bool) -> Stateful<Div> {
     div()
@@ -135,7 +135,7 @@ pub fn row_btn(id: impl Into<gpui::ElementId>, always_visible: bool) -> Stateful
         .px(px(3.))
         .rounded(px(4.))
         .text_size(px(10.))
-        .text_color(c(theme::faint()))
+        .text_color(c(theme::FAINT))
         .when(!always_visible, |el| {
             el.invisible().group_hover("sb-row", |st| st.visible())
         })
@@ -153,7 +153,7 @@ pub fn meta() -> Div {
     div()
         .font_family("Menlo")
         .text_size(px(10.))
-        .text_color(c(theme::faint()))
+        .text_color(c(theme::FAINT))
 }
 
 /// 卡片底：设置页三个小节和看板卡片共用的「surface 底 + edge 描边 + 10 圆角」。
@@ -161,7 +161,7 @@ pub fn meta() -> Div {
 pub fn card() -> Div {
     div()
         .rounded(px(10.))
-        .bg(c(theme::surface()))
+        .bg(c(theme::SURFACE))
         .border_1()
-        .border_color(c(theme::edge()))
+        .border_color(c(theme::EDGE))
 }

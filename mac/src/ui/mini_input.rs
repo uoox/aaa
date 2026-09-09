@@ -7,6 +7,11 @@
 //! ⌘A 全选，⌘C 复制（没选区就复制整行），⌘X 剪切选区，⌘V 粘贴替换选区，打字 /
 //! 退格 / 输入法组字都先吃掉选区。
 //!
+//! 2026-09-10 用户：「输入框最好也可以用 command/ctrl+A/V/C」——⌘ 那套一直在，Ctrl 那套
+//! 补上（从 Linux / Windows 过来的手指记的是 Ctrl；这里是文本框不是终端，Ctrl-C 没有
+//! 中断可言）。处理掉的快捷键顺手 `stop_propagation`：不然键等价事件一路冒到窗口都算
+//! 「没人要」，macOS 会给一声提示音。
+//!
 //! 2026-09-08 用户报「消息流的输入框很奇怪，无法选中文字，无法通过鼠标移动光标」：
 //! 那之前鼠标只有两个动作——单击收起选区、双击全选，**按哪儿都一样**，因为
 //! 画字的 canvas 里拿得到字形位置，事件回调里拿不到。现在每帧把 shape 出来的
@@ -320,6 +325,8 @@ impl MiniInput {
         }
         let ks = &ev.keystroke;
         let m = ks.modifiers;
+        // ⌘ 与 Ctrl 同义（2026-09-10 用户要求）
+        let shortcut = m.platform || m.control;
         let changed = match ks.key.as_str() {
             "backspace" => self.ed.backspace(),
             "delete" => self.ed.delete_forward(),
@@ -348,24 +355,24 @@ impl MiniInput {
                 self.ed.end(m.shift);
                 true
             }
-            "a" if m.platform => {
+            "a" if shortcut => {
                 self.ed.select_all();
                 true
             }
-            "c" if m.platform => {
+            "c" if shortcut => {
                 if let Some(s) = self.ed.copy() {
                     cx.write_to_clipboard(ClipboardItem::new_string(s));
                 }
                 false
             }
-            "x" if m.platform => match self.ed.cut() {
+            "x" if shortcut => match self.ed.cut() {
                 Some(s) => {
                     cx.write_to_clipboard(ClipboardItem::new_string(s));
                     true
                 }
                 None => false,
             },
-            "v" if m.platform => {
+            "v" if shortcut => {
                 if let Some(item) = cx.read_from_clipboard()
                     && let Some(text) = item.text()
                 {
@@ -380,6 +387,10 @@ impl MiniInput {
         };
         if changed {
             cx.notify();
+        }
+        // 这框吃掉的键不再往上冒（复制没改文本，但也是吃掉了）
+        if changed || (shortcut && matches!(ks.key.as_str(), "a" | "c" | "x" | "v")) {
+            cx.stop_propagation();
         }
     }
 
@@ -535,11 +546,11 @@ impl Render for MiniInput {
             .rounded(px(6.))
             .border_1()
             .border_color(if focused {
-                c(theme::accent())
+                c(theme::ACCENT)
             } else {
-                c(theme::edge_light())
+                c(theme::EDGE_LIGHT)
             })
-            .bg(c(theme::inset()))
+            .bg(c(theme::INSET))
             .cursor_text()
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::on_key_down))
@@ -587,7 +598,7 @@ impl Render for MiniInput {
                         } else {
                             text.clone().into()
                         };
-                        let color = if empty { theme::faint() } else { theme::ink() };
+                        let color = if empty { theme::FAINT } else { theme::INK };
                         let runs = [gpui::TextRun {
                             len: display.len(),
                             font: gpui::font("Menlo"),
@@ -595,7 +606,7 @@ impl Render for MiniInput {
                             background_color: None,
                             underline: marked.as_ref().map(|_| gpui::UnderlineStyle {
                                 thickness: px(1.),
-                                color: Some(c(theme::accent()).into()),
+                                color: Some(c(theme::ACCENT).into()),
                                 wavy: false,
                             }),
                             strikethrough: None,
@@ -636,7 +647,7 @@ impl Render for MiniInput {
                                         point(bounds.origin.x + x0 - shift, bounds.origin.y + px(5.)),
                                         size(x1 - x0, bounds.size.height - px(10.)),
                                     ),
-                                    ca(theme::accent(), if focused { 0.30 } else { 0.16 }),
+                                    ca(theme::ACCENT, if focused { 0.30 } else { 0.16 }),
                                 ));
                             }
                             let _ = line.paint(
@@ -656,7 +667,7 @@ impl Render for MiniInput {
                                         ),
                                         size(px(1.5), bounds.size.height - px(10.)),
                                     ),
-                                    c(theme::accent()),
+                                    c(theme::ACCENT),
                                 ));
                             }
                         });

@@ -39,11 +39,11 @@ impl EventListener for ProxyListener {
 
 fn color_for_index(idx: usize) -> alacritty_terminal::vte::ansi::Rgb {
     let raw = match idx {
-        0..=255 => theme::palette().indexed_color(idx as u8),
-        256 => theme::term_fg(),
-        257 => theme::term_bg(),
-        258 => theme::accent(), // cursor
-        _ => theme::term_fg(),
+        0..=255 => theme::indexed_color(idx as u8),
+        256 => theme::TERM_FG,
+        257 => theme::TERM_BG,
+        258 => theme::ACCENT, // cursor
+        _ => theme::TERM_FG,
     };
     alacritty_terminal::vte::ansi::Rgb {
         r: (raw >> 16) as u8,
@@ -250,8 +250,11 @@ fn tilde_seq(k: &KeyInput, num: u8) -> Vec<u8> {
 pub fn encode_key(k: KeyInput, app_cursor: bool) -> Option<Vec<u8>> {
     // cmd 组合不进终端（App 快捷键），由调用方过滤
     let out = match k.key {
+        // ⌥⏎ 与 ⇧⏎ 都是 ESC CR：Claude Code 把它读作「换行不发送」，其 `/terminal-setup`
+        // 给 iTerm2 / VS Code 配的 Shift+Enter 发的正是这串；zsh / bash 对它没有绑定，
+        // 误按一下什么都不发生
         "enter" => {
-            if k.alt {
+            if k.alt || k.shift {
                 b"\x1b\r".to_vec()
             } else {
                 b"\r".to_vec()
@@ -478,6 +481,11 @@ mod tests {
     #[test]
     fn basic_keys() {
         assert_eq!(encode_key(k("enter"), false).unwrap(), b"\r");
+        // Shift+Enter / Alt+Enter = ESC CR（Claude Code 的「换行不发送」）
+        let shift_enter = KeyInput { key: "enter", shift: true, ..Default::default() };
+        assert_eq!(encode_key(shift_enter, false).unwrap(), b"\x1b\r");
+        let alt_enter = KeyInput { key: "enter", alt: true, ..Default::default() };
+        assert_eq!(encode_key(alt_enter, false).unwrap(), b"\x1b\r");
         assert_eq!(encode_key(k("tab"), false).unwrap(), b"\t");
         assert_eq!(encode_key(k("escape"), false).unwrap(), b"\x1b");
         assert_eq!(encode_key(k("backspace"), false).unwrap(), b"\x7f");

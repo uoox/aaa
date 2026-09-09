@@ -127,7 +127,6 @@ fn run() {
     });
     pool.restore_persisted();
     let inbox = crate::inbox::Inbox::load(&paths.state_dir());
-    let pins = crate::pins::Pins::load(&paths.state_dir());
     let history = crate::history::History::load(&paths.state_dir());
 
     let app: SharedApp = Arc::new(App {
@@ -139,7 +138,6 @@ fn run() {
         store_lock: std::sync::Mutex::new(()),
         bound_port: std::sync::atomic::AtomicU16::new(0),
         inbox: std::sync::Mutex::new(inbox),
-        pins: std::sync::Mutex::new(pins),
         history: std::sync::Mutex::new(history),
         plan_usage: std::sync::Mutex::new(None),
         root_state: std::sync::atomic::AtomicU8::new(root_state.as_u8()),

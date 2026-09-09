@@ -107,8 +107,8 @@ pub(super) fn pct_level(pct: f64) -> Level {
 pub(super) fn level_color(level: Level, ok: u32) -> u32 {
     match level {
         Level::Ok => ok,
-        Level::Warn => theme::amber(),
-        Level::Crit => theme::red(),
+        Level::Warn => theme::AMBER,
+        Level::Crit => theme::RED,
     }
 }
 
@@ -368,7 +368,7 @@ impl RootView {
     fn empty_hint(text: &'static str) -> gpui::Div {
         div()
             .text_size(px(11.5))
-            .text_color(c(theme::faint()))
+            .text_color(c(theme::FAINT))
             .child(text)
     }
 
@@ -380,7 +380,7 @@ impl RootView {
             .px(px(14.))
             .py(px(12.))
             .border_b_1()
-            .border_color(ca(theme::edge(), 0.7))
+            .border_color(ca(theme::EDGE, 0.7))
             .child(Self::sect_label(label))
             .child(body)
     }
@@ -394,7 +394,7 @@ impl RootView {
             .px(px(14.))
             .py(px(12.))
             .border_b_1()
-            .border_color(ca(theme::edge(), 0.7))
+            .border_color(ca(theme::EDGE, 0.7))
             .child(
                 meta()
                     .pb(px(6.))
@@ -432,7 +432,7 @@ impl RootView {
                         .flex_1()
                         .truncate()
                         .text_size(px(12.))
-                        .text_color(c(theme::ink()))
+                        .text_color(c(theme::INK))
                         .child(SharedString::from(title)),
                 )
                 .child(
@@ -451,7 +451,7 @@ impl RootView {
                             div()
                                 .line_clamp(2)
                                 .text_size(px(11.))
-                                .text_color(c(theme::dim()))
+                                .text_color(c(theme::DIM))
                                 .child(SharedString::from(sub)),
                         )
                     }),
@@ -482,13 +482,13 @@ impl RootView {
             .h(px(30.))
             .px(px(14.))
             .border_b_1()
-            .border_color(c(theme::edge()))
+            .border_color(c(theme::EDGE))
             .child(
                 div()
                     .flex_1()
                     .text_size(px(12.))
                     .font_weight(gpui::FontWeight::BOLD)
-                    .text_color(c(theme::ink()))
+                    .text_color(c(theme::INK))
                     .child("详情"),
             )
             .child(
@@ -503,8 +503,8 @@ impl RootView {
                     .rounded(px(4.))
                     .cursor_pointer()
                     .text_size(px(11.))
-                    .text_color(c(theme::faint()))
-                    .hover(|st| st.text_color(c(theme::ink())).bg(c(theme::edge_light())))
+                    .text_color(c(theme::FAINT))
+                    .hover(|st| st.text_color(c(theme::INK)).bg(c(theme::EDGE_LIGHT)))
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_detail(cx)))
                     .child("✕"),
             );
@@ -532,9 +532,9 @@ impl RootView {
                 .flex()
                 .flex_col()
                 .overflow_hidden()
-                .bg(c(theme::surface()))
+                .bg(c(theme::SURFACE))
                 .border_l_1()
-                .border_color(c(theme::edge()))
+                .border_color(c(theme::EDGE))
                 .child(header)
                 .child(body),
         )
@@ -554,7 +554,7 @@ impl RootView {
             div()
                 .font_family("Menlo")
                 .text_size(px(10.5))
-                .text_color(c(theme::faint()))
+                .text_color(c(theme::FAINT))
                 .pb(px(2.))
                 .child(SharedString::from(format!("{done}/{total} 完成"))),
         );
@@ -568,7 +568,7 @@ impl RootView {
                         div()
                             .flex_none()
                             .text_size(px(12.))
-                            .text_color(c(if it.done { theme::green() } else { theme::faint() }))
+                            .text_color(c(if it.done { theme::GREEN } else { theme::FAINT }))
                             .child(if it.done { "☑" } else { "☐" }),
                     )
                     .child(
@@ -576,7 +576,7 @@ impl RootView {
                             .flex_1()
                             .min_w(px(0.))
                             .text_size(px(12.))
-                            .text_color(c(if it.done { theme::dim() } else { theme::ink() }))
+                            .text_color(c(if it.done { theme::DIM } else { theme::INK }))
                             .child(SharedString::from(it.text)),
                     ),
             );
@@ -609,7 +609,7 @@ impl RootView {
                 .truncate()
                 .text_size(px(12.5))
                 .font_weight(gpui::FontWeight::BOLD)
-                .text_color(c(theme::ink()))
+                .text_color(c(theme::INK))
                 .child(SharedString::from(model)),
         );
         if let Some(effort) = u.effort.as_deref().filter(|e| !e.is_empty()) {
@@ -619,10 +619,10 @@ impl RootView {
                     .px(px(5.))
                     .py(px(1.))
                     .rounded(px(4.))
-                    .bg(ca(theme::accent(), 0.14))
+                    .bg(ca(theme::ACCENT, 0.14))
                     .font_family("Menlo")
                     .text_size(px(9.5))
-                    .text_color(c(theme::accent()))
+                    .text_color(c(theme::ACCENT))
                     .child(SharedString::from(effort.to_string())),
             );
         }
@@ -631,7 +631,7 @@ impl RootView {
         // 上下文条
         if let Some(pct) = u.context_pct {
             let pct = pct.clamp(0.0, 100.0);
-            let color = level_color(pct_level(pct), theme::accent());
+            let color = level_color(pct_level(pct), theme::ACCENT);
             col = col.child(
                 div()
                     .flex()
@@ -645,7 +645,7 @@ impl RootView {
                             .child(
                                 div()
                                     .text_size(px(11.))
-                                    .text_color(c(theme::dim()))
+                                    .text_color(c(theme::DIM))
                                     .child("上下文"),
                             )
                             .child(mono(format!("{}%", pct.round() as i64), color)),
@@ -655,7 +655,7 @@ impl RootView {
                             .w_full()
                             .h(px(4.))
                             .rounded(px(2.))
-                            .bg(c(theme::edge()))
+                            .bg(c(theme::EDGE))
                             .child(
                                 div()
                                     .h_full()
@@ -681,7 +681,7 @@ impl RootView {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .child(div().text_size(px(11.)).text_color(c(theme::dim())).child("缓存"))
+                    .child(div().text_size(px(11.)).text_color(c(theme::DIM)).child("缓存"))
                     .child(mono(
                         format!(
                             "{} · 命中 {:.1}% · 读 {} 写 {} 新 {}",
@@ -691,14 +691,14 @@ impl RootView {
                             k(u.cache_creation_tokens),
                             k(u.fresh_input_tokens)
                         ),
-                        if alive { theme::green() } else { theme::faint() },
+                        if alive { theme::GREEN } else { theme::FAINT },
                     )),
             );
         }
         // 费用 · 行数 · 时长
         let mut stats = div().flex().flex_wrap().items_center().gap(px(10.));
         if let Some(cost) = u.cost_usd {
-            stats = stats.child(mono(fmt_cost(cost), theme::ink()));
+            stats = stats.child(mono(fmt_cost(cost), theme::INK));
         }
         if u.lines_added.is_some() || u.lines_removed.is_some() {
             stats = stats.child(
@@ -706,13 +706,13 @@ impl RootView {
                     .flex()
                     .items_center()
                     .gap(px(4.))
-                    .child(mono(format!("+{}", u.lines_added.unwrap_or(0)), theme::green()))
-                    .child(mono(format!("−{}", u.lines_removed.unwrap_or(0)), theme::red()))
-                    .child(div().text_size(px(11.)).text_color(c(theme::dim())).child("行")),
+                    .child(mono(format!("+{}", u.lines_added.unwrap_or(0)), theme::GREEN))
+                    .child(mono(format!("−{}", u.lines_removed.unwrap_or(0)), theme::RED))
+                    .child(div().text_size(px(11.)).text_color(c(theme::DIM)).child("行")),
             );
         }
         if let Some(ms) = u.duration_ms {
-            stats = stats.child(mono(humanize_ms(ms), theme::dim()));
+            stats = stats.child(mono(humanize_ms(ms), theme::DIM));
         }
         col.child(stats)
     }
@@ -743,7 +743,7 @@ impl RootView {
                     .mx(px(-8.))
                     .rounded(px(6.))
                     .cursor_pointer()
-                    .hover(|st| st.bg(c(theme::surface_raised())))
+                    .hover(|st| st.bg(c(theme::SURFACE_RAISED)))
                     .on_click(cx.listener(move |_, _, _, cx| cx.open_url(&url)))
                     .child(
                         div()
@@ -756,7 +756,7 @@ impl RootView {
                                     .truncate()
                                     .text_size(px(12.))
                                     .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(c(theme::ink()))
+                                    .text_color(c(theme::INK))
                                     .child(SharedString::from(title)),
                             )
                             .child(
@@ -769,7 +769,7 @@ impl RootView {
                             div()
                                 .line_clamp(2)
                                 .text_size(px(11.))
-                                .text_color(c(theme::dim()))
+                                .text_color(c(theme::DIM))
                                 .child(SharedString::from(a.description.clone())),
                         )
                     }),
@@ -785,9 +785,9 @@ impl RootView {
             .iter()
             .map(|a| {
                 let lead = match a.status.as_str() {
-                    "running" => ("⋯", theme::accent()),
-                    "err" => ("✗", theme::red()),
-                    _ => ("✓", theme::green()),
+                    "running" => ("⋯", theme::ACCENT),
+                    "err" => ("✗", theme::RED),
+                    _ => ("✓", theme::GREEN),
                 };
                 let title = if a.kind.is_empty() { a.tool.clone() } else { a.kind.clone() };
                 (Some(lead), title, a.summary.clone(), fmt_artifact_time(&a.ts, now, &chrono::Local).unwrap_or_default())
@@ -803,7 +803,7 @@ impl RootView {
             .iter()
             .map(|t| {
                 (
-                    Some(("⋯", theme::accent())),
+                    Some(("⋯", theme::ACCENT)),
                     t.tool.clone(),
                     t.summary.clone(),
                     fmt_artifact_time(&t.ts, now, &chrono::Local).unwrap_or_default(),
@@ -858,13 +858,13 @@ impl RootView {
             .flex()
             .items_center()
             .when(on, |el| el.justify_end())
-            .bg(c(if on { theme::accent() } else { theme::edge_light() }))
+            .bg(c(if on { theme::ACCENT } else { theme::EDGE_LIGHT }))
             .child(
                 div()
                     .w(px(12.))
                     .h(px(12.))
                     .rounded_full()
-                    .bg(c(if on { theme::on_accent() } else { theme::ink() })),
+                    .bg(c(if on { theme::ON_ACCENT } else { theme::INK })),
             );
         div()
             .id("mute-toggle")
@@ -877,7 +877,7 @@ impl RootView {
             .child(
                 div()
                     .text_size(px(12.))
-                    .text_color(c(theme::ink()))
+                    .text_color(c(theme::INK))
                     .child("静音此项目的通知"),
             )
             .child(knob)
@@ -901,9 +901,9 @@ impl RootView {
             .text_size(px(11.));
         for (ix, (label, pct)) in parts.iter().enumerate() {
             if ix > 0 {
-                line1 = line1.child(div().px(px(4.)).text_color(c(theme::faint())).child("·"));
+                line1 = line1.child(div().px(px(4.)).text_color(c(theme::FAINT)).child("·"));
             }
-            let color = level_color(pct_level(*pct), theme::dim());
+            let color = level_color(pct_level(*pct), theme::DIM);
             line1 = line1.child(
                 div()
                     .text_color(c(color))
@@ -918,7 +918,7 @@ impl RootView {
             .px(px(16.))
             .py(px(7.))
             .border_t_1()
-            .border_color(c(theme::edge()))
+            .border_color(c(theme::EDGE))
             .child(line1);
         if !resets.is_empty() {
             block = block.child(
@@ -975,8 +975,8 @@ mod tests {
         assert_eq!(pct_level(150.0), Level::Crit);
         // 正常级别用调用方的底色，警戒级别用主题色
         assert_eq!(level_color(Level::Ok, 0x123456), 0x123456);
-        assert_eq!(level_color(Level::Warn, 0x123456), theme::amber());
-        assert_eq!(level_color(Level::Crit, 0x123456), theme::red());
+        assert_eq!(level_color(Level::Warn, 0x123456), theme::AMBER);
+        assert_eq!(level_color(Level::Crit, 0x123456), theme::RED);
     }
 
     fn at(s: &str) -> DateTime<FixedOffset> {

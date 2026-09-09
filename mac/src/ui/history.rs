@@ -65,7 +65,7 @@ impl RootView {
                     .items_start()
                     .gap(px(8.))
                     // 蓝竖线 = 还在跑；已删除的写一个字；其余什么都不画（和项目列表同一套话）
-                    .when(card_running(card), |el| el.child(mark_bar(theme::blue()).mt(px(1.))))
+                    .when(card_running(card), |el| el.child(mark_bar(theme::BLUE).mt(px(1.))))
                     .when(card.deleted, |el| {
                         el.child(
                             meta().flex_none()
@@ -78,7 +78,7 @@ impl RootView {
                             .min_w(px(0.))
                             .text_size(px(13.))
                             .whitespace_normal()
-                            .text_color(c(if dimmed { theme::dim() } else { theme::ink() }))
+                            .text_color(c(if dimmed { theme::DIM } else { theme::INK }))
                             .child(SharedString::from(card.title.clone())),
                     )
                     .when(alive, |el| {
@@ -90,9 +90,9 @@ impl RootView {
                                 .py(px(2.))
                                 .rounded(px(4.))
                                 .text_size(px(10.5))
-                                .text_color(c(theme::accent()))
+                                .text_color(c(theme::ACCENT))
                                 .cursor_pointer()
-                                .hover(|st| st.bg(c(theme::edge_light())))
+                                .hover(|st| st.bg(c(theme::EDGE_LIGHT)))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     cx.stop_propagation();
                                     this.open_session(id_open.clone(), cx);
@@ -116,20 +116,20 @@ impl RootView {
                             .flex_1()
                             .h(px(4.))
                             .rounded(px(2.))
-                            .bg(c(theme::edge()))
-                            .child(div().h_full().w(gpui::relative(frac)).rounded(px(2.)).bg(c(if card.open == 0 { theme::green() } else { theme::accent() }))),
+                            .bg(c(theme::EDGE))
+                            .child(div().h_full().w(gpui::relative(frac)).rounded(px(2.)).bg(c(if card.open == 0 { theme::GREEN } else { theme::ACCENT }))),
                     )
                     .child(
                         div()
                             .flex_none()
                             .font_family("Menlo")
                             .text_size(px(10.))
-                            .text_color(c(theme::dim()))
+                            .text_color(c(theme::DIM))
                             .child(SharedString::from(format!("{}/{}", card.done, total))),
                     ),
             );
         } else {
-            el = el.child(div().text_size(px(11.)).text_color(c(theme::faint())).child("没有进度清单"));
+            el = el.child(div().text_size(px(11.)).text_color(c(theme::FAINT)).child("没有进度清单"));
         }
         // 全部清单项：没勾的在前，做完的灰掉；会话还在池子里就能点着勾 / 取消勾。
         // 带着**原下标**一起走（`enumerate` 在重排之前）：POST 回去要说清是第几条，
@@ -150,14 +150,14 @@ impl RootView {
                     .items_start()
                     .when(alive, |row| {
                         row.cursor_pointer()
-                            .hover(|st| st.bg(ca(theme::accent(), 0.08)))
+                            .hover(|st| st.bg(ca(theme::ACCENT, 0.08)))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
                                 this.toggle_checklist(sid.clone(), i, text.clone(), !done, cx);
                             }))
                     })
-                    .child(div().flex_none().text_size(px(11.5)).text_color(c(if it.done { theme::green() } else { theme::amber() })).child(if it.done { "☑" } else { "☐" }))
-                    .child(div().text_size(px(12.)).text_color(c(if it.done { theme::dim() } else { theme::ink() })).whitespace_normal().child(SharedString::from(it.text.clone()))),
+                    .child(div().flex_none().text_size(px(11.5)).text_color(c(if it.done { theme::GREEN } else { theme::AMBER })).child(if it.done { "☑" } else { "☐" }))
+                    .child(div().text_size(px(12.)).text_color(c(if it.done { theme::DIM } else { theme::INK })).whitespace_normal().child(SharedString::from(it.text.clone()))),
             );
         }
         el
@@ -180,9 +180,9 @@ impl RootView {
                 .rounded(px(6.))
                 .cursor_pointer()
                 .text_size(px(11.))
-                .text_color(c(if on { theme::accent() } else { theme::dim() }))
-                .when(on, |el| el.bg(ca(theme::accent(), 0.14)))
-                .hover(|st| st.bg(c(theme::surface_raised())))
+                .text_color(c(if on { theme::ACCENT } else { theme::DIM }))
+                .when(on, |el| el.bg(ca(theme::ACCENT, 0.14)))
+                .hover(|st| st.bg(c(theme::SURFACE_RAISED)))
                 .child(SharedString::from(label))
         };
 
@@ -213,8 +213,8 @@ impl RootView {
             div()
                 .font_family("Menlo")
                 .text_size(px(10.5))
-                .text_color(c(theme::dim()))
-                .when(clickable, |el| el.cursor_pointer().hover(|st| st.text_color(c(theme::ink()))))
+                .text_color(c(theme::DIM))
+                .when(clickable, |el| el.cursor_pointer().hover(|st| st.text_color(c(theme::INK))))
                 .child(SharedString::from(label))
         };
 
@@ -241,7 +241,7 @@ impl RootView {
                 .when(gone_open, |el| el.child(masonry(&gone, cx)));
         }
         if here.is_empty() && gone.is_empty() {
-            body = body.child(div().text_size(px(12.)).text_color(c(theme::faint())).child(if d.sessions.is_empty() {
+            body = body.child(div().text_size(px(12.)).text_color(c(theme::FAINT)).child(if d.sessions.is_empty() {
                 "还没有记录（daemon 每秒把会话同步进日志）"
             } else {
                 "没有匹配的会话"
@@ -251,7 +251,7 @@ impl RootView {
         let open_items = div()
             .font_family("Menlo")
             .text_size(px(10.5))
-            .text_color(c(theme::amber()))
+            .text_color(c(theme::AMBER))
             .child(SharedString::from(format!("未完成 {} 条", d.counts.open_items)));
 
         div()
@@ -266,7 +266,7 @@ impl RootView {
                     .px(px(16.))
                     .pt(px(16.))
                     .pb(px(12.))
-                    .child(div().text_size(px(14.)).font_weight(gpui::FontWeight::BOLD).text_color(c(theme::ink())).child("看板"))
+                    .child(div().text_size(px(14.)).font_weight(gpui::FontWeight::BOLD).text_color(c(theme::INK)).child("看板"))
                     .child(open_items)
                     .child(div().flex_1())
                     .when(deleted_n > 0, |el| {

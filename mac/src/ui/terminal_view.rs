@@ -29,6 +29,8 @@ use crate::theme;
 const FONT_SIZE: f32 = 12.5;
 const LINE_HEIGHT_RATIO: f32 = 1.5;
 const PAD: f32 = 8.0;
+/// resize 控制帧的去抖窗口（见 `TerminalView::apply_view_size`）
+const RESIZE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(80);
 
 pub struct TerminalView {
     pub model: TermModel,
@@ -36,7 +38,13 @@ pub struct TerminalView {
     focus_handle: FocusHandle,
     marked: Option<String>,
     pub conn_down: bool,
+    /// 最近一次真正发给 daemon 的行列（resize 控制帧）。可能落后于 `view_size`——
+    /// 见 [`Self::apply_view_size`] 的去抖
     last_sent: Option<(u16, u16)>,
+    /// 视图按自己的像素算出来的行列（本地模型已经是这个尺寸）；None = 还没排过版
+    view_size: Option<(u16, u16)>,
+    /// resize 去抖的代数：每次尺寸变化 +1，定时器醒来时代数没变才发
+    resize_gen: u32,
     cell: Option<(Pixels, Pixels)>, // (cell_w, line_h)
     scroll_accum: f32,
     /// canvas 内容区左上角（窗口坐标，prepaint 时回写；鼠标→格点换算用）
@@ -200,11 +208,17 @@ impl LineSnap {
     /// 追加一格：与上一 seg 同风格、同字宽且列连续则并入。
     /// 宽字符（CJK）也整段合并、一次 shape_line 按 2 格强制推进——
     /// 每字符单独 shape 是已知热点（一行中文 ≈ 60 次 shape → 1 次）。
-    fn push_cell(&mut self, col: u16, ch: char, wide: bool, style: SegStyle) {
+    /// `cursor_col`（光标在这一行时给）那一格自成一段：block 光标要把底下那个字反色
+    /// （见 `paint_text`），段里混着别的字就做不到——以前光标压在词中间时那个字不反色，
+    /// 橙块上顶着一个墨字。
+    fn push_cell(&mut self, col: u16, ch: char, wide: bool, style: SegStyle, cursor_col: Option<u16>) {
         let cell_w = if wide { 2 } else { 1 };
+        let at_cursor = cursor_col == Some(col);
         match self.segs.last_mut() {
             Some(s)
-                if s.cell_w == cell_w
+                if !at_cursor
+                    && !cursor_col.is_some_and(|cc| s.col <= cc && cc < s.col + s.chars * s.cell_w)
+                    && s.cell_w == cell_w
                     && s.style == style
                     && s.col + s.chars * s.cell_w == col =>
             {
@@ -263,6 +277,8 @@ impl TerminalView {
             marked: None,
             conn_down: false,
             last_sent: None,
+            view_size: None,
+            resize_gen: 0,
             cell: None,
             scroll_accum: 0.,
             last_origin: None,
@@ -310,9 +326,9 @@ impl TerminalView {
         cx.notify();
     }
 
-    /// hello 帧给的服务端尺寸（本地还未 resize 前先跟随）
+    /// hello 帧给的服务端尺寸（本地还没排过版之前先跟随）
     pub fn set_remote_size(&mut self, cols: u16, rows: u16, cx: &mut Context<Self>) {
-        if self.last_sent.is_none() && cols > 0 && rows > 0 {
+        if self.view_size.is_none() && cols > 0 && rows > 0 {
             self.model.resize(cols, rows);
             cx.notify();
         }
@@ -332,19 +348,42 @@ impl TerminalView {
     /// 把当前行列再宣告一次（会话页切到前台 / 窗口激活时）：手机那头在这期间可能把
     /// PTY 改成了它的尺寸——谁在看谁说了算，轮到 mac 看就夺回来。
     pub fn reassert_size(&mut self) {
-        if let Some((cols, rows)) = self.last_sent {
+        if let Some((cols, rows)) = self.view_size {
+            self.last_sent = Some((cols, rows));
             self.attach.resize(cols, rows);
         }
     }
 
+    /// 视图尺寸变了：本地模型立刻按新行列画，发给 daemon 的 resize 控制帧**去抖**——
+    /// 拖窗口边缘 / 拖侧栏时一秒几十个尺寸，每个都发就是几十次 SIGWINCH、TUI 几十次整屏
+    /// 重排（手机那头连着的话跟着一起重排）。尺寸稳住 [`RESIZE_DEBOUNCE`] 才发最后那个。
     fn apply_view_size(&mut self, cols: u16, rows: u16, cx: &mut Context<Self>) {
-        if self.last_sent == Some((cols, rows)) {
+        if self.view_size == Some((cols, rows)) {
             return;
         }
-        self.last_sent = Some((cols, rows));
+        self.view_size = Some((cols, rows));
         self.model.resize(cols, rows);
-        self.attach.resize(cols, rows);
+        self.resize_gen = self.resize_gen.wrapping_add(1);
+        let generation = self.resize_gen;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(RESIZE_DEBOUNCE).await;
+            let _ = this.update(cx, |t, _| t.flush_resize(generation));
+        })
+        .detach();
         cx.notify();
+    }
+
+    /// 去抖定时器醒来：这期间尺寸又变过（代数不同）就让位给后面那个定时器
+    fn flush_resize(&mut self, generation: u32) {
+        if generation != self.resize_gen {
+            return;
+        }
+        if let Some(size) = self.view_size
+            && self.last_sent != Some(size)
+        {
+            self.last_sent = Some(size);
+            self.attach.resize(size.0, size.1);
+        }
     }
 
     fn send_input(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
@@ -659,6 +698,21 @@ impl TerminalView {
         if m.control && ks.key == "tab" {
             return; // Ctrl-Tab 留给 App 级「切换激活会话」，不进 PTY
         }
+        // Shift+PageUp / PageDown：翻本地回滚，一次一屏（真终端的老规矩）。
+        // 备用屏没有回滚（less / TUI），照常把带 Shift 的 PgUp 送给应用
+        if m.shift
+            && !m.control
+            && !m.alt
+            && matches!(ks.key.as_str(), "pageup" | "pagedown")
+            && !self.model.mode().contains(TermMode::ALT_SCREEN)
+        {
+            let page = (self.model.rows as i32 - 1).max(1);
+            self.model
+                .scroll_display(if ks.key == "pageup" { page } else { -page });
+            cx.notify();
+            cx.stop_propagation();
+            return;
+        }
         if self.marked.is_some() {
             return; // IME 组字中
         }
@@ -823,7 +877,7 @@ impl TerminalView {
                     if let Some(rgb) = colors[*i as usize] {
                         ((rgb.r as u32) << 16) | ((rgb.g as u32) << 8) | rgb.b as u32
                     } else {
-                        theme::palette().indexed_color(*i)
+                        theme::indexed_color(*i)
                     }
                 }
                 AnsiColor::Named(n) => {
@@ -832,10 +886,10 @@ impl TerminalView {
                         return ((rgb.r as u32) << 16) | ((rgb.g as u32) << 8) | rgb.b as u32;
                     }
                     match n {
-                        NamedColor::Foreground | NamedColor::BrightForeground => theme::term_fg(),
-                        NamedColor::Background => theme::term_bg(),
-                        NamedColor::Cursor => theme::accent(),
-                        _ if idx < 16 => theme::palette().ansi[idx],
+                        NamedColor::Foreground | NamedColor::BrightForeground => theme::TERM_FG,
+                        NamedColor::Background => theme::TERM_BG,
+                        NamedColor::Cursor => theme::ACCENT,
+                        _ if idx < 16 => theme::ANSI[idx],
                         _ => default,
                     }
                 }
@@ -855,6 +909,13 @@ impl TerminalView {
             (0..rows).map(|_| (String::new(), Vec::new())).collect();
         // OSC 8 显式超链接：终端自己声明的地址，优先于按文本猜的
         let mut osc8: Vec<Vec<(u16, u16, String)>> = (0..rows).map(|_| Vec::new()).collect();
+        // 光标所在的 (viewport 行, 列)：那一格要自成一段（见 `LineSnap::push_cell`）
+        let cursor_cell: Option<(i32, u16)> = (!matches!(content.cursor.shape, CursorShape::Hidden)).then(|| {
+            (
+                content.cursor.point.line.0 + display_offset as i32,
+                content.cursor.point.column.0 as u16,
+            )
+        });
 
         for indexed in content.display_iter {
             let vrow = indexed.point.line.0 + display_offset as i32;
@@ -882,8 +943,8 @@ impl TerminalView {
                     _ => runs.push((col, end, h.uri().to_string())),
                 }
             }
-            let mut fg = resolve(&cell.fg, theme::term_fg());
-            let mut bg = resolve(&cell.bg, theme::term_bg());
+            let mut fg = resolve(&cell.fg, theme::TERM_FG);
+            let mut bg = resolve(&cell.bg, theme::TERM_BG);
             if flags.contains(CellFlags::INVERSE) {
                 std::mem::swap(&mut fg, &mut bg);
             }
@@ -894,10 +955,10 @@ impl TerminalView {
                 && (n as usize) < 8
                 && !flags.contains(CellFlags::INVERSE)
             {
-                fg = theme::palette().ansi[n as usize + 8];
+                fg = theme::ANSI[n as usize + 8];
             }
             // 背景 span
-            if bg != theme::term_bg() {
+            if bg != theme::TERM_BG {
                 let end = col + if wide { 2 } else { 1 };
                 match line.bgs.last_mut() {
                     Some((_, e, color)) if *e == col && *color == bg => *e = end,
@@ -924,7 +985,8 @@ impl TerminalView {
                     underline: flags.intersects(CellFlags::UNDERLINE),
                     strike: flags.contains(CellFlags::STRIKEOUT),
                 };
-                line.push_cell(col, cell.c, wide, style);
+                let cursor_col = cursor_cell.filter(|(r, _)| *r == vrow).map(|(_, c)| c);
+                line.push_cell(col, cell.c, wide, style, cursor_col);
             }
         }
 
@@ -1069,7 +1131,7 @@ impl Render for TerminalView {
         let handle = self.focus_handle.clone();
         let focused = self.focus_handle.is_focused(window);
         let marked = self.marked.clone();
-        let last_sent = self.last_sent;
+        let view_size = self.view_size;
         let last_origin = self.last_origin;
         let last_size = self.last_size;
         let sb_dragging = self.sb_drag.is_some();
@@ -1085,7 +1147,7 @@ impl Render for TerminalView {
         div()
             .id("terminal")
             .size_full()
-            .bg(c(theme::term_bg()))
+            .bg(c(theme::TERM_BG))
             .track_focus(&self.focus_handle)
             .when(hover.is_some(), |el| el.cursor_pointer())
             .on_key_down(cx.listener(Self::on_key_down))
@@ -1098,7 +1160,7 @@ impl Render for TerminalView {
                 canvas(
                     move |bounds, _window, cx| {
                         sync_view_size(
-                            bounds, cell_w, line_h, last_sent, last_origin, last_size, &entity2, cx,
+                            bounds, cell_w, line_h, view_size, last_origin, last_size, &entity2, cx,
                         );
                     },
                     move |bounds, _, window, cx| {
@@ -1170,7 +1232,7 @@ fn sync_view_size(
     bounds: Bounds<Pixels>,
     cell_w: Pixels,
     line_h: Pixels,
-    last_sent: Option<(u16, u16)>,
+    view_size: Option<(u16, u16)>,
     last_origin: Option<gpui::Point<Pixels>>,
     last_size: Option<gpui::Size<Pixels>>,
     view: &gpui::Entity<TerminalView>,
@@ -1182,7 +1244,7 @@ fn sync_view_size(
         .max(2) as u16;
     let origin = bounds.origin;
     let bsize = bounds.size;
-    if last_sent == Some((cols, rows)) && last_origin == Some(origin) && last_size == Some(bsize) {
+    if view_size == Some((cols, rows)) && last_origin == Some(origin) && last_size == Some(bsize) {
         return;
     }
     let e = view.clone();
@@ -1229,7 +1291,7 @@ fn paint_backgrounds(
                     point(ox + cell_w * (*s as f32), y),
                     size(cell_w * ((*e - *s) as f32), line_h),
                 ),
-                ca(theme::accent(), 0.24),
+                ca(theme::ACCENT, 0.24),
             ));
         }
     }
@@ -1254,19 +1316,19 @@ fn paint_cursor(
     let (b, color) = match shape {
         CursorShape::Block => (
             Bounds::new(point(x, y), size(cell_w, line_h)),
-            ca(theme::accent(), if focused { 0.9 } else { 0.35 }),
+            ca(theme::ACCENT, if focused { 0.9 } else { 0.35 }),
         ),
         CursorShape::Beam => (
             Bounds::new(point(x, y), size(px(2.), line_h)),
-            ca(theme::accent(), 0.9),
+            ca(theme::ACCENT, 0.9),
         ),
         CursorShape::Underline => (
             Bounds::new(point(x, y + line_h - px(2.)), size(cell_w, px(2.))),
-            ca(theme::accent(), 0.9),
+            ca(theme::ACCENT, 0.9),
         ),
         _ => (
             Bounds::new(point(x, y), size(cell_w, line_h)),
-            ca(theme::accent(), 0.35),
+            ca(theme::ACCENT, 0.35),
         ),
     };
     window.paint_quad(fill(b, color));
@@ -1302,8 +1364,8 @@ fn paint_text(
             let mut color: gpui::Hsla = c(seg.style.fg).into();
             color.a = seg.style.alpha;
             if cursor_here && focused && seg.chars == 1 {
-                // 单字符 seg 且光标在其上：反色
-                color = c(theme::term_bg()).into();
+                // 光标格自成一段（snapshot 保证），把底下那个字画成终端底色 = 反色
+                color = c(theme::TERM_BG).into();
             }
             let run = gpui::TextRun {
                 len: seg.text.len(),
@@ -1358,7 +1420,7 @@ fn paint_link_underline(
             ),
             size(cell_w * ((e - s) as f32), px(1.)),
         ),
-        c(theme::accent()),
+        c(theme::ACCENT),
     ));
 }
 
@@ -1383,11 +1445,11 @@ fn paint_ime_preview(
     let run = gpui::TextRun {
         len: marked.len(),
         font: mono(false, false),
-        color: c(theme::ink()).into(),
-        background_color: Some(c(theme::surface_raised()).into()),
+        color: c(theme::INK).into(),
+        background_color: Some(c(theme::SURFACE_RAISED).into()),
         underline: Some(gpui::UnderlineStyle {
             thickness: px(1.5),
-            color: Some(c(theme::accent()).into()),
+            color: Some(c(theme::ACCENT).into()),
             wavy: false,
         }),
         strikethrough: None,
@@ -1398,7 +1460,7 @@ fn paint_ime_preview(
             .shape_line(marked.to_string().into(), px(FONT_SIZE), &[run], None);
     window.paint_quad(fill(
         Bounds::new(point(x, y), size(shaped.width, line_h)),
-        c(theme::surface_raised()),
+        c(theme::SURFACE_RAISED),
     ));
     let _ = shaped.paint(point(x, y), line_h, gpui::TextAlign::Left, None, window, cx);
 }
@@ -1426,14 +1488,14 @@ fn paint_scrollbar(
             point(track_x, bounds.origin.y),
             size(px(14.), bounds.size.height),
         ),
-        ca(theme::edge_light(), 0.35),
+        ca(theme::EDGE_LIGHT, 0.35),
     ));
     window.paint_quad(fill(
         Bounds::new(
             point(track_x + px(2.), bounds.origin.y + px(top)),
             size(px(10.), px(h)),
         ),
-        ca(theme::dim(), if dragging { 0.85 } else { 0.45 }),
+        ca(theme::DIM, if dragging { 0.85 } else { 0.45 }),
     ));
 }
 
@@ -1451,7 +1513,7 @@ fn paint_backscroll_badge(
     let run = gpui::TextRun {
         len: label.len(),
         font: mono(false, false),
-        color: c(theme::amber()).into(),
+        color: c(theme::AMBER).into(),
         background_color: None,
         underline: None,
         strikethrough: None,
@@ -1465,7 +1527,7 @@ fn paint_backscroll_badge(
             point(x - px(8.), bounds.origin.y + px(4.)),
             size(shaped.width + px(16.), px(20.)),
         ),
-        ca(theme::surface_raised(), 0.92),
+        ca(theme::SURFACE_RAISED, 0.92),
     ));
     let _ = shaped.paint(
         point(x, bounds.origin.y + px(7.)),
@@ -1486,11 +1548,11 @@ fn down_badge() -> gpui::Div {
         .px(px(10.))
         .py(px(3.))
         .rounded(px(6.))
-        .bg(ca(theme::red(), 0.15))
+        .bg(ca(theme::RED, 0.15))
         .border_1()
-        .border_color(c(theme::red()))
+        .border_color(c(theme::RED))
         .text_size(px(11.))
-        .text_color(c(theme::red()))
+        .text_color(c(theme::RED))
         .child("连接已断开 · 自动重连中…")
 }
 
@@ -1530,11 +1592,11 @@ mod tests {
         // "ab中文x"：a(0) b(1) 中(2,宽) 文(4,宽) x(6)
         let mut line = empty_line();
         let s = style(0xffffff);
-        line.push_cell(0, 'a', false, s);
-        line.push_cell(1, 'b', false, s);
-        line.push_cell(2, '中', true, s);
-        line.push_cell(4, '文', true, s);
-        line.push_cell(6, 'x', false, s);
+        line.push_cell(0, 'a', false, s, None);
+        line.push_cell(1, 'b', false, s, None);
+        line.push_cell(2, '中', true, s, None);
+        line.push_cell(4, '文', true, s, None);
+        line.push_cell(6, 'x', false, s, None);
         let segs = &line.segs;
         assert_eq!(segs.len(), 3, "窄/宽切换处分段");
         assert_eq!((segs[0].col, segs[0].cell_w, segs[0].text.as_str()), (0, 1, "ab"));
@@ -1544,18 +1606,43 @@ mod tests {
     }
 
     #[test]
+    fn cursor_cell_is_its_own_segment() {
+        // 光标在第 2 列："hello" 拆成 he | l | lo，中间那段就是要反色的那个字
+        let mut line = empty_line();
+        let s = style(0xffffff);
+        for (i, ch) in "hello".chars().enumerate() {
+            line.push_cell(i as u16, ch, false, s, Some(2));
+        }
+        let got: Vec<(u16, &str)> = line.segs.iter().map(|g| (g.col, g.text.as_str())).collect();
+        assert_eq!(got, [(0, "he"), (2, "l"), (3, "lo")]);
+        // 光标在宽字符上：段按 2 格算，后面的字照样另起一段
+        let mut line = empty_line();
+        line.push_cell(0, '中', true, s, Some(2));
+        line.push_cell(2, '文', true, s, Some(2));
+        line.push_cell(4, '字', true, s, Some(2));
+        let got: Vec<(u16, &str)> = line.segs.iter().map(|g| (g.col, g.text.as_str())).collect();
+        assert_eq!(got, [(0, "中"), (2, "文"), (4, "字")]);
+        // 光标不在这一行：整段合并
+        let mut line = empty_line();
+        for (i, ch) in "hello".chars().enumerate() {
+            line.push_cell(i as u16, ch, false, s, None);
+        }
+        assert_eq!(line.segs.len(), 1);
+    }
+
+    #[test]
     fn style_change_and_gap_break_merge() {
         let mut line = empty_line();
-        line.push_cell(0, 'a', false, style(0xffffff));
-        line.push_cell(1, 'b', false, style(0xff0000)); // 换色
-        line.push_cell(3, 'c', false, style(0xff0000)); // 列不连续（跳过空格）
+        line.push_cell(0, 'a', false, style(0xffffff), None);
+        line.push_cell(1, 'b', false, style(0xff0000), None); // 换色
+        line.push_cell(3, 'c', false, style(0xff0000), None); // 列不连续（跳过空格）
         assert_eq!(line.segs.len(), 3);
         // 宽字符列连续性按 2 格推进：中(0) 文(2) 连续，文(2) 后跳到 5 断开
         let mut line = empty_line();
         let s = style(0xffffff);
-        line.push_cell(0, '中', true, s);
-        line.push_cell(2, '文', true, s);
-        line.push_cell(5, '字', true, s);
+        line.push_cell(0, '中', true, s, None);
+        line.push_cell(2, '文', true, s, None);
+        line.push_cell(5, '字', true, s, None);
         assert_eq!(line.segs.len(), 2);
         assert_eq!(line.segs[0].text, "中文");
         assert_eq!(line.segs[1].col, 5);

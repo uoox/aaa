@@ -28,8 +28,6 @@ data class AppSettings(
      * 跨设备同步反而会替另一台把话说了。
      */
     val unreadProjects: Set<String> = emptySet(),
-    /** 界面主题：dark | light | claude（见 Palette）。 */
-    val theme: String = "dark",
     /** 最近打开的会话 id：没有首页了，app 起来直接回到它 */
     val lastSession: String? = null,
 ) {
@@ -45,7 +43,6 @@ class SettingsStore(private val context: Context) {
         val DEFAULT_UI = stringPreferencesKey("default_ui")
         val MUTED_PROJECTS = stringSetPreferencesKey("muted_projects")
         val UNREAD_PROJECTS = stringSetPreferencesKey("unread_projects")
-        val THEME = stringPreferencesKey("theme")
         /** 会话 id → 输入框草稿（JSON 对象）。切出去 / 被系统杀掉再回来，字还在。 */
         val DRAFTS = stringPreferencesKey("drafts_json")
         val LAST_SESSION = stringPreferencesKey("last_session")
@@ -63,7 +60,6 @@ class SettingsStore(private val context: Context) {
             defaultUi = p[K.DEFAULT_UI] ?: "messages",
             mutedProjects = p[K.MUTED_PROJECTS] ?: emptySet(),
             unreadProjects = p[K.UNREAD_PROJECTS] ?: emptySet(),
-            theme = p[K.THEME] ?: "dark",
             lastSession = p[K.LAST_SESSION]?.takeIf { it.isNotBlank() },
         )
     }
@@ -84,8 +80,6 @@ class SettingsStore(private val context: Context) {
     suspend fun setServiceEnabled(v: Boolean) = context.dataStore.edit { it[K.SERVICE_ENABLED] = v }
     suspend fun setDefaultUi(v: String) = context.dataStore.edit { it[K.DEFAULT_UI] = v }
     suspend fun setLastSession(id: String?) = context.dataStore.edit { p -> if (id.isNullOrBlank()) p.remove(K.LAST_SESSION) else p[K.LAST_SESSION] = id }
-    /** 只存认识的名字：不认识的落回黑暗，读的那头就不用再兜底。 */
-    suspend fun setTheme(v: String) = context.dataStore.edit { it[K.THEME] = Palette.forName(v).name }
 
     /** 全部草稿；坏数据当空处理 */
     suspend fun drafts(): Map<String, String> {

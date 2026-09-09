@@ -134,8 +134,6 @@ const val SCHEMA_PROJECT_STATUS = 2
     val dir_size: Long = 0,
     val agent: String? = null,
     val session_title: String? = null,
-    /** v1.8：置顶（daemon 侧存，三端一起变） */
-    val pinned: Boolean = false,
     /** v1.22：代表这个项目的会话；没有活会话时是最近退出的那个，一个都没有 → null */
     val session_id: String? = null,
     /** v1.22：`asking|running|background|active|paused` 五态之一；没有活会话 = `paused`。老 daemon 不给 → 空串 */

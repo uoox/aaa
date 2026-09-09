@@ -55,6 +55,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -80,7 +81,7 @@ data class ProjectRow(
      */
     val unread: Boolean = false,
 ) {
-    /** 五态之一，daemon 算好的；老 daemon 不给 → 空串（未知，排最后、线是灰的） */
+    /** 五态之一，daemon 算好的；老 daemon 不给 → 空串（未知，排最后、不画底色） */
     val status: String get() = project.status
 
     /**
@@ -97,7 +98,7 @@ data class ProjectRow(
 }
 
 /**
- * 五态的先后，PROTOCOL「项目列表：顺序 = 置顶 → 黄点 → 在跑 → 时间」那张表的镜像。
+ * 五态的先后，PROTOCOL「项目列表：顺序 = 黄底 → 在跑 → 时间」那张表的镜像。
  * 认不出来的状态（老 daemon 的空串、以后新增的词）沉到最后：宁可排在底下，也不假装懂它。
  */
 private val STATUS_RANK = mapOf("asking" to 0, "running" to 1, "background" to 2, "active" to 3, "paused" to 4)
@@ -105,12 +106,12 @@ private val STATUS_RANK = mapOf("asking" to 0, "running" to 1, "background" to 2
 /** 排序档位，见 [STATUS_RANK]。 */
 fun statusRank(status: String): Int = STATUS_RANK[status] ?: STATUS_RANK.size
 
-/** 蓝线：它还在动，你不用管（自己在跑，或后台任务还没回来）。`asking` 不蓝——那是在等你。 */
+/** 淡蓝底：它还在动，你不用管（自己在跑，或后台任务还没回来）。`asking` 不蓝——那是在等你。 */
 fun statusRunning(s: String) = s == "running" || s == "background"
 
 /**
- * 一项目一行。排序（2026-09-08 用户拍板）：**置顶 > 有黄点 > 状态 > 时间倒序 > 路径**。置顶是
- * 自己按的，黄线也挤不掉它；黄线排在蓝线前面——蓝线的还在自己往前走，黄点的那个是在等你。
+ * 一项目一行。排序（2026-09-10 用户拍板拿掉置顶后）：**有黄底 > 状态 > 时间倒序 > 路径**。
+ * 黄底排在蓝底前面——蓝底的还在自己往前走，黄底的那个是在等你。
  * 状态和时间都读 `/projects` 行上 daemon 算好的 `status` / `updated_at`：`updated_at` 只在状态
  * 翻转 / 改名时变，几个会话同时在跑时行才不会互相换位。同刻按路径稳住。
  *
@@ -123,8 +124,7 @@ fun projectRows(projects: List<Project>, sessions: List<Session>, unread: Set<St
     return projects.map { p ->
         ProjectRow(p, p.session_id?.let { byId[it] }, pathListContains(unread, p.path))
     }.sortedWith(
-        compareByDescending<ProjectRow> { it.project.pinned }
-            .thenByDescending { it.unread }
+        compareByDescending<ProjectRow> { it.unread }
             .thenBy { statusRank(it.status) }
             .thenByDescending { it.updatedIso }
             .thenBy { it.project.path },
@@ -132,20 +132,18 @@ fun projectRows(projects: List<Project>, sessions: List<Session>, unread: Set<St
 }
 
 /**
- * 那根竖线的颜色（2026-09-08 用户拍板，先替掉转圈动画、当天又把圆点换成竖线，同一天又把线
- * 从行首挪到行尾）：**蓝** = 在跑（含后台任务没回来，以及本行正在 resume）；**黄** = 跑完了 /
- * 在等你回话而这台设备还没进去看；**灰** = 已读，没什么要你操心的。三种情况同一根线，行高不
- * 随状态跳，也不再为一个 24fps 的圆圈让整列跟着重组。竖线比圆点更贴着行走，一列扫下来是条
- * 节奏线而不是一串珠子。
+ * 整行的状态底色（2026-09-10 用户拍板「去掉竖线状态的设计，改为背景色，用浅色」；2026-09-08
+ * 那四版记号——转圈 → 蓝点 → 竖线 → 行尾竖线——全部作废）：**淡黄** = 在等你、而这台设备还
+ * 没进去看过；**淡蓝** = 它还在动（含后台任务没回来，以及本行正在 resume）；**没有底色** =
+ * 已读，没什么要你操心的。**黄盖过蓝**——黄的那个在等你。纯函数，好测；行高不随状态跳。
  */
-@Composable
-private fun rowMarkColor(status: String, unread: Boolean, busy: Boolean): Color = when {
-    busy || statusRunning(status) -> Tok.Blue
-    unread -> Tok.Amber
-    else -> Tok.Dim
+fun rowBackground(status: String, unread: Boolean, busy: Boolean = false): Color? = when {
+    unread -> Tok.RowUnread
+    busy || statusRunning(status) -> Tok.RowRunning
+    else -> null
 }
 
-/** 竖线本体：项目行行尾一根，看板卡片同一套 */
+/** 竖线本体：只剩看板卡片在用（项目行 2026-09-10 起改成整行淡底） */
 @Composable
 fun MarkBar(color: Color, modifier: Modifier = Modifier) {
     Box(modifier.width(2.5.dp).height(16.dp).background(color, RoundedCornerShape(1.25.dp)))
@@ -199,7 +197,9 @@ fun NewProjectField(
  * 项目面板 = 以前的首页整块（2026-09-07 用户拍板：☰ 抽屉要有首页所有按钮和功能，首页就没
  * 必要单独存在了）。会话页的 ☰ 抽屉和「一个会话都没打开」时的落地页画的都是它：顶栏
  * 一行（额度 / 看板 / 设置，2026-09-08 用户拍板砍到这三样）、新建项目框、项目列表（点开、长按操作）、
- * 下拉刷新。`currentPath` 高亮当前会话的项目；`onBeforeNavigate` 在抽屉里就是「先关抽屉」。
+ * 下拉刷新。`currentPath` / `currentTerminalId` 标出正在看的那一行（标题加下划线，二选一：
+ * 会话屏给项目路径，终端屏给终端 id——终端不是项目，按 cwd 去点亮项目行是错的）；
+ * `onBeforeNavigate` 在抽屉里就是「先关抽屉」。
  *
  * 点一行进该项目的消息流——会话活着直接进，退出了/没有就 `POST /sessions`（daemon 幂等，
  * 且 resume 找不到旧对话会自动开新会话）再进；长按出项目操作单。顶部输入框既过滤列表也
@@ -211,7 +211,7 @@ fun NewProjectField(
  */
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
-fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? = null, onBeforeNavigate: () -> Unit = {}) {
+fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? = null, currentTerminalId: String? = null, onBeforeNavigate: () -> Unit = {}) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val openSession = LocalOpenSession.current
@@ -359,6 +359,7 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
                     terminals = terminals,
                     root = root,
                     creatingTerminal = creatingTerminal,
+                    currentTerminalId = currentTerminalId,
                     onOpen = { t ->
                         // 点下去就把 attach 拉起来，等屏幕组合完 replay 往往已经到了
                         store.prewarmAttachment(t.id)
@@ -393,7 +394,7 @@ private fun LazyListScope.projectSection(
     /** 有没有项目（区分「一个都没有」和「被搜索词滤没了」两种空） */
     anyProject: Boolean,
     minuteTick: Long,
-    /** 正在 POST /sessions 的项目路径，行尾的线先按「在跑」画 */
+    /** 正在 POST /sessions 的项目路径，行先按「在跑」画淡蓝底 */
     busy: Set<String>,
     currentPath: String?,
     onOpen: (ProjectRow) -> Unit,
@@ -428,6 +429,8 @@ private fun LazyListScope.terminalSection(
     /** 项目根，用来把终端的工作目录缩成一个短名字 */
     root: String,
     creatingTerminal: Boolean,
+    /** 正在看的那个终端（终端屏才有），标题加下划线 */
+    currentTerminalId: String? = null,
     onOpen: (Session) -> Unit,
     onClose: (Session) -> Unit,
     onNew: () -> Unit,
@@ -437,6 +440,7 @@ private fun LazyListScope.terminalSection(
         TerminalRowItem(
             terminalTabLabel(i, t, root),
             modifier = Modifier.animateItem(),
+            current = t.id == currentTerminalId,
             onClick = { onOpen(t) },
             onClose = { onClose(t) },
         )
@@ -582,9 +586,9 @@ fun PlanUsageDialog(plan: PlanUsage, onDismiss: () -> Unit) {
 }
 
 /**
- * 一行到底：标题 + 更新时间 + 竖线。不再有第二行——目录大小等细节在长按单里。
- * 2026-09-08 用户拍板「竖条放在项目列表后面而不是前面」：记号挪到行尾，标题就此顶格起，
- * 一列扫下来左边是齐的；分隔线也跟着文字的 16dp 走，不再为行首那一格缩进 40dp。
+ * 一行到底：标题 + 更新时间。不再有第二行——目录大小等细节在长按单里。状态由整行的淡底色说
+ * （[rowBackground]，2026-09-10 用户拍板），行上不画任何记号；选中的那一行标题用强调色 + 一条
+ * 强调色下划线——底色归状态用了，选中态不能再拿整行底色去抢它（此前是 `Raised` 底）。
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -592,27 +596,20 @@ private fun ProjectRowItem(row: ProjectRow, timeText: String, busy: Boolean, cur
     Column(modifier) {
         Row(
             Modifier.fillMaxWidth()
-                // 置顶不写字也不挂图标，整行一层淡底就够了（2026-09-08 用户拍板）；
-                // 当前打开的那一行更重，压过置顶底
-                .background(
-                    when {
-                        current -> Tok.Raised
-                        row.project.pinned -> Tok.Pinned
-                        else -> Color.Transparent
-                    },
-                )
+                .background(rowBackground(row.status, row.unread, busy) ?: Color.Transparent)
                 .combinedClickable(onClick = onClick, onLongClick = onLongClick)
                 .padding(horizontal = 16.dp, vertical = 11.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                row.title, color = if (row.alive) Tok.Ink else Tok.Dim, fontSize = 15.sp, fontWeight = FontWeight.Bold,
+                row.title,
+                color = if (current) Tok.Accent else if (row.alive) Tok.Ink else Tok.Dim,
+                textDecoration = if (current) TextDecoration.Underline else null,
+                fontSize = 15.sp, fontWeight = FontWeight.Bold,
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
             )
             Spacer(Modifier.width(8.dp))
             Text(timeText, color = Tok.Faint, fontSize = 11.sp)
-            Spacer(Modifier.width(8.dp))
-            MarkBar(rowMarkColor(row.status, row.unread, busy))
         }
         HorizontalDivider(color = Tok.Edge, thickness = 1.dp, modifier = Modifier.padding(start = 16.dp))
     }
@@ -623,16 +620,22 @@ private fun ProjectRowItem(row: ProjectRow, timeText: String, busy: Boolean, cur
  * 「android终端列表高度太高了」：记号拿掉——终端没有状态可言，三道横杠只是占着行首那一格；
  * 标题就此顶格起，上下各 6dp、字号降一档，终端不是项目，它该比项目行更矮。行尾的 × 换成一个
  * 28dp 见方的可点 Box，IconButton 那 48dp 的触摸区本身就把整行撑得比项目行还高。
+ *
+ * 终端行没有状态底色（终端没有状态可言）；[current] = 正在看的那个终端，标题跟项目行用同一
+ * 套选中语言：强调色 + 下划线。
  */
 @Composable
-private fun TerminalRowItem(label: String, onClick: () -> Unit, onClose: () -> Unit, modifier: Modifier = Modifier) {
+private fun TerminalRowItem(label: String, onClick: () -> Unit, onClose: () -> Unit, current: Boolean = false, modifier: Modifier = Modifier) {
     Column(modifier) {
         Row(
             Modifier.fillMaxWidth().clickable(onClick = onClick).padding(start = 16.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                label, color = Tok.Ink, fontSize = 13.5.sp,
+                label,
+                color = if (current) Tok.Accent else Tok.Ink,
+                textDecoration = if (current) TextDecoration.Underline else null,
+                fontSize = 13.5.sp,
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
             )
             Box(Modifier.size(28.dp).clickable(onClick = onClose), contentAlignment = Alignment.Center) {
@@ -716,7 +719,7 @@ fun ProjectActionsSheet(
                     if (p.status == "running") killConfirm = true else killPrimary()
                 }
             }
-            // 注册表里没有的目录不能 resume（daemon 不认它），置顶 / 删项目同理——都收起来，
+            // 注册表里没有的目录不能 resume（daemon 不认它），删项目同理——都收起来，
             // 只留「它此刻这个会话」能做的事
             if (!alive && p.registered) SheetItem("▶", "继续会话", "resume") {
                 val agent = p.agent ?: DEFAULT_AGENT
@@ -730,13 +733,6 @@ fun ProjectActionsSheet(
             if (!alive && primary != null) {
                 // 点行 = resume 新会话；上一条已退出的会话只要还在池子里就留着 transcript 回放入口
                 SheetItem("↺", "上次会话回放", "消息流 · 终端回放") { onDismiss(); onBeforeNavigate(); openSession(primary.id, "") }
-            }
-            if (p.registered) SheetItem("📌", if (p.pinned) "取消置顶" else "置顶", "列表最前") {
-                scope.launch {
-                    runCatching { store.client?.setPinned(p.path, !p.pinned) }.onFailure { toast("失败：${it.message}") }
-                    store.refreshProjects()
-                }
-                onDismiss()
             }
             SheetItem("＞", "在此目录开终端", "zsh") {
                 scope.launch {

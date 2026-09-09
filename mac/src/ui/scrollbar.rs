@@ -159,7 +159,7 @@ pub fn scroll_area(
                     window.paint_quad(
                         fill(
                             Bounds::new(point(x, bounds.origin.y + px(top)), size(px(THUMB_W), px(h))),
-                            ca(theme::dim(), if paint.grab.get().is_some() { 0.85 } else { 0.4 }),
+                            ca(theme::DIM, if paint.grab.get().is_some() { 0.85 } else { 0.4 }),
                         )
                         .corner_radii(px(THUMB_W / 2.)),
                     );

@@ -137,7 +137,7 @@ class TerminalAttachment(
         onResize = { d -> sendResize(d.columns, d.rows) },
         onClipboardCopy = { text -> onClipboardCopy?.invoke(text) },
         autoDetectUrls = true,
-    ).also { applyTerminalPalette(Tok.current, it) }
+    ).also { applyTerminalPalette(it) }
 
     /**
      * 连接状态与 hello 帧带回的会话元数据做成 StateFlow，而不是构造期传进来的

@@ -16,15 +16,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -47,127 +41,56 @@ import java.time.format.DateTimeFormatter
 // ---------- 配色 ----------
 
 /**
- * 一套完整配色。两套：黑暗（PROTOCOL.md 的原始 token，一个值都没改）与
- * Claude 橙（Anthropic 品牌的米白 + 赭橙，终端也是暖白底墨字）。纯数据，PaletteTest 直接跑。
+ * 设计 token（PROTOCOL.md「设计令牌」）：Anthropic 象牙白 + 陶土橙，终端暖白底墨字。
  *
- * [isDark] 说的是**界面**底色深浅——决定系统栏图标颜色与 Material 基线。
- */
-data class Palette(
-    /** 设置里存的键：dark / claude。 */
-    val name: String,
-    /** 设置页显示的名字。 */
-    val label: String,
-    val isDark: Boolean,
-    val bg: Color,
-    val surface: Color,
-    val raised: Color,
-    val edge: Color,
-    val edge2: Color,
-    val ink: Color,
-    val dim: Color,
-    val faint: Color,
-    /** 强调色（黑暗主题里是青色，Claude 橙里是赭橙），FAB / 链接 / 选中态都用它。 */
-    val accent: Color,
-    /** 压在强调色上的文字（FAB 的 ＋、键位条选中态）。 */
-    val onAccent: Color,
-    /** 配对页大标题用的第二强调色。 */
-    val magenta: Color,
-    val green: Color,
-    val amber: Color,
-    val red: Color,
-    /**
-     * 项目行尾「在跑」那根线。三套主题里都要是**蓝**：green/amber/red 各有旧含义，
-     * accent 又随主题从青变成橙，只有蓝在三套里都读作「它自己在动」。
-     */
-    val blue: Color,
-    /** 代码块 / 思考行 / 工具输出这类「凹下去」的小面板底色——界面侧的，跟终端无关。 */
-    val inset: Color,
-    /** 终端画布底色与默认前景。 */
-    val termBg: Color,
-    val termFg: Color,
-    /**
-     * 终端 ANSI 16 色。null = 沿用 xterm 默认表（为黑底设计）；亮底主题必须
-     * 自带一套——xterm 的亮黄 #FFFF54、亮青 #54FFFF 落在白纸上根本看不见，而 Claude Code
-     * 的警告 / 提示恰恰爱用这几个。规则同 mac：浅底上 8–15 比 0–7 更沉而不是更亮。
-     */
-    val ansi: List<Color>? = null,
-) {
-    init { require(ansi == null || ansi.size == 16) { "ansi 必须是 16 色" } }
-
-    companion object {
-        val Dark = Palette(
-            name = "dark", label = "黑暗", isDark = true,
-            bg = Color(0xFF0E1216), surface = Color(0xFF1A222B), raised = Color(0xFF212B36),
-            edge = Color(0xFF28323E), edge2 = Color(0xFF36434F),
-            ink = Color(0xFFE3EBF3), dim = Color(0xFF8B99A8), faint = Color(0xFF5F6D7C),
-            accent = Color(0xFF53C6DD), onAccent = Color(0xFF08252C), magenta = Color(0xFFC583E0),
-            green = Color(0xFF5ECB8F), amber = Color(0xFFE3B45C), red = Color(0xFFE57373), blue = Color(0xFF6C9EF8),
-            inset = Color(0xFF0A0E12), termBg = Color(0xFF0A0E12), termFg = Color(0xFFC9D4DE),
-            // 深色主题的终端 16 色，与 mac `theme.rs::ANSI` 逐色相同（v1.23 统一）：1/2/3/5/6/8/15
-            // 号刻意与界面令牌同值——终端里的红绿黄和界面上的同一个意思长一个样。此前这里是
-            // null、落到 xterm/termux 出厂色，同一段输出在两端颜色完全不一样，而「两端 UI 必须
-            // 一致」是写在协议里的。共享向量 fixtures/tokens.json 现在两套主题都钉着。
-            ansi = listOf(
-                0xFF1C242E, 0xFFE57373, 0xFF5ECB8F, 0xFFE3B45C, 0xFF6FA8DC, 0xFFC583E0, 0xFF53C6DD, 0xFFC9D4DE,
-                0xFF5F6D7C, 0xFFEF9A9A, 0xFF81E2AC, 0xFFF0C987, 0xFF8FC3F0, 0xFFD9A8EF, 0xFF7FDBEF, 0xFFE3EBF3,
-            ).map(::Color),
-        )
-        val Claude = Palette(
-            name = "claude", label = "Claude 橙", isDark = false,
-            bg = Color(0xFFFAF9F5), surface = Color(0xFFF0EEE6), raised = Color(0xFFE8E6DC),
-            edge = Color(0xFFDAD8CE), edge2 = Color(0xFFC8C6BC),
-            ink = Color(0xFF141413), dim = Color(0xFF5E5D59), faint = Color(0xFF91908A),
-            accent = Color(0xFFD97757), onAccent = Color(0xFF141413), magenta = Color(0xFF9B6B9E),
-            green = Color(0xFF2F855A), amber = Color(0xFFB8860B), red = Color(0xFFC0392B), blue = Color(0xFF3F6EA8),
-            inset = Color(0xFFFFFEFA), termBg = Color(0xFFFFFDF7), termFg = Color(0xFF141413),
-            // gruvbox-light；与 mac 的 CLAUDE.ansi 逐色相同
-            ansi = listOf(
-                0xFF3C3836, 0xFFCC241D, 0xFF98971A, 0xFFD79921, 0xFF458588, 0xFFB16286, 0xFF689D6A, 0xFFA89984,
-                0xFF7C6F64, 0xFF9D0006, 0xFF79740E, 0xFFB57614, 0xFF076678, 0xFF8F3F71, 0xFF427B58, 0xFF141413,
-            ).map(::Color),
-        )
-
-        /** 设置页的排列顺序。 */
-        val all: List<Palette> = listOf(Dark, Claude)
-
-        /**
-         * 设置里存的名字 → 配色；不认识的（含 null、旧版本没写过、以及 2026-09-08
-         * 删掉的 "light"）一律黑暗。存量设置因此不需要迁移。
-         */
-        fun forName(name: String?): Palette = all.firstOrNull { it.name == name } ?: Dark
-    }
-}
-
-/**
- * 设计 token（PROTOCOL.md「设计令牌」）。调用点仍旧读 `Tok.Bg`、`Tok.Ink`……，
- * 值来自 [current]。current 是 snapshot state：组合期读到的每一个 Tok.X 都被 Compose
- * 追踪，换主题时凡是画过颜色的地方自动重组，不必整棵树 key 重建；非组合代码
- * （TerminalHost 里的 View 回调、AndroidView.update）读到的就是当下的值。
+ * 2026-09-10 用户拍板「不需要黑暗模式，仅保留一个主题即可，精简代码」：以前是两套配色
+ * 加一个 snapshot state，换主题时整棵树跟着重组。只剩一套之后这些全是常量——组合期读到的
+ * 就是编译期的值，非组合代码（TerminalHost 的 View 回调、TerminalAttachment）也直接读。
  */
 object Tok {
-    var current: Palette by mutableStateOf(Palette.Dark)
+    val Bg = Color(0xFFFAF9F5)
+    val Surface = Color(0xFFF0EEE6)
+    val Raised = Color(0xFFE8E6DC)
+    val Edge = Color(0xFFDAD8CE)
+    val Edge2 = Color(0xFFC8C6BC)
+    val Ink = Color(0xFF141413)
+    val Dim = Color(0xFF5E5D59)
+    val Faint = Color(0xFF91908A)
+    /** 主操作 / 链接 / 选中项目的标题与下划线。 */
+    val Accent = Color(0xFFD97757)
+    /** 压在强调色上的文字（FAB 的 ＋、键位条选中态）。 */
+    val OnAccent = Color(0xFF141413)
+    /** 配对页大标题用的第二强调色（哑紫，不取橙的邻色，否则和 Accent 分不开）。 */
+    val Magenta = Color(0xFF9B6B9E)
+    val Green = Color(0xFF2F855A)
+    val Amber = Color(0xFFB8860B)
+    val Red = Color(0xFFC0392B)
+    /** 看板卡片标题前「在跑」那根线。Green/Amber/Red 各有旧含义，Accent 是橙，只有蓝读作「它自己在动」。 */
+    val Blue = Color(0xFF3F6EA8)
+    /** 代码块 / 思考行 / 工具输出这类「凹下去」的小面板底色——界面侧的，跟终端无关。 */
+    val Inset = Color(0xFFFFFEFA)
 
-    val Bg: Color get() = current.bg
-    val Surface: Color get() = current.surface
-    val Raised: Color get() = current.raised
-    val Edge: Color get() = current.edge
-    val Edge2: Color get() = current.edge2
-    val Ink: Color get() = current.ink
-    val Dim: Color get() = current.dim
-    val Faint: Color get() = current.faint
-    val Accent: Color get() = current.accent
-    val OnAccent: Color get() = current.onAccent
-    val Magenta: Color get() = current.magenta
-    val Green: Color get() = current.green
-    val Amber: Color get() = current.amber
-    val Red: Color get() = current.red
-    val Blue: Color get() = current.blue
-    val Inset: Color get() = current.inset
+    /** 项目行「在跑」的淡蓝底（2026-09-10 起整行淡底代替行尾竖线）。 */
+    val RowRunning = Color(0xFFDDE7F1)
+    /** 项目行「未读」的淡黄底：跑完了 / 在等你，而这台设备还没看过。 */
+    val RowUnread = Color(0xFFF6E7C9)
 
-    /** 置顶行的底色（2026-09-08 用户拍板：置顶不再挂 📌，改成整行一层淡淡的强调色底） */
-    val Pinned: Color get() = current.accent.copy(alpha = 0.12f)
-    val TermBg: Color get() = current.termBg
-    val TermFg: Color get() = current.termFg
+    /** 终端画布底色与默认前景。 */
+    val TermBg = Color(0xFFFFFDF7)
+    val TermFg = Color(0xFF141413)
+
+    /**
+     * 终端 ANSI 16 色（gruvbox-light），与 mac `theme.rs::ANSI` 逐色相同、共享向量
+     * `fixtures/tokens.json` 钉着。**没有「不带就用 xterm 默认表」这条回退**——那是
+     * 「同一段输出两端颜色不一样」的唯一来源，而 xterm 的亮黄 / 亮青落在白纸上根本看不见。
+     * 浅底上 8–15 比 0–7 更沉而不是更亮，7 white 是暖灰，15 bright white = Ink。
+     */
+    val TerminalAnsi: IntArray = intArrayOf(
+        0xFF3C3836.toInt(), 0xFFCC241D.toInt(), 0xFF98971A.toInt(), 0xFFD79921.toInt(),
+        0xFF458588.toInt(), 0xFFB16286.toInt(), 0xFF689D6A.toInt(), 0xFFA89984.toInt(),
+        0xFF7C6F64.toInt(), 0xFF9D0006.toInt(), 0xFF79740E.toInt(), 0xFFB57614.toInt(),
+        0xFF076678.toInt(), 0xFF8F3F71.toInt(), 0xFF427B58.toInt(), 0xFF141413.toInt(),
+    )
 
     fun stateColor(state: String): Color = when (state) {
         "running" -> Green
@@ -178,83 +101,49 @@ object Tok {
 }
 
 /**
- * Material3 配色表跟着 Palette 走：对话框、底部单、文本框、开关、分段按钮这些没有
- * 显式传色的控件从这里取。selected 容器给强调色的淡底压在 surface 上，而不是 M3
- * 默认那套紫灰。
+ * Material3 配色表：对话框、底部单、文本框、开关、分段按钮这些没有显式传色的控件从这里取。
+ * selected 容器给强调色的淡底压在 Surface 上，而不是 M3 默认那套紫灰。
  */
-fun Palette.materialScheme(): ColorScheme {
-    val accentTint = accent.copy(alpha = 0.18f).compositeOver(surface)
-    return if (isDark) darkColorScheme(
-        primary = accent, onPrimary = onAccent,
-        primaryContainer = accentTint, onPrimaryContainer = ink,
-        secondary = dim, onSecondary = bg,
-        secondaryContainer = accentTint, onSecondaryContainer = ink,
-        background = bg, onBackground = ink,
-        surface = surface, onSurface = ink,
-        surfaceVariant = raised, onSurfaceVariant = dim,
-        surfaceContainerLowest = bg, surfaceContainerLow = surface, surfaceContainer = surface,
-        surfaceContainerHigh = raised, surfaceContainerHighest = raised,
-        surfaceTint = accent,
-        outline = edge2, outlineVariant = edge,
-        error = red, onError = bg,
-    ) else lightColorScheme(
-        primary = accent, onPrimary = onAccent,
-        primaryContainer = accentTint, onPrimaryContainer = ink,
-        secondary = dim, onSecondary = surface,
-        secondaryContainer = accentTint, onSecondaryContainer = ink,
-        background = bg, onBackground = ink,
-        surface = surface, onSurface = ink,
-        surfaceVariant = raised, onSurfaceVariant = dim,
-        surfaceContainerLowest = surface, surfaceContainerLow = surface, surfaceContainer = surface,
-        surfaceContainerHigh = raised, surfaceContainerHighest = raised,
-        surfaceTint = accent,
-        outline = edge2, outlineVariant = edge,
-        error = red, onError = surface,
-    )
-}
-
-/**
- * 主题里 libvterm 实际会用的 16 色。v1.23 起**两套主题都自带一套**（深色与 mac 逐色相同，
- * Claude 橙是 gruvbox-light），xterm/termux 出厂表那条回退就此拿掉——它是「两端长得不一样」
- * 的唯一来源，而且没有哪套主题该拿别人的默认色当自己的脸。
- */
-fun terminalAnsi(p: Palette): IntArray = IntArray(16) { i -> (p.ansi?.get(i) ?: p.termFg).toArgb() }
+val AaaColorScheme: ColorScheme = lightColorScheme(
+    primary = Tok.Accent, onPrimary = Tok.OnAccent,
+    primaryContainer = Tok.Accent.copy(alpha = 0.18f).compositeOver(Tok.Surface), onPrimaryContainer = Tok.Ink,
+    secondary = Tok.Dim, onSecondary = Tok.Surface,
+    secondaryContainer = Tok.Accent.copy(alpha = 0.18f).compositeOver(Tok.Surface), onSecondaryContainer = Tok.Ink,
+    background = Tok.Bg, onBackground = Tok.Ink,
+    surface = Tok.Surface, onSurface = Tok.Ink,
+    surfaceVariant = Tok.Raised, onSurfaceVariant = Tok.Dim,
+    surfaceContainerLowest = Tok.Surface, surfaceContainerLow = Tok.Surface, surfaceContainer = Tok.Surface,
+    surfaceContainerHigh = Tok.Raised, surfaceContainerHighest = Tok.Raised,
+    surfaceTint = Tok.Accent,
+    outline = Tok.Edge2, outlineVariant = Tok.Edge,
+    error = Tok.Red, onError = Tok.Surface,
+)
 
 /** 配色喂给 libvterm：16 色 + 默认前景/背景。 */
-fun applyTerminalPalette(p: Palette, emulator: org.connectbot.terminal.TerminalEmulator) {
-    emulator.applyColorScheme(terminalAnsi(p), p.termFg.toArgb(), p.termBg.toArgb())
+fun applyTerminalPalette(emulator: org.connectbot.terminal.TerminalEmulator) {
+    emulator.applyColorScheme(Tok.TerminalAnsi, Tok.TermFg.toArgb(), Tok.TermBg.toArgb())
 }
 
-/** 读设置里的主题，交给 [AaaTheme]。两个 Activity（主界面、分享目标）都走这里。 */
+/** 全局主题。两个 Activity（主界面、分享目标）都走这里。 */
 @Composable
-fun AaaTheme(store: AppStore, content: @Composable () -> Unit) {
-    val settings by store.settings.flow.collectAsState(initial = null)
-    AaaTheme(theme = settings?.theme, content = content)
-}
-
-@Composable
-fun AaaTheme(theme: String?, content: @Composable () -> Unit) {
-    val palette = remember(theme) { Palette.forName(theme) }
+fun AaaTheme(content: @Composable () -> Unit) {
     val view = LocalView.current
     SideEffect {
-        // 写在 SideEffect 里而不是组合期：Tok.current 是被追踪的 state，组合期改它
-        // 会被判成反向写入。这一帧 MaterialTheme 已经用新 palette 画，Tok 读者下一帧跟上。
-        if (Tok.current != palette) Tok.current = palette
-        // 系统栏：亮主题黑图标，暗主题白图标。API 35 起 setStatusBarColor 是空操作
-        // （强制 edge-to-edge，底色由下面那个 Box 透上去），老系统上仍要它把栏染成 Bg。
+        // 亮界面 → 系统栏黑图标。API 35 起 setStatusBarColor 是空操作（强制 edge-to-edge，
+        // 底色由下面那个 Box 透上去），老系统上仍要它把栏染成 Bg。
         val window = view.context.findActivity()?.window
         if (window != null && !view.isInEditMode) {
             @Suppress("DEPRECATION")
-            window.statusBarColor = palette.bg.toArgb()
+            window.statusBarColor = Tok.Bg.toArgb()
             @Suppress("DEPRECATION")
-            window.navigationBarColor = palette.bg.toArgb()
+            window.navigationBarColor = Tok.Bg.toArgb()
             WindowCompat.getInsetsController(window, view).apply {
-                isAppearanceLightStatusBars = !palette.isDark
-                isAppearanceLightNavigationBars = !palette.isDark
+                isAppearanceLightStatusBars = true
+                isAppearanceLightNavigationBars = true
             }
         }
     }
-    MaterialTheme(colorScheme = palette.materialScheme()) {
+    MaterialTheme(colorScheme = AaaColorScheme) {
         // Keep every screen clear of the status and navigation bars. Screen
         // heights differ enough between devices (a foldable's cover display
         // has a taller status bar than a plain phone) that a layout which
@@ -263,7 +152,7 @@ fun AaaTheme(theme: String?, content: @Composable () -> Unit) {
         Box(
             Modifier
                 .fillMaxSize()
-                .background(palette.bg)
+                .background(Tok.Bg)
                 .systemBarsPadding(),
         ) { content() }
     }

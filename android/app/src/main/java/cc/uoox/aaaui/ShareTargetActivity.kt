@@ -48,7 +48,7 @@ class ShareTargetActivity : ComponentActivity() {
         @Suppress("DEPRECATION")
         val uri: Uri? = if (intent?.action == Intent.ACTION_SEND) intent.getParcelableExtra(Intent.EXTRA_STREAM) else null
         val sharedText: String? = if (intent?.action == Intent.ACTION_SEND) intent.getStringExtra(Intent.EXTRA_TEXT) else null
-        setContent { AaaTheme(store) { ShareScreen(store, uri, sharedText) { finish() } } }
+        setContent { AaaTheme { ShareScreen(store, uri, sharedText) { finish() } } }
     }
 }
 

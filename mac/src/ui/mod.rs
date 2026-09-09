@@ -23,7 +23,7 @@ use gpui::{
 
 use crate::model::*;
 use crate::net::{ConnState, Net, UiEvent};
-use crate::theme::{self, ThemeKind};
+use crate::theme;
 use kit::*;
 use messages_view::MessagesView;
 use mini_input::MiniInput;
@@ -66,8 +66,9 @@ fn kill_needs_confirm(s: &Session) -> bool {
 }
 
 /// 侧栏一行：一个项目（2026-09-06 起单列，不再分「激活 / 未激活」两栏）。
-/// **2026-09-08 用户拍板：侧栏不再写状态字**——行首（后来挪到行尾）只有一根竖线，颜色
-/// 说完一切：**蓝 = 在跑**，**黄 = 跑完了 / 在等你回话且这台机器还没进去看**，**灰 = 已读**。
+/// **2026-09-08 用户拍板：侧栏不再写状态字**；**2026-09-10 再拍板：也不画竖线，状态用整行
+/// 的淡底色说**——**淡蓝 = 在跑**，**淡黄 = 跑完了 / 在等你回话且这台机器还没进去看**，
+/// **无底色 = 已读**；当前打开的那一行标题带强调色下划线（见 [`row_bg`]）。
 #[derive(Debug, Clone)]
 struct ProjectRow {
     path: String,
@@ -83,8 +84,6 @@ struct ProjectRow {
     project: Option<Project>,
     /// 排序键：daemon 的 `updated_at`（没给就退到目录 mtime）。ISO 时间串，字典序即时间序
     sort_key: String,
-    /// 置顶的排在最前（组内仍按 sort_key）
-    pinned: bool,
     /// 黄点：跑完一轮 / 在等你回话，而这台机器还没进去看过（本机状态，UiState::unread_projects）
     unread: bool,
 }
@@ -100,7 +99,7 @@ impl ProjectRow {
 
 /// 项目 → 侧栏行。**v1.22：一行的内容全部现成**——标题、五态、代表会话、排序时间都由
 /// daemon 算好放在 `Project` 上（PROTOCOL「版本兼容」），这里只做两件纯本机的事：
-/// 把 `session_id` 换成手里的 `Session` 对象，和按「置顶 > 黄点 > 状态 > 时间」排。
+/// 把 `session_id` 换成手里的 `Session` 对象，和按「黄点 > 状态 > 时间」排。
 ///
 /// 删掉的旧做法（别再加回来）：① 遍历 `sessions` 按 project_path 挑「最近更新的活会话」
 /// 当代表、顺带算最新时间——Android 挑法不同，两端标题和状态对不上；② 标题回退链
@@ -129,16 +128,14 @@ fn project_rows(projects: &[Project], sessions: &[Session], unread: &[String]) -
                 .clone()
                 .filter(|t| !t.is_empty())
                 .unwrap_or_else(|| p.mtime.clone()),
-            pinned: p.pinned,
             unread: path_list_contains(unread, &p.path),
         })
         .collect();
-    // 2026-09-08 用户拍板：置顶 > 有黄点 > 在跑 > 其余，同一档里最近更新的在前，同刻按标题稳住。
-    // 置顶是自己按的，黄线也挤不掉它；黄线排在蓝线前面——蓝线的还在自己往前走，黄线的那个在等你。
+    // 2026-09-08 用户拍板：有黄点 > 在跑 > 其余，同一档里最近更新的在前，同刻按标题稳住
+    // （置顶那一档 2026-09-10 拿掉了）。黄底排在蓝底前面——蓝的还在自己往前走，黄的那个在等你。
     rows.sort_by(|a, b| {
-        b.pinned
-            .cmp(&a.pinned)
-            .then_with(|| b.unread.cmp(&a.unread))
+        b.unread
+            .cmp(&a.unread)
             .then_with(|| status_rank(&a.status).cmp(&status_rank(&b.status)))
             .then_with(|| b.sort_key.cmp(&a.sort_key))
             .then_with(|| a.title.cmp(&b.title))
@@ -166,17 +163,17 @@ fn relative_time(iso: &str, now: chrono::DateTime<chrono::Local>) -> String {
 /// daemon 不下发五态 / 标题 / 代表会话，项目列表顶上挂降级横幅。
 const SCHEMA_MIN: u32 = 2;
 
-/// 那根竖线的颜色（2026-09-08 用户拍板，先替掉转圈动画、当天又把点换成竖线）：
-/// **蓝** = 在跑（含后台任务还没回来）；**黄** = 跑完了 / 在等你回话而这台机器还没进去看；
-/// **灰** = 已读，没什么要你操心的。三种情况都是同一根线，行高不随状态跳，也不再有动画
-/// 带着整个侧栏按帧重画。竖线比圆点更贴着行走，一列扫下来是条节奏线而不是一串珠子。
-fn row_mark_color(row: &ProjectRow) -> u32 {
-    if status_running(&row.status) {
-        theme::blue()
-    } else if row.unread {
-        theme::amber()
+/// 这一行的状态底色（2026-09-10 用户拍板：「去掉竖线状态的设计，改为背景色，用浅色」）：
+/// **淡黄** = 跑完了 / 在等你回话而这台机器还没进去看；**淡蓝** = 在跑（含后台任务还没回来）；
+/// `None` = 已读，没什么要你操心的，就是侧栏自己的底。黄盖过蓝——排序也是黄在前，那个在等你。
+/// 行高不随状态跳，也没有任何按帧重画的动画。
+fn row_bg(status: &str, unread: bool) -> Option<u32> {
+    if unread {
+        Some(theme::ROW_UNREAD)
+    } else if status_running(status) {
+        Some(theme::ROW_RUNNING)
     } else {
-        theme::dim()
+        None
     }
 }
 
@@ -336,8 +333,6 @@ pub struct RootView {
     // 侧栏宽度（拖右边缘调整，松手落盘）与拖动中的 (按下时鼠标 x, 按下时宽度)
     pub sidebar_w: f32,
     sidebar_drag: Option<(f32, f32)>,
-    /// 当前主题（与 theme::current 同步）：设置页切换，随 ui.toml 落盘
-    pub theme: ThemeKind,
 
     // 详情面板（会话页右侧，⌘I）
     /// 面板展开与否，随 ui.toml 落盘
@@ -437,10 +432,7 @@ impl RootView {
         })
         .detach();
 
-        // 本机偏好先于首帧：主题必须在第一次 render 之前生效，否则会闪一帧黑暗
         let ui_state = UiState::load();
-        let theme_kind = ThemeKind::from_str(&ui_state.theme);
-        theme::set_current(theme_kind);
 
         let new_input = cx.new(|cx| MiniInput::new(cx, "新建项目：文件夹名，回车"));
         let name_input = cx.new(|cx| MiniInput::new(cx, "新名字"));
@@ -483,7 +475,6 @@ impl RootView {
             user_killed: HashSet::new(),
             sidebar_w: ui_state.sidebar_w,
             sidebar_drag: None,
-            theme: theme_kind,
             detail_visible: ui_state.detail_visible,
             muted_projects: ui_state.muted_projects,
             unread_projects: ui_state.unread_projects,
@@ -771,7 +762,7 @@ impl RootView {
         .detach();
     }
 
-    /// 只管发出去、不看返回体的请求（重命名 / 终止 / 置顶 / 关终端）：四处以前
+    /// 只管发出去、不看返回体的请求（重命名 / 终止 / 关终端）：几处以前
     /// 各写一遍同一个 `|_, _: serde_json::Value, _| {}`，那个闭包里没有一个字是
     /// 某一处独有的。`toast_error` 留着——「删失败只记日志」和「终止失败要弹」
     /// 是两个不同的决定，不能一起写死。
@@ -922,16 +913,6 @@ impl RootView {
         );
     }
 
-    /// 置顶开关：POST /projects/pin；列表靠 projects_changed 帧重拉，这里先乐观改一下
-    fn set_pinned(&mut self, path: String, pinned: bool, cx: &mut Context<Self>) {
-        if let Some(p) = self.projects.iter_mut().find(|p| p.path == path) {
-            p.pinned = pinned;
-        }
-        let fut = self.net.set_pinned(&path, pinned);
-        self.spawn_fetch_ignore(fut, true, cx);
-        cx.notify();
-    }
-
     fn session(&self, id: &str) -> Option<&Session> {
         self.sessions.iter().find(|s| s.id == id)
     }
@@ -1045,7 +1026,7 @@ impl RootView {
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let (conn_color, conn_text) = match self.conn {
             ConnState::Connected => (
-                theme::green(),
+                theme::GREEN,
                 format!(
                     "daemon v{}",
                     self.health
@@ -1054,8 +1035,8 @@ impl RootView {
                         .unwrap_or("?")
                 ),
             ),
-            ConnState::Connecting => (theme::amber(), "连接中…".to_string()),
-            ConnState::Disconnected => (theme::red(), "未连接".to_string()),
+            ConnState::Connecting => (theme::AMBER, "连接中…".to_string()),
+            ConnState::Disconnected => (theme::RED, "未连接".to_string()),
         };
 
         div()
@@ -1065,7 +1046,7 @@ impl RootView {
             .flex()
             .flex_col()
             .overflow_hidden() // 拖窄时标题按 ellipsis 收，不许挤出侧栏
-            .bg(c(theme::surface()))
+            .bg(c(theme::SURFACE))
             .child(self.render_new_project_row(cx))
             .when(self.schema_too_old(), |el| el.child(self.render_schema_banner()))
             .child(
@@ -1087,7 +1068,7 @@ impl RootView {
     /// 侧栏主体那一列：项目行一条条排下来，终端行接在同一列后面。
     ///
     /// ── 项目列表：单列（2026-09-06 用户拍板）──
-    ///   行首只有一根竖线：蓝 = 在跑 / 黄 = 未读 / 灰 = 已读（2026-09-08 用户拍板，状态字整套去掉）。
+    ///   整行淡底色说状态：淡蓝 = 在跑 / 淡黄 = 未读 / 无底 = 已读（2026-09-10 用户拍板，竖线也去掉了）。
     ///   问题本身不在侧栏画：进消息流，表单原生呈现、原地作答。exited 会话不代表项目
     ///   （点一下 resume）；终端（shell）不在这里（归终端面板）。
     fn render_sidebar_list(&self, cx: &mut Context<Self>) -> gpui::Div {
@@ -1102,7 +1083,8 @@ impl RootView {
         list_col.child(self.render_terminal_rows(cx))
     }
 
-    /// 侧栏的一个项目行：标题 + 行尾按钮（悬停才现身）+ 更新时间 + 那根竖线。
+    /// 侧栏的一个项目行：标题 + 行尾按钮（悬停才现身）+ 更新时间。状态是整行的淡底色
+    /// （[`row_bg`]），选中是标题下一条强调色线（2026-09-10 用户拍板）。
     fn render_project_row(
         &self,
         row: ProjectRow,
@@ -1120,8 +1102,9 @@ impl RootView {
         let open_project = row.project.clone();
         let kill = row.live().map(|s| (s.id.clone(), kill_needs_confirm(s)));
         let del_path = row.project.as_ref().map(|p| p.path.clone());
-        let pin = row.project.as_ref().map(|p| (p.path.clone(), p.pinned));
-        let mark = row_mark_color(&row);
+        let bg = row_bg(&row.status, row.unread);
+        // 悬停是在这一行自己的底上压深一点，不是换成灰底——否则鼠标一过，状态底就没了
+        let hover_bg = theme::mix(bg.unwrap_or(theme::SURFACE), theme::INK, 0.06);
         let time = relative_time(&row.sort_key, now);
         let title = row.title;
         // 元素 id 用路径而不是序号：排序变了悬停 / 点击态跟着行走，不留在原位
@@ -1129,11 +1112,8 @@ impl RootView {
         let act_id = SharedString::from(format!("sb-act:{}", row.path));
         let mut el = sidebar_row(row_id.into())
             .group("sb-row")
-            // 置顶不挂图标，整行一层淡淡的强调色底就够了（2026-09-08 用户拍板）；
-            // 当前打开的那一行更重，压过置顶底
-            .when(row.pinned && !active, |el| el.bg(ca(theme::accent(), 0.12)))
-            .when(active, |el| el.bg(ca(theme::accent(), 0.22)).border_1().border_color(ca(theme::accent(), 0.75)))
-            .hover(|st| st.bg(c(theme::surface_raised())))
+            .when_some(bg, |el, bg| el.bg(c(bg)))
+            .hover(move |st| st.bg(c(hover_bg)))
             // 点一下：活着的会话直接进；未激活的 resume（daemon 幂等，找不到旧对话开新的）
             .on_click(cx.listener(move |this, _, _, cx| {
                 if let Some(id) = &open_session {
@@ -1149,25 +1129,15 @@ impl RootView {
                     .text_ellipsis()
                     .whitespace_nowrap()
                     .text_size(px(12.5))
-                    .text_color(c(if active { theme::accent() } else if dim_title { theme::dim() } else { theme::ink() }))
+                    .text_color(c(if active { theme::ACCENT } else if dim_title { theme::DIM } else { theme::INK }))
+                    // 选中 = 标题下一条强调色线：底色归状态用了，选中态不再抢整行的底
+                    .when(active, |el| el.text_decoration_1().text_decoration_color(c(theme::ACCENT)))
                     .child(SharedString::from(title)),
             );
         // 行尾按钮（非当前行悬停才现身；invisible 连命中盒一起去掉）：
-        // 「顶 / 取消」= 置顶开关（daemon 侧存，三端一起变）；
         // 活着的 × = 结束会话（只有执行中的才确认，被顺手点掉最伤）；未激活的「删」= 删项目
-        if let Some((pin_path, pinned)) = pin {
-            el = el.child(
-                row_btn(SharedString::from(format!("sb-pin:{}", row.path)), active)
-                    .hover(|st| st.text_color(c(theme::accent())).bg(c(theme::edge_light())))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.set_pinned(pin_path.clone(), !pinned, cx);
-                    }))
-                    .child(if pinned { "取消顶" } else { "顶" }),
-            );
-        }
         let button = row_btn(act_id, active)
-            .hover(|st| st.text_color(c(theme::red())).bg(c(theme::edge_light())));
+            .hover(|st| st.text_color(c(theme::RED)).bg(c(theme::EDGE_LIGHT)));
         if let Some((id_close, confirm)) = kill {
             el = el.child(
                 button
@@ -1192,18 +1162,17 @@ impl RootView {
                     .child("删"),
             );
         }
-        // 行尾（2026-09-08 用户拍板）：更新时间 + 那根竖线。时间是「这个项目上一次
-        // 有动静」，和线说的是同一件事的两面，所以并排放在右边同一处
+        // 行尾：更新时间——「这个项目上一次有动静」；状态已经在底色里，这里不再挂记号
         if !time.is_empty() {
             el = el.child(
                 div()
                     .flex_none()
                     .text_size(px(10.5))
-                    .text_color(c(theme::faint()))
+                    .text_color(c(theme::FAINT))
                     .child(SharedString::from(time)),
             );
         }
-        el.child(mark_bar(mark))
+        el
     }
 
     /// 侧栏顶上的新建项目行：一个输入框（字即文件夹名，回车或 ＋ 创建；⌘N 把光标放进来）
@@ -1224,17 +1193,17 @@ impl RootView {
                     .w(px(28.))
                     .rounded(px(6.))
                     .border_1()
-                    .border_color(c(theme::edge_light()))
+                    .border_color(c(theme::EDGE_LIGHT))
                     .flex()
                     .items_center()
                     .justify_center()
                     .cursor_pointer()
-                    .hover(|st| st.bg(c(theme::surface_raised())).border_color(c(theme::accent())))
+                    .hover(|st| st.bg(c(theme::SURFACE_RAISED)).border_color(c(theme::ACCENT)))
                     .on_click(cx.listener(|this, _, _, cx| this.create_project(cx)))
                     .child(
                         div()
                             .text_size(px(14.))
-                            .text_color(c(if self.creating { theme::faint() } else { theme::accent() }))
+                            .text_color(c(if self.creating { theme::FAINT } else { theme::ACCENT }))
                             .child(if self.creating { "…" } else { "＋" }),
                     ),
             )
@@ -1242,7 +1211,7 @@ impl RootView {
 
     /// schema 闸门（PROTOCOL「版本兼容」）：老 daemon 不下发项目状态，客户端
     /// **不保留第二套算法**——留着就等于把 v1.22 刚删掉的分歧又养回来。
-    /// 所以这里只说实话：列表照画（灰线、标题退到目录名），顶上明写「不可用」。
+    /// 所以这里只说实话：列表照画（无底色、标题退到目录名），顶上明写「不可用」。
     fn render_schema_banner(&self) -> gpui::Div {
         div()
             .flex_none()
@@ -1251,11 +1220,11 @@ impl RootView {
             .px(px(8.))
             .py(px(5.))
             .rounded(px(6.))
-            .bg(ca(theme::amber(), 0.1))
+            .bg(ca(theme::AMBER, 0.1))
             .border_1()
-            .border_color(ca(theme::amber(), 0.4))
+            .border_color(ca(theme::AMBER, 0.4))
             .text_size(px(11.))
-            .text_color(c(theme::amber()))
+            .text_color(c(theme::AMBER))
             .child(SharedString::from(format!(
                 "daemon 版本过旧（v{}），项目状态不可用 —— 请更新 daemon",
                 self.health
@@ -1280,14 +1249,14 @@ impl RootView {
             .px(px(16.))
             .py(px(9.))
             .border_t_1()
-            .border_color(c(theme::edge()))
+            .border_color(c(theme::EDGE))
             .child(dot(conn_color))
             .child(
                 div()
                     .flex_1()
                     .text_size(px(11.))
                     .font_family("Menlo")
-                    .text_color(c(theme::dim()))
+                    .text_color(c(theme::DIM))
                     .child(SharedString::from(conn_text)),
             )
             .child(
@@ -1296,11 +1265,11 @@ impl RootView {
                     .cursor_pointer()
                     .text_size(px(13.))
                     .text_color(if self.page == Page::Settings {
-                        c(theme::accent())
+                        c(theme::ACCENT)
                     } else {
-                        c(theme::dim())
+                        c(theme::DIM)
                     })
-                    .hover(|st| st.text_color(c(theme::accent())))
+                    .hover(|st| st.text_color(c(theme::ACCENT)))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.page = Page::Settings;
                         cx.notify();
@@ -1318,8 +1287,8 @@ impl RootView {
             .flex_none()
             .h_full()
             .cursor_col_resize()
-            .bg(c(if dragging { theme::accent() } else { theme::edge() }))
-            .hover(|st| st.bg(c(theme::accent())))
+            .bg(c(if dragging { theme::ACCENT } else { theme::EDGE }))
+            .hover(|st| st.bg(c(theme::ACCENT)))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, ev: &MouseDownEvent, _, cx| {
@@ -1361,39 +1330,10 @@ impl RootView {
     fn ui_state(&self) -> UiState {
         UiState {
             sidebar_w: self.sidebar_w,
-            theme: self.theme.as_str().to_string(),
             detail_visible: self.detail_visible,
             muted_projects: self.muted_projects.clone(),
             unread_projects: self.unread_projects.clone(),
         }
-    }
-
-    /// 切主题：进程级调色板换掉、落盘、整窗重画。终端 / 消息流 / 输入框是独立
-    /// 实体，一并 notify，保证同一帧换色而不是谁先动谁先变。
-    pub(super) fn set_theme(&mut self, kind: ThemeKind, cx: &mut Context<Self>) {
-        if self.theme == kind {
-            return;
-        }
-        theme::set_current(kind);
-        self.theme = kind;
-        self.ui_state().save();
-        for t in self.terminals.values() {
-            t.update(cx, |_, cx| cx.notify());
-        }
-        for v in self.msg_views.values() {
-            v.update(cx, |_, cx| cx.notify());
-        }
-        for i in [
-            &self.new_input,
-            &self.name_input,
-            &self.host_input,
-            &self.port_input,
-            &self.token_input,
-            &self.root_input,
-        ] {
-            i.update(cx, |_, cx| cx.notify());
-        }
-        cx.notify();
     }
 
     fn render_statusbar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -1404,12 +1344,12 @@ impl RootView {
             .h(px(26.))
             .flex_none()
             .px(px(12.))
-            .bg(c(theme::surface()))
+            .bg(c(theme::SURFACE))
             .border_t_1()
-            .border_color(c(theme::edge()))
+            .border_color(c(theme::EDGE))
             .text_size(px(11.))
             .font_family("Menlo")
-            .text_color(c(theme::dim()));
+            .text_color(c(theme::DIM));
         match &self.page {
             Page::Session(id) => {
                 if let Some(s) = self.session(id) {
@@ -1441,7 +1381,7 @@ impl RootView {
                             .rounded(px(4.))
                             .cursor_pointer()
                             .text_color(c(color))
-                            .hover(|st| st.bg(c(theme::surface_raised())))
+                            .hover(|st| st.bg(c(theme::SURFACE_RAISED)))
                             .child(label)
                     };
 
@@ -1457,7 +1397,7 @@ impl RootView {
                             act(
                                 "view-toggle",
                                 if on { "⌘E 终端" } else { "⌘E 消息流" },
-                                if on { theme::accent() } else { theme::faint() },
+                                if on { theme::ACCENT } else { theme::FAINT },
                             )
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.toggle_msg_mode(cx);
@@ -1477,24 +1417,24 @@ impl RootView {
                             act(
                                 "detail-toggle",
                                 "ⓘ 详情",
-                                if detail_on { theme::accent() } else { theme::faint() },
+                                if detail_on { theme::ACCENT } else { theme::FAINT },
                             )
                             .on_click(cx.listener(|this, _, _, cx| this.toggle_detail(cx))),
                         )
-                        .child(act("sess-rename", "重命名", theme::dim()).on_click(cx.listener(
+                        .child(act("sess-rename", "重命名", theme::DIM).on_click(cx.listener(
                             move |this, _, window, cx| {
                                 this.open_rename_modal(sid_rename.clone(), window, cx);
                             },
                         )));
                     if !exited {
                         let confirm = kill_needs_confirm(s);
-                        bar = bar.child(act("sess-kill", "终止", theme::amber()).on_click(
+                        bar = bar.child(act("sess-kill", "终止", theme::AMBER).on_click(
                             cx.listener(move |this, _, _, cx| {
                                 this.request_kill(sid_kill.clone(), confirm, cx);
                             }),
                         ));
                     }
-                    bar = bar.child(act("sess-del", "删除", theme::red()).on_click(cx.listener(
+                    bar = bar.child(act("sess-del", "删除", theme::RED).on_click(cx.listener(
                         move |this, _, _, cx| {
                             this.modal = Modal::ConfirmDeleteSession {
                                 id: sid_del.clone(),
@@ -1505,11 +1445,11 @@ impl RootView {
 
                     // 「待回复」盖过状态字：asking 是结构化事实，比 running/waiting 更要紧
                     let (label, color) = if s.asking {
-                        ("待回复".to_string(), theme::amber())
+                        ("待回复".to_string(), theme::AMBER)
                     } else if s.compacting {
                         ("整理上下文中".to_string(), state_color)
                     } else if let Some(e) = s.error_label() {
-                        (e, theme::amber())
+                        (e, theme::AMBER)
                     } else {
                         (theme::state_label(s.state.as_str()).to_string(), state_color)
                     };
@@ -1549,18 +1489,18 @@ impl RootView {
                 .gap(px(8.))
                 .px(px(12.))
                 .py(px(6.))
-                .bg(ca(theme::red(), 0.14))
+                .bg(ca(theme::RED, 0.14))
                 .border_b_1()
-                .border_color(c(theme::red()))
+                .border_color(c(theme::RED))
                 .text_size(px(12.))
-                .text_color(c(theme::red()))
+                .text_color(c(theme::RED))
                 .cursor_pointer()
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.error = None;
                     cx.notify();
                 }))
                 .child(SharedString::from(err))
-                .child(div().ml_auto().text_color(c(theme::dim())).child("点击关闭")),
+                .child(div().ml_auto().text_color(c(theme::DIM)).child("点击关闭")),
         )
     }
 }
@@ -1593,7 +1533,7 @@ impl Render for RootView {
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .text_color(c(theme::faint()))
+                                .text_color(c(theme::FAINT))
                                 .child("会话未打开"),
                         ),
                     }
@@ -1606,7 +1546,7 @@ impl Render for RootView {
                         .items_center()
                         .justify_center()
                         .gap(px(6.))
-                        .text_color(c(theme::faint()))
+                        .text_color(c(theme::FAINT))
                         .child(div().text_size(px(13.)).child("双击左侧项目开启会话"))
                         .child(
                             div()
@@ -1621,7 +1561,7 @@ impl Render for RootView {
             }
         });
 
-        let mut main = div().flex_1().min_w(px(0.)).flex().flex_col().bg(c(theme::bg()));
+        let mut main = div().flex_1().min_w(px(0.)).flex().flex_col().bg(c(theme::BG));
         if let Some(toast) = self.render_error_toast(cx) {
             main = main.child(toast);
         }
@@ -1631,11 +1571,11 @@ impl Render for RootView {
                     .flex_none()
                     .px(px(12.))
                     .py(px(5.))
-                    .bg(ca(theme::amber(), 0.1))
+                    .bg(ca(theme::AMBER, 0.1))
                     .border_b_1()
-                    .border_color(ca(theme::amber(), 0.4))
+                    .border_color(ca(theme::AMBER, 0.4))
                     .text_size(px(11.5))
-                    .text_color(c(theme::amber()))
+                    .text_color(c(theme::AMBER))
                     .child("SSD 未挂载：创建 / 启动 / 删除已禁用（绝不建占位目录），挂载恢复后自动解除"),
             );
         }
@@ -1644,8 +1584,8 @@ impl Render for RootView {
         let mut root = div()
             .size_full()
             .flex()
-            .bg(c(theme::bg()))
-            .text_color(c(theme::ink()))
+            .bg(c(theme::BG))
+            .text_color(c(theme::INK))
             .text_size(px(13.))
             .on_key_down(cx.listener(Self::on_root_key))
             .child(self.render_sidebar(cx))
@@ -1900,7 +1840,7 @@ mod tests {
     }
 
     /// 老 daemon（schema < 2）不给 title / updated_at：退到目录名和目录 mtime。
-    /// 状态是空串 → 排最后、线是灰的（横幅另说，见 schema_too_old）
+    /// 状态是空串 → 排最后、没有底色（横幅另说，见 schema_too_old）
     #[test]
     fn falls_back_to_dir_name_and_mtime_when_fields_missing() {
         let bare = Project {
@@ -1913,6 +1853,12 @@ mod tests {
         assert_eq!(rows[0].title, "bare");
         assert_eq!(rows[0].sort_key, "2026-09-03T00:00:00Z");
         assert!(!status_running(&rows[0].status));
+        assert_eq!(row_bg(&rows[0].status, false), None);
+        // 黄盖过蓝：在跑但还没看过的行是黄底；看过的在跑行是蓝底；停着且看过的没有底
+        assert_eq!(row_bg("running", true), Some(theme::ROW_UNREAD));
+        assert_eq!(row_bg("background", false), Some(theme::ROW_RUNNING));
+        assert_eq!(row_bg("asking", false), None, "在问 = 在等你，不是在跑");
+        assert_eq!(row_bg("paused", false), None);
         // title 给了空串也退回目录名（空标题的行等于没有行）
         let mut empty = proj("/p/x", "", "paused", "");
         empty.name = "x".into();
@@ -1922,7 +1868,7 @@ mod tests {
     }
 
     /// 三端共享向量 fixtures/projects.json：同一份 `/projects` + 同一份本机黄点，
-    /// 两端必须排出同一个顺序、同一批蓝线黄线。此前两端各测各的，所以谁都没发现
+    /// 两端必须排出同一个顺序、同一批蓝底黄底。此前两端各测各的，所以谁都没发现
     /// 两边推出来的标题和状态不一样。
     #[test]
     fn shared_fixture_project_rows() {
@@ -1936,15 +1882,23 @@ mod tests {
         // 会话一个都没给：行只靠 daemon 那几个字段就能画全
         let rows = project_rows(&projects, &[], &unread);
         assert_eq!(rows.iter().map(|r| r.path.clone()).collect::<Vec<_>>(), strs("order"));
-        // 蓝线 = status ∈ {running, background}；asking 不蓝，那是在等你
-        let blue = strs("blue");
+        // 淡蓝底 = status ∈ {running, background}；asking 不蓝，那是在等你
+        let running = strs("running");
         for r in &rows {
-            assert_eq!(status_running(&r.status), blue.contains(&r.path), "蓝线: {}", r.path);
+            assert_eq!(status_running(&r.status), running.contains(&r.path), "在跑: {}", r.path);
         }
-        // 黄线 = 本机 unread 集合里有它（路径去尾斜杠比较）
-        let yellow = strs("yellow");
+        // 淡黄底 = 本机 unread 集合里有它（路径去尾斜杠比较），且盖过蓝
+        let unread_rows = strs("unread_rows");
         for r in &rows {
-            assert_eq!(r.unread, yellow.contains(&r.path), "黄线: {}", r.path);
+            assert_eq!(r.unread, unread_rows.contains(&r.path), "未读: {}", r.path);
+            let want = if r.unread {
+                Some(theme::ROW_UNREAD)
+            } else if running.contains(&r.path) {
+                Some(theme::ROW_RUNNING)
+            } else {
+                None
+            };
+            assert_eq!(row_bg(&r.status, r.unread), want, "底色: {}", r.path);
         }
         // 标题回退链已在 daemon 里走完，客户端直接用
         for (path, want) in fx["expect"]["titles"].as_object().unwrap() {

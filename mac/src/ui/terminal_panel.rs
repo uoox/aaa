@@ -183,23 +183,23 @@ impl RootView {
             .px(px(16.))
             .py(px(7.))
             .border_t_1()
-            .border_color(c(theme::edge()))
+            .border_color(c(theme::EDGE))
             .cursor_pointer()
-            .when(active, |el| el.bg(c(theme::surface_raised())))
-            .hover(|st| st.bg(c(theme::surface_raised())))
+            .when(active, |el| el.bg(c(theme::SURFACE_RAISED)))
+            .hover(|st| st.bg(c(theme::SURFACE_RAISED)))
             .on_click(cx.listener(|this, _, _, cx| this.open_history(cx)))
             .child(
                 div()
                     .font_family("Menlo")
                     .text_size(px(11.))
-                    .text_color(c(if active { theme::accent() } else { theme::dim() }))
+                    .text_color(c(if active { theme::ACCENT } else { theme::DIM }))
                     .child("▦"),
             )
             .child(
                 div()
                     .flex_1()
                     .text_size(px(12.5))
-                    .text_color(c(if active { theme::accent() } else { theme::ink() }))
+                    .text_color(c(if active { theme::ACCENT } else { theme::INK }))
                     .child("看板"),
             )
     }
@@ -222,7 +222,7 @@ impl RootView {
                     .pt(px(8.))
                     .pb(px(4.))
                     .border_t_1()
-                    .border_color(c(theme::edge()))
+                    .border_color(c(theme::EDGE))
                     .child("终端"),
             );
         for (ix, (id, label)) in self.live_terminal_tabs().into_iter().enumerate() {
@@ -233,8 +233,7 @@ impl RootView {
             col = col.child(
                 sidebar_row(("sb-term", ix).into())
                     .group("sb-row")
-                    .when(active, |el| el.bg(c(theme::surface_raised())))
-                    .hover(|st| st.bg(c(theme::surface_raised())))
+                    .hover(|st| st.bg(c(theme::SURFACE_RAISED)))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.focus_terminal(id_click.clone(), cx);
                     }))
@@ -245,13 +244,15 @@ impl RootView {
                             .text_ellipsis()
                             .whitespace_nowrap()
                             .text_size(px(12.5))
-                            .text_color(c(if active { theme::ink() } else { theme::dim() }))
+                            .text_color(c(if active { theme::ACCENT } else { theme::DIM }))
+                            // 当前终端与当前项目同一种说法：标题下一条强调色线（2026-09-10）
+                            .when(active, |el| el.text_decoration_1().text_decoration_color(c(theme::ACCENT)))
                             .child(SharedString::from(label)),
                     )
                     // × 关终端：当前行常显，其余悬停才现身（与项目行一致）
                     .child(
                         row_btn(("sb-term-close", ix), active)
-                            .hover(|st| st.text_color(c(theme::red())).bg(c(theme::edge_light())))
+                            .hover(|st| st.text_color(c(theme::RED)).bg(c(theme::EDGE_LIGHT)))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
                                 this.close_terminal(&id_close, cx);
@@ -262,13 +263,13 @@ impl RootView {
         }
         col.child(
             sidebar_row("sb-term-new".into())
-                .hover(|st| st.bg(c(theme::surface_raised())))
+                .hover(|st| st.bg(c(theme::SURFACE_RAISED)))
                 .on_click(cx.listener(|this, _, _, cx| this.new_terminal(cx)))
                 .child(
                     div()
                         .flex_1()
                         .text_size(px(12.5))
-                        .text_color(c(theme::accent()))
+                        .text_color(c(theme::ACCENT))
                         .child("＋ 新增终端"),
                 ),
         )
@@ -291,7 +292,7 @@ impl RootView {
                 .items_center()
                 .justify_center()
                 .gap(px(10.))
-                .text_color(c(theme::faint()))
+                .text_color(c(theme::FAINT))
                 .child(div().text_size(px(13.)).child("还没有终端"))
                 .child(
                     tbtn("term-empty-new", "＋ 新终端")
@@ -325,7 +326,7 @@ impl RootView {
         .child(
             div()
                 .ml_auto()
-                .text_color(c(theme::faint()))
+                .text_color(c(theme::FAINT))
                 .child(hint),
         )
     }

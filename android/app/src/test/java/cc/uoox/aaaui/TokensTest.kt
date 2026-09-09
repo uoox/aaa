@@ -11,42 +11,38 @@ import org.junit.Test
 /**
  * 设计令牌的三端共享向量 `fixtures/tokens.json`（mac 那边有一份对着同一个文件的测试）。
  *
- * 「两端 UI 必须一致」这句话此前只写在 PROTOCOL 里，没有任何东西盯着：深色终端前景一边
- * `#c9d4de` 一边纯白、Claude 主题的 magenta 一边哑紫一边直接等于 accent——两端各测各的
- * 一套，所以谁都没发现。
+ * 「两端 UI 必须一致」这句话此前只写在 PROTOCOL 里，没有任何东西盯着：终端前景一边
+ * `#c9d4de` 一边纯白、magenta 一边哑紫一边直接等于 accent——两端各测各的一套，所以谁都没发现。
+ *
+ * 2026-09-10 只剩一套主题，向量因此拍平：顶层一个 `roles` 一个 `ansi`，没有 `themes` 这一层了。
  */
 class TokensTest {
     private val fx = Json.parseToJsonElement(java.io.File("../../fixtures/tokens.json").readText()).jsonObject
-    private fun theme(name: String) = fx["themes"]!!.jsonObject[name]!!.jsonObject
-    private fun hex(c: Color) = "#%06x".format(c.value.toString().let { _ -> (c.value shr 32).toLong() and 0xFFFFFF })
+    private fun hex(c: Color) = "#%06x".format((c.value shr 32).toLong() and 0xFFFFFF)
 
-    private fun assertRoles(name: String, p: Palette) {
-        val roles = theme(name)["roles"]!!.jsonObject
+    @Test fun 十九个角色逐色对上共享向量() {
+        val roles = fx["roles"]!!.jsonObject
         val actual = mapOf(
-            "bg" to p.bg, "surface" to p.surface, "surface_raised" to p.raised,
-            "edge" to p.edge, "edge_light" to p.edge2,
-            "ink" to p.ink, "dim" to p.dim, "faint" to p.faint,
-            "term_bg" to p.termBg, "term_fg" to p.termFg,
-            "accent" to p.accent, "magenta" to p.magenta,
-            "green" to p.green, "amber" to p.amber, "red" to p.red, "blue" to p.blue,
-            "inset" to p.inset,
+            "bg" to Tok.Bg, "surface" to Tok.Surface, "surface_raised" to Tok.Raised,
+            "edge" to Tok.Edge, "edge_light" to Tok.Edge2,
+            "ink" to Tok.Ink, "dim" to Tok.Dim, "faint" to Tok.Faint,
+            "term_bg" to Tok.TermBg, "term_fg" to Tok.TermFg,
+            "accent" to Tok.Accent, "on_accent" to Tok.OnAccent, "magenta" to Tok.Magenta,
+            "green" to Tok.Green, "amber" to Tok.Amber, "red" to Tok.Red, "blue" to Tok.Blue,
+            "inset" to Tok.Inset,
+            "row_running" to Tok.RowRunning, "row_unread" to Tok.RowUnread,
         )
+        // 一个都不许漏：向量里有几个角色，这边就得画出几个
+        assertEquals(roles.keys.sorted(), actual.keys.sorted())
         for ((role, color) in actual) {
-            assertEquals("$name.$role", roles[role]!!.jsonPrimitive.content, hex(color))
+            assertEquals(role, roles[role]!!.jsonPrimitive.content, hex(color))
         }
     }
 
-    @Test fun 黑暗主题逐色对上共享向量() = assertRoles("dark", Palette.Dark)
-
-    @Test fun claude主题逐色对上共享向量() = assertRoles("claude", Palette.Claude)
-
-    /** v1.23：**两套**主题的终端 16 色都两端逐色相同（深色那套以前 Android 用的是 xterm 默认）。 */
-    @Test fun 两套主题的终端16色两端逐色相同() {
-        for (name in listOf("dark", "claude")) {
-            val want = theme(name)["ansi"]!!.jsonArray.map { it.jsonPrimitive.content }
-            val p = Palette.all.first { it.name == name }
-            val got = terminalAnsi(p).map { "#%06x".format(it and 0xFFFFFF) }
-            assertEquals(name, want, got)
-        }
+    /** 终端 16 色两端逐色相同（gruvbox-light），没有「不带就用 xterm 默认表」那条回退。 */
+    @Test fun 终端16色两端逐色相同() {
+        val want = fx["ansi"]!!.jsonArray.map { it.jsonPrimitive.content }
+        val got = Tok.TerminalAnsi.map { "#%06x".format(it and 0xFFFFFF) }
+        assertEquals(want, got)
     }
 }

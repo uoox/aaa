@@ -57,7 +57,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             // 折叠/展开只是配置变化（manifest 里已接管），整棵 composition 不重建。
             // 首页是单栏项目列表，宽窄屏同一套布局，不再按窗口宽度切导航位置。
-            AaaTheme(store) { AaaApp(store, pendingSessionId, pendingPrefill) }
+            AaaTheme { AaaApp(store, pendingSessionId, pendingPrefill) }
         }
     }
 

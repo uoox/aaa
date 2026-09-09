@@ -694,12 +694,12 @@ private fun BubbleCaption(text: String, color: Color) {
 private val UserBubbleShape = RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp, bottomEnd = 6.dp, bottomStart = 14.dp)
 
 /**
- * 用户一侧的气泡：[tint] 淡底（暗主题 0.18、亮主题 0.14——亮底上同样的透明度会显得脏）
- * 加 0.35 的一像素边。宽度跟着内容走，最多占父宽 86%。
+ * 用户一侧的气泡：[tint] 淡底（亮底上 0.14 就够——再重就显得脏）加 0.35 的一像素边。
+ * 宽度跟着内容走，最多占父宽 86%。
  */
 @Composable
 private fun UserBubble(tint: Color = Tok.Accent, content: @Composable () -> Unit) {
-    val fill = tint.copy(alpha = if (Tok.current.isDark) 0.18f else 0.14f)
+    val fill = tint.copy(alpha = 0.14f)
     Box(
         Modifier.maxWidthFraction(0.86f)
             .background(fill, UserBubbleShape)
@@ -772,8 +772,7 @@ private fun ScrollToEndButton(visible: Boolean, modifier: Modifier, onClick: () 
 @Composable
 private fun rememberLinkified(m: ChatMessage): AnnotatedString {
     val context = LocalContext.current
-    // 链接色烙在 AnnotatedString 里，换主题要重扫一遍
-    return remember(m.seq, m.text, Tok.current) { linkified(m.text) { url -> openUrl(context, url) } }
+    return remember(m.seq, m.text) { linkified(m.text) { url -> openUrl(context, url) } }
 }
 
 @Composable

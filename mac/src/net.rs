@@ -175,10 +175,6 @@ impl Net {
     ) -> impl Future<Output = Result<serde_json::Value>> + use<> {
         self.post_json("/projects", serde_json::json!({"name": name, "agent": agent}))
     }
-    /// 置顶 / 取消置顶（daemon 侧存；随后 projects_changed 帧会让列表重拉）
-    pub fn set_pinned(&self, path: &str, pinned: bool) -> impl Future<Output = Result<serde_json::Value>> + use<> {
-        self.post_json("/projects/pin", serde_json::json!({ "path": path, "pinned": pinned }))
-    }
     pub fn delete_projects(
         &self,
         paths: Vec<String>,

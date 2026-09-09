@@ -92,7 +92,7 @@ fun TerminalScreen(store: AppStore, nav: NavHostController, focusId: String) {
                 drawerShape = if (frac >= 1f) RectangleShape else DrawerDefaults.shape,
                 drawerContainerColor = Tok.Surface, drawerContentColor = Tok.Ink,
             ) {
-                ProjectPanel(store, nav, currentPath = current?.project_path, onBeforeNavigate = { scope.launch { drawerState.close() } })
+                ProjectPanel(store, nav, currentTerminalId = current?.id, onBeforeNavigate = { scope.launch { drawerState.close() } })
             }
         },
     ) {

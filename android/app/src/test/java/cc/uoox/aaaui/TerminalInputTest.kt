@@ -7,7 +7,6 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class TerminalInputTest {
@@ -77,10 +76,9 @@ class TerminalInputTest {
         assertEquals(2, displayWidth('中')); assertEquals(1, displayWidth('a'))
     }
 
-    /** v1.23：两套主题都自带 16 色，`terminalAnsi` 原样交给 libvterm，不再有 xterm 默认表兜底。 */
-    @Test fun everyThemeFeedsItsOwnAnsiToVterm() {
-        listOf(Palette.Dark, Palette.Claude).forEach { p ->
-            assertTrue(p.name, terminalAnsi(p).contentEquals(p.ansi!!.map { it.toArgb() }.toIntArray()))
-        }
+    /** 终端 16 色写死在令牌里、原样交给 libvterm，没有 xterm 默认表那条回退（两端颜色不一样就是从那儿来的）。 */
+    @Test fun ansiTableIsFullyDefinedForVterm() {
+        assertEquals(16, Tok.TerminalAnsi.size)
+        assertEquals(Tok.Ink.toArgb(), Tok.TerminalAnsi[15])
     }
 }

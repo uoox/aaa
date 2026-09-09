@@ -28,7 +28,7 @@ fn modal_actions() -> gpui::Div {
 fn modal_hint(text: impl Into<SharedString>) -> gpui::Div {
     div()
         .text_size(px(12.5))
-        .text_color(c(theme::dim()))
+        .text_color(c(theme::DIM))
         .child(text.into())
 }
 
@@ -261,9 +261,9 @@ impl RootView {
             .max_h(px(600.))
             .p(px(18.))
             .rounded(px(12.))
-            .bg(c(theme::surface_raised()))
+            .bg(c(theme::SURFACE_RAISED))
             .border_1()
-            .border_color(c(theme::edge_light()))
+            .border_color(c(theme::EDGE_LIGHT))
             .shadow_lg()
             .flex()
             .flex_col()
@@ -322,7 +322,7 @@ impl RootView {
                 div()
                     .pt(px(8.))
                     .text_size(px(11.))
-                    .text_color(c(theme::faint()))
+                    .text_color(c(theme::FAINT))
                     .child("purge 语义与 aaa CLI 完全一致，不可恢复。"),
             )
             .child(
@@ -361,13 +361,13 @@ impl RootView {
                 div()
                     .py(px(4.))
                     .border_b_1()
-                    .border_color(ca(theme::edge(), 0.5))
+                    .border_color(ca(theme::EDGE, 0.5))
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .gap(px(8.))
-                            .child(dot(if r.ok { theme::green() } else { theme::red() }))
+                            .child(dot(if r.ok { theme::GREEN } else { theme::RED }))
                             .child(
                                 div()
                                     .text_size(px(12.5))
@@ -379,7 +379,7 @@ impl RootView {
                             .pl(px(15.))
                             .font_family("Menlo")
                             .text_size(px(11.))
-                            .text_color(c(theme::ink()))
+                            .text_color(c(theme::INK))
                             .child(SharedString::from(purged)),
                     ),
             );
@@ -594,14 +594,14 @@ impl RootView {
                 div()
                     .font_family("Menlo")
                     .text_size(px(11.5))
-                    .text_color(c(theme::dim()))
+                    .text_color(c(theme::DIM))
                     .child(SharedString::from(old_root)),
             )
             .child(
                 div()
                     .font_family("Menlo")
                     .text_size(px(11.5))
-                    .text_color(c(theme::ink()))
+                    .text_color(c(theme::INK))
                     .pb(px(10.))
                     .child(SharedString::from(format!("→ {new_root}"))),
             )

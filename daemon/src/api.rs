@@ -40,8 +40,6 @@ pub struct App {
     pub bound_port: std::sync::atomic::AtomicU16,
     /// v1.1 task inbox
     pub inbox: std::sync::Mutex<crate::inbox::Inbox>,
-    /// v1.8 置顶的项目路径（三端共享）
-    pub pins: std::sync::Mutex<crate::pins::Pins>,
     /// v1.15：归档的项目（列表 / 看板默认藏起来）
     /// v1.9 会话日志：所有出现过的会话，含已退出、已删除
     pub history: std::sync::Mutex<crate::history::History>,
@@ -411,11 +409,6 @@ async fn projects_list(State(app): State<SharedApp>) -> ApiResult<Json<Value>> {
         let rows = stores::collect(&app2.paths, &mut cache, &app2.cfg.project_root);
         let reg = Registry::load(&app2.cfg.project_root);
         let namer = Namer::new(&app2.paths, app2.cfg.namer);
-        let pinned: std::collections::HashSet<String> = rows
-            .iter()
-            .filter(|r| app2.pins.lock().unwrap().is_pinned(&r.path))
-            .map(|r| r.path.clone())
-            .collect();
         let out: Vec<Value> = rows
             .iter()
             // 注册表就是项目名册：根目录下没登记的目录（顺手 clone 的仓库、
@@ -455,8 +448,6 @@ async fn projects_list(State(app): State<SharedApp>) -> ApiResult<Json<Value>> {
                     "dir_size": r.dir_size,
                     "agent": agent,
                     "session_title": if title.is_empty() { Value::Null } else { Value::String(title.clone()) },
-                    // v1.8：置顶（POST /projects/pin）
-                    "pinned": pinned.contains(&r.path),
                     // v1.22：登记过的项目才能 resume / 删（见下面补的「没登记但有活会话」那几行）
                     "registered": true,
                     // ↓ v1.22：daemon 算好的「这一项目此刻的样子」，客户端只画
@@ -507,7 +498,6 @@ async fn projects_list(State(app): State<SharedApp>) -> ApiResult<Json<Value>> {
                 "dir_size": 0,
                 "agent": l.agent,
                 "session_title": Value::Null,
-                "pinned": false,
                 // 没登记 = 不能 resume / 删项目，客户端据此收起那些菜单项
                 "registered": false,
                 "session_id": l.id,
@@ -566,7 +556,6 @@ async fn projects_create(
         "dir_size": 0,
         "agent": agent,
         "session_title": Value::Null,
-        "pinned": false,
     })))
 }
 
@@ -617,25 +606,6 @@ async fn history_dashboard(State(app): State<SharedApp>) -> ApiResult<Json<Value
     }
     let d = crate::history::dashboard(&entries, &live);
     Ok(Json(serde_json::to_value(d).unwrap_or_else(|_| json!({}))))
-}
-
-#[derive(Deserialize)]
-struct PinBody {
-    path: String,
-    pinned: bool,
-}
-
-/// 置顶 / 取消置顶：daemon 侧存，三端一起变；随后广播 projects_changed
-async fn projects_pin(State(app): State<SharedApp>, Json(body): Json<PinBody>) -> ApiResult<Json<Value>> {
-    if !body.path.starts_with('/') {
-        return Err(ApiError::not_found("path must be absolute"));
-    }
-    let key = stores::realpath(&body.path);
-    let changed = app.pins.lock().unwrap().set_pinned(&key, body.pinned);
-    if changed {
-        app.hub.projects_changed();
-    }
-    Ok(Json(json!({"ok": true, "path": key, "pinned": body.pinned})))
 }
 
 #[derive(Deserialize)]
@@ -754,7 +724,6 @@ async fn projects_delete(
     })
     .await?;
     for p in &deleted_paths {
-        app.pins.lock().unwrap().forget(p);
         let mut h = app.history.lock().unwrap();
         h.mark_project_deleted(p);
         h.save_if_dirty();
@@ -1401,7 +1370,7 @@ struct ConfigPut {
     port: Option<u16>,
     token: Option<String>,
     project_root: Option<String>,
-    /// project_root 变化时是否迁移（整根移动 + 会话 / 日志 / 置顶 / Claude 存储全部改指向）
+    /// project_root 变化时是否迁移（整根移动 + 会话 / 日志 / Claude 存储全部改指向）
     #[serde(default)]
     migrate: bool,
     /// 有存活会话时不再 409：像 `/restart {force}` 一样先正经结束它们，重启后按
@@ -1837,7 +1806,6 @@ pub fn router(app: SharedApp) -> Router {
         .route("/api/v1/health", get(health))
         .route("/api/v1/projects", get(projects_list).post(projects_create))
         .route("/api/v1/projects/delete", post(projects_delete))
-        .route("/api/v1/projects/pin", post(projects_pin))
         .route("/api/v1/history", get(history_list))
         .route("/api/v1/history/backfill", post(history_backfill))
         .route("/api/v1/sessions/{id}/permission", post(session_permission))

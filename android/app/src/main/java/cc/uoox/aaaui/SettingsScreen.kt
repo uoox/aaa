@@ -137,19 +137,6 @@ fun SettingsScreen(store: AppStore, nav: NavHostController) {
                 }
             }
             Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("主题", color = Tok.Ink, fontSize = 14.sp, modifier = Modifier.weight(1f))
-                SingleChoiceSegmentedButtonRow {
-                    Palette.all.forEachIndexed { i, p ->
-                        SegmentedButton(
-                            selected = settings.theme == p.name,
-                            onClick = { scope.launch { store.settings.setTheme(p.name) } },
-                            shape = SegmentedButtonDefaults.itemShape(i, Palette.all.size),
-                            icon = {},
-                        ) { Text(p.label, fontSize = 12.sp, maxLines = 1) }
-                    }
-                }
-            }
-            Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("默认视图", color = Tok.Ink, fontSize = 14.sp, modifier = Modifier.weight(1f))
                 SingleChoiceSegmentedButtonRow {
                     SegmentedButton(
