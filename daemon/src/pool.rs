@@ -553,6 +553,9 @@ pub struct SpawnSpec {
     pub project_name: String,
     pub agent: String,
     pub title: String,
+    /// 标题是用户自己起的（`api::carried_title` 从上一段对话继承来的那种）：
+    /// namer 从此不改它。默认 false——目录名兜底的标题就该被 namer 覆盖。
+    pub custom_title: bool,
     pub cmd: String,
     pub resume_id: Option<String>,
     pub feed_inbox: bool,
@@ -715,7 +718,7 @@ impl SessionPool {
         let hooked = spec.hooked;
         let meta = Meta {
             title: spec.title,
-            custom_title: false,
+            custom_title: spec.custom_title,
             project_path: spec.project_path.clone(),
             project_name: spec.project_name.clone(),
             agent: spec.agent.clone(),

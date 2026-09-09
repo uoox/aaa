@@ -457,12 +457,7 @@ async fn projects_list(State(app): State<SharedApp>) -> ApiResult<Json<Value>> {
                         .or_else(|| a.and_then(|a| a.latest.as_ref().map(|l| l.id.clone()))),
                     // 五态与看板、CLI 同一句话（history::status_of）；没有活会话 = paused
                     "status": live.map(|l| l.status).unwrap_or("paused"),
-                    // 标题回退链：活会话的标题 → agent 存储读出的 session_title → 目录名。
-                    // 这条链此前三端各写一遍
-                    "title": live
-                        .map(|l| l.title.clone())
-                        .filter(|t| !t.trim().is_empty())
-                        .unwrap_or_else(|| if title.is_empty() { r.name.clone() } else { title.clone() }),
+                    "title": project_title(live.map(|l| l.title.as_str()), &title, &r.name),
                     // 排序键：该项目最新一条非终端会话的 updated_at（含已退出）；一个都没有 → 目录 mtime
                     "updated_at": a
                         .and_then(|a| a.latest.as_ref().map(|l| l.updated_at.clone()))
@@ -780,6 +775,98 @@ struct CreateSession {
     fresh: bool,
 }
 
+/// 项目行的标题回退链：活会话的标题 → agent 存储读出的 `session_title` → 目录名。
+/// 这条链此前三端各写一遍（PROTOCOL「一件事只算一次」）。
+///
+/// 活会话的标题**还是目录名**时让位给存储里那个（v1.34）：namer 还没轮到这个会话时
+/// 它就是目录名，而存储那边已经算好了。两个都是目录名的话结果不变。
+fn project_title(live: Option<&str>, store: &str, dir_name: &str) -> String {
+    let store = store.trim();
+    let live = live.map(str::trim).filter(|t| !t.is_empty() && !(*t == dir_name && !store.is_empty()));
+    match live {
+        Some(t) => t.to_string(),
+        None if store.is_empty() => dir_name.to_string(),
+        None => store.to_string(),
+    }
+}
+
+/// 一条可继承标题的旧记录（池子里的会话、或会话日志里的一行）。
+struct TitleCand {
+    agent: String,
+    title: String,
+    custom_title: bool,
+    resume_id: Option<String>,
+    project_path: String,
+    /// ISO-8601 UTC，秒精度——两个来源同一种写法，直接按字符串比新旧
+    ts: String,
+}
+
+/// 从旧记录里挑一个标题：同一段对话（`resume_id`）优先，其次同一目录、同一 agent，
+/// 同一档里取最新的一条。用户自己改的名只跟着同一段对话走——同目录另一段对话的
+/// 自定义标题按到这一段头上，namer 就再也不会纠正它了。
+fn pick_title(
+    cands: &[TitleCand],
+    resume_id: Option<&str>,
+    project_path: &str,
+    agent: &str,
+) -> Option<(String, bool)> {
+    let mut best: Option<(u8, &TitleCand)> = None;
+    for c in cands {
+        if c.agent != agent || c.title.trim().is_empty() {
+            continue;
+        }
+        let rank = if resume_id.is_some() && c.resume_id.as_deref() == resume_id {
+            2
+        } else if c.project_path == project_path {
+            1
+        } else {
+            continue;
+        };
+        if best.map(|(r, b)| (rank, &c.ts) > (r, &b.ts)).unwrap_or(true) {
+            best = Some((rank, c));
+        }
+    }
+    best.map(|(rank, c)| (c.title.trim().to_string(), rank == 2 && c.custom_title))
+}
+
+/// resume 出来的会话接着上一段的标题（v1.34）：池子里已退出的记录（重启后由
+/// `restore_persisted` 读回来）加会话日志，就是「上一段」的全部去处。
+fn carried_title(
+    app: &SharedApp,
+    resume_id: Option<&str>,
+    project_path: &str,
+    agent: &str,
+) -> Option<(String, bool)> {
+    let iso = |t: chrono::DateTime<Utc>| t.to_rfc3339_opts(SecondsFormat::Secs, true);
+    let mut cands: Vec<TitleCand> = app
+        .pool
+        .all()
+        .iter()
+        .map(|s| {
+            let m = s.meta.lock().unwrap();
+            TitleCand {
+                agent: m.agent.clone(),
+                title: m.title.clone(),
+                custom_title: m.custom_title,
+                resume_id: m.resume_id.clone(),
+                project_path: m.project_path.clone(),
+                ts: iso(m.updated_at.unwrap_or(m.created_at)),
+            }
+        })
+        .collect();
+    cands.extend(app.history.lock().unwrap().list(crate::history::KEEP).into_iter().map(|e| {
+        TitleCand {
+            agent: e.agent,
+            title: e.title,
+            custom_title: false,
+            resume_id: None,
+            project_path: e.project_path,
+            ts: e.created_at,
+        }
+    }));
+    pick_title(&cands, resume_id, project_path, agent)
+}
+
 async fn sessions_create(
     State(app): State<SharedApp>,
     Json(body): Json<CreateSession>,
@@ -920,11 +1007,17 @@ async fn sessions_create(
             Err(e) => eprintln!("agy hooks unavailable ({e}); session falls back to screen diffing"),
         }
     }
+    // 标题接着上一段（v1.34）：新会话的标题先用目录名占着，等 namer 起名。平时看不
+    // 出来（新会话本来也没标题），但重启会把所有活会话 resume 一遍——那几十秒里整列
+    // 项目都显示成文件夹名，赶上会话在这窗口里被收掉，错的那版还会落进会话日志。
+    let (title, custom_title) = carried_title(&app, resume_id.as_deref(), &canon_str, agent.id)
+        .unwrap_or_else(|| (project_name.clone(), false));
     let spec = SpawnSpec {
         project_path: canon_str.clone(),
         project_name: project_name.clone(),
         agent: agent.id.to_string(),
-        title: project_name,
+        title,
+        custom_title,
         cmd,
         resume_id,
         feed_inbox: body.feed_inbox,
@@ -2029,6 +2122,60 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn project_row_title_falls_back_through_the_chain() {
+        assert_eq!(project_title(Some("改登录页"), "旧名字", "proj"), "改登录页");
+        // 活会话还叫目录名（namer 还没轮到它）：存储里算好的那个更像话
+        assert_eq!(project_title(Some("proj"), "旧名字", "proj"), "旧名字");
+        // 两个都只有目录名：结果不变
+        assert_eq!(project_title(Some("proj"), "", "proj"), "proj");
+        // 没有活会话
+        assert_eq!(project_title(None, "旧名字", "proj"), "旧名字");
+        assert_eq!(project_title(None, "", "proj"), "proj");
+        assert_eq!(project_title(Some("   "), "", "proj"), "proj");
+    }
+
+    fn cand(agent: &str, title: &str, path: &str, rid: Option<&str>, ts: &str, custom: bool) -> TitleCand {
+        TitleCand {
+            agent: agent.into(),
+            title: title.into(),
+            custom_title: custom,
+            resume_id: rid.map(String::from),
+            project_path: path.into(),
+            ts: ts.into(),
+        }
+    }
+
+    /// 重启会把活会话整批 resume 一遍；新会话若拿目录名当标题，整列项目都变成
+    /// 文件夹名，要等 namer 一个一个补回来。上一段的标题就在旧记录里。
+    #[test]
+    fn resumed_session_inherits_the_previous_title() {
+        let c = vec![
+            cand("claude", "改登录页", "/p/a", Some("conv1"), "2026-09-10T07:00:00Z", false),
+            cand("claude", "另一段", "/p/a", Some("conv2"), "2026-09-10T09:00:00Z", false),
+            cand("claude", "别的项目", "/p/b", Some("conv3"), "2026-09-10T10:00:00Z", false),
+            cand("agy", "别的 agent", "/p/a", Some("conv1"), "2026-09-10T11:00:00Z", false),
+        ];
+        // 同一段对话优先，哪怕同目录有更新的另一段
+        assert_eq!(pick_title(&c, Some("conv1"), "/p/a", "claude"), Some(("改登录页".into(), false)));
+        // 认不出对话（首次重启、老记录没有 resume_id）：同目录最新的那条
+        assert_eq!(pick_title(&c, None, "/p/a", "claude"), Some(("另一段".into(), false)));
+        // 没有旧记录 → 交给调用方用目录名兜底
+        assert_eq!(pick_title(&c, None, "/p/c", "claude"), None);
+        // 空标题的旧记录不算数
+        let empty = vec![cand("claude", "   ", "/p/a", Some("conv1"), "2026-09-10T07:00:00Z", false)];
+        assert_eq!(pick_title(&empty, Some("conv1"), "/p/a", "claude"), None);
+    }
+
+    /// 用户自己改的名只跟着同一段对话走：同目录另一段对话的自定义标题按到这一段
+    /// 头上，namer 就再也不会纠正它了。
+    #[test]
+    fn custom_title_follows_only_the_same_conversation() {
+        let c = vec![cand("claude", "我起的名", "/p/a", Some("conv1"), "2026-09-10T07:00:00Z", true)];
+        assert_eq!(pick_title(&c, Some("conv1"), "/p/a", "claude"), Some(("我起的名".into(), true)));
+        assert_eq!(pick_title(&c, None, "/p/a", "claude"), Some(("我起的名".into(), false)));
+    }
 
     #[test]
     fn auth_check() {
