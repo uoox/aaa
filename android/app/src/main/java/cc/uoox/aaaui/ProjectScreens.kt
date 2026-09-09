@@ -736,7 +736,6 @@ fun ProjectActionsSheet(
     var killConfirm by remember { mutableStateOf(false) }
 
     fun toast(msg: String) = Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-    val muted = pathListContains(settings.mutedProjects, p.path)
     // 激活与否读 daemon 的 status（没有活会话 = paused），不再自己看会话的 state
     val alive = p.status.isNotBlank() && p.status != "paused"
     /** 结束会话 = 项目回到未激活栏。用户自己动的手，随后的 exited 不弹通知。 */
@@ -799,14 +798,6 @@ fun ProjectActionsSheet(
                         onDismiss(); onBeforeNavigate(); nav.openTerminal(sess.id)
                     } catch (e: Exception) { toast("失败：${e.message}") }
                 }
-            }
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("🔕", fontSize = 14.sp, modifier = Modifier.width(28.dp))
-                Text("静音此项目通知", color = Tok.Ink, fontSize = 15.sp, modifier = Modifier.weight(1f))
-                Switch(muted, { v -> scope.launch { store.settings.setProjectMuted(p.path, v) } })
             }
             if (p.registered) SheetItem("🗑", "删除项目…", "目录 + 全部会话", danger = true) { deleteConfirm = true }
             else Text(

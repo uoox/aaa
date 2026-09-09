@@ -330,6 +330,8 @@ pub struct LiveStatus {
     pub status: &'static str,
     /// updated_at（排序键）
     pub updated_at: String,
+    /// 此刻卡在什么权限请求上（`Session.permission` 原样），没有就是 None
+    pub permission: Option<serde_json::Value>,
 }
 
 /// 一张卡
@@ -349,6 +351,11 @@ pub struct SessionCard {
     pub items: Vec<ChecklistItem>,
     /// 排序键：状态翻转 / 改名 / 退出的时刻
     pub updated_at: String,
+    /// v1.27 待决策：卡在什么权限请求上（与 `/sessions` 行上的 `permission` 同一个对象）。
+    /// 有它 = 看板顶上那一节能原地放行，不必进会话。`asking` 但没有它 = 结构化提问
+    /// （AskUserQuestion），只能进会话答。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission: Option<serde_json::Value>,
 }
 
 /// 看板顶上唯一还留着的数字（2026-09-08 用户拍板：五态计数条跟着列表的状态字一起去掉——
@@ -376,9 +383,14 @@ pub fn dashboard(
         .filter(|e| e.agent != "shell")
         .map(|e| {
             let items = parse_checklist(&e.summary);
-            let (status, updated_at, alive) = match live.get(&e.id) {
-                Some(l) => (l.status.to_string(), l.updated_at.clone(), true),
-                None => ("paused".to_string(), e.ended_at.clone().unwrap_or_else(|| e.created_at.clone()), false),
+            let (status, updated_at, alive, permission) = match live.get(&e.id) {
+                Some(l) => (l.status.to_string(), l.updated_at.clone(), true, l.permission.clone()),
+                None => (
+                    "paused".to_string(),
+                    e.ended_at.clone().unwrap_or_else(|| e.created_at.clone()),
+                    false,
+                    None,
+                ),
             };
             SessionCard {
                 id: e.id.clone(),
@@ -392,6 +404,7 @@ pub fn dashboard(
                 open: items.iter().filter(|i| !i.done).count(),
                 items,
                 updated_at,
+                permission,
             }
         })
         .collect();
@@ -465,7 +478,7 @@ mod dashboard_tests {
                 let status = match v["status"].as_str().unwrap() {
                     "asking" => "asking", "running" => "running", "background" => "background", "active" => "active", _ => "paused",
                 };
-                (id.clone(), LiveStatus { status, updated_at: v["updated_at"].as_str().unwrap().to_string() })
+                (id.clone(), LiveStatus { status, updated_at: v["updated_at"].as_str().unwrap().to_string(), permission: None })
             })
             .collect();
         let d = dashboard(&entries, &live);
@@ -500,7 +513,7 @@ mod dashboard_tests {
 
     #[test]
     fn cards_sort_by_status_then_update_and_counts_skip_deleted() {
-        let ls = |status: &'static str, t: &str| LiveStatus { status, updated_at: t.into() };
+        let ls = |status: &'static str, t: &str| LiveStatus { status, updated_at: t.into(), permission: None };
         let mut live = HashMap::new();
         live.insert("act".to_string(), ls("active", "2026-09-07T09:00:00Z"));
         live.insert("bg".to_string(), ls("background", "2026-09-07T01:00:00Z"));

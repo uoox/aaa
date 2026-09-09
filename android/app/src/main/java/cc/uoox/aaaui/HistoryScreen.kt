@@ -3,6 +3,7 @@ package cc.uoox.aaaui
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -26,6 +27,7 @@ import androidx.compose.foundation.lazy.staggeredgrid.items
 import androidx.compose.foundation.lazy.staggeredgrid.rememberLazyStaggeredGridState
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -77,6 +79,15 @@ fun dashboardSections(cards: List<SessionCard>, query: String, showDeleted: Bool
 }
 
 /**
+ * 待决策 = 还在池子里、没删、`status == "asking"` 的会话，等得久的在前。
+ * **刻意不受搜索框与「已删除」开关影响**：这一节是「现在要你做什么」，不是可筛的清单。
+ * 看板本来是「所有会话的进度」，几十个会话并发时真正要人的只有三五个，散在瀑布流里
+ * 得一张张找——这一节把它们拎到顶上，权限请求原地放行。
+ */
+fun pendingCards(cards: List<SessionCard>): List<SessionCard> =
+    cards.filter { it.alive && !it.deleted && it.status == "asking" }.sortedBy { it.updated_at }
+
+/**
  * 看板（2026-09-07 用户拍板，第二版）：**所有会话的进度**，没有时间维度。
  * 数据是 daemon 一次算好的 `GET /history/dashboard`。
  *
@@ -117,6 +128,24 @@ fun HistoryScreen(store: AppStore, nav: NavHostController) {
             Text("看板", color = Tok.Ink, fontSize = 17.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.weight(1f))
             d?.let { Text("未完成 ${it.counts.open_items} 条", color = Tok.Amber, fontSize = 12.sp, fontFamily = FontFamily.Monospace) }
+        }
+        // 两个批量口（v1.27）：紧急制动只收在跑的项目会话（终端不动）；
+        // 清空已退出只清池子里的记录，不碰项目目录，也不碰会话日志
+        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TextButton(onClick = {
+                scope.launch {
+                    runCatching { store.client?.killAll(true); dash = store.client?.historyDashboard() }
+                        .onFailure { e -> error = e.message }
+                    store.refreshSessions()
+                }
+            }) { Text("全部停下", color = Tok.Red, fontSize = 12.sp) }
+            TextButton(onClick = {
+                scope.launch {
+                    runCatching { store.client?.cleanExited(); dash = store.client?.historyDashboard() }
+                        .onFailure { e -> error = e.message }
+                    store.refreshSessions()
+                }
+            }) { Text("清空已退出", color = Tok.Dim, fontSize = 12.sp) }
         }
         RoundedTextField(
             query, { query = it }, "搜索：标题 / 项目 / 条目",
@@ -164,6 +193,24 @@ fun HistoryScreen(store: AppStore, nav: NavHostController) {
                             },
                         )
                     }
+                    val pending = pendingCards(d.sessions)
+                    if (pending.isNotEmpty()) {
+                        item(key = "hdr-pending", span = StaggeredGridItemSpan.FullLine) {
+                            SectionHeader("待决策 ${pending.size}")
+                        }
+                        items(pending, key = { "pend-${it.id}" }, span = { StaggeredGridItemSpan.FullLine }) { c ->
+                            PendingCard(
+                                c,
+                                onDecide = { behavior ->
+                                    scope.launch {
+                                        runCatching { store.client?.permission(c.id, behavior); dash = store.client?.historyDashboard() }
+                                            .onFailure { e -> error = e.message }
+                                    }
+                                },
+                                onOpen = { openSession(c.id, "") },
+                            )
+                        }
+                    }
                     // 空的那一节整节不画，表头也不画：没有「在 AAA 里 0」这种话。
                     // 只有这一节时也不写表头——它只在「和下面那节相对」时才有意义
                     if (sections.inAaa.isNotEmpty()) {
@@ -185,6 +232,41 @@ fun HistoryScreen(store: AppStore, nav: NavHostController) {
                 }
                 ScrollHint(gridState, Modifier.align(Alignment.TopEnd).padding(top = 4.dp, bottom = 24.dp, end = 1.dp))
             }
+        }
+    }
+}
+
+/**
+ * 待决策的一行：标题 + 项目 · 它在问什么 + 动作。权限请求能替答（允许 / 拒绝直接
+ * `POST /sessions/:id/permission`），结构化提问只能进会话，给一个「去回答」。
+ */
+@Composable
+private fun PendingCard(c: SessionCard, onDecide: (String) -> Unit, onOpen: () -> Unit) {
+    val p = c.permission
+    val summary = when {
+        p == null -> "弹着选项等你选"
+        p.tool_name.isBlank() -> p.summary
+        else -> "${p.tool_name}：${p.summary}"
+    }
+    Row(
+        Modifier.fillMaxWidth()
+            .background(Tok.Amber.copy(alpha = 0.08f), RoundedCornerShape(10.dp))
+            .border(1.dp, Tok.Amber.copy(alpha = 0.7f), RoundedCornerShape(10.dp))
+            .padding(start = 12.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(c.title, color = Tok.Ink, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(
+                "${c.project_name} · $summary",
+                color = Tok.Faint, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            )
+        }
+        if (p != null) {
+            TextButton(onClick = { onDecide("allow") }) { Text("允许", color = Tok.Green, fontSize = 13.sp) }
+            TextButton(onClick = { onDecide("deny") }) { Text("拒绝", color = Tok.Red, fontSize = 13.sp) }
+        } else {
+            TextButton(onClick = onOpen) { Text("去回答", color = Tok.Accent, fontSize = 13.sp) }
         }
     }
 }

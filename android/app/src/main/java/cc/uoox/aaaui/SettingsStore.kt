@@ -21,7 +21,6 @@ data class AppSettings(
     val notifyDone: Boolean = true,
     val serviceEnabled: Boolean = false,
     val defaultUi: String = "messages", // "messages" | "terminal"
-    val mutedProjects: Set<String> = emptySet(),
     /**
      * 有黄点的项目路径（2026-09-08 用户拍板 Q1(a)：**只存本地**）。这台设备还没看过的
      * 「跑完了 / 在等你回话」。手机看过不影响 Mac 上的黄点——黄点说的是「我这台还没看」，
@@ -30,10 +29,7 @@ data class AppSettings(
     val unreadProjects: Set<String> = emptySet(),
     /** 最近打开的会话 id：没有首页了，app 起来直接回到它 */
     val lastSession: String? = null,
-) {
-    val notifySettings: NotifySettings
-        get() = NotifySettings(notifyDone, mutedProjects)
-}
+)
 
 class SettingsStore(private val context: Context) {
     private object K {
@@ -41,12 +37,11 @@ class SettingsStore(private val context: Context) {
         val NOTIFY_DONE = booleanPreferencesKey("notify_done")
         val SERVICE_ENABLED = booleanPreferencesKey("service_enabled")
         val DEFAULT_UI = stringPreferencesKey("default_ui")
-        val MUTED_PROJECTS = stringSetPreferencesKey("muted_projects")
         val UNREAD_PROJECTS = stringSetPreferencesKey("unread_projects")
         /** 会话 id → 输入框草稿（JSON 对象）。切出去 / 被系统杀掉再回来，字还在。 */
         val DRAFTS = stringPreferencesKey("drafts_json")
         val LAST_SESSION = stringPreferencesKey("last_session")
-        /** 上次见到的 daemon 项目根：变了就把静音路径的前缀跟着改 */
+        /** 上次见到的 daemon 项目根：变了就把黄点路径的前缀跟着改 */
         val PROJECT_ROOT = stringPreferencesKey("project_root")
     }
 
@@ -58,7 +53,6 @@ class SettingsStore(private val context: Context) {
             notifyDone = p[K.NOTIFY_DONE] ?: true,
             serviceEnabled = p[K.SERVICE_ENABLED] ?: false,
             defaultUi = p[K.DEFAULT_UI] ?: "messages",
-            mutedProjects = p[K.MUTED_PROJECTS] ?: emptySet(),
             unreadProjects = p[K.UNREAD_PROJECTS] ?: emptySet(),
             lastSession = p[K.LAST_SESSION]?.takeIf { it.isNotBlank() },
         )
@@ -93,7 +87,7 @@ class SettingsStore(private val context: Context) {
     }
 
     /**
-     * daemon 报的项目根变了（迁根）：静音项目按路径存，前缀跟着换，用户不用重新点。
+     * daemon 报的项目根变了（迁根）：黄点按路径存，前缀跟着换，用户不用重新点。
      * 第一次见到的根只记下来。返回是否改写过。
      */
     suspend fun noteProjectRoot(root: String): Boolean {
@@ -102,20 +96,13 @@ class SettingsStore(private val context: Context) {
         context.dataStore.edit { p ->
             val old = p[K.PROJECT_ROOT]
             if (old != null && old != root) {
-                for (key in listOf(K.MUTED_PROJECTS, K.UNREAD_PROJECTS)) {
-                    val cur = p[key] ?: emptySet()
-                    val next = cur.map { rerootPath(it, old, root) }.toSet()
-                    if (next != cur) { p[key] = next; changed = true }
-                }
+                val cur = p[K.UNREAD_PROJECTS] ?: emptySet()
+                val next = cur.map { rerootPath(it, old, root) }.toSet()
+                if (next != cur) { p[K.UNREAD_PROJECTS] = next; changed = true }
             }
             p[K.PROJECT_ROOT] = root
         }
         return changed
-    }
-
-    suspend fun setProjectMuted(path: String, muted: Boolean) = context.dataStore.edit { p ->
-        val cur = p[K.MUTED_PROJECTS] ?: emptySet()
-        p[K.MUTED_PROJECTS] = if (muted) cur + path else withoutPath(cur, path)
     }
 
     /** 打黄点 / 清黄点。path 为空（老 daemon 没给项目路径）时什么都不做。 */

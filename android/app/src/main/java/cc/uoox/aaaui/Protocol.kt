@@ -217,6 +217,11 @@ const val SCHEMA_PROJECT_STATUS = 2
     val open: Int = 0,
     val items: List<ChecklistItem> = emptyList(),
     val updated_at: String = "",
+    /**
+     * v1.27：卡在什么权限请求上（`asking` 且是权限对话框时才有）。看板顶上的
+     * 「待决策」靠它原地放行；`asking` 而没有它 = 结构化提问，只能进会话答。
+     */
+    val permission: PermissionPrompt? = null,
 )
 
 /**
@@ -316,22 +321,8 @@ sealed class EventFrame {
     }
 }
 
-// ---------- notification filtering (client-side, PROTOCOL v1.1 通知细化) ----------
-
-data class NotifySettings(
-    val doneEnabled: Boolean = true,
-    val mutedProjects: Set<String> = emptySet(),
-)
-
-object NotifyFilter {
-    fun shouldNotify(projectPath: String, settings: NotifySettings): Boolean {
-        if (pathListContains(settings.mutedProjects, projectPath)) return false
-        return settings.doneEnabled
-    }
-}
-
 /**
- * 本机按路径存的集合（黄点 / 静音）里有没有这个项目。**两边都去掉尾斜杠再比**：daemon、
+ * 本机按路径存的集合（现在只剩黄点）里有没有这个项目。**两边都去掉尾斜杠再比**：daemon、
  * 通知、`/projects` 三处给的同一个目录可能一个带尾斜杠一个不带，裸字符串相等会把 `/p/a` 和
  * `/p/a/` 当成两个项目——黄点打在带斜杠的那份上，进会话时按不带斜杠的那份去清，清不掉。
  * 只削尾斜杠，不做前缀匹配：`/p/b` 不是 `/p/bg`。

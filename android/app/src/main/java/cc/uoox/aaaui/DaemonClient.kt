@@ -133,6 +133,13 @@ class DaemonClient(
         json.decodeFromString(get("/sessions/$id/messages?after=$after&limit=$limit"))
 
     /** v1.16：替用户答权限对话框（allow / deny） */
+    /** 紧急制动：收掉还活着的项目会话（终端不收） */
+    suspend fun killAll(runningOnly: Boolean = true): String =
+        post("/sessions/kill_all", buildJsonObject { put("running_only", runningOnly) }.toString())
+
+    /** 清掉池子里已退出的会话记录（不动项目目录、不动 agent 存储） */
+    suspend fun cleanExited(): String = post("/sessions/clean_exited", "{}")
+
     suspend fun permission(sessionId: String, behavior: String) {
         post("/sessions/$sessionId/permission", buildJsonObject { put("behavior", behavior) }.toString())
     }

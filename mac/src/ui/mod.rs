@@ -341,8 +341,8 @@ pub struct RootView {
     // 详情面板（会话页右侧，⌘I）
     /// 面板展开与否，随 ui.toml 落盘
     pub detail_visible: bool,
-    /// 静音通知的项目路径，随 ui.toml 落盘
-    pub muted_projects: Vec<String>,
+    /// 系统通知总开关，随 ui.toml 落盘（设置页；没有分项目静音了）
+    pub notify_on: bool,
     /// 有黄点的项目路径（本机，见 UiState::unread_projects）
     pub unread_projects: Vec<String>,
     /// 套餐用量（GET /usage + usage 帧）；None = 没有套餐信息，侧栏不画
@@ -420,12 +420,18 @@ impl RootView {
         // 系统通知点击 → 回到 App、打开那条会话（notify.rs 把会话 id 丢进这条通道）
         let mut clicks = crate::notify::install();
         cx.spawn(async move |this, cx| {
-            while let Some(id) = clicks.next().await {
+            while let Some(action) = clicks.next().await {
                 if this
-                    .update(cx, |root: &mut RootView, cx| {
-                        cx.activate(true);
-                        if root.session(&id).is_some() {
-                            root.open_session(id, cx);
+                    .update(cx, |root: &mut RootView, cx| match action {
+                        // 横幅上按的「允许 / 拒绝」：不抢焦点，直接替答
+                        crate::notify::NotifyAction::Decide(id, behavior) => {
+                            root.spawn_fetch_ignore(root.net.session_permission(&id, behavior), false, cx);
+                        }
+                        crate::notify::NotifyAction::Open(id) => {
+                            cx.activate(true);
+                            if root.session(&id).is_some() {
+                                root.open_session(id, cx);
+                            }
                         }
                     })
                     .is_err()
@@ -482,7 +488,7 @@ impl RootView {
             sidebar_w: ui_state.sidebar_w,
             sidebar_drag: None,
             detail_visible: ui_state.detail_visible,
-            muted_projects: ui_state.muted_projects,
+            notify_on: ui_state.notify,
             unread_projects: ui_state.unread_projects,
             plan: None,
             dashboard: Dashboard::default(),
@@ -657,13 +663,12 @@ impl RootView {
         // 用户正盯着这个会话（窗口前台 + 当前页就是它）就别弹通知——
         // 眼皮底下跑完的东西再弹一条只是噪音
         let watching = self.page == Page::Session(new.id.clone()) && cx.active_window().is_some();
-        // 详情面板里静音了这个项目：一条都不弹
-        let muted = path_list_contains(&self.muted_projects, &new.project_path);
+
         // 标记无论如何都要消耗掉
         let killed_here = self.user_killed.remove(&new.id);
         // 黄点（2026-09-08）：打点的时机和三种通知完全一样——响一声、列表上留一个点，是同一
-        // 件事的两种说法。区别只有一个：**静音只关通知，不关黄点**（静音是「别吵我」，不是
-        // 「别记着」）；正盯着这个会话看的时候不打点，那已经看见了。
+        // 件事的两种说法。区别只有一个：**通知总开关只关通知，不关黄点**（关通知是「别吵我」，
+        // 不是「别记着」）；正盯着这个会话看的时候不打点，那已经看见了。
         let worth_flagging = (new.asking && !old_asking && new.state != SessionState::Exited)
             || new
                 .error
@@ -679,27 +684,34 @@ impl RootView {
         if worth_flagging && !watching {
             self.set_unread(new.project_path.clone(), true, cx);
         }
-        if watching || muted {
+        if watching || !self.notify_on {
             return;
         }
         if new.asking && !old_asking && new.state != SessionState::Exited {
-            crate::notify::send(&new.display_title(), "待回复 · 等你选一个", &new.id);
+            // 权限请求能在横幅上直接答；结构化提问（AskUserQuestion）只能进会话，不给按钮
+            let p = new.permission.as_ref();
+            let body = match p {
+                None => "待回复 · 等你选一个".to_string(),
+                Some(p) if p.tool_name.is_empty() => p.summary.clone(),
+                Some(p) => format!("{}：{}", p.tool_name, p.summary),
+            };
+            crate::notify::send(&new.display_title(), &body, &new.id, p.is_some());
             return;
         }
         if let Some(err) = new.error.as_deref().filter(|e| !e.is_empty())
             && old_error.as_deref() != Some(err)
         {
-            crate::notify::send(&new.display_title(), &format!("出错 · {err}"), &new.id);
+            crate::notify::send(&new.display_title(), &format!("出错 · {err}"), &new.id, false);
             return;
         }
         if old_state != Some(SessionState::Running) {
             return;
         }
         match new.state {
-            SessionState::Waiting => crate::notify::send(&new.display_title(), "运行结束 · 等你下一步", &new.id),
+            SessionState::Waiting => crate::notify::send(&new.display_title(), "运行结束 · 等你下一步", &new.id, false),
             SessionState::Exited => {
                 if !killed_here && new.exit_code.is_some_and(|c| c != 0) {
-                    crate::notify::send(&new.display_title(), &format!("出错 · 退出码 {}", new.exit_code.unwrap_or(0)), &new.id);
+                    crate::notify::send(&new.display_title(), &format!("出错 · 退出码 {}", new.exit_code.unwrap_or(0)), &new.id, false);
                 }
             }
             SessionState::Running => {}
@@ -1447,7 +1459,7 @@ impl RootView {
         UiState {
             sidebar_w: self.sidebar_w,
             detail_visible: self.detail_visible,
-            muted_projects: self.muted_projects.clone(),
+            notify: self.notify_on,
             unread_projects: self.unread_projects.clone(),
         }
     }

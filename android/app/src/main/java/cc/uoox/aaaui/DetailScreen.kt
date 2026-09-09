@@ -183,18 +183,6 @@ fun SessionDetailScreen(store: AppStore, nav: NavHostController, sessionId: Stri
                 }
             }
 
-            // ── 通知：按项目静音（本机配置）
-            DetailSection("通知", null) {
-                Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("静音此项目通知", color = Tok.Ink, fontSize = 14.sp, modifier = Modifier.weight(1f))
-                    Switch(
-                        // 去尾斜杠再比：`/p/a` 与 `/p/a/` 是同一个项目（见 pathListContains）
-                        pathListContains(settings.mutedProjects, s.project_path),
-                        { v -> scope.launch { store.settings.setProjectMuted(s.project_path, v) } },
-                    )
-                }
-            }
-
             // ── 更多：原来 ⋮ 里那些一年用一次的操作，收在最后（用户 2026-09-08：顶栏不该占着它们）。
             // 结束会话 / 删除**不在这里**：那归项目列表（长按项目行）
             DetailSection("更多", null) {

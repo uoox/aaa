@@ -87,9 +87,6 @@ class ProjectRowsTest {
         assertTrue(unread.contains("/p/bg/"))
         assertTrue(rows.first { it.project.path == "/p/bg" }.unread)
         assertFalse(rows.first { it.project.path == "/p/bare" }.unread)
-        // 静音判定同一口径
-        assertTrue(NotifyFilter.shouldNotify("/p/bg", NotifySettings(mutedProjects = setOf("/p/other"))))
-        assertFalse(NotifyFilter.shouldNotify("/p/bg", NotifySettings(mutedProjects = setOf("/p/bg/"))))
     }
 
     /** 不认识的状态（老 daemon 的空串）沉到最后，也不画淡蓝底：宁可排在底下，也不假装懂它 */

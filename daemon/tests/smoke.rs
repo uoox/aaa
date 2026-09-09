@@ -504,6 +504,64 @@ async fn upload_saves_into_project_inbox_dir() {
     drop(guard);
 }
 
+/// v1.27 两个批量口：紧急制动（收掉在跑的项目会话，终端不动）与清空已退出的记录。
+#[tokio::test(flavor = "multi_thread")]
+async fn kill_all_spares_terminals_and_clean_exited_clears_the_pool() {
+    let env = setup_env();
+    let guard = spawn_daemon(&env);
+    let port = wait_port(&env);
+
+    let (_, proj) = http(
+        "POST",
+        port,
+        "/api/v1/projects",
+        Some(TOKEN),
+        Some(serde_json::json!({"name": "brake"})),
+    );
+    let path = proj["path"].as_str().unwrap().to_string();
+    // 一个「项目会话」（这里用 shell 当替身：测试环境里没有 claude）与一个终端。
+    // 项目会话之所以是项目会话，看的是 agent 不等于 shell——所以这里改用
+    // 一个真的项目会话拿不到，退而验证「终端不会被收」这一条。
+    let (_, term) = http(
+        "POST",
+        port,
+        "/api/v1/sessions",
+        Some(TOKEN),
+        Some(serde_json::json!({"project_path": path, "agent": "shell", "resume": false, "fresh": true})),
+    );
+    let term_id = term["id"].as_str().unwrap().to_string();
+
+    let (code, r) = http("POST", port, "/api/v1/sessions/kill_all", Some(TOKEN), Some(serde_json::json!({})));
+    assert_eq!(code, 200, "静态段不能被 /sessions/{{id}} 抢走");
+    assert_eq!(r["count"], 0, "终端不算项目会话，一个都不该收");
+    let (_, list) = http("GET", port, "/api/v1/sessions", Some(TOKEN), None);
+    assert_eq!(list.as_array().unwrap().len(), 1, "终端还活着");
+
+    // 收掉终端（这条走单会话的口），它就成了池子里一条已退出的记录
+    let (code, _) = http("POST", port, &format!("/api/v1/sessions/{term_id}/kill"), Some(TOKEN), None);
+    assert_eq!(code, 200);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let (_, l) = http("GET", port, "/api/v1/sessions", Some(TOKEN), None);
+        if l[0]["state"] == "exited" {
+            break;
+        }
+        assert!(Instant::now() < deadline, "终端没有退出");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let (code, r) = http("POST", port, "/api/v1/sessions/clean_exited", Some(TOKEN), None);
+    assert_eq!(code, 200);
+    assert_eq!(r["removed"], 1);
+    let (_, list) = http("GET", port, "/api/v1/sessions", Some(TOKEN), None);
+    assert!(list.as_array().unwrap().is_empty(), "池子清空了");
+    // 会话日志里记录还在（盖了删除戳），项目目录也还在
+    let (_, hist) = http("GET", port, "/api/v1/history", Some(TOKEN), None);
+    assert!(hist["entries"].as_array().unwrap().iter().any(|e| e["id"] == term_id.as_str()));
+    assert!(Path::new(&path).is_dir(), "只清记录，不动目录");
+    drop(guard);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn inbox_auto_feed_on_first_waiting() {
     let env = setup_env();

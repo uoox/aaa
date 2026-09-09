@@ -49,6 +49,9 @@
                 <data android:mimeType="*/*"/>
             </intent-filter>
         </activity>
+        <receiver
+            android:name=".PermissionActionReceiver"
+            android:exported="false" />
         <service
             android:name=".NotificationService"
             android:exported="false"

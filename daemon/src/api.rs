@@ -600,24 +600,14 @@ async fn projects_agent(
         .ok_or_else(|| ApiError::agent_unknown(&body.agent))?;
     let app2 = Arc::clone(&app);
     let (raw, agent_id) = (body.path.clone(), agent.id);
-    // 注册表的键有两种写法：`POST /projects` 存的是原样路径，开会话时存的是
-    // canonicalize 过的（项目根本身带软链接时两者不同）。删项目那边两个都 unset，
-    // 这里同理——**存在的都改**。只改命中的那一个，另一个会留着旧 agent，下次
-    // `POST /sessions` 按 canonicalize 路径去查，刚换的就白换了。
     let path = blocking(move || {
         let _reg_lock = crate::registry::lock();
         let mut reg = Registry::load(&app2.cfg.project_root);
-        let mut keys = vec![raw.clone()];
-        let canon = stores::realpath(&raw);
-        if canon != raw {
-            keys.push(canon);
+        if reg.get(&raw).is_none() {
+            return Err(format!("not registered: {raw}"));
         }
-        keys.retain(|k| reg.get(k).is_some());
-        let first = keys.first().cloned().ok_or_else(|| format!("not registered: {raw}"))?;
-        for k in &keys {
-            reg.set(k, agent_id).map_err(|e| format!("registry: {e}"))?;
-        }
-        Ok::<String, String>(first)
+        reg.set(&raw, agent_id).map_err(|e| format!("registry: {e}"))?;
+        Ok(Registry::norm(&raw))
     })
     .await?
     .map_err(ApiError::not_found)?;
@@ -668,7 +658,10 @@ async fn history_dashboard(State(app): State<SharedApp>) -> ApiResult<Json<Value
         let m = s.meta.lock().unwrap();
         let status = crate::history::status_of(&m);
         let updated_at = m.updated_at.unwrap_or(m.created_at).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        live.insert(s.id.clone(), crate::history::LiveStatus { status, updated_at });
+        live.insert(
+            s.id.clone(),
+            crate::history::LiveStatus { status, updated_at, permission: m.permission.clone() },
+        );
     }
     let d = crate::history::dashboard(&entries, &live);
     Ok(Json(serde_json::to_value(d).unwrap_or_else(|_| json!({}))))
@@ -775,7 +768,6 @@ async fn projects_delete(
                 .into_iter()
                 .map(|(label, count)| json!({"agent_label": label, "count": count}))
                 .collect();
-            let _ = reg.unset(p);
             let _ = reg.unset(&target);
             let rm_ok = if target_dir.exists() {
                 std::fs::remove_dir_all(&target_dir).is_ok()
@@ -1244,6 +1236,71 @@ async fn session_kill(
     Ok(Json(json!({"ok": true})))
 }
 
+#[derive(Deserialize)]
+struct KillAll {
+    /// 默认只收在跑的；false = 连停在输入框等你说话的一起收
+    #[serde(default = "default_true")]
+    running_only: bool,
+}
+
+/// 紧急制动：一把收掉所有还活着的**项目**会话（终端不收——它不烧配额，
+/// 而且十有八九是你自己开着在用）。会话留在池子里，屏幕能回放，跟一个个按 ✕ 完全一样。
+///
+/// 与 `/restart` 的区别：那个是把 daemon 重启（起来还会自动 resume），这个只是刹车。
+async fn sessions_kill_all(
+    State(app): State<SharedApp>,
+    body: Option<Json<KillAll>>,
+) -> ApiResult<Json<Value>> {
+    let running_only = body.map(|b| b.running_only).unwrap_or(true);
+    let victims: Vec<Arc<crate::pool::Session>> = app
+        .pool
+        .list()
+        .into_iter()
+        .filter(|s| {
+            let m = s.meta.lock().unwrap();
+            m.agent != "shell"
+                && m.state != SState::Exited
+                && (!running_only || m.state == SState::Running)
+        })
+        .collect();
+    let killed: Vec<String> = victims.iter().map(|s| s.meta.lock().unwrap().title.clone()).collect();
+    // 并行收，总耗时 = 最慢那一个（与 /restart 同一套）
+    let waits: Vec<_> = victims
+        .iter()
+        .cloned()
+        .map(|s| tokio::spawn(async move { kill_and_wait(&s, 25, 120).await }))
+        .collect();
+    for w in waits {
+        let _ = w.await;
+    }
+    Ok(Json(json!({"ok": true, "count": killed.len(), "killed": killed})))
+}
+
+/// 把池子里已经退出的会话记录一次清干净。**只动记录**：项目目录、agent 存储、
+/// 会话日志里的条目都不碰（日志那边照旧盖 `deleted_at`）。
+/// 存在的理由：几十个会话跑上几天，池子里几百条已退出的记录，看板每次都要连它们一起
+/// 反序列化和排版；此前想清只能一条条 `DELETE /sessions/:id`，或者去删整个项目目录。
+async fn sessions_clean_exited(State(app): State<SharedApp>) -> ApiResult<Json<Value>> {
+    let gone: Vec<Arc<crate::pool::Session>> = app
+        .pool
+        .list()
+        .into_iter()
+        .filter(|s| s.state() == SState::Exited)
+        .collect();
+    for sess in &gone {
+        app.pool.remove(&sess.id);
+        sess.remove_persisted(&app.pool.ctx);
+        let mut h = app.history.lock().unwrap();
+        h.upsert(crate::history::entry_from(sess));
+        h.mark_deleted(&sess.id);
+        app.hub.session_removed(&sess.id);
+    }
+    if !gone.is_empty() {
+        app.history.lock().unwrap().save_if_dirty();
+    }
+    Ok(Json(json!({"ok": true, "removed": gone.len()})))
+}
+
 async fn session_delete(
     State(app): State<SharedApp>,
     UrlPath(id): UrlPath<String>,
@@ -1612,6 +1669,13 @@ async fn session_messages(
     })))
 }
 
+// ---------- 收件箱：项目的任务清单，Claude 空下来时 daemon 自动喂 ----------
+//
+// 2026-09-10 一度当成僵尸路由删掉（两端确实都不调），装回来了：它是收件箱**唯一**的
+// 通用写入口——另一个写入者只有「信任对话框挡着屏幕时把整句话收下」那一条岔路。
+// 删了它 `feed.rs` 就只剩那个角落能触发，smoke 里那条自动投喂的用例也没法再写。
+// 真正待定的是整个「收件箱 + 自动投喂」要不要留：两端都没有入口，用户加不进任务。
+
 #[derive(Deserialize)]
 struct InboxQuery {
     path: String,
@@ -1879,6 +1943,8 @@ pub fn router(app: SharedApp) -> Router {
         .route("/api/v1/sessions/{id}/checklist", post(session_checklist))
         .route("/api/v1/history/dashboard", get(history_dashboard))
         .route("/api/v1/sessions", get(sessions_list).post(sessions_create))
+        .route("/api/v1/sessions/kill_all", post(sessions_kill_all))
+        .route("/api/v1/sessions/clean_exited", post(sessions_clean_exited))
         .route("/api/v1/sessions/{id}", delete(session_delete))
         .route("/api/v1/sessions/{id}/input", post(session_input))
         .route("/api/v1/sessions/{id}/answer", post(session_answer))
@@ -1886,13 +1952,13 @@ pub fn router(app: SharedApp) -> Router {
         .route("/api/v1/sessions/{id}/rename", post(session_rename))
         .route("/api/v1/sessions/{id}/screen", get(session_screen))
         .route("/api/v1/sessions/{id}/messages", get(session_messages))
-        .route("/api/v1/inbox", get(inbox_list).post(inbox_add))
-        .route("/api/v1/inbox/{id}", delete(inbox_delete))
         .route(
             "/api/v1/projects/upload",
             post(project_upload)
                 .layer(axum::extract::DefaultBodyLimit::max(UPLOAD_LIMIT)),
         )
+        .route("/api/v1/inbox", get(inbox_list).post(inbox_add))
+        .route("/api/v1/inbox/{id}", delete(inbox_delete))
         .route("/api/v1/hooks/{event}", post(hook_event))
         .route("/api/v1/usage", get(usage_get))
         .route("/api/v1/sessions/{id}/artifacts", get(session_artifacts))

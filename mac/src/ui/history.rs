@@ -46,6 +46,103 @@ impl RootView {
     }
 
     /// 一张卡（全展开：所有清单项都列出来）
+    /// 待决策：此刻卡在你身上的会话。看板本来是「所有会话的进度」，几十个会话并发时
+    /// 真正要人的却只有三五个——它们散在瀑布流里，得一张张找。这一节把它们拎到顶上，
+    /// 权限请求原地放行，结构化提问给一个「去回答」。
+    fn pending(&self) -> Vec<&SessionCard> {
+        pending_cards(&self.dashboard.sessions)
+    }
+
+    /// 看板上原地放行。成功与否都重拉一次看板——那一条会随之从这一节消失。
+    fn decide_from_board(&mut self, id: String, behavior: &'static str, cx: &mut Context<Self>) {
+        let fut = self.net.session_permission(&id, behavior);
+        self.spawn_fetch(fut, |r, _: serde_json::Value, cx| r.fetch_history(cx), true, cx);
+    }
+
+    fn pending_card(&self, card: &SessionCard, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        let id = card.id.clone();
+        let btn = |el_id: SharedString, label: &'static str, color: u32, sid: String, behavior: &'static str, cx: &mut Context<Self>| {
+            div()
+                .id(el_id)
+                .px(px(10.))
+                .py(px(3.))
+                .rounded(px(6.))
+                .text_size(px(11.5))
+                .text_color(c(theme::INK))
+                .bg(ca(color, 0.18))
+                .border_1()
+                .border_color(ca(color, 0.6))
+                .cursor_pointer()
+                .hover(|st| st.bg(ca(color, 0.3)))
+                .on_click(cx.listener(move |this, _, _, cx| this.decide_from_board(sid.clone(), behavior, cx)))
+                .child(label)
+        };
+        let summary = card
+            .permission
+            .as_ref()
+            .map(|p| {
+                if p.tool_name.is_empty() { p.summary.clone() } else { format!("{}：{}", p.tool_name, p.summary) }
+            })
+            .unwrap_or_else(|| "弹着选项等你选".into());
+        let mut row = div()
+            .id(SharedString::from(format!("pend-{}", card.id)))
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .px(px(12.))
+            .py(px(8.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(ca(theme::AMBER, 0.7))
+            .bg(ca(theme::AMBER, 0.08))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .child(
+                        div()
+                            .text_size(px(12.5))
+                            .text_color(c(theme::INK))
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .child(SharedString::from(card.title.clone())),
+                    )
+                    .child(
+                        meta()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .child(SharedString::from(format!("{} · {summary}", card.project_name))),
+                    ),
+            );
+        // 权限请求能替答；结构化提问（AskUserQuestion）只能进会话，给一个入口就够
+        if card.permission.is_some() {
+            row = row
+                .child(btn(SharedString::from(format!("pa-{}", card.id)), "允许", theme::GREEN, id.clone(), "allow", cx))
+                .child(btn(SharedString::from(format!("pd-{}", card.id)), "拒绝", theme::RED, id.clone(), "deny", cx));
+        } else {
+            let open_id = id.clone();
+            row = row.child(
+                div()
+                    .id(SharedString::from(format!("po-{}", card.id)))
+                    .px(px(10.))
+                    .py(px(3.))
+                    .rounded(px(6.))
+                    .text_size(px(11.5))
+                    .text_color(c(theme::ACCENT))
+                    .cursor_pointer()
+                    .hover(|st| st.bg(c(theme::SURFACE_RAISED)))
+                    .on_click(cx.listener(move |this, _, _, cx| this.open_session(open_id.clone(), cx)))
+                    .child("去回答"),
+            );
+        }
+        row
+    }
+
     fn card(&self, card: &SessionCard, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
         let total = card.done + card.open;
         let frac = if total == 0 { 0. } else { card.done as f32 / total as f32 };
@@ -219,6 +316,16 @@ impl RootView {
         };
 
         let mut body = div().flex().flex_col().gap(px(12.)).pb(px(16.));
+        // 待决策排在最前，且不受搜索框和「已删除」开关影响：它是「现在要你做什么」，
+        // 不是一份可以筛的清单
+        let pending = self.pending();
+        if !pending.is_empty() {
+            let mut sec = div().flex().flex_col().gap(px(6.));
+            for card in &pending {
+                sec = sec.child(self.pending_card(card, cx));
+            }
+            body = body.child(head(format!("待决策 {}", pending.len()), false)).child(sec);
+        }
         if !here.is_empty() {
             // 只有一节时不写表头：「在 AAA 里 7」单独挂在那儿是句废话，它只在
             // 「和下面那节相对」时才有意义
@@ -269,6 +376,20 @@ impl RootView {
                     .child(div().text_size(px(14.)).font_weight(gpui::FontWeight::BOLD).text_color(c(theme::INK)).child("看板"))
                     .child(open_items)
                     .child(div().flex_1())
+                    .child(
+                        toggle("dash-brake", "全部停下".into(), false).on_click(cx.listener(|this, _, _, cx| {
+                            let fut = this.net.kill_all(true);
+                            this.spawn_fetch(fut, |r, _: serde_json::Value, cx| r.fetch_history(cx), true, cx);
+                        })),
+                    )
+                    .when(gone.iter().any(|c| c.alive), |el| {
+                        el.child(
+                            toggle("dash-clean", "清空已退出".into(), false).on_click(cx.listener(|this, _, _, cx| {
+                                let fut = this.net.clean_exited();
+                                this.spawn_fetch(fut, |r, _: serde_json::Value, cx| r.fetch_history(cx), true, cx);
+                            })),
+                        )
+                    })
                     .when(deleted_n > 0, |el| {
                         el.child(
                             toggle("dash-deleted", format!("已删除 {}", deleted_n), self.dash_show_deleted).on_click(cx.listener(|this, _, _, cx| {
@@ -286,5 +407,46 @@ impl RootView {
                     .min_h(px(0.))
                     .child(super::scrollbar::scroll_area("dash-scroll", &self.dash_scroll, div().px(px(16.)).child(body))),
             )
+    }
+}
+
+/// 待决策 = 还在池子里、没删、`status == "asking"` 的会话，等得久的在前。
+/// 刻意不受搜索框与「已删除」开关影响：这一节是「现在要你做什么」，不是可筛的清单。
+pub(super) fn pending_cards(sessions: &[SessionCard]) -> Vec<&SessionCard> {
+    let mut v: Vec<&SessionCard> = sessions
+        .iter()
+        .filter(|c| c.alive && !c.deleted && c.status == "asking")
+        .collect();
+    v.sort_by(|a, b| a.updated_at.cmp(&b.updated_at));
+    v
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn card(id: &str, status: &str, alive: bool, deleted: bool, updated: &str) -> SessionCard {
+        SessionCard {
+            id: id.into(),
+            status: status.into(),
+            alive,
+            deleted,
+            updated_at: updated.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn pending_is_only_what_is_waiting_on_you_oldest_first() {
+        let cards = vec![
+            card("run", "running", true, false, "2026-09-10T01:00:00Z"),
+            card("new", "asking", true, false, "2026-09-10T03:00:00Z"),
+            card("old", "asking", true, false, "2026-09-10T02:00:00Z"),
+            card("gone", "asking", false, false, "2026-09-10T02:30:00Z"),
+            card("del", "asking", true, true, "2026-09-10T02:40:00Z"),
+        ];
+        let ids: Vec<&str> = pending_cards(&cards).iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, vec!["old", "new"], "等得久的在前；不在池子里的、已删的都不算");
+        assert!(pending_cards(&[]).is_empty());
     }
 }

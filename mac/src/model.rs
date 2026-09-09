@@ -171,6 +171,10 @@ pub struct SessionCard {
     pub items: Vec<ChecklistItem>,
     #[serde(default)]
     pub updated_at: String,
+    /// v1.27：卡在什么权限请求上（`asking` 且是权限对话框时才有）。看板顶上的
+    /// 「待决策」靠它原地放行；`asking` 而没有它 = 结构化提问，只能进会话答。
+    #[serde(default)]
+    pub permission: Option<PermissionPrompt>,
 }
 
 // ── 五态（PROTOCOL「/projects」那张 5 行表的镜像）─────────────────────────────
@@ -797,9 +801,10 @@ pub struct UiState {
     /// 会话页右侧详情面板是否展开（⌘I 切换；默认展开）
     #[serde(default = "default_true")]
     pub detail_visible: bool,
-    /// 静音通知的项目路径（详情面板「通知」段的开关）
-    #[serde(default)]
-    pub muted_projects: Vec<String>,
+    /// 系统通知总开关（设置页；2026-09-10 用户拍板「通知只需要总开关，不需要分项目开关」）。
+    /// 老文件里的 `muted_projects` 被忽略，不需要迁移。
+    #[serde(default = "default_true")]
+    pub notify: bool,
     /// 有黄点的项目路径（2026-09-08 用户拍板 Q1(a)：**只存本地**）——这台机器还没进去看过的
     /// 「跑完了 / 在等你回话」。Mac 看过不影响手机上的黄点：黄点说的是「我这台还没看」。
     #[serde(default)]
@@ -811,7 +816,7 @@ impl Default for UiState {
         UiState {
             sidebar_w: SIDEBAR_W_DEFAULT,
             detail_visible: true,
-            muted_projects: Vec::new(),
+            notify: true,
             unread_projects: Vec::new(),
         }
     }
@@ -819,8 +824,7 @@ impl Default for UiState {
 
 /// 这个项目路径在不在这份名单里：去尾斜杠后精确匹配（同一目录写法不同不该算两个项目；
 /// 前缀相同的 `/p/b` 与 `/p/bg` 也不许互相命中）。
-/// **本机的两份名单（静音 / 未读）共用它**——原来叫 `is_muted`，未读那两处调用因此看着
-/// 像在判静音，名字和事实对不上，改静音逻辑就会顺手打坏未读。
+/// 只剩未读一处在用（静音 2026-09-10 收成了总开关）。
 pub fn path_list_contains(list: &[String], project_path: &str) -> bool {
     let p = project_path.trim_end_matches('/');
     !p.is_empty() && list.iter().any(|m| m.trim_end_matches('/') == p)
@@ -1237,21 +1241,21 @@ mod tests {
 
     #[test]
     fn path_list_lookup_and_toggle() {
-        let mut muted: Vec<String> = vec!["/p/a/".into()];
+        let mut unread: Vec<String> = vec!["/p/a/".into()];
         // 尾斜杠不影响匹配
-        assert!(path_list_contains(&muted, "/p/a"));
-        assert!(path_list_contains(&muted, "/p/a/"));
-        assert!(!path_list_contains(&muted, "/p/ab"));
-        assert!(!path_list_contains(&muted, ""));
-        // 切换（详情面板直接调 set_flagged 取反）；返回值是「有没有变」
-        assert!(set_flagged(&mut muted, "/p/a", false));
-        assert!(muted.is_empty());
-        assert!(set_flagged(&mut muted, "/p/b/", true));
-        assert_eq!(muted, vec!["/p/b".to_string()]);
-        assert!(path_list_contains(&muted, "/p/b"));
+        assert!(path_list_contains(&unread, "/p/a"));
+        assert!(path_list_contains(&unread, "/p/a/"));
+        assert!(!path_list_contains(&unread, "/p/ab"));
+        assert!(!path_list_contains(&unread, ""));
+        // 返回值是「有没有变」，没变就不用落盘
+        assert!(set_flagged(&mut unread, "/p/a", false));
+        assert!(unread.is_empty());
+        assert!(set_flagged(&mut unread, "/p/b/", true));
+        assert_eq!(unread, vec!["/p/b".to_string()]);
+        assert!(path_list_contains(&unread, "/p/b"));
         // 空路径不记
-        assert!(!set_flagged(&mut muted, "", true));
-        assert_eq!(muted.len(), 1);
+        assert!(!set_flagged(&mut unread, "", true));
+        assert_eq!(unread.len(), 1);
     }
 
     #[test]
@@ -1324,21 +1328,24 @@ mod tests {
         let s = UiState {
             sidebar_w: 320.0,
             detail_visible: false,
-            muted_projects: vec!["/p/a".into()],
+            notify: false,
             unread_projects: vec!["/p/b".into()],
         };
         let text = toml::to_string(&s).unwrap();
         let back: UiState = toml::from_str(&text).unwrap();
         assert_eq!(back.sidebar_w, 320.0);
         assert!(!back.detail_visible);
-        assert_eq!(back.muted_projects, vec!["/p/a".to_string()]);
-        // 缺字段（旧版本写的文件）用默认值补齐，不报错；详情面板默认展开
+        assert!(!back.notify);
+        // 缺字段（旧版本写的文件）用默认值补齐，不报错；详情面板默认展开、通知默认开
         let empty: UiState = toml::from_str("").unwrap();
         assert_eq!(empty.sidebar_w, SIDEBAR_W_DEFAULT);
         assert!(empty.detail_visible);
-        assert!(empty.muted_projects.is_empty());
-        // 老版本写过 theme 字段（2026-09-10 拿掉主题开关）：不认识的键忽略，不报错
-        let old: UiState = toml::from_str("sidebar_w = 250.0\ntheme = \"claude\"\n").unwrap();
+        assert!(empty.notify);
+        // 老版本写过 theme / muted_projects（主题 2026-09-10 拿掉、分项目静音同日收成总开关）：
+        // 不认识的键忽略，不报错，也不需要迁移
+        let old: UiState =
+            toml::from_str("sidebar_w = 250.0\ntheme = \"claude\"\nmuted_projects = [\"/p/a\"]\n").unwrap();
         assert_eq!(old.sidebar_w, 250.0);
+        assert!(old.notify);
     }
 }

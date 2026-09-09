@@ -50,9 +50,18 @@ impl Config {
 }
 
 /// Load config; create it (with a random token) on first run.
+///
+/// **项目根在这里就 canonicalize**（v1.27）：注册表的键、`/projects` 的行、开会话时
+/// 的 cwd 都从它派生，根本身带一个软链接（`/tmp` → `/private/tmp` 这类）就会让
+/// 「`join(name)` 拼出来的」和「`canonicalize` 出来的」变成两种写法，同一个项目在
+/// 名册里占两行。归一在源头做一次，下游就都对得上。目录还不存在时保持原样。
 pub fn load_or_create(path: &Path) -> io::Result<Config> {
     match std::fs::read_to_string(path) {
-        Ok(s) => toml::from_str(&s)
+        Ok(s) => toml::from_str::<Config>(&s)
+            .map(|mut c| {
+                c.project_root = PathBuf::from(crate::stores::realpath(&c.project_root.to_string_lossy()));
+                c
+            })
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{}: {e}", path.display()))),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             let cfg = Config::fresh();

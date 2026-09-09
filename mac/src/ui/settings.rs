@@ -126,7 +126,40 @@ impl RootView {
                     .gap(px(14.))
                     .max_w(px(720.))
                     .child(self.render_pair_section(cx))
+                    .child(self.render_notify_section(cx))
                     .child(self.render_config_section(cx)),
+            )
+    }
+
+    /// 通知：一个总开关（2026-09-10 用户拍板「通知只需要总开关，不需要分项目开关」——
+    /// 分项目静音两端一起删了）。关掉只关系统通知，项目列表上的黄点照打：
+    /// 关通知是「别吵我」，不是「别记着」。
+    fn render_notify_section(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let on = self.notify_on;
+        card()
+            .child(sect_title("通知"))
+            .child(
+                div()
+                    .id("notify-toggle")
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.notify_on = !this.notify_on;
+                        this.ui_state().save();
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .child(div().text_size(px(12.)).text_color(c(theme::INK)).child("系统通知"))
+                            .child(meta().child("待回复 / 跑完了 / 出错时弹一条。关掉不影响列表上的黄点")),
+                    )
+                    .child(switch_knob(on)),
             )
     }
 

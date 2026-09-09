@@ -118,23 +118,12 @@ fun SettingsScreen(store: AppStore, nav: NavHostController) {
                     Text(host, color = Tok.Dim, fontSize = 12.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.padding(start = 36.dp, end = 14.dp, bottom = 4.dp))
                 }
             }
-            ToggleRow("完成时通知", settings.notifyDone) { scope.launch { store.settings.setNotifyDone(it) } }
+            // 2026-09-10 用户拍板：通知只要一个总开关，分项目静音两端一起删了。
+            // 关掉只关系统通知，项目列表上的黄点照打。
+            ToggleRow("系统通知", settings.notifyDone) { scope.launch { store.settings.setNotifyDone(it) } }
             ToggleRow("后台常驻", settings.serviceEnabled) { on ->
                 scope.launch { store.settings.setServiceEnabled(on) }
                 if (on) NotificationService.start(context) else NotificationService.stop(context)
-            }
-            if (settings.mutedProjects.isNotEmpty()) {
-                // 静音的项目挤在一行里，点名字取消
-                Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("已静音", color = Tok.Ink, fontSize = 14.sp)
-                    Spacer(Modifier.width(10.dp))
-                    Text(
-                        settings.mutedProjects.joinToString(" · ") { it.substringAfterLast('/') } + "（点取消）",
-                        color = Tok.Dim, fontSize = 12.sp, modifier = Modifier.weight(1f).clickable {
-                            scope.launch { settings.mutedProjects.forEach { store.settings.setProjectMuted(it, false) } }
-                        },
-                    )
-                }
             }
             Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("默认视图", color = Tok.Ink, fontSize = 14.sp, modifier = Modifier.weight(1f))

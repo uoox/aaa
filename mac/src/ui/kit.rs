@@ -15,6 +15,27 @@ pub fn ca(hex: u32, alpha: f32) -> Rgba {
     rgba((hex << 8) | ((alpha.clamp(0., 1.) * 255.0) as u32))
 }
 
+/// 开关滑块。只画样子，点击由调用方接 `.on_click`——它自己不知道开的是什么。
+pub fn switch_knob(on: bool) -> Div {
+    div()
+        .flex_none()
+        .w(px(30.))
+        .h(px(16.))
+        .rounded_full()
+        .p(px(2.))
+        .flex()
+        .items_center()
+        .when(on, |el| el.justify_end())
+        .bg(c(if on { theme::ACCENT } else { theme::EDGE_LIGHT }))
+        .child(
+            div()
+                .w(px(12.))
+                .h(px(12.))
+                .rounded_full()
+                .bg(c(if on { theme::ON_ACCENT } else { theme::INK })),
+        )
+}
+
 /// 状态点（绿=运行 黄=等待 灰=空闲 红=退出）
 pub fn dot(color: u32) -> Div {
     div()

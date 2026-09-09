@@ -2,7 +2,7 @@
 //!
 //! 面板五段：会话用量（模型 / 上下文条 / 费用 / 行数 / 时长）、产物（发布过的
 //! Artifact，点开浏览器）、改动（start 检查点 vs 工作区，可展开 patch、可回滚）、
-//! 收件箱（项目任务清单，Claude 空下来时 daemon 自动喂）、通知（按项目静音）。
+//! 收件箱（项目任务清单，Claude 空下来时 daemon 自动喂）。
 //!
 //! 拉取节流：整个面板共用一个 [`Throttle`]——`messages_changed` 帧来得很密
 //! （daemon 侧 ≥500ms 一帧），这里按「间隔内最多一次、间隔末尾补一次」收口：
@@ -21,8 +21,7 @@ use gpui::{Context, SharedString, div, prelude::*, px, relative};
 use super::kit::*;
 use super::{Page, RootView};
 use crate::model::{
-    Artifact, PlanUsage, Session, SessionDetailResponse, SessionUsage, path_list_contains,
-    set_flagged,
+    Artifact, PlanUsage, Session, SessionDetailResponse, SessionUsage,
 };
 use crate::theme::{self, human_bytes};
 
@@ -339,23 +338,6 @@ impl RootView {
         );
     }
 
-    /// 当前会话所属项目的路径（面板的静音按它）
-    fn current_project_path(&self) -> Option<String> {
-        let Page::Session(id) = &self.page else { return None };
-        self.session(id)
-            .map(|s| s.project_path.clone())
-            .filter(|p| !p.is_empty())
-    }
-
-    fn toggle_mute_current(&mut self, cx: &mut Context<Self>) {
-        if let Some(path) = self.current_project_path() {
-            let on = !path_list_contains(&self.muted_projects, &path);
-            set_flagged(&mut self.muted_projects, &path, on);
-            self.ui_state().save();
-            cx.notify();
-        }
-    }
-
     // ── 渲染 ────────────────────────────────────────────────────────────
 
     /// 段标题：与设置页同款的 Menlo 小字
@@ -521,8 +503,7 @@ impl RootView {
             .child(Self::section_n("后台任务", ex.background_tasks.len(), Self::render_background(ex, &now)))
             .child(Self::section_n("已上传", ex.uploads.len(), Self::render_uploads(ex, &now)))
             .child(Self::section_n("产物", d.map(|d| d.artifacts.len()).unwrap_or(0), self.render_artifacts_section(d, &now, cx)))
-            .child(Self::section_n("已使用技能", ex.skills.len(), Self::render_skills(ex, &now)))
-            .child(Self::section("通知", self.render_notify_section(s, cx)));
+            .child(Self::section_n("已使用技能", ex.skills.len(), Self::render_skills(ex, &now)));
 
         Some(
             div()
@@ -845,42 +826,6 @@ impl RootView {
             })
             .collect();
         Self::detail_rows(rows, "这个会话还没用过技能")
-    }
-
-    fn render_notify_section(&self, s: &Session, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
-        let on = path_list_contains(&self.muted_projects, &s.project_path);
-        let knob = div()
-            .flex_none()
-            .w(px(30.))
-            .h(px(16.))
-            .rounded_full()
-            .p(px(2.))
-            .flex()
-            .items_center()
-            .when(on, |el| el.justify_end())
-            .bg(c(if on { theme::ACCENT } else { theme::EDGE_LIGHT }))
-            .child(
-                div()
-                    .w(px(12.))
-                    .h(px(12.))
-                    .rounded_full()
-                    .bg(c(if on { theme::ON_ACCENT } else { theme::INK })),
-            );
-        div()
-            .id("mute-toggle")
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap(px(8.))
-            .cursor_pointer()
-            .on_click(cx.listener(|this, _, _, cx| this.toggle_mute_current(cx)))
-            .child(
-                div()
-                    .text_size(px(12.))
-                    .text_color(c(theme::INK))
-                    .child("静音此项目的通知"),
-            )
-            .child(knob)
     }
 
     /// 侧栏最底部的套餐用量块；plan 为 null / 没有任何窗口有数就整块不画

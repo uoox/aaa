@@ -5,6 +5,13 @@
 //! project can be resumed after the project root moves: agent stores key their
 //! sessions by cwd, and a migrated path finds nothing there — the registry id
 //! is the fallback that still names the old conversation.
+//!
+//! **键只有一种写法**（v1.27）：削掉尾斜杠，其余原样。此前 `POST /projects` 存
+//! `project_root.join(name)`、开会话存 canonicalize 过的，根本身带软链接时同一个项目
+//! 就有两行——于是删项目要两个都 unset、换 agent 要猜改哪个、列项目还可能整行查不到。
+//! 真正的修法在源头：项目根装载时就 canonicalize（config.rs），下游派生的路径从此
+//! 只有一种写法。这里的归一只兜「`/p/a` 与 `/p/a/`」，**刻意不碰磁盘**——realpath 的
+//! 结果随目录存不存在而变，拿它当键会在「先写名册、再移动目录」这种顺序上失配。
 
 use std::collections::HashMap;
 use std::io;
@@ -36,9 +43,15 @@ impl Registry {
         project_root.join(".aaa-agents")
     }
 
+    /// 目录键的**唯一**写法：削尾斜杠。纯词法，不看磁盘。
+    pub fn norm(dir: &str) -> String {
+        let t = dir.trim_end_matches('/');
+        if t.is_empty() { dir.to_string() } else { t.to_string() }
+    }
+
     pub fn load(project_root: &Path) -> Self {
         let path = Self::registry_path(project_root);
-        let mut map = HashMap::new();
+        let mut map: HashMap<String, Entry> = HashMap::new();
         if let Ok(body) = std::fs::read_to_string(&path) {
             for line in body.lines() {
                 let mut it = line.splitn(3, '\t');
@@ -47,18 +60,29 @@ impl Registry {
                     continue;
                 }
                 let id = it.next().map(str::trim).filter(|s| !s.is_empty()).map(String::from);
-                map.insert(d.to_string(), Entry { agent: a.to_string(), id });
+                let e = Entry { agent: a.to_string(), id };
+                // 老文件里同一个目录可能有两种写法：归一之后撞在一起，留带对话 id 的那行
+                match map.entry(Self::norm(d)) {
+                    std::collections::hash_map::Entry::Occupied(mut o) => {
+                        if o.get().id.is_none() && e.id.is_some() {
+                            o.insert(e);
+                        }
+                    }
+                    std::collections::hash_map::Entry::Vacant(v) => {
+                        v.insert(e);
+                    }
+                }
             }
         }
         Registry { path, map }
     }
 
     pub fn get(&self, dir: &str) -> Option<&str> {
-        self.map.get(dir).map(|e| e.agent.as_str())
+        self.map.get(&Self::norm(dir)).map(|e| e.agent.as_str())
     }
 
     pub fn get_id(&self, dir: &str) -> Option<&str> {
-        self.map.get(dir).and_then(|e| e.id.as_deref())
+        self.map.get(&Self::norm(dir)).and_then(|e| e.id.as_deref())
     }
 
     /// All `(dir, agent, id)` rows, for migration sweeps.
@@ -70,7 +94,7 @@ impl Registry {
     }
 
     pub fn set(&mut self, dir: &str, agent: &str) -> io::Result<()> {
-        let e = self.map.entry(dir.to_string()).or_default();
+        let e = self.map.entry(Self::norm(dir)).or_default();
         if e.agent != agent {
             // 换 agent 的同时旧对话 id 就没有意义了
             e.id = None;
@@ -82,7 +106,7 @@ impl Registry {
     /// Record the conversation id for a directory (agent entry must make sense
     /// to the caller; a missing row is created with the given agent).
     pub fn set_id(&mut self, dir: &str, agent: &str, id: &str) -> io::Result<()> {
-        let e = self.map.entry(dir.to_string()).or_default();
+        let e = self.map.entry(Self::norm(dir)).or_default();
         if e.agent.is_empty() {
             e.agent = agent.to_string();
         }
@@ -98,7 +122,7 @@ impl Registry {
     pub fn set_ids(&mut self, triples: &[(String, String, String)]) -> io::Result<()> {
         let mut dirty = false;
         for (dir, agent, id) in triples {
-            let e = self.map.entry(dir.clone()).or_default();
+            let e = self.map.entry(Self::norm(dir)).or_default();
             if e.agent == *agent && e.id.as_deref() == Some(id) {
                 continue;
             }
@@ -111,7 +135,7 @@ impl Registry {
 
     /// 兜底 id 被证实已失效（agent 存储里找不到）时清掉，别反复撞同一堵墙
     pub fn clear_id(&mut self, dir: &str) -> io::Result<()> {
-        match self.map.get_mut(dir) {
+        match self.map.get_mut(&Self::norm(dir)) {
             Some(e) if e.id.is_some() => {
                 e.id = None;
                 self.flush()
@@ -121,7 +145,7 @@ impl Registry {
     }
 
     pub fn unset(&mut self, dir: &str) -> io::Result<()> {
-        if self.map.remove(dir).is_none() {
+        if self.map.remove(&Self::norm(dir)).is_none() {
             return Ok(());
         }
         self.flush()
@@ -139,7 +163,7 @@ impl Registry {
                 Err(_) if d == old_s => new_root.to_string_lossy().into_owned(),
                 Err(_) => d,
             };
-            next.insert(nd, e);
+            next.insert(Self::norm(&nd), e);
         }
         self.map = next;
         self.flush()

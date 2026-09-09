@@ -255,6 +255,14 @@ impl Net {
     /// daemon 负责翻译成对话框按键并确认对话框关闭。409（`ApiFailure::status`）=
     /// 没有待答问题 / 非 claude 会话 / 对话框没吃下——调用方提示用户去终端收尾。
     /// v1.16：替用户答权限对话框（allow / deny）
+    /// 紧急制动：收掉还活着的项目会话（终端不收）
+    pub fn kill_all(&self, running_only: bool) -> impl Future<Output = Result<serde_json::Value>> + use<> {
+        self.post_json("/sessions/kill_all", serde_json::json!({ "running_only": running_only }))
+    }
+    /// 清掉池子里已退出的会话记录（不动项目目录、不动 agent 存储）
+    pub fn clean_exited(&self) -> impl Future<Output = Result<serde_json::Value>> + use<> {
+        self.post_json("/sessions/clean_exited", serde_json::json!({}))
+    }
     pub fn session_permission(&self, id: &str, behavior: &str) -> impl Future<Output = Result<serde_json::Value>> + use<> {
         self.post_json(&format!("/sessions/{id}/permission"), serde_json::json!({ "behavior": behavior }))
     }

@@ -14,6 +14,8 @@ HELP = """aaa — AAA daemon 的工具箱
   aaa [status] [--json]          daemon 状态（版本、项目根、会话五态计数）
   aaa ls [-a] [--json]           会话列表，按 待回复 / 运行 / 后台 / 激活 / 暂停 分组（-a 含暂停）
   aaa wait [--json]              只列有表单等你回答的会话
+  aaa stop-all [--all] [--yes]   收掉在跑的项目会话（终端不动；--all 连等你回话的一起收）
+  aaa clean [--yes]              清掉池子里已退出的会话记录（不动项目目录）
   aaa perms [--json]             macOS 权限状态
   aaa perms all | <id…>          申请权限（弹窗出现在 Mac 上）
   aaa restart [--force]          重启 daemon（有活会话需 --force：先结束、起来后自动 resume）
@@ -282,6 +284,38 @@ def cmd_wait(conn, args):
     if not sessions: out(DIM + "没有会话在等你回答" + RESET); return
     for s in sessions:
         out("%s●%s %s%s%s  %s%s%s\n   %s" % (YELLOW, RESET, BOLD, S(s, "project_name"), RESET, DIM, S(s, "id"), RESET, S(s, "title")))
+
+def cmd_stop_all(conn, args):
+    """紧急制动。默认只收在跑的；--all 连停在输入框等你的一起收。终端一律不动。"""
+    conn.probe()
+    running_only = "--all" not in args
+    sessions = [s for s in call(conn, "GET", "/api/v1/sessions")
+                if S(s, "agent") != "shell" and S(s, "state") != "exited"
+                and (not running_only or S(s, "state") == "running")]
+    if not sessions:
+        out(DIM + "没有要收的会话" + RESET); return
+    if "--json" not in args:
+        out("将结束 %d 个会话（终端不动）：" % len(sessions))
+        for s in sessions[:10]:
+            out("  %s%s%s  %s" % (BOLD, S(s, "project_name"), RESET, S(s, "title")))
+        if len(sessions) > 10: out(DIM + "  …还有 %d 个" % (len(sessions) - 10) + RESET)
+        if not confirm("继续？", "--yes" in args): return
+    v = call(conn, "POST", "/api/v1/sessions/kill_all", {"running_only": running_only})
+    if "--json" in args: out(pretty(v)); return
+    out("已结束 %d 个会话" % S(v, "count", 0))
+
+def cmd_clean(conn, args):
+    """只清池子里的已退出记录：项目目录、agent 存储、会话日志都不碰。"""
+    conn.probe()
+    n = len([s for s in call(conn, "GET", "/api/v1/sessions") if S(s, "state") == "exited"])
+    if not n:
+        out(DIM + "池子里没有已退出的会话" + RESET); return
+    if "--json" not in args:
+        out("将清掉 %d 条已退出的会话记录（只是记录，目录和 transcript 都不动）" % n)
+        if not confirm("继续？", "--yes" in args): return
+    v = call(conn, "POST", "/api/v1/sessions/clean_exited", {})
+    if "--json" in args: out(pretty(v)); return
+    out("已清 %d 条" % S(v, "removed", 0))
 
 def cmd_perms(conn, args):
     conn.probe()
@@ -588,6 +622,7 @@ def cmd_service(conn, args):
     os.execvp("aaa-daemon", ["aaa-daemon", "service", sub])
 
 COMMANDS = {"backfill": cmd_backfill, "status": cmd_status, "st": cmd_status, "ls": cmd_ls, "wait": cmd_wait, "perms": cmd_perms,
+            "stop-all": cmd_stop_all, "clean": cmd_clean,
             "permissions": cmd_perms, "restart": cmd_restart, "_idle-watch": cmd_idle_watch, "config": cmd_config, "migrate-root": cmd_migrate_root,
             "service": cmd_service}
 

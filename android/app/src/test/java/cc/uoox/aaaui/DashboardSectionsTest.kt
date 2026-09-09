@@ -73,4 +73,20 @@ class DashboardSectionsTest {
         assertTrue(none.inAaa.isEmpty() && none.gone.isEmpty())
         assertEquals(0, dashboardSections(emptyList(), "", showDeleted = false).total)
     }
+
+    /**
+     * 待决策：只收「还在池子里、没删、asking」的，等得久的在前。
+     * mac 那边同一口径（`pending_cards`），两端都盯着这几条。
+     */
+    @Test fun `待决策只收此刻卡在你身上的会话`() {
+        val cards = listOf(
+            SessionCard(id = "run", status = "running", alive = true, updated_at = "2026-09-10T01:00:00Z"),
+            SessionCard(id = "new", status = "asking", alive = true, updated_at = "2026-09-10T03:00:00Z"),
+            SessionCard(id = "old", status = "asking", alive = true, updated_at = "2026-09-10T02:00:00Z"),
+            SessionCard(id = "gone", status = "asking", alive = false, updated_at = "2026-09-10T02:30:00Z"),
+            SessionCard(id = "del", status = "asking", alive = true, deleted = true, updated_at = "2026-09-10T02:40:00Z"),
+        )
+        assertEquals(listOf("old", "new"), pendingCards(cards).map { it.id })
+        assertTrue(pendingCards(emptyList()).isEmpty())
+    }
 }
