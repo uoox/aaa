@@ -2,11 +2,11 @@
 //! parse it into a structured message list (mobile main view).
 //!
 //! claude: full support (user/assistant/tool_use/tool_result/thinking, filters
-//! isSidechain/isMeta and injected blocks). agy 与 shell 目前一律 `supported:false`，
-//! 客户端据此回落到终端画面。**agy 不是没有 transcript**：它的 statusLine 负载里带
-//! `transcript_path`，指向 `brain/<对话id>/.system_generated/logs/transcript.jsonl`，
-//! 每行一条 `{step_index, source, type, status, created_at, content}`，能跟读——
-//! 缺的只是一个解析器（见 PROTOCOL「Agent 表」）。
+//! isSidechain/isMeta and injected blocks). agy（v1.30）：`brain/<对话id>/
+//! .system_generated/logs/transcript.jsonl`，一行一步 `{step_index, source, type,
+//! status, created_at, content}`，追加式、步号不重复，同样按偏移量尾随。它**不记
+//! 工具名**，工具那一栏是看结果形状认出来的。shell 仍 `supported:false`，客户端
+//! 据此回落到终端画面。
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -167,6 +167,7 @@ impl MsgStore {
     pub fn for_agent(agent: &str) -> Self {
         let (supported, source) = match agent {
             "claude" => (true, "claude"),
+            "agy" => (true, "agy"),
             _ => (false, "none"),
         };
         MsgStore {
@@ -818,10 +819,220 @@ pub fn artifact_url(text: &str) -> Option<String> {
     if url.len() > "https://claude.ai/code/artifact/".len() { Some(url.to_string()) } else { None }
 }
 
+// ---------- agy（Antigravity CLI）----------
+//
+// 形状与 claude 完全不同，一行一步：`{step_index, source, type, status, created_at, content}`。
+// `source` ∈ USER_EXPLICIT / MODEL / SYSTEM / SYSTEM_SDK，`type` ∈ USER_INPUT /
+// PLANNER_RESPONSE / GENERIC / SYSTEM_MESSAGE / ERROR_MESSAGE / CHECKPOINT。
+// 只追加、`step_index` 不重复（198 份实测无一重号），所以按偏移量尾随就够。
+//
+// **它不记工具名**：一次工具调用只留下结果文本（GENERIC），入参和工具名都不在文件里。
+// 所以工具那一栏是**看结果的形状认出来的**（命令 / 读文件 / 搜索 / 子代理），认不出就叫
+// 「工具」——宁可标签粗一点，也不假装知道它调的是什么。
+
+/// `<USER_REQUEST>…</USER_REQUEST>` 里那一句才是用户说的话；同一行后面还挂着
+/// `<ADDITIONAL_METADATA>`（本地时间）与 `<USER_SETTINGS_CHANGE>`（换模型）之类的
+/// 系统附文，那些不是用户打的字。实测 210 条用户输入全带这个包装。
+fn agy_user_text(content: &str) -> String {
+    between(content, "<USER_REQUEST>", "</USER_REQUEST>")
+        .map(str::trim)
+        .unwrap_or_else(|| content.split("<ADDITIONAL_METADATA>").next().unwrap_or("").trim())
+        .to_string()
+}
+
+/// 结果文本头两行是 agy 自己加的 `Created At:` / `Completed At:`，正文从第三行起。
+fn agy_result_body(content: &str) -> &str {
+    let mut rest = content;
+    for _ in 0..2 {
+        let head = rest.lines().next().unwrap_or("");
+        if head.starts_with("Created At:") || head.starts_with("Completed At:") {
+            rest = rest.split_once('\n').map(|(_, r)| r).unwrap_or("");
+        }
+    }
+    rest.trim_start_matches('\n')
+}
+
+/// 认出这条结果是什么工具干的，给出 `(工具名, 摘要, 出没出错)`。
+/// 只看正文开头——agy 每类工具的结果都有固定的第一行。
+fn agy_tool_of(body: &str) -> (&'static str, String, bool) {
+    let first = body.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+    if let Some(code) = first.strip_prefix("The command exited with code ") {
+        let code = code.trim_end_matches('.');
+        let failed = code != "0";
+        // 摘要取输出的第一行实话，没有输出就报退出码
+        let out = body
+            .split_once("Output:\n")
+            .or_else(|| body.split_once("Stdout:\n"))
+            .map(|(_, r)| r)
+            .unwrap_or("")
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("")
+            .trim();
+        let summary = if out.is_empty() { format!("退出码 {code}") } else { out.to_string() };
+        return ("命令", cap(&one_line(&summary), SUMMARY_CAP), failed);
+    }
+    if let Some(rest) = first.strip_prefix("File Path: ") {
+        let p = rest.trim().trim_matches('`');
+        let name = p.rsplit('/').next().unwrap_or(p);
+        return ("读文件", percent_decode(name), false);
+    }
+    if first.starts_with("No results found") {
+        return ("搜索", "没有匹配".to_string(), false);
+    }
+    if let Some(n) = first.strip_prefix("Found ").and_then(|r| r.split_whitespace().next()) {
+        return ("搜索", format!("{n} 处匹配"), false);
+    }
+    if first.starts_with("{\"File\":") {
+        let n = body.lines().filter(|l| l.starts_with("{\"File\":")).count();
+        return ("搜索", format!("{n} 处匹配"), false);
+    }
+    if first.starts_with("Created the following subagents:")
+        || first.starts_with("Message sent to")
+        || first.starts_with("Task:")
+    {
+        return ("子代理", cap(&one_line(first), SUMMARY_CAP), false);
+    }
+    ("工具", cap(&one_line(first), SUMMARY_CAP), false)
+}
+
+/// `%E9%82%AE` → 「邮」。agy 的文件路径是 `file://` URL，非 ASCII 一律百分号编码，
+/// 直接显示的话中文文件名就是一串 `%`。解不出合法 UTF-8 就原样返回。
+fn percent_decode(s: &str) -> String {
+    if !s.contains('%') {
+        return s.to_string();
+    }
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
+}
+
+/// 结果文本这么开头 = 这一步转后台了，后面跟着任务 id。
+const AGY_BG_PREFIX: &str = "Tool is running as a background task with task id:";
+
+/// `<标签>` 后面那一行的内容（`Task Description: …`）。没有这个标签就是空串。
+fn first_line_after<'a>(s: &'a str, label: &str) -> &'a str {
+    s.split_once(label)
+        .map(|(_, r)| r.lines().next().unwrap_or("").trim())
+        .unwrap_or("")
+}
+
+/// `<SYSTEM_MESSAGE>` 那一段的正文。外面裹着一句「以下是系统消息，不是用户发的」，
+/// 那句本身也带着 `<SYSTEM_MESSAGE>` 三个字，所以开标签要从**后往前**找。
+fn system_message_body(content: &str) -> &str {
+    let Some(end) = content.find("</SYSTEM_MESSAGE>") else { return content };
+    let head = &content[..end];
+    match head.rfind("<SYSTEM_MESSAGE>") {
+        Some(i) => &head[i + "<SYSTEM_MESSAGE>".len()..],
+        None => content,
+    }
+}
+
+pub fn parse_agy_line(store: &mut MsgStore, v: &Value) {
+    let ty = v.get("type").and_then(Value::as_str).unwrap_or("");
+    let source = v.get("source").and_then(Value::as_str).unwrap_or("");
+    let status = v.get("status").and_then(Value::as_str).unwrap_or("");
+    let ts = v.get("created_at").and_then(Value::as_str).unwrap_or("").to_string();
+    let content = v.get("content").and_then(Value::as_str).unwrap_or("");
+    match ty {
+        "USER_INPUT" => {
+            let text = agy_user_text(content);
+            if !text.is_empty() {
+                store.push(&ts, "user", "text", cap(&text, TEXT_CAP), None);
+            }
+        }
+        // 模型这一步说的话。content 为空 = 这一步只调了工具没开口（实测 1820 步里 1736 步
+        // 如此），跳过——空气泡比没有更难读
+        "PLANNER_RESPONSE" => {
+            let text = content.trim();
+            if !text.is_empty() {
+                store.note_activity(&ts);
+                store.push(&ts, "assistant", "text", cap(text, TEXT_CAP), None);
+            }
+        }
+        "GENERIC" => {
+            let body = agy_result_body(content);
+            store.note_activity(&ts);
+            // 「这一步转后台了」：agy 把任务 id 写在结果里，完成时由一条 SYSTEM_MESSAGE
+            // 报回来（见下）。挂着的条数就是会话的「后台」态
+            if let Some(rest) = body.strip_prefix(AGY_BG_PREFIX) {
+                let id = rest.trim_start().lines().next().unwrap_or("").trim();
+                let desc = first_line_after(body, "Task Description:");
+                let summary = if desc.is_empty() {
+                    format!("后台任务 {}", id.rsplit('/').next().unwrap_or(id))
+                } else {
+                    cap(&one_line(desc), SUMMARY_CAP)
+                };
+                store.bg_pending.insert(
+                    id.to_string(),
+                    BgTask { tool: "后台任务".into(), summary: summary.clone(), ts: ts.clone() },
+                );
+                // 后半截「YOU MUST TAKE ONE OF THE FOLLOWING TWO ACTIONS…」是写给模型的
+                // 行动指令，不是发生过的事
+                let shown = body.split("YOU MUST").next().unwrap_or(body).trim_end();
+                store.push(
+                    &ts,
+                    "tool",
+                    "tool_result",
+                    cap(shown, RESULT_CAP),
+                    Some(ToolInfo { name: "后台任务".into(), summary, status: "running".into() }),
+                );
+                return;
+            }
+            let (name, summary, failed) = agy_tool_of(body);
+            let st = if status == "RUNNING" {
+                "running"
+            } else if failed {
+                "err"
+            } else {
+                "ok"
+            };
+            store.push(
+                &ts,
+                "tool",
+                "tool_result",
+                cap(body.trim_end(), RESULT_CAP),
+                Some(ToolInfo { name: name.to_string(), summary, status: st.to_string() }),
+            );
+        }
+        // 周期性系统提醒（SYSTEM_SDK）是喂给模型的注入文本，不是发生过的事——
+        // 与 claude 那边过滤 isMeta 同一条线。真出错的 ERROR_MESSAGE 和上下文截断的
+        // CHECKPOINT 要留：它们解释了后面对话为什么突然变了样
+        "SYSTEM_MESSAGE" | "ERROR_MESSAGE" | "CHECKPOINT" if source != "SYSTEM_SDK" => {
+            // 外面那层「以下是系统消息，不是用户发的」是给模型看的，人不需要读第二遍
+            let text = system_message_body(content).trim();
+            // 后台任务回来了：销掉那一条，「后台」态跟着灭
+            if let Some(id) = between(text, "Task id \"", "\"") {
+                if store.bg_pending.remove(id).is_some() {
+                    store.note_activity(&ts);
+                }
+            }
+            if !text.is_empty() {
+                store.push(&ts, "system", "text", cap(text, RESULT_CAP), None);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn parse_line(store: &mut MsgStore, line: &str) {
     let Ok(v) = serde_json::from_str::<Value>(line) else { return };
-    if store.source == "claude" {
-        parse_claude_line(store, &v);
+    match store.source {
+        "claude" => parse_claude_line(store, &v),
+        "agy" => parse_agy_line(store, &v),
+        _ => {}
     }
 }
 
@@ -868,6 +1079,24 @@ pub fn discover_file(
     created_epoch: f64,
     claimed: &std::collections::HashSet<PathBuf>,
 ) -> Option<(PathBuf, bool)> {
+    // agy 的对话就是一个 id，transcript 的路径由它算出来——没有「扫一遍候选再挑」
+    // 这一步：先认 resume id（hooks 报的 session_id 就是对话 id），再退回
+    // `cache/last_conversations.json` 里这个 cwd 的最后一条
+    if source == "agy" {
+        let by_id = resume_id.and_then(|id| crate::stores::agy_transcript(paths, id));
+        if let Some(f) = by_id.filter(|f| !claimed.contains(f)) {
+            return Some((f, false));
+        }
+        let id = crate::stores::agy_find(paths, project_path);
+        let f = crate::stores::agy_transcript(paths, &id)?;
+        let (_, mt) = crate::stores::fstat(&f);
+        // 表里那一条可能是**上一次**的对话（这次的还没写第一步）：比会话起始时刻老的不认，
+        // 否则新会话一开就把上一轮的记录当成自己的
+        if claimed.contains(&f) || mt < created_epoch - 5.0 {
+            return None;
+        }
+        return Some((f, false));
+    }
     let candidates: Vec<PathBuf> = match source {
         "claude" => {
             let mut v = Vec::new();
@@ -1024,7 +1253,7 @@ pub fn poll_session(
     let (agent_ok, project_path, resume_id, created_epoch, exited) = {
         let meta = sess.meta.lock().unwrap();
         (
-            meta.agent == "claude",
+            meta.agent != "shell",
             meta.project_path.clone(),
             meta.resume_id.clone(),
             meta.created_at.timestamp() as f64,
@@ -1432,13 +1661,91 @@ mod tests {
 
 
     #[test]
-    fn only_claude_is_supported() {
-        assert!(MsgStore::for_agent("claude").supported);
-        for other in ["shell", "codex", "pi", "reasonix", "agy", "grok"] {
+    fn only_the_two_agents_are_supported() {
+        for (id, source) in [("claude", "claude"), ("agy", "agy")] {
+            let st = MsgStore::for_agent(id);
+            assert!(st.supported, "{id} 有消息流");
+            assert_eq!(st.source, source);
+        }
+        for other in ["shell", "codex", "pi", "reasonix", "grok"] {
             let st = MsgStore::for_agent(other);
             assert!(!st.supported, "{other} 不再解析");
             assert_eq!(st.source, "none");
         }
+    }
+
+    /// agy 的 transcript：一行一步。用户那句要从 `<USER_REQUEST>` 里取出来（同一行
+    /// 后面挂着的本地时间、换模型通知不是用户打的字）；模型没开口的那些步（content
+    /// 为 null，实测占 95%）不占气泡；工具结果没有工具名，按结果形状认。
+    #[test]
+    fn agy_transcript_lines_become_messages() {
+        let mut st = MsgStore::for_agent("agy");
+        feed_lines(&mut st, &[
+            json!({"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-09-09T15:57:02Z",
+                   "content":"<USER_REQUEST>\n硬盘有点满，帮我看看\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nThe current local time is: 2026-09-09T23:57:02+08:00.\n</ADDITIONAL_METADATA>"}),
+            json!({"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-09-09T15:57:02Z","content":null}),
+            json!({"step_index":2,"source":"MODEL","type":"GENERIC","status":"DONE","created_at":"2026-09-09T15:57:05Z",
+                   "content":"Created At: 2026-09-09T23:57:05+08:00\nCompleted At: 2026-09-09T23:57:06+08:00\n\nThe command exited with code 0.\nOutput:\n/dev/vda1 97% /\n"}),
+            json!({"step_index":3,"source":"MODEL","type":"GENERIC","status":"DONE","created_at":"2026-09-09T15:57:07Z",
+                   "content":"Created At: x\nCompleted At: y\nFile Path: `file:///p/%E9%82%AE%E4%BB%B6.py`\nTotal Lines: 3\n"}),
+            json!({"step_index":4,"source":"SYSTEM_SDK","type":"SYSTEM_MESSAGE","status":"DONE","created_at":"2026-09-09T15:57:08Z","content":"This is a periodic system reminder."}),
+            json!({"step_index":5,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-09-09T15:57:10Z","content":"根目录满了。"}),
+        ]);
+        let m: Vec<_> = st.msgs.iter().collect();
+        assert_eq!(m.len(), 4, "null 的 planner 步与 SDK 周期提醒都不占气泡");
+        assert_eq!((m[0].role.as_str(), m[0].text.as_str()), ("user", "硬盘有点满，帮我看看"));
+        assert_eq!(m[1].tool.as_ref().unwrap().name, "命令");
+        assert_eq!(m[1].tool.as_ref().unwrap().summary, "/dev/vda1 97% /");
+        assert!(m[1].text.starts_with("The command exited"), "两行时间戳不进正文");
+        assert_eq!(m[2].tool.as_ref().unwrap().name, "读文件");
+        assert_eq!(m[2].tool.as_ref().unwrap().summary, "邮件.py", "路径是 file:// URL，百分号要解开");
+        assert_eq!((m[3].role.as_str(), m[3].text.as_str()), ("assistant", "根目录满了。"));
+        assert_eq!(st.last_activity_ts, "2026-09-09T15:57:10Z");
+    }
+
+    /// agy 的后台任务：结果文本说「转后台了」就挂上，完成 / 取消由一条 SYSTEM_MESSAGE
+    /// 报回来（`Task id "…"`）——挂着的条数就是会话的「后台」态。
+    #[test]
+    fn agy_background_task_settles_on_its_system_message() {
+        let mut st = MsgStore::for_agent("agy");
+        let id = "d620583b/task-28";
+        feed_lines(&mut st, &[
+            json!({"step_index":0,"source":"MODEL","type":"GENERIC","status":"DONE","created_at":"2026-09-09T16:00:00Z",
+                   "content":format!("Created At: x\nTool is running as a background task with task id: {id}\nTask Description: ssh hk-mlnl \"df -h\"\nYOU MUST TAKE ONE OF THE FOLLOWING TWO ACTIONS")}),
+        ]);
+        assert_eq!(st.pending_background(None), 1);
+        let last = st.msgs.back().unwrap();
+        assert_eq!(last.tool.as_ref().unwrap().name, "后台任务");
+        assert_eq!(last.tool.as_ref().unwrap().summary, "ssh hk-mlnl \"df -h\"", "摘要用 Task Description 那一行");
+        assert!(!last.text.contains("YOU MUST"), "写给模型的行动指令不进正文");
+
+        feed_lines(&mut st, &[
+            json!({"step_index":1,"source":"SYSTEM","type":"SYSTEM_MESSAGE","status":"DONE","created_at":"2026-09-09T16:08:00Z",
+                   "content":format!("The following is a <SYSTEM_MESSAGE> not actually sent by the user.\n\n<SYSTEM_MESSAGE>\n[Message] content=Task id \"{id}\" finished with result:\nok\n</SYSTEM_MESSAGE>")}),
+        ]);
+        assert_eq!(st.pending_background(None), 0, "回来了就销掉");
+        let last = st.msgs.back().unwrap();
+        assert!(last.text.starts_with("[Message]"), "外面那句「以下是系统消息」不重复给人看");
+    }
+
+    /// 非 0 退出码 = 这一步出错了（红），RUNNING = 还在跑。
+    #[test]
+    fn agy_tool_status_follows_exit_code() {
+        let mut st = MsgStore::for_agent("agy");
+        feed_lines(&mut st, &[
+            json!({"step_index":0,"source":"MODEL","type":"GENERIC","status":"DONE","created_at":"t1",
+                   "content":"Created At: x\nCompleted At: y\nThe command exited with code 1.\nOutput:\n"}),
+            json!({"step_index":1,"source":"MODEL","type":"GENERIC","status":"RUNNING","created_at":"t2",
+                   "content":"Created At: x\nThe command exited with code 0.\nOutput:\nhi\n"}),
+            json!({"step_index":2,"source":"MODEL","type":"GENERIC","status":"DONE","created_at":"t3",
+                   "content":"No results found"}),
+        ]);
+        let m: Vec<_> = st.msgs.iter().collect();
+        assert_eq!(m[0].tool.as_ref().unwrap().status, "err");
+        assert_eq!(m[0].tool.as_ref().unwrap().summary, "退出码 1", "没有输出就报退出码");
+        assert_eq!(m[1].tool.as_ref().unwrap().status, "running");
+        assert_eq!(m[2].tool.as_ref().unwrap().name, "搜索");
+        assert_eq!(m[2].tool.as_ref().unwrap().summary, "没有匹配");
     }
 
     #[test]

@@ -232,7 +232,6 @@ impl RootView {
             let id_close = id;
             col = col.child(
                 sidebar_row(("sb-term", ix).into())
-                    .group("sb-row")
                     // 当前终端与当前项目同一种说法：整行一圈强调色边框（2026-09-10）
                     .when(active, |el| el.border_color(c(theme::ACCENT)))
                     .hover(|st| st.bg(c(theme::SURFACE_RAISED)))
@@ -249,9 +248,9 @@ impl RootView {
                             .text_color(c(if active { theme::ACCENT } else { theme::DIM }))
                             .child(SharedString::from(label)),
                     )
-                    // × 关终端：当前行常显，其余悬停才现身（与项目行一致）
+                    // × 关终端（与项目行一致：一直画着）
                     .child(
-                        row_btn(("sb-term-close", ix), active)
+                        row_btn(("sb-term-close", ix))
                             .hover(|st| st.text_color(c(theme::RED)).bg(c(theme::EDGE_LIGHT)))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();

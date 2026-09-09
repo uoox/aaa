@@ -372,6 +372,52 @@ pub struct InboxEntry {
     pub created_at: String,
 }
 
+// ── v1.30 目录浏览：GET /files、GET /files/read ─────────────────────────────
+
+/// 目录里的一项。`kind` ∈ markdown | text | binary（目录是空串）。
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+pub struct FileEntry {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub dir: bool,
+    #[serde(default)]
+    pub size: u64,
+    #[serde(default)]
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct FileListing {
+    #[serde(default)]
+    pub path: String,
+    /// 项目根自己没有上一级
+    #[serde(default)]
+    pub parent: Option<String>,
+    #[serde(default)]
+    pub truncated: bool,
+    #[serde(default)]
+    pub entries: Vec<FileEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct FileBody {
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub size: u64,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub truncated: bool,
+}
+
 // ── v1.17 详情栏：GET /sessions/:id/detail ──────────────────────────────────
 
 /// 一次子代理调用（Agent / Task 工具）

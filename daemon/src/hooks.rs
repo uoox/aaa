@@ -85,12 +85,24 @@ pub fn hook_script_path(paths: &crate::paths::Paths) -> PathBuf {
 // 解析不动就整个放弃，宁可这次没有钩子，也不能把人家的键盖没了。卸载时的清理见 `service.rs`。
 // 脚本在 `AAA_SESSION` 没设时立刻退出：用户自己在终端里跑 agy 不该往 daemon 发东西。
 
+/// agy 的一个钩子事件：它那边叫什么、打到 daemon 的哪个事件、要不要包一层工具名匹配器。
+pub struct AgyEvent {
+    pub agy: &'static str,
+    pub daemon: &'static str,
+    /// agy 的文件里带工具名的事件写成 `matcher` + 嵌套 `hooks`，其余是平铺的一串命令。
+    /// 写死在表里而不是从事件名猜（此前按 `ends_with("ToolUse")` 认，agy 哪天加一个
+    /// 别的带工具名的事件就会写成错的形状，而且没人看得出来）。
+    pub matcher: bool,
+}
+
 /// agy 事件 → daemon 事件。`PreToolUse` 不接：daemon 那边它是 claude 专用的
 /// AskUserQuestion 匹配器，agy 没有对应的结构化提问，接了只是噪声。
-pub const AGY_EVENTS: &[(&str, &str)] = &[
-    ("PreInvocation", "UserPromptSubmit"),
-    ("Stop", "Stop"),
-    ("PostToolUse", "PostToolUse"),
+/// agy 一共只有 PreInvocation / PostInvocation / Stop / PreToolUse / PostToolUse 五个，
+/// **没有会话启动事件**——收件箱在 agy 会话刚起来时靠每秒那一遍 tick 投喂，不靠事件。
+pub const AGY_EVENTS: &[AgyEvent] = &[
+    AgyEvent { agy: "PreInvocation", daemon: "UserPromptSubmit", matcher: false },
+    AgyEvent { agy: "Stop", daemon: "Stop", matcher: false },
+    AgyEvent { agy: "PostToolUse", daemon: "PostToolUse", matcher: true },
 ];
 
 /// 我们在 agy 的 hooks.json 里占的键
@@ -158,20 +170,22 @@ pub fn agy_hooks_entry(script: &Path) -> Value {
         })
     };
     let mut m = serde_json::Map::new();
-    for (agy_event, daemon_event) in AGY_EVENTS {
-        // 带工具名的事件要 matcher + 嵌套 hooks，其余是平铺的（照 agy 自己的文件学的）
-        let v = if agy_event.ends_with("ToolUse") {
-            json!([{ "matcher": "*", "hooks": [cmd(daemon_event)] }])
+    for ev in AGY_EVENTS {
+        let v = if ev.matcher {
+            json!([{ "matcher": "*", "hooks": [cmd(ev.daemon)] }])
         } else {
-            json!([cmd(daemon_event)])
+            json!([cmd(ev.daemon)])
         };
-        m.insert(agy_event.to_string(), v);
+        m.insert(ev.agy.to_string(), v);
     }
     Value::Object(m)
 }
 
 /// 把 `aaa` 那一段装进（或刷新）用户的 `hooks.json`，别人的键原样保留。
-/// 返回是否可用——写不出来就让调用方退回屏幕差分，而不是让会话永远停在「在跑」。
+///
+/// **装不上就退回屏幕差分**（全库只在这里说一次）：`Err` 的意思是「这个会话没有事件源」，
+/// 调用方必须据此把 `Session.hooked` 置 false，而不是按 agent 名猜。猜错的后果是
+/// 会话永远停在「在跑」——没有 Stop 事件，也没有屏幕差分接手。
 pub fn ensure_agy_hooks(app: &App) -> std::io::Result<()> {
     let port = match app.bound_port.load(std::sync::atomic::Ordering::Relaxed) {
         0 => app.cfg.port,
@@ -184,8 +198,8 @@ pub fn ensure_agy_hooks(app: &App) -> std::io::Result<()> {
     static AGY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _g = AGY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // **文件不存在**才当空表。读得出来却解析不动（用户手改坏了一个逗号）时必须报错退出——
-    // 否则我们会拿 `{"aaa":…}` 盖掉人家所有的钩子。调用方收到 Err 会退回屏幕差分，
-    // 这是唯一一处 AAA 写别人的文件，出错方向只能选「什么都不做」。
+    // 否则我们会拿 `{"aaa":…}` 盖掉人家所有的钩子。这是唯一一处 AAA 写别人的文件，
+    // 出错方向只能选「什么都不做」。
     let mut root = match std::fs::read_to_string(&path) {
         Ok(text) if text.trim().is_empty() => serde_json::Map::new(),
         Ok(text) => serde_json::from_str::<Value>(&text)

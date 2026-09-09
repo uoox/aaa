@@ -148,13 +148,14 @@ pub fn sidebar_row(id: gpui::ElementId) -> Stateful<Div> {
         .cursor_pointer()
 }
 
-/// 侧栏行尾的悬停小按钮（项目行的「删 / ✕」、终端行的「✕」）：
-/// 三处骨架逐字相同——非当前行平时不画（invisible 连命中盒一起去掉），
-/// 整行悬停才现身。`always_visible` 是「这是当前行」。
+/// 侧栏行尾的小按钮（项目行的「删 / ✕」与 agent 字母小标、终端行的「✕」）：
+/// 三处骨架逐字相同。**一直画着**（2026-09-10 用户拍板「不要悬停显示，直接就显示」）——
+/// 此前非当前行要整行悬停才现身，一列扫下来看不出哪些行能删、哪一行跑的是谁，
+/// 而鼠标一移开又全没了。字色本来就是最淡的那一档，常显也不抢标题。
 ///
 /// 只收骨架：hover 配色各处不同（红 = 终止 / 删），
 /// 硬塞成参数就得再传两个颜色，不如让调用方接着 `.hover(..)` 写清楚。
-pub fn row_btn(id: impl Into<gpui::ElementId>, always_visible: bool) -> Stateful<Div> {
+pub fn row_btn(id: impl Into<gpui::ElementId>) -> Stateful<Div> {
     div()
         .id(id)
         .flex_none()
@@ -162,9 +163,6 @@ pub fn row_btn(id: impl Into<gpui::ElementId>, always_visible: bool) -> Stateful
         .rounded(px(4.))
         .text_size(px(10.))
         .text_color(c(theme::FAINT))
-        .when(!always_visible, |el| {
-            el.invisible().group_hover("sb-row", |st| st.visible())
-        })
 }
 
 // ── 文字与容器 ──────────────────────────────────────────────────────────

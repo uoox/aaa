@@ -938,9 +938,8 @@ async fn sessions_create(
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| canon_str.clone());
-    // hooks（事件源，见 hooks.rs）：claude 走 `--settings` 片段，agy 走它全局那份
-    // `hooks.json` 里我们自己的一段。**写不出来只是退回屏幕启发式，不阻止开会话**——
-    // 但那时 `hooked` 必须是 false，不然会话会永远停在「在跑」。
+    // hooks（事件源，见 `hooks::ensure_agy_hooks` 的文档）：claude 走 `--settings` 片段，
+    // agy 走它全局那份 `hooks.json` 里我们自己的一段。装不上照样开会话，只是 hooked=false。
     let (cmd, mut hooked) = match crate::hooks::ensure_settings(&app) {
         Ok(p) => crate::hooks::with_settings(cmd, agent, &p),
         Err(e) => {
@@ -1764,6 +1763,51 @@ async fn inbox_delete(
     }
 }
 
+// ---- v1.30 目录浏览（消息流 / 终端之外的第三种视图）----
+
+#[derive(Deserialize)]
+struct PathQuery {
+    path: String,
+}
+
+/// 客户端给的路径 → 项目根底下一个真实存在的路径。出根 / 不存在一律 404，
+/// 且**不回显解析细节**：这是唯一一处按客户端给的字符串去碰文件系统的读接口。
+fn under_root(app: &App, path: &str) -> ApiResult<std::path::PathBuf> {
+    crate::files::resolve(&app.cfg.project_root, path)
+        .ok_or_else(|| ApiError::not_found(format!("no such path under the project root: {path}")))
+}
+
+async fn files_list(
+    State(app): State<SharedApp>,
+    axum::extract::Query(q): axum::extract::Query<PathQuery>,
+) -> ApiResult<Json<Value>> {
+    ssd_guard(&app)?;
+    let dir = under_root(&app, &q.path)?;
+    let listed = {
+        let dir = dir.clone();
+        blocking(move || crate::files::list_dir(&dir)).await?
+    };
+    let entries = listed.map_err(|e| ApiError::not_found(format!("no such directory: {e}")))?;
+    Ok(Json(json!({
+        "path": dir.to_string_lossy(),
+        "parent": crate::files::parent_of(&app.cfg.project_root, &dir),
+        "truncated": entries.len() >= crate::files::MAX_ENTRIES,
+        "entries": entries,
+    })))
+}
+
+async fn files_read(
+    State(app): State<SharedApp>,
+    axum::extract::Query(q): axum::extract::Query<PathQuery>,
+) -> ApiResult<Json<Value>> {
+    ssd_guard(&app)?;
+    let file = under_root(&app, &q.path)?;
+    let body = blocking(move || crate::files::read_file(&file))
+        .await?
+        .map_err(|e| ApiError::not_found(format!("cannot read: {e}")))?;
+    Ok(Json(serde_json::to_value(body).unwrap_or_default()))
+}
+
 pub const UPLOAD_LIMIT: usize = 50 * 1024 * 1024;
 
 #[derive(Deserialize)]
@@ -1979,6 +2023,8 @@ pub fn router(app: SharedApp) -> Router {
             post(project_upload)
                 .layer(axum::extract::DefaultBodyLimit::max(UPLOAD_LIMIT)),
         )
+        .route("/api/v1/files", get(files_list))
+        .route("/api/v1/files/read", get(files_read))
         .route("/api/v1/inbox", get(inbox_list).post(inbox_add))
         .route("/api/v1/inbox/{id}", delete(inbox_delete))
         .route("/api/v1/hooks/{event}", post(hook_event))

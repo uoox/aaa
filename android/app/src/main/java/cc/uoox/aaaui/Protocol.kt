@@ -160,6 +160,14 @@ const val SCHEMA_PROJECT_STATUS = 2
  */
 @Serializable data class AgentInfo(val id: String = "", val label: String = "", val available: Boolean = false)
 
+/**
+ * v1.30 目录浏览（`GET /files` / `GET /files/read`）：项目根底下的只读文件浏览器。
+ * `kind` ∈ markdown | text | binary（目录是空串）。出不出根由 daemon 保证，客户端只画。
+ */
+@Serializable data class FileEntry(val name: String = "", val path: String = "", val dir: Boolean = false, val size: Long = 0, val kind: String = "")
+@Serializable data class FileListing(val path: String = "", val parent: String? = null, val truncated: Boolean = false, val entries: List<FileEntry> = emptyList())
+@Serializable data class FileBody(val path: String = "", val name: String = "", val size: Long = 0, val kind: String = "", val text: String = "", val truncated: Boolean = false)
+
 @Serializable data class PurgedAgent(val agent_label: String, val count: Int)
 @Serializable data class ProjectDeleteResult(val path: String, val ok: Boolean, val purged: List<PurgedAgent> = emptyList())
 

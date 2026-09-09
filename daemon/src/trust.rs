@@ -85,20 +85,14 @@ pub fn dialog_visible(screen: &vt100::Screen) -> bool {
 }
 
 /// Pure decision: act now?
-pub fn should_press(
-    enabled: bool,
-    agent: &str,
-    alive: bool,
-    visible: bool,
-    presses: u8,
-    since_last: Option<Duration>,
-) -> bool {
-    enabled
-        && agent != "shell"
-        && alive
-        && visible
-        && presses < MAX_PRESSES
-        && since_last.is_none_or(|d| d >= Duration::from_secs(RETRY_SECS))
+pub fn should_press(alive: bool, visible: bool, since_last: Option<Duration>) -> bool {
+    alive && visible && since_last.is_none_or(|d| d >= Duration::from_secs(RETRY_SECS))
+}
+
+/// 门槛里**不用碰锁、不用读屏**的那一半：配置开着、不是终端、还没按够。
+/// `on_tick` 先过这一关——读一次屏幕是每秒每会话都要付的钱，终端会话不该付。
+pub fn may_press(enabled: bool, agent: &str, presses: u8) -> bool {
+    enabled && agent != "shell" && presses < MAX_PRESSES
 }
 
 /// Called from the 1s tick for every session.
@@ -107,7 +101,7 @@ pub fn on_tick(app: &SharedApp, sess: &Arc<Session>) {
         let meta = sess.meta.lock().unwrap();
         (meta.agent.clone(), meta.trust_presses, meta.trust_pressed_inst)
     };
-    if !app.cfg.auto_trust || agent == "shell" || presses >= MAX_PRESSES {
+    if !may_press(app.cfg.auto_trust, &agent, presses) {
         return;
     }
     let alive = sess.live.lock().unwrap().is_some();
@@ -115,7 +109,7 @@ pub fn on_tick(app: &SharedApp, sess: &Arc<Session>) {
         let guard = sess.parser.lock().unwrap();
         guard.as_ref().and_then(|p| next_key(p.screen()))
     };
-    if !should_press(true, &agent, alive, key.is_some(), presses, last.map(|t| t.elapsed())) {
+    if !should_press(alive, key.is_some(), last.map(|t| t.elapsed())) {
         return;
     }
     let Some(key) = key else { return };
@@ -186,9 +180,9 @@ mod tests {
         assert_eq!(next_key(quoted.screen()), None, "但高亮标记不在行首，一个键都不许按");
 
         // 替它按这件事对 claude / agy 一视同仁，终端（shell）永远不按
-        assert!(should_press(true, "agy", true, true, 0, None));
-        assert!(should_press(true, "claude", true, true, 0, None));
-        assert!(!should_press(true, "shell", true, true, 0, None));
+        assert!(may_press(true, "agy", 0));
+        assert!(may_press(true, "claude", 0));
+        assert!(!may_press(true, "shell", 0), "终端不替人按");
         // 只有提示没有选项行（比如被引用在输出里）不算
         let doc = screen_of("It said: Quick safety check: Is this a project you created? — then I answered.");
         assert!(!dialog_visible(doc.screen()));
@@ -197,13 +191,13 @@ mod tests {
     #[test]
     fn press_gate() {
         let s = Duration::from_secs;
-        assert!(should_press(true, "claude", true, true, 0, None));
-        assert!(should_press(true, "claude", true, true, 1, Some(s(2))));
-        assert!(!should_press(true, "claude", true, true, 1, Some(Duration::from_millis(300))), "retry spacing");
-        assert!(!should_press(true, "claude", true, true, MAX_PRESSES, Some(s(9))), "gives up");
-        assert!(!should_press(false, "claude", true, true, 0, None), "config off");
-        assert!(!should_press(true, "shell", true, true, 0, None));
-        assert!(!should_press(true, "claude", false, true, 0, None));
-        assert!(!should_press(true, "claude", true, false, 0, None));
+        assert!(should_press(true, true, None));
+        assert!(should_press(true, true, Some(s(2))));
+        assert!(!should_press(true, true, Some(Duration::from_millis(300))), "retry spacing");
+        assert!(!should_press(false, true, None), "进程已经没了");
+        assert!(!should_press(true, false, None), "屏幕上没有对话框");
+        assert!(!may_press(true, "claude", MAX_PRESSES), "gives up");
+        assert!(!may_press(false, "claude", 0), "config off");
+        assert!(!may_press(true, "shell", 0));
     }
 }

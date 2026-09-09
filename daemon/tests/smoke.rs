@@ -1007,3 +1007,66 @@ async fn events_reconnect_snapshot_is_authoritative() {
     assert!(found["queued"].is_array(), "queued 也在");
 }
 
+
+/// v1.30 目录浏览：列目录、读 Markdown、出根被挡。守卫在 daemon 这一层做完，
+/// 两端只画——所以这条必须端到端跑，而不是只测 `files.rs` 里的纯函数。
+#[test]
+fn files_browser_lists_reads_and_refuses_to_leave_the_root() {
+    let env = setup_env();
+    let _guard = spawn_daemon(&env);
+    let port = wait_port(&env);
+
+    let (_, proj) = http(
+        "POST",
+        port,
+        "/api/v1/projects",
+        Some(TOKEN),
+        Some(serde_json::json!({"name": "browse"})),
+    );
+    let dir = proj["path"].as_str().unwrap().to_string();
+    std::fs::create_dir_all(Path::new(&dir).join("src")).unwrap();
+    std::fs::write(Path::new(&dir).join("NOTE.md"), "# 标题\n正文").unwrap();
+
+    let (code, listing) = http("GET", port, &format!("/api/v1/files?path={dir}"), Some(TOKEN), None);
+    assert_eq!(code, 200);
+    let names: Vec<&str> = listing["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["src", "NOTE.md"], "目录在前");
+    assert_eq!(listing["entries"][1]["kind"], "markdown");
+    assert!(listing["parent"].is_string(), "项目目录有上一级（项目根）");
+
+    let root = env.root.canonicalize().unwrap();
+    let (_, at_root) = http(
+        "GET",
+        port,
+        &format!("/api/v1/files?path={}", root.display()),
+        Some(TOKEN),
+        None,
+    );
+    assert!(at_root["parent"].is_null(), "项目根没有上一级");
+
+    let (code, file) = http(
+        "GET",
+        port,
+        &format!("/api/v1/files/read?path={dir}/NOTE.md"),
+        Some(TOKEN),
+        None,
+    );
+    assert_eq!(code, 200);
+    assert_eq!(file["text"], "# 标题\n正文");
+    assert_eq!(file["kind"], "markdown");
+
+    // 出根：`..` 与根之外的绝对路径都是 404，不是「读到了别人的文件」
+    for bad in ["/etc", "/etc/hosts"] {
+        let (code, _) = http("GET", port, &format!("/api/v1/files?path={bad}"), Some(TOKEN), None);
+        assert_eq!(code, 404, "{bad} 在项目根之外");
+    }
+    let (code, _) = http("GET", port, "/api/v1/files/read?path=/etc/hosts", Some(TOKEN), None);
+    assert_eq!(code, 404);
+    let (code, _) = http("GET", port, &format!("/api/v1/files?path={dir}/../.."), Some(TOKEN), None);
+    assert_eq!(code, 404, "`..` 爬不出去");
+}

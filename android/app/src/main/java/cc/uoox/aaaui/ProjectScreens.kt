@@ -382,8 +382,16 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
                     minuteTick = minuteTick,
                     busy = busy,
                     currentPath = currentPath,
+                    agents = agents,
                     onOpen = { row -> open(row) },
                     onLongPress = { p -> actionsFor = p },
+                    onSwapAgent = { path, next ->
+                        scope.launch {
+                            runCatching { store.client?.setProjectAgent(path, next) }
+                                .onSuccess { store.refreshProjects() }
+                                .onFailure { toast("失败：${it.message}") }
+                        }
+                    },
                 )
                 // 终端与会话平级（2026-09-08 用户拍板）：项目列表下面直接是终端列表，
                 // 底部一行「新增终端」。以前它藏在顶栏一个 `>_` 按钮后面，是另一个世界。
@@ -429,19 +437,29 @@ private fun LazyListScope.projectSection(
     /** 正在 POST /sessions 的项目路径，行先按「在跑」画淡蓝底 */
     busy: Set<String>,
     currentPath: String?,
+    /** agent 表：装了两个以上时每行尾部才画那个字母小标 */
+    agents: List<AgentInfo>,
     onOpen: (ProjectRow) -> Unit,
     onLongPress: (Project) -> Unit,
+    onSwapAgent: (String, String) -> Unit,
 ) {
     // 空态也是列表里的一项：下面还有终端一节，浮一层居中文字会盖住它
     if (rows.isEmpty()) item(key = "projects-empty") { ProjectsEmpty(anyProject = anyProject) }
     items(rows, key = { it.project.path }) { row ->
         // 顺序随最近更新变：Compose 按 key 做位移过渡，上移/下移都有动画
+        // 这一行下次开谁：注册表里登记的，没登记就按默认（表里第一个装了的）算——
+        // 直接给 `agentLabel("")` 会让每一行都常驻一个原样回显的空标签
+        val agent = row.project.agent?.takeIf { it.isNotEmpty() }
+            ?: agents.firstOrNull { it.available }?.id ?: DEFAULT_AGENT
+        val next = if (row.project.registered) nextAgent(agents, agent) else null
         ProjectRowItem(
             row,
             timeText = remember(row.updatedIso, minuteTick) { relativeTime(row.updatedIso) },
             modifier = Modifier.animateItem(),
             busy = row.project.path in busy,
             current = row.project.path == currentPath,
+            agentMark = next?.let { agentLabel(agents, agent).take(1) },
+            onSwapAgent = next?.let { { onSwapAgent(row.project.path, it) } },
             onClick = { onOpen(row) },
             onLongClick = { onLongPress(row.project) },
         )
@@ -625,7 +643,18 @@ fun PlanUsageDialog(plan: PlanUsage, onDismiss: () -> Unit) {
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ProjectRowItem(row: ProjectRow, timeText: String, busy: Boolean, current: Boolean = false, onClick: () -> Unit, onLongClick: () -> Unit, modifier: Modifier = Modifier) {
+private fun ProjectRowItem(
+    row: ProjectRow,
+    timeText: String,
+    busy: Boolean,
+    current: Boolean = false,
+    /** 这个项目下次开谁的首字母；null = 只装了一个 agent（或这一行换不了），整个不画 */
+    agentMark: String? = null,
+    onSwapAgent: (() -> Unit)? = null,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     Column(modifier) {
         Row(
             Modifier.fillMaxWidth()
@@ -641,6 +670,19 @@ private fun ProjectRowItem(row: ProjectRow, timeText: String, busy: Boolean, cur
                 fontSize = 15.sp, fontWeight = FontWeight.Bold,
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
             )
+            // agent 字母小标：一列扫下来看得出哪几行不是默认那个。点它换「下次开谁」——
+            // 与 mac 同一处入口（长按单里那一条仍在，两条路同一个动作）。
+            // v1.30 前这里什么都不画（mac 有悬停、手机没有，所以只给了长按单）；
+            // mac 那边改成常显之后，这条不对称的理由就没有了
+            if (agentMark != null && onSwapAgent != null) {
+                Spacer(Modifier.width(6.dp))
+                Box(
+                    Modifier.size(24.dp).clickable(onClick = onSwapAgent),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(agentMark, color = Tok.Faint, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                }
+            }
             Spacer(Modifier.width(8.dp))
             Text(timeText, color = Tok.Faint, fontSize = 11.sp)
         }

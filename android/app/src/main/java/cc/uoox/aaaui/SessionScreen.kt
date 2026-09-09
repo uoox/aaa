@@ -122,7 +122,12 @@ fun SessionScreen(
         messagesSupported == false -> "terminal"
         else -> settings.defaultUi
     }
-    val showMessages = effectiveMode == "messages" && messagesSupported != false
+    // v1.30 起有三种看法（messages / terminal / files），顶栏点一下轮换。
+    // 消息流画不出来的会话（shell、老 daemon）跳过那一档——切到一个画不出来的
+    // 视图，用户只会看见终端，还以为按钮坏了
+    val mode = if (effectiveMode == "messages" && messagesSupported == false) "terminal" else effectiveMode
+    val showMessages = mode == "messages"
+    val showFiles = mode == "files"
 
     // 输入框：内容跟着会话存在 AppStore（并落盘），返回首页 / 切去别的 app 再回来字还在；
     // 通知带来的 prefill 优先，它本身也成为新草稿
@@ -284,18 +289,18 @@ fun SessionScreen(
             title = s?.title?.ifBlank { s.project_name } ?: sessionId,
             usage = s?.usage,
             state = s?.state ?: "",
-            showMessages = showMessages,
-            canSwitchView = messagesSupported != false,
+            viewLabel = viewLabelOf(mode),
+            canSwitchView = true,
             onMenu = { scope.launch { drawerState.open() } },
-            onToggleView = { uiMode = if (showMessages) "terminal" else "messages" },
+            onToggleView = { uiMode = nextView(mode, messagesSupported != false) },
             onDetail = { nav.openDetail(sessionId) },
         )
-        if (!wsConnected && !showMessages) {
+        if (!wsConnected && !showMessages && !showFiles) {
             Text("连接中…", color = Tok.Amber, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 16.dp))
         }
 
         // 快捷键条（仅终端视图，且要先用 ⌨ 放出来）：放在终端上方，软键盘弹起时不会被顶到看不见
-        if (!showMessages && keysOpen) {
+        if (!showMessages && !showFiles && keysOpen) {
             TerminalKeyBar(
                 attachment = attachment,
                 ctrlStickyState = ctrlStickyState,
@@ -308,7 +313,9 @@ fun SessionScreen(
 
         // 主体
         Box(Modifier.weight(1f).fillMaxWidth()) {
-            if (showMessages) {
+            if (showFiles) {
+                FilesView(store, s?.project_path.orEmpty())
+            } else if (showMessages) {
                 MessagesView(
                     messages.value, messagesSupported, live = s?.state == "running",
                     sessionAlive = s?.state != "exited",
@@ -340,8 +347,9 @@ fun SessionScreen(
             }
         }
 
-        // composer：消息流视图始终在；终端视图下跟键位条一起收放
-        if (showMessages || keysOpen) {
+        // composer：消息流视图始终在；终端视图下跟键位条一起收放；浏览视图没有 composer
+        // （那一屏是在看文件，不是在说话）
+        if (showMessages || (!showFiles && keysOpen)) {
             SessionComposer(
                 text = composer,
                 onTextChange = { composer = it },
@@ -353,12 +361,32 @@ fun SessionScreen(
     }
     // 终端视图下键位条收起时：右下角一枚 ⌨ 把它放出来（悬浮在终端上，不占一行；
     // 条本身在顶部，按钮留在右下角是为了不盖住画面第一行的输出）
-    if (!showMessages && !keysOpen) {
+    if (!showMessages && !showFiles && !keysOpen) {
         Box(Modifier.align(Alignment.BottomEnd).padding(end = 14.dp, bottom = 14.dp)) { KeyChip("⌨") { keysOpen = true } }
     }
     }
     }
 
+}
+
+/**
+ * 三种看法的轮换顺序：终端 → 消息流 → 浏览 → 终端（与 mac 的 `next_view` 同一条线）。
+ * `msgs` 为 false 时跳过消息流那一档。
+ */
+fun nextView(cur: String, msgs: Boolean): String {
+    val order = listOf("terminal", "messages", "files")
+    val i = order.indexOf(cur).let { if (it < 0) 0 else it }
+    for (step in 1..order.size) {
+        val cand = order[(i + step) % order.size]
+        if (cand != "messages" || msgs) return cand
+    }
+    return "terminal"
+}
+
+fun viewLabelOf(mode: String): String = when (mode) {
+    "messages" -> "消息流"
+    "files" -> "浏览"
+    else -> "终端"
 }
 
 /**
@@ -375,7 +403,8 @@ private fun SessionTopBar(
     title: String,
     usage: SessionUsage?,
     state: String,
-    showMessages: Boolean,
+    /** 当前这一格写着哪三个字（消息流 / 终端 / 浏览） */
+    viewLabel: String,
     /** 消息流探测下来是否可切换：老 daemon 没有消息流端点，那就不画切换按钮 */
     canSwitchView: Boolean,
     onMenu: () -> Unit,
@@ -407,7 +436,7 @@ private fun SessionTopBar(
         // 视图切换：显示当前视图名，点一下换另一种
         if (canSwitchView) {
             Text(
-                if (showMessages) "消息流" else "终端",
+                viewLabel,
                 color = Tok.Accent, fontSize = 12.sp, fontFamily = FontFamily.Monospace,
                 modifier = Modifier
                     .clickable(onClick = onToggleView)

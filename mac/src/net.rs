@@ -376,6 +376,15 @@ impl Net {
         self.get_json(&format!("/sessions/{id}/messages?after={after}&limit=500"))
     }
 
+    /// v1.30 目录浏览：列一个目录（daemon 保证它在项目根底下）
+    pub fn files(&self, path: &str) -> impl Future<Output = Result<crate::model::FileListing>> + use<> {
+        self.get_json(&format!("/files?path={}", percent_encode(path)))
+    }
+    /// v1.30 目录浏览：读一个文件（二进制只回大小，正文空）
+    pub fn file_read(&self, path: &str) -> impl Future<Output = Result<crate::model::FileBody>> + use<> {
+        self.get_json(&format!("/files/read?path={}", percent_encode(path)))
+    }
+
     /// v1.4 套餐用量（`plan` 为 null = 没有套餐信息）
     pub fn usage(&self) -> impl Future<Output = Result<UsageResponse>> + use<> {
         self.get_json("/usage")

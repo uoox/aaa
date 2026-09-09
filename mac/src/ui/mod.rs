@@ -1,6 +1,7 @@
 //! UI 根视图：侧栏（唯一的会话切换入口）+ 页面区 + 状态栏 + 模态框。
 
 mod detail_panel;
+mod files_view;
 mod history;
 mod kit;
 mod messages_view;
@@ -25,6 +26,7 @@ use crate::model::*;
 use crate::net::{ConnState, Net, UiEvent};
 use crate::theme;
 use kit::*;
+use files_view::FilesView;
 use messages_view::MessagesView;
 use mini_input::MiniInput;
 use terminal_view::TerminalView;
@@ -38,6 +40,41 @@ pub enum Page {
     Terminal,
     /// 会话日志（侧栏底部入口）：所有出现过的会话，含已退出、已删除
     History,
+}
+
+/// 一条会话的三种看法（v1.30 加了「浏览」）。终端是**兜底那一个**：消息流可能
+/// 不支持（shell / 老 daemon），浏览要项目目录，终端永远画得出来。
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum SessionView {
+    #[default]
+    Terminal,
+    Messages,
+    Files,
+}
+
+impl SessionView {
+    pub fn label(self) -> &'static str {
+        match self {
+            SessionView::Terminal => "终端",
+            SessionView::Messages => "消息流",
+            SessionView::Files => "浏览",
+        }
+    }
+}
+
+/// ⌘E 的轮换顺序：终端 → 消息流 → 浏览 → 终端。`msgs` 为 false（shell、
+/// 老 daemon、探明不支持）时跳过消息流那一档——切到一个画不出来的视图，
+/// 用户按下去只会看见终端，还以为快捷键坏了。
+pub fn next_view(cur: SessionView, msgs: bool) -> SessionView {
+    let order = [SessionView::Terminal, SessionView::Messages, SessionView::Files];
+    let i = order.iter().position(|v| *v == cur).unwrap_or(0);
+    for step in 1..=order.len() {
+        let cand = order[(i + step) % order.len()];
+        if cand != SessionView::Messages || msgs {
+            return cand;
+        }
+    }
+    SessionView::Terminal
 }
 
 /// 关掉 `closed` 之后停在哪一页：只有关的正是当前页才换页，换到剩下的最近一个
@@ -325,9 +362,11 @@ pub struct RootView {
     /// （随后的 exited 帧不再重复删），session_removed 时清掉
     deleted_terminals: HashSet<String>,
 
-    // v1.1 消息流：按需创建的视图 + 处于消息流模式的会话（⌘E 切换）
+    // 会话的三种看法（⌘E 轮换，状态栏也能直接点）：视图按需创建，
+    // 没记过的会话默认终端——它永远画得出来
     msg_views: HashMap<String, Entity<MessagesView>>,
-    msg_mode: HashSet<String>,
+    files_views: HashMap<String, Entity<FilesView>>,
+    view_mode: HashMap<String, SessionView>,
 
     /// 本机手动终止的会话：exited 不弹「已退出」（自己动的手）
     pub user_killed: HashSet<String>,
@@ -488,7 +527,8 @@ impl RootView {
             active_terminal: None,
             deleted_terminals: HashSet::new(),
             msg_views: HashMap::new(),
-            msg_mode: HashSet::new(),
+            files_views: HashMap::new(),
+            view_mode: HashMap::new(),
             user_killed: HashSet::new(),
             sidebar_w: ui_state.sidebar_w,
             sidebar_drag: None,
@@ -583,7 +623,8 @@ impl RootView {
                 self.sessions.retain(|s| s.id != id);
                 self.terminals.remove(&id);
                 self.msg_views.remove(&id);
-                self.msg_mode.remove(&id);
+                self.files_views.remove(&id);
+                self.view_mode.remove(&id);
                 self.open_order.retain(|x| x != &id);
                 self.user_killed.remove(&id);
                 self.deleted_terminals.remove(&id);
@@ -620,45 +661,77 @@ impl RootView {
         }
     }
 
-    /// ⌘E：当前会话在 终端 ⇄ 消息流 之间切换；视图按需创建
-    fn toggle_msg_mode(&mut self, cx: &mut Context<Self>) {
+    /// ⌘E：当前会话在 终端 → 消息流 → 浏览 之间轮换
+    fn cycle_view(&mut self, cx: &mut Context<Self>) {
         let Page::Session(id) = self.page.clone() else {
             return;
         };
-        if self.msg_mode.contains(&id) {
-            self.msg_mode.remove(&id);
-            self.pending_focus = Some(id);
-        } else {
-            let net = self.net.clone();
-            let sid = id.clone();
-            // 新建的视图默认当会话活着；这里立刻用真实状态校准，已退出的会话
-            // 里悬着的表单不能是可交互的
-            let (alive, running, perm, asking_seq, queued) = self
-                .session(&id)
-                .map(|s| (s.state != SessionState::Exited, s.state == SessionState::Running, s.permission.clone(), s.asking_seq, s.queued.clone()))
-                .unwrap_or((false, false, None, None, Vec::new()));
-            let project_path = self.session(&id).map(|s| s.project_path.clone()).unwrap_or_default();
-            self.msg_views
-                .entry(id.clone())
-                .or_insert_with(|| cx.new(|cx| MessagesView::new(sid, net, cx)))
-                .update(cx, |v, cx| {
-                    v.set_project_path(project_path);
-                    v.set_session(alive, running, perm, asking_seq, queued.clone(), cx);
-                    v.fetch(cx);
-                    v.request_focus(cx);
-                });
-            self.msg_mode.insert(id);
+        let next = next_view(self.view_of(&id, cx), self.msgs_available(&id, cx));
+        self.set_view(id, next, cx);
+    }
+
+    /// 切到某一种看法；视图按需创建，切走时把焦点还给终端
+    fn set_view(&mut self, id: String, view: SessionView, cx: &mut Context<Self>) {
+        match view {
+            SessionView::Terminal => {
+                self.pending_focus = Some(id.clone());
+            }
+            SessionView::Messages => {
+                let net = self.net.clone();
+                let sid = id.clone();
+                // 新建的视图默认当会话活着；这里立刻用真实状态校准，已退出的会话
+                // 里悬着的表单不能是可交互的
+                let (alive, running, perm, asking_seq, queued) = self
+                    .session(&id)
+                    .map(|s| (s.state != SessionState::Exited, s.state == SessionState::Running, s.permission.clone(), s.asking_seq, s.queued.clone()))
+                    .unwrap_or((false, false, None, None, Vec::new()));
+                let project_path = self.session(&id).map(|s| s.project_path.clone()).unwrap_or_default();
+                self.msg_views
+                    .entry(id.clone())
+                    .or_insert_with(|| cx.new(|cx| MessagesView::new(sid, net, cx)))
+                    .update(cx, |v, cx| {
+                        v.set_project_path(project_path);
+                        v.set_session(alive, running, perm, asking_seq, queued.clone(), cx);
+                        v.fetch(cx);
+                        v.request_focus(cx);
+                    });
+            }
+            SessionView::Files => {
+                let net = self.net.clone();
+                let dir = self.session(&id).map(|s| s.project_path.clone()).unwrap_or_default();
+                match self.files_views.entry(id.clone()) {
+                    std::collections::hash_map::Entry::Occupied(e) => {
+                        // 会话换过项目（resume 到别处）时把浏览器指到新目录
+                        e.get().update(cx, |v, cx| v.set_dir(dir, cx));
+                    }
+                    std::collections::hash_map::Entry::Vacant(e) => {
+                        e.insert(cx.new(|cx| FilesView::new(net, dir, cx)));
+                    }
+                }
+            }
         }
+        self.view_mode.insert(id, view);
         cx.notify();
     }
 
-    /// 当前会话此刻是否显示消息流（不支持的会话自动回落终端）
-    fn msg_mode_active(&self, id: &str, cx: &Context<Self>) -> bool {
-        self.msg_mode.contains(id)
+    /// 这条会话此刻在看哪一种。**记着的那一种可能已经画不出来了**（消息流探明
+    /// 不支持、会话没有项目目录），那就当它在看终端——回落只判这一处。
+    fn view_of(&self, id: &str, cx: &Context<Self>) -> SessionView {
+        match self.view_mode.get(id).copied().unwrap_or_default() {
+            SessionView::Messages if !self.msgs_available(id, cx) => SessionView::Terminal,
+            v => v,
+        }
+    }
+
+    /// 这条会话有没有消息流可看（shell / 老 daemon / 探明不支持 → 没有）
+    fn msgs_available(&self, id: &str, cx: &Context<Self>) -> bool {
+        self.session(id).is_some_and(|s| s.agent != "shell")
             && self
                 .msg_views
                 .get(id)
-                .is_some_and(|v| v.read(cx).supported != Some(false))
+                .map(|v| v.read(cx).supported)
+                .unwrap_or(None)
+                != Some(false)
     }
 
     /// 系统通知只有三种（2026-09-07 用户拍板，PROTOCOL「WS」通知策略）：
@@ -932,7 +1005,8 @@ impl RootView {
     pub fn close_tab(&mut self, id: &str, cx: &mut Context<Self>) {
         self.terminals.remove(id);
         self.msg_views.remove(id);
-        self.msg_mode.remove(id);
+        self.files_views.remove(id);
+        self.view_mode.remove(id);
         self.open_order.retain(|x| x != id);
         self.page = page_after_close(&self.page, id, &self.open_order);
         cx.notify();
@@ -1060,7 +1134,7 @@ impl RootView {
         }
         if ks.key == "e" && m.platform {
             if matches!(self.modal, Modal::None) {
-                self.toggle_msg_mode(cx);
+                self.cycle_view(cx);
             }
             cx.stop_propagation();
             return;
@@ -1189,7 +1263,6 @@ impl RootView {
         let row_id = SharedString::from(format!("sb-proj:{}", row.path));
         let act_id = SharedString::from(format!("sb-act:{}", row.path));
         let mut el = sidebar_row(row_id.into())
-            .group("sb-row")
             .when_some(bg, |el, bg| el.bg(c(bg)))
             // 选中 = 整行一圈强调色边框：底色归状态用了，选中态不再抢整行的底
             .when(active, |el| el.border_color(c(theme::ACCENT)))
@@ -1212,9 +1285,10 @@ impl RootView {
                     .text_color(c(if active { theme::ACCENT } else if dim_title { theme::DIM } else { theme::INK }))
                     .child(SharedString::from(title)),
             );
-        // agent 小标兼开关：表里只有一个可用 agent 时整个不画。默认 agent 的行也不画
-        // （一列扫下来还是只有标题和时间），非默认的常显——「这个项目下次开谁」得看得见。
-        // 没登记的行（daemon 给「有活会话但不在名册」的目录补的）换不了。
+        // agent 小标兼开关：表里只有一个可用 agent 时整个不画（没得换）。装了两个以上时
+        // **每一行都画**（2026-09-10 用户拍板：不要悬停才显示）——「这个项目下次开谁」
+        // 是一列扫下来就该看得出的事。没登记的行（daemon 给「有活会话但不在名册」的
+        // 目录补的）换不了。
         // 行上没写 agent（老 daemon / 客户端自己拼的行）时按默认那个算——不然
         // `agent_label("")` 取不到首字母，每一行都会常驻一个「?」
         let agent = row
@@ -1231,24 +1305,20 @@ impl RootView {
             .map(|p| p.path.clone())
             .zip(self.next_agent(&agent));
         if let Some((path, next)) = swap {
-            let is_default = self.agents.iter().find(|a| a.available).is_some_and(|a| a.id == agent);
             let mark = self.agent_label(&agent).chars().next().unwrap_or('?').to_string();
             el = el.child(
-                row_btn(
-                    SharedString::from(format!("sb-agent:{}", row.path)),
-                    active || !is_default,
-                )
-                .hover(|st| st.text_color(c(theme::ACCENT)).bg(c(theme::EDGE_LIGHT)))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.swap_project_agent(path.clone(), next.clone(), cx);
-                }))
-                .child(SharedString::from(mark)),
+                row_btn(SharedString::from(format!("sb-agent:{}", row.path)))
+                    .hover(|st| st.text_color(c(theme::ACCENT)).bg(c(theme::EDGE_LIGHT)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.swap_project_agent(path.clone(), next.clone(), cx);
+                    }))
+                    .child(SharedString::from(mark)),
             );
         }
-        // 行尾按钮（非当前行悬停才现身；invisible 连命中盒一起去掉）：
-        // 活着的 × = 结束会话（只有执行中的才确认，被顺手点掉最伤）；未激活的「删」= 删项目
-        let button = row_btn(act_id, active)
+        // 行尾按钮：活着的 × = 结束会话（只有执行中的才确认，被顺手点掉最伤）；
+        // 未激活的「删」= 删项目
+        let button = row_btn(act_id)
             .hover(|st| st.text_color(c(theme::RED)).bg(c(theme::EDGE_LIGHT)));
         if let Some((id_close, confirm)) = kill {
             el = el.child(
@@ -1527,25 +1597,37 @@ impl RootView {
                             .child(label)
                     };
 
-                    // 消息流 ⇄ 终端 切换（shell 无消息流；探明不支持后隐藏）
-                    let msg_supported = self
-                        .msg_views
-                        .get(&sid)
-                        .map(|v| v.read(cx).supported)
-                        .unwrap_or(None);
-                    if s.agent != "shell" && msg_supported != Some(false) {
-                        let on = self.msg_mode_active(&sid, cx);
-                        bar = bar.child(
-                            act(
-                                "view-toggle",
-                                if on { "⌘E 终端" } else { "⌘E 消息流" },
-                                if on { theme::ACCENT } else { theme::FAINT },
-                            )
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.toggle_msg_mode(cx);
+                    // 三种看法各一格，当前那一格是主色（⌘E 也走同一条路）。
+                    // 消息流那一格在 shell / 探明不支持时整个不画——不画比画一个
+                    // 点不动的灰字诚实
+                    let cur = self.view_of(&sid, cx);
+                    let msgs_ok = self.msgs_available(&sid, cx);
+                    bar = bar.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(2.))
+                            .children([SessionView::Terminal, SessionView::Messages, SessionView::Files].into_iter().filter_map(|v| {
+                                if v == SessionView::Messages && !msgs_ok {
+                                    return None;
+                                }
+                                let sid = sid.clone();
+                                Some(
+                                    act(
+                                        match v {
+                                            SessionView::Terminal => "view-term",
+                                            SessionView::Messages => "view-msgs",
+                                            SessionView::Files => "view-files",
+                                        },
+                                        v.label(),
+                                        if v == cur { theme::ACCENT } else { theme::FAINT },
+                                    )
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.set_view(sid.clone(), v, cx);
+                                    })),
+                                )
                             })),
-                        );
-                    }
+                    );
 
                     // 会话操作
                     let sid_rename = sid.clone();
@@ -1661,15 +1743,17 @@ impl Render for RootView {
         let content = div().flex_1().min_h(px(0.)).flex().flex_col().map(|el| {
             match self.page.clone() {
                 Page::Session(id) => {
-                    let msg_view = self
-                        .msg_mode_active(&id, cx)
-                        .then(|| self.msg_views.get(&id).cloned())
-                        .flatten();
-                    let term = self.terminals.get(&id).cloned();
-                    match (msg_view, term) {
-                        (Some(mv), _) => el.child(div().flex_1().min_h(px(0.)).child(mv)),
-                        (None, Some(t)) => el.child(div().flex_1().min_h(px(0.)).child(t)),
-                        (None, None) => el.child(
+                    // 记着的那一种视图拿不出实体（还没建 / 刚被清掉）就落回终端，
+                    // 终端也没有才是「会话未打开」
+                    let body: Option<gpui::AnyElement> = match self.view_of(&id, cx) {
+                        SessionView::Messages => self.msg_views.get(&id).cloned().map(IntoElement::into_any_element),
+                        SessionView::Files => self.files_views.get(&id).cloned().map(IntoElement::into_any_element),
+                        SessionView::Terminal => None,
+                    }
+                    .or_else(|| self.terminals.get(&id).cloned().map(IntoElement::into_any_element));
+                    match body {
+                        Some(b) => el.child(div().flex_1().min_h(px(0.)).child(b)),
+                        None => el.child(
                             div()
                                 .flex_1()
                                 .flex()
@@ -1781,6 +1865,19 @@ mod tests {
         assert_eq!(relative_time("不是时间", now), "");
         // daemon 的时钟稍微快一点也不该写成负数
         assert_eq!(relative_time("2026-09-08T12:00:30Z", now), "刚刚");
+    }
+
+    /// ⌘E 的轮换：终端 → 消息流 → 浏览 → 终端；没有消息流的会话（shell、老 daemon）
+    /// 跳过那一档，两下就回到终端。
+    #[test]
+    fn view_cycle_skips_what_cannot_be_drawn() {
+        use SessionView::*;
+        assert_eq!(next_view(Terminal, true), Messages);
+        assert_eq!(next_view(Messages, true), Files);
+        assert_eq!(next_view(Files, true), Terminal);
+        assert_eq!(next_view(Terminal, false), Files, "没有消息流就直接到浏览");
+        assert_eq!(next_view(Files, false), Terminal);
+        assert_eq!(next_view(Messages, false), Files, "记着消息流却已不支持：往下走，不卡住");
     }
 
     #[test]

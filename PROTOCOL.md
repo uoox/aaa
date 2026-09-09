@@ -60,11 +60,13 @@ daemon 在启动时用 `zsh -lic` 问一次「终端里应有的 PATH」（带�
 | agent | 存储 | resume id | 消息流 |
 |---|---|---|---|
 | claude | `~/.claude/projects/<cwd 编码>/<id>.jsonl`，cwd 取自 jsonl 头部记录 | 扫该 cwd 最新的 jsonl，文件名即 id | 支持：逐行读 transcript |
-| agy | `~/.gemini/antigravity-cli/`：`cache/last_conversations.json` 就是现成的 `cwd → 最近对话 id`，对话本体在 `conversations/<id>.db` | 直接查表，再确认 `.db`/`.pb` 还在（表里可能指向已被 GC 的对话） | **尚未实现**，客户端回落到终端画面。原先写的理由（「只有 SQLite，没有可跟读的 transcript」）是错的：v1.29 接 statusLine 时发现它的负载里带 `transcript_path`，指向 `brain/<对话id>/.system_generated/logs/transcript.jsonl`——每行一条 `{step_index, source, type, status, created_at, content}`（`source` ∈ USER_EXPLICIT/MODEL，`type` ∈ USER_INPUT/PLANNER_RESPONSE…），是能跟读的。缺的只是一个解析器 |
+| agy | `~/.gemini/antigravity-cli/`：`cache/last_conversations.json` 就是现成的 `cwd → 最近对话 id`，对话本体在 `conversations/<id>.db` | 直接查表，再确认 `.db`/`.pb` 还在（表里可能指向已被 GC 的对话） | **支持（v1.30）**：`brain/<对话id>/.system_generated/logs/transcript.jsonl`，一行一步 `{step_index, source, type, status, created_at, content}`。见下方「agy 的消息流」 |
 
-**agy 的钩子（v1.28）**：agy 没有 `--settings`，钩子只有全局一份 `~/.gemini/config/hooks.json`，而且只认 `type:"command"`。daemon 因此往那份文件里塞一个 **`aaa` 键**（别人的键原样保留，比如 orca-status），命令是一个转发脚本，**事件名的映射写在那份文件里**——agy 的 `PreInvocation` 打到 daemon 的 `UserPromptSubmit`，`Stop` 打到 `Stop`，`PostToolUse` 原样。按 agent 分派的仍然只有事实来源，daemon 那边判定只有一份。`PreToolUse` 不接：它在 daemon 那边是 claude 专用的 AskUserQuestion 匹配器。脚本在 `AAA_SESSION` 没设时立刻退出，所以用户自己在终端里跑 agy 不会往 daemon 发东西。**装不上就退回屏幕差分**：`Session.hooked` 由「这次到底装没装上」决定，不是按 agent 名猜——猜错的后果是会话永远停在「在跑」。这段只在**第一次开 agy 会话时**才写进去，没用过 agy 的机器那份文件不会被碰；卸掉 AAA 之后 `aaa` 那个键会留在原地（脚本没了，agy 每次事件会跑一个不存在的命令然后继续），`aaa-daemon service uninstall` 会顺手摘掉它。agy 的 **statusLine 也接**（v1.29）：它推的 JSON 与 Claude Code 同一个形状（`model.display_name`、`context_window.*`），所以模型、token、缓存命中直接就有；没有 `cost` / `rate_limits`，费用与套餐配额留空。**只在那一格空着的时候才接**——用户装了别的状态栏（agy-hud 那类）就不抢，宁可没有用量也不动人家的东西；`service uninstall` 只还我们自己放的那一格。agy 刚起来的第一帧里 `context_window_size` 是 0、`used_percentage` 也是 0，那是「还不知道」不是「用了 0%」：**窗口明写着 0 时百分比不算数**（字段整个没有则照旧信任百分比——老 Claude Code 只给百分比不给大小）。
+**agy 的消息流（v1.30）**：一行一步，只追加、`step_index` 不重号（198 份实测无一重复），所以与 claude 一样按偏移量尾随。`source` ∈ `USER_EXPLICIT`/`MODEL`/`SYSTEM`/`SYSTEM_SDK`，`type` ∈ `USER_INPUT`/`PLANNER_RESPONSE`/`GENERIC`/`SYSTEM_MESSAGE`/`ERROR_MESSAGE`/`CHECKPOINT`。四条映射：① `USER_INPUT` = 用户那句，但**只取 `<USER_REQUEST>` 里那一段**——同一行后面还挂着 `<ADDITIONAL_METADATA>`（本地时间）与 `<USER_SETTINGS_CHANGE>`（换模型通知），那些不是用户打的字；② `PLANNER_RESPONSE` = 模型开口说的话，`content` 为 null 表示这一步只调了工具没说话（实测 1820 步里 1736 步如此），**不占气泡**；③ `GENERIC` = 一次工具结果——**agy 不记工具名，也不记入参**，所以工具那一栏是按结果形状认出来的（`The command exited with code N.` → 命令、`File Path: …` → 读文件、`Found N results`/`No results found`/`{"File":…}` → 搜索、`Created the following subagents:` → 子代理，认不出就叫「工具」），退出码非 0 就是红的；④ `SYSTEM_SDK` 的周期性提醒不进流（与 claude 那边过滤 `isMeta` 同一条线），`SYSTEM` 的错误与 `CHECKPOINT` 要进——它们解释了后面对话为什么突然变了样。**后台态也有**：结果文本以 `Tool is running as a background task with task id: X` 开头就挂上一条（摘要取 `Task Description:` 那一行），完成/取消由一条带 `Task id "X"` 的 SYSTEM_MESSAGE 销掉，挂着的条数就是会话的「后台」。transcript 的位置优先认 hooks 报的 `session_id`（就是对话 id），其次查 `cache/last_conversations.json`；表里那条比会话起始时刻还老就不认（那是上一次的对话）。agy 没有结构化提问，`asking` 仍恒为 false，因此不画表单卡、看板「待决策」里也不会出现 agy 的会话。
 
-**选 agent 的入口**（`GET /agents` 说有哪些、装没装；两端只画）：新建项目时是输入框边上一个字母小标，点一下在装了的之间轮换；换已有项目**下次**开谁，mac 是项目行尾一个字母小标（默认 agent 的行悬停才现身，非默认的常显——一列扫下来看得出哪几个不是 claude），Android 在长按操作单里。**这处两端故意不一样**：mac 有悬停、Android 没有，✕/删 早就是这么分的（mac 行尾悬停按钮，Android 长按单），agent 跟着同一条线走，不为了「一致」在手机每一行上多挂一个字母。装了的少于两个时两端都不画任何入口。
+**agy 的钩子（v1.28）**：agy 没有 `--settings`，钩子只有全局一份 `~/.gemini/config/hooks.json`，而且只认 `type:"command"`。daemon 因此往那份文件里塞一个 **`aaa` 键**（别人的键原样保留，比如 orca-status），命令是一个转发脚本，**事件名的映射写在那份文件里**——agy 的 `PreInvocation` 打到 daemon 的 `UserPromptSubmit`，`Stop` 打到 `Stop`，`PostToolUse` 原样。按 agent 分派的仍然只有事实来源，daemon 那边判定只有一份。`PreToolUse` 不接：它在 daemon 那边是 claude 专用的 AskUserQuestion 匹配器。事件名与「要不要包一层工具名匹配器」都写死在 daemon 的表里，不从名字猜（agy 一共只有 `PreInvocation`/`PostInvocation`/`Stop`/`PreToolUse`/`PostToolUse` 五个，**没有会话启动事件**——收件箱在 agy 会话刚起来时靠每秒那一遍 tick 投喂，不靠事件；钩子装上的会话初始态本来就是 waiting）。脚本在 `AAA_SESSION` 没设时立刻退出，所以用户自己在终端里跑 agy 不会往 daemon 发东西。**装不上就退回屏幕差分**：`Session.hooked` 由「这次到底装没装上」决定，不是按 agent 名猜——猜错的后果是会话永远停在「在跑」。这段只在**第一次开 agy 会话时**才写进去，没用过 agy 的机器那份文件不会被碰；卸掉 AAA 之后 `aaa` 那个键会留在原地（脚本没了，agy 每次事件会跑一个不存在的命令然后继续），`aaa-daemon service uninstall` 会顺手摘掉它。agy 的 **statusLine 也接**（v1.29）：它推的 JSON 与 Claude Code 同一个形状（`model.display_name`、`context_window.*`），所以模型、token、缓存命中直接就有；没有 `cost` / `rate_limits`，费用与套餐配额留空。**只在那一格空着的时候才接**——用户装了别的状态栏（agy-hud 那类）就不抢，宁可没有用量也不动人家的东西；`service uninstall` 只还我们自己放的那一格。agy 刚起来的第一帧里 `context_window_size` 是 0、`used_percentage` 也是 0，那是「还不知道」不是「用了 0%」：**窗口明写着 0 时百分比不算数**（字段整个没有则照旧信任百分比——老 Claude Code 只给百分比不给大小）。
+
+**选 agent 的入口**（`GET /agents` 说有哪些、装没装；两端只画）：新建项目时是输入框边上一个字母小标，点一下在装了的之间轮换；换已有项目**下次**开谁，**两端都是项目行尾一个字母小标，每一行都画着**（v1.30，2026-09-10 用户拍板「不要悬停显示，直接就显示」）——一列扫下来就该看得出哪几个不是 claude。此前 mac 只在默认 agent 的行悬停时才现身，Android 干脆只有长按单，理由是「mac 有悬停、手机没有」；mac 那边改成常显之后这条不对称的理由就没有了，两端因此同步。Android 长按单里那一条「换成 X」仍在（两条路同一个动作）。装了的少于两个时两端都不画任何入口；注册表里没有的行（daemon 给「有活会话但不在名册」的目录补的）换不了，也不画。mac 项目行尾的 ✕/删、终端行的 ✕ 同样改成常显——字色本来就是最淡的那一档，常显不抢标题，而悬停才现身意味着鼠标不在那一行时根本看不出它能不能删。
 
 `~/.cache/aaa-cwds.json` 里 `claude:<path>` 键与旧 CLI 兼容。agy 的 `asking` 恒为 false（它没有结构化提问）。pi / reasonix / codex / grok 的存储支持仍在 2026-09-03 删除的状态，没有恢复。
 
@@ -75,10 +77,22 @@ daemon 在启动时用 `zsh -lic` 问一次「终端里应有的 PATH」（带�
 - 终端没有回放价值：客户端看到 shell 会话 `exited` 就 `DELETE /sessions/:id`（daemon 侧仍按普通会话持久化，200 条上限兜底）。
 - 「在此目录开终端」保留：在该项目目录开一个 shell 会话，同样归终端面板管。
 
+## 浏览（v1.30：会话的第三种看法）
+
+2026-09-10 用户拍板「消息流和终端以外再加一个目录的 explorer，Markdown 文件直接支持打开」。
+
+- **一条会话三种看法**：终端 / 消息流 / 浏览。mac 状态栏三格并排，当前那格是主色，⌘E 按 终端 → 消息流 → 浏览 → 终端 轮换；Android 顶栏那一格写着当前看法，点一下走同一个顺序。消息流画不出来的会话（`agent:"shell"`、老 daemon、探明 `supported:false`）**跳过那一档**——切到一个画不出来的视图，用户只会看见终端，还以为按钮坏了。**终端是兜底**：另外两种都可能没有，终端永远画得出来。
+- **只读**。没有写、改名、删除、上传。要改文件就跟 agent 说，那是 agent 的活；`_inbox/` 那条上传通道另说（见「手机→项目文件通道」）。
+- **出不了项目根**，而且这件事只在 daemon 判一次：路径先 `canonicalize`（`..` 和软链接都在这一步解掉），再要求它落在同样 canonicalize 过的项目根底下；`starts_with` 按路径段比，`/Volumes/SSD/project-old` 不会被当成 `/Volumes/SSD/project` 的孩子。指到根外的软链接同样挡住。出根一律 404，不回显解析细节。
+- **不读二进制**：后缀先分类（`md`/`markdown`/`mdx` → markdown，图片/压缩包/音视频/字体/目标文件/数据库 → binary，其余 text），真读时 UTF-8 解不动的再改判 binary，只报大小、正文留空。文本上限 512 KB，超出截断并标 `truncated`——**截断切在多字节字符中间不等于二进制**，切口之前那一段照旧给。
+- 目录列表：**目录在前，其次按名字（大小写无关）**；点开头的照列（`.gitignore`、`.aaa-agents` 正是要看的）。一次最多 2000 条，超出标 `truncated`。
+- 打开的文件是**视图状态**不是另一页：「上一级」在看文件时是回到目录，在目录里才是回上一层；项目根没有上一级（`parent` 为 null）。切去终端再切回来，还在原处。
+- Markdown 用两端各自那套 CommonMark 渲染器画（与消息流里 assistant 文本同一个），其余文本等宽 + 横向滚动。
+
 ## 消息流渲染约定
 
 - assistant 的 `text`（回复与过程中的中途文本）按 **CommonMark** 渲染：标题、粗斜体、行内代码、围栏代码块（等宽 + 横向滚动 + 语言标签）、有序/无序/嵌套列表、引用、分隔线、链接（可点）、GFM 表格与删除线尽力支持。用户消息、工具输出、thinking 保持纯文本。两端解析器：mac `pulldown-cmark`，Android `org.commonmark`。**表格（v1.13.1）是真正的网格**：列宽 = 该列最宽单元格按实际排版测出的像素（mac `WindowTextSystem::layout_line`，Android `TextMeasurer`），单元格里的粗体 / 行内代码 / 链接照常渲染，表头加粗下划线，比消息宽时横向滚动。此前拼成等宽文本靠空格对齐，中文落到备用字体时不是等宽字体的两倍宽，列会漂。
-- mac 快捷键：⌘N 新建、⌃Tab 切换会话、⌘E 消息流⇄终端、**⌘W 关闭当前会话**（存活 → 终止确认；已退出 → 删除确认；终端面板里 = 关闭当前标签）。
+- mac 快捷键：⌘N 新建、⌃Tab 切换会话、**⌘E 轮换三种看法**（终端 → 消息流 → 浏览 → 终端，见「浏览」）、**⌘W 关闭当前会话**（存活 → 终止确认；已退出 → 删除确认；终端面板里 = 关闭当前标签）。
 - mac 输入框（新建项目 / composer / 表单自填 / 设置）里 **⌘ 与 Ctrl 同义**（2026-09-10 用户要求「输入框最好也可以用 command/ctrl+A/V/C」）：A 全选、C 复制、X 剪切、V 粘贴；处理掉的键不再往上冒，免得 macOS 给一声「没人要」的提示音。终端不在此列——终端里 Ctrl-C 是中断，只有 Ctrl-V 与 ⌘V 同为粘贴。
 - mac 终端（2026-09-10）：**⇧⏎ 与 ⌥⏎ 都发 `ESC CR`**——Claude Code 读作「换行不发送」，其 `/terminal-setup` 给 iTerm2 / VS Code 配的 Shift+Enter 发的就是这串；zsh / bash 对它没有绑定，误按不出事。**⇧PgUp / ⇧PgDn** 翻本地回滚一屏（备用屏没有回滚，照常送给应用）。视图尺寸变化时本地模型立刻重排、发给 daemon 的 resize 控制帧**去抖 80ms**——拖窗口边缘时一秒几十个尺寸，每个都发就是几十次 SIGWINCH 和 TUI 整屏重排。block 光标底下那个字**一定反色**（光标格单独成一段来画），以前光标压在词中间时是橙块顶着一个墨字。
 
@@ -199,6 +213,8 @@ CLI 的 `ls` / 交互菜单按五组打印（v1.13 起；以前是「执行中 /
 | DELETE | `/sessions/:id` | 删除记录与回放（活着先 kill） |
 | POST | `/sessions/:id/rename` | `{title}` |
 | GET | `/sessions/:id/ports` | 进程树监听端口 `[{port,cmd}]`（mac「Web 预览」入口用；其它客户端未接） |
+| GET | `/files?path=<绝对路径>` | v1.30 目录浏览：`{path, parent, truncated, entries:[{name, path, dir, size, mtime, kind}]}`。`path` 是 canonicalize 之后的真实路径，`parent` 到项目根为止（根自己是 null），`kind` ∈ `markdown\|text\|binary`（目录是空串）。目录在前、其次按名字（大小写无关），最多 2000 条。**出项目根 → 404**（见「浏览」） |
+| GET | `/files/read?path=<绝对路径>` | v1.30 目录浏览：`{path, name, size, mtime, kind, text, truncated}`。`kind:"binary"` 时 `text` 为空只报大小；文本上限 512 KB，超出 `truncated:true`。**出项目根 / 不是文件 → 404** |
 | POST | `/hooks/:event` | Claude Code hooks 回调（见「Claude Code hooks」）；头 `X-AAA-Session`；永远 200 `{}`。`:event=statusline` 是 statusLine 命令转来的状态 JSON |
 | GET | `/usage` | `{plan}`：账号 plan 配额：`{five_hour:{used_percentage,resets_at}, seven_day:{…}, model_scoped:[{display_name,utilization,resets_at}]|null, updated_at}`。5h / 7d 来自最近一次 statusLine 的 `rate_limits`，也来自 daemon 每分钟对 claude.ai usage 接口的轮询；`model_scoped`（按模型的周窗口，如 Fable）**只**来自轮询——statusLine 从不带它。轮询用 Claude Code 自己登录的 OAuth 令牌（macOS 钥匙串 `Claude Code-credentials` / `~/.claude/.credentials.json`），只读不刷新；没登录或令牌过期时沿用旧值。两个来源都还没给过时 `plan=null` |
 | GET | `/sessions/:id/artifacts` | `{artifacts:[{url,title,description,file_path,ts}]}`：会话里用 Artifact 工具发布过的链接（报告 / 原型 / 图），按 url 去重，来自 transcript |
@@ -313,11 +329,11 @@ Claude 以 `--dangerously-skip-permissions` 运行，`PermissionRequest` 不会�
 
 ### 消息流（手机主视图，终端保留可切换）
 
-- `GET /sessions/:id/messages?after=<seq>&limit=<n=200>` → `{"supported":bool,"source":"claude|none","last_seq":N,"messages":[…]}`
+- `GET /sessions/:id/messages?after=<seq>&limit=<n=200>` → `{"supported":bool,"source":"claude|agy|none","last_seq":N,"messages":[…]}`
 - 消息结构：`{"seq":N,"ts":"…","role":"user|assistant|tool|system","kind":"text|thinking|tool_use|tool_result|question|answer","text":"…","tool":{"name":"Bash","summary":"cargo build","status":"ok|err|running"}|null,"question":{…}?}`
 - **表单（claude）**：`AskUserQuestion` 工具调用不当普通 tool_use 显示，而是 `kind:"question"`（role assistant）：`text` = 第一题题面，`tool.summary` = 各题 header 用 ` · ` 连接，并附 `"question":{"questions":[{"header":"Color","question":"Pick a color","options":[{"label":"Red","description":"A warm color"}],"multi_select":false}]}`（原样来自工具入参，`multiSelect` 已转 snake_case）。它的 tool_result 变成 `kind:"answer"`（role **user**）：`text` 为用户的回答（单题就是答案本身；多题每行 `题面 → 答案`），`tool.status` 沿用 ok/err。**待答** = 最新一条 question 后面没有 answer，且它不早于本进程 `created_at`（resume 进来的旧 transcript 里悬着的问题，新进程不会再弹框，不算）。这就是会话 `asking` 的定义。**这条判定只在 daemon 做**（`MsgStore::pending_question`，整串比 `ts`），结果就是会话对象上的 `asking_seq`；客户端画哪张卡片一律看它，不再自己倒着找消息流。v1.22 前三端各判一次、比法还不同（daemon 整串、两端取前 19 字符），同一秒里 daemon 说「不是待答」而客户端说「是」，点提交就是 409。
 - 客户端渲染约定：`question` 一律**原生对话框**——单选画单选、`multi_select` 画复选、末尾固定一条「其它…」自填；已有 answer 的表单折成已答态；待答且会话存活时才可交互，提交走 `POST /sessions/:id/answer`。不折叠进过程；`answer` 画在用户一侧。
-- daemon 在会话 spawn/resume 后定位该会话的 Claude transcript（resume 已知文件；新会话按 cwd 匹配 + mtime ≥ 启动时刻轮询发现）并增量 tail 解析（jsonl：user/assistant/tool_use/tool_result/thinking，过滤 isSidechain 与注入块）。shell（终端）返回 `supported:false`。resume 场景：旧 id 的 transcript 只是延迟兜底（~30s），发现会话自己写的新文件后自动升级；同目录并发会话不共享同一存储文件（已被认领的候选跳过）。
+- daemon 在会话 spawn/resume 后定位该会话的 Claude transcript（resume 已知文件；新会话按 cwd 匹配 + mtime ≥ 启动时刻轮询发现）并增量 tail 解析（jsonl：user/assistant/tool_use/tool_result/thinking，过滤 isSidechain 与注入块）。agy 的形状完全不同，见「Agent 表 · agy 的消息流」；**只有事实来源按 agent 分派，判定不分派**——待答、后台、折叠、排序全走同一份实现。shell（终端）返回 `supported:false`。resume 场景：旧 id 的 transcript 只是延迟兜底（~30s），发现会话自己写的新文件后自动升级；同目录并发会话不共享同一存储文件（已被认领的候选跳过）。
 - **折叠约定（v1.11 修，2026-09-07）**：assistant 的**每一条** `text` 都是回答，一律露出——Claude 的回答天生分段（说一句 → 干活 → 再说一句）。折叠里只放 `thinking` / `tool_use` / `tool_result` / system；一轮内连续的过程消息并成一个折叠段，夹在各段回答之间，展开状态按段内第一条 `seq` 记。只有会话在跑、且**贴在最后**的那一段画成「进行中 · N 步 · 最近：…」。此前只把一轮的最后一条 text 当回答、其余折进「过程」，中途的真回答看起来就成了思考过程。
 - `/events` 新帧：`{"t":"messages_changed","id":"s_…","last_seq":N}`（≥500ms 节流）。客户端收到后增量拉取。
   尾随节拍 **250ms**（v1.18 从 1s 改下来；活会话每拍都看，已退出的每 4 拍一次——它们的 transcript 不会再长）。以前节拍本身就是那个 ≥500ms 节流，现在是显式的：窗口内攒着、下一拍补发，一帧都不丢。**这条链路的延迟天花板不在轮询上**——Claude Code 每条**写完**的消息才落一行 JSONL，没有半截的流式条目，所以消息永远是整块到达的，逐字流只存在于 PTY 屏幕上（终端视图看得到）。

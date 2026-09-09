@@ -17,6 +17,7 @@ pub mod config;
 pub mod daemon;
 pub mod events;
 pub mod feed;
+pub mod files;
 pub mod history;
 pub mod hooks;
 pub mod inbox;

@@ -133,6 +133,14 @@ class DaemonClient(
         json.decodeFromString(get("/sessions/$id/messages?after=$after&limit=$limit"))
 
     /** v1.16：替用户答权限对话框（allow / deny） */
+    /** v1.30 目录浏览：列一个目录（daemon 保证它在项目根底下） */
+    suspend fun files(path: String): FileListing =
+        json.decodeFromString(FileListing.serializer(), get("/files?path=" + urlEncode(path)))
+
+    /** v1.30 目录浏览：读一个文件（二进制只回大小，正文空） */
+    suspend fun fileRead(path: String): FileBody =
+        json.decodeFromString(FileBody.serializer(), get("/files/read?path=" + urlEncode(path)))
+
     /** 项目任务队列：排着的几句话（agent 空下来 daemon 自动喂下一句） */
     suspend fun inboxList(path: String): List<InboxEntry> =
         json.decodeFromString(ListSerializer(InboxEntry.serializer()), get("/inbox?path=" + java.net.URLEncoder.encode(path, "UTF-8")))

@@ -1332,10 +1332,11 @@ fn is_markdown(m: &ChatMessage) -> bool {
 // 输入是 crate::markdown 的纯数据块，这里只负责映射到 gpui 元素。
 // 需要 id 的元素（横向滚动容器、可点链接段落）用 (seq, 计数) 生成稳定且唯一的 id。
 
-/// 一条消息内的 id 发号器
-struct MdIds {
-    seq: u64,
-    next: usize,
+/// 一条消息内的 id 发号器。`seq` 只是让 id 在整页里唯一——目录浏览那边
+/// （`files_view`）没有消息号，传一个固定值即可，一页只画一个文件。
+pub(super) struct MdIds {
+    pub seq: u64,
+    pub next: usize,
 }
 
 impl MdIds {
@@ -1345,7 +1346,7 @@ impl MdIds {
     }
 }
 
-fn md_blocks(blocks: &[Block], ids: &mut MdIds, ts: Option<&gpui::WindowTextSystem>) -> Vec<AnyElement> {
+pub(super) fn md_blocks(blocks: &[Block], ids: &mut MdIds, ts: Option<&gpui::WindowTextSystem>) -> Vec<AnyElement> {
     blocks.iter().map(|b| md_block(b, ids, ts)).collect()
 }
 

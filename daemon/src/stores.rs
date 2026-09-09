@@ -206,8 +206,9 @@ pub fn claude_sessions(paths: &Paths, cache: &mut CwdCache) -> Vec<SessRec> {
 //
 // 与 claude 完全不同的形状：`cache/last_conversations.json` 本身就是
 // `cwd -> 最近对话 id` 的现成映射（每个 cwd 只留最后一条），所以没有
-// 「扫一遍所有会话」这一步；对话本体是 SQLite，读不出 transcript，
-// 因此 agy 只参与 resume 与 agent 判定，不喂消息流、不出标题。
+// 「扫一遍所有会话」这一步。对话本体（`conversations/<id>.db`）是 SQLite 读不动，
+// 但消息流不看它——看的是 `brain/<id>/.system_generated/logs/transcript.jsonl`
+// （见 [`agy_transcript`]）。agy 仍不出标题：SQLite 里那份摘要读不出来。
 
 fn agy_map(paths: &Paths) -> serde_json::Map<String, Value> {
     let p = paths.agy_root().join("cache").join("last_conversations.json");
@@ -244,7 +245,24 @@ fn agy_conv_mtime(paths: &Paths, id: &str) -> Option<f64> {
     })
 }
 
-fn agy_find(paths: &Paths, target: &str) -> String {
+/// 这个对话的 transcript（v1.30 消息流）：`brain/<id>/.system_generated/logs/transcript.jsonl`。
+/// 一行一步、只追加，daemon 按偏移量尾随。文件不在（老对话 / 还没写第一步）→ None。
+pub fn agy_transcript(paths: &Paths, id: &str) -> Option<std::path::PathBuf> {
+    if !safe_id(id) {
+        return None;
+    }
+    let p = paths
+        .agy_root()
+        .join("brain")
+        .join(id)
+        .join(".system_generated")
+        .join("logs")
+        .join("transcript.jsonl");
+    p.is_file().then_some(p)
+}
+
+/// 这个 cwd 最近一次 agy 对话的 id（表里指着已被 GC 的对话时是空串）。
+pub fn agy_find(paths: &Paths, target: &str) -> String {
     let map = agy_map(paths);
     let id = agy_key(&map, target)
         .and_then(|k| map.get(&k).and_then(|v| v.as_str()).map(String::from))
