@@ -47,6 +47,11 @@ pub fn main_entry() {
                 Ok(false) => {}
                 Err(e) => eprintln!("could not clean agy hooks: {e}"),
             }
+            match crate::hooks::remove_agy_statusline(&paths) {
+                Ok(true) => println!("released agy's statusLine"),
+                Ok(false) => {}
+                Err(e) => eprintln!("could not release agy statusLine: {e}"),
+            }
             if let Err(e) = crate::service::uninstall(&paths) {
                 eprintln!("service uninstall failed: {e}");
                 std::process::exit(1);

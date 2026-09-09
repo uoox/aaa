@@ -100,6 +100,54 @@ pub fn agy_hooks_path(paths: &crate::paths::Paths) -> PathBuf {
     paths.home.join(".gemini").join("config").join("hooks.json")
 }
 
+pub fn agy_settings_path(paths: &crate::paths::Paths) -> PathBuf {
+    paths.home.join(".gemini").join("antigravity-cli").join("settings.json")
+}
+
+/// 接管 agy 的 statusLine（模型、token、缓存命中就从这儿来；它推的 JSON 与
+/// Claude Code 同一个形状）。**只在那一格空着、或者本来就是我们的时候才写**——
+/// 用户装了别的状态栏（agy-hud 那类）就别抢，宁可没有用量也不动人家的东西。
+/// 返回是否真的接管了。
+pub fn ensure_agy_statusline(paths: &crate::paths::Paths, script: &Path) -> std::io::Result<bool> {
+    let path = agy_settings_path(paths);
+    let want = format!("{} {STATUSLINE_EVENT}", crate::agents::shell_quote(&script.to_string_lossy()));
+    let Ok(text) = std::fs::read_to_string(&path) else { return Ok(false) };
+    let Some(mut root) = serde_json::from_str::<Value>(&text).ok().and_then(|v| v.as_object().cloned())
+    else {
+        return Ok(false); // 解析不动就别碰，和 hooks.json 一个道理
+    };
+    match root.get("statusLine").and_then(|v| v.get("command")).and_then(Value::as_str) {
+        Some(cur) if cur == want => return Ok(true), // 已经是我们的
+        Some(_) => return Ok(false),                 // 别人的，不抢
+        None => {}
+    }
+    root.insert("statusLine".into(), json!({"type": "command", "command": want}));
+    crate::paths::write_atomic(&path, &serde_json::to_vec_pretty(&Value::Object(root))?)?;
+    Ok(true)
+}
+
+/// 卸载时把 statusLine 那一格还回去（只还我们自己放的）
+pub fn remove_agy_statusline(paths: &crate::paths::Paths) -> std::io::Result<bool> {
+    let path = agy_settings_path(paths);
+    let want_prefix = hook_script_path(paths).to_string_lossy().into_owned();
+    let Ok(text) = std::fs::read_to_string(&path) else { return Ok(false) };
+    let Some(mut root) = serde_json::from_str::<Value>(&text).ok().and_then(|v| v.as_object().cloned())
+    else {
+        return Ok(false);
+    };
+    let ours = root
+        .get("statusLine")
+        .and_then(|v| v.get("command"))
+        .and_then(Value::as_str)
+        .is_some_and(|c| c.contains(&want_prefix));
+    if !ours {
+        return Ok(false);
+    }
+    root.remove("statusLine");
+    crate::paths::write_atomic(&path, &serde_json::to_vec_pretty(&Value::Object(root))?)?;
+    Ok(true)
+}
+
 /// 我们那一段的内容（`hooks.json` 里 `aaa` 键的值）
 pub fn agy_hooks_entry(script: &Path) -> Value {
     let cmd = |daemon_event: &str| {
@@ -153,14 +201,17 @@ pub fn ensure_agy_hooks(app: &App) -> std::io::Result<()> {
         Err(e) => return Err(e),
     };
     let want = agy_hooks_entry(&script);
-    if root.get(AGY_KEY) == Some(&want) {
-        return Ok(());
+    if root.get(AGY_KEY) != Some(&want) {
+        root.insert(AGY_KEY.to_string(), want);
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        crate::paths::write_atomic(&path, &serde_json::to_vec_pretty(&Value::Object(root))?)?;
     }
-    root.insert(AGY_KEY.to_string(), want);
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    crate::paths::write_atomic(&path, &serde_json::to_vec_pretty(&Value::Object(root))?)
+    // statusLine 那一格空着就顺手接过来。**在钩子那一步的短路之外**：钩子早就装好了
+    // 的机器（升级上来的）也得有机会接管，拿不到用量不算失败，钩子才是关键。
+    let _ = ensure_agy_statusline(&app.paths, &script);
+    Ok(())
 }
 
 pub fn settings_json_with(port: u16, token: &str, statusline: &Path) -> Value {
@@ -500,7 +551,15 @@ pub fn permission_summary(tool: &str, input: &Value) -> String {
 /// 本会话用量：statusLine JSON 里与这一个会话有关的部分，压成客户端直接能画的形状。
 pub fn session_usage(body: &Value) -> Value {
     let cw = body.get("context_window");
+    // **明写着窗口是 0** = 这个 agent 这一帧不知道窗口有多大（agy 就是这样，它同时把
+    // used_percentage 也填 0）。那时百分比只能是「不知道」，不能当真的 0% 画出来。
+    // 字段整个没有则不算数：老 Claude Code 只给百分比不给大小，那个百分比是真的。
+    let window_says_unknown = cw
+        .and_then(|c| c.get("context_window_size"))
+        .and_then(Value::as_f64)
+        .is_some_and(|s| s <= 0.0);
     let pct = cw
+        .filter(|_| !window_says_unknown)
         .and_then(|c| c.get("used_percentage"))
         .and_then(Value::as_f64)
         .or_else(|| {
@@ -632,6 +691,40 @@ mod tests {
         // PreToolUse 不接：daemon 那边它是 claude 专用的 AskUserQuestion 匹配器
         assert!(e.get("PreToolUse").is_none());
 
+        // statusLine：空着才接，别人的不抢，我们自己的幂等
+        let dir1 = tempfile::tempdir().unwrap();
+        let paths1 = crate::paths::Paths::new(dir1.path());
+        let sp = agy_settings_path(&paths1);
+        std::fs::create_dir_all(sp.parent().unwrap()).unwrap();
+        let script1 = hook_script_path(&paths1);
+        let read_cmd = |p: &Path| -> Option<String> {
+            let v: Value = serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok()?;
+            v.get("statusLine")?.get("command")?.as_str().map(str::to_string)
+        };
+
+        std::fs::write(&sp, r#"{"model":"x"}"#).unwrap();
+        assert!(ensure_agy_statusline(&paths1, &script1).unwrap(), "空着就接");
+        assert!(read_cmd(&sp).unwrap().ends_with(" statusline"));
+        assert!(ensure_agy_statusline(&paths1, &script1).unwrap(), "已经是我们的：幂等");
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&sp).unwrap()).unwrap();
+        assert_eq!(v["model"], "x", "别的设置不许丢");
+
+        std::fs::write(&sp, r#"{"statusLine":{"type":"command","command":"agy-hud.js"}}"#).unwrap();
+        assert!(!ensure_agy_statusline(&paths1, &script1).unwrap(), "别人的状态栏不抢");
+        assert_eq!(read_cmd(&sp).unwrap(), "agy-hud.js");
+        assert!(!remove_agy_statusline(&paths1).unwrap(), "也不许替别人还回去");
+        assert_eq!(read_cmd(&sp).unwrap(), "agy-hud.js");
+
+        // 卸载：只还我们自己放的那一格
+        std::fs::write(&sp, r#"{"model":"x"}"#).unwrap();
+        ensure_agy_statusline(&paths1, &script1).unwrap();
+        assert!(remove_agy_statusline(&paths1).unwrap());
+        assert!(read_cmd(&sp).is_none());
+        assert_eq!(
+            serde_json::from_str::<Value>(&std::fs::read_to_string(&sp).unwrap()).unwrap()["model"],
+            "x"
+        );
+
         // 坏 JSON 不能当空文件：那会拿 {"aaa":…} 盖掉人家所有的钩子
         let dir0 = tempfile::tempdir().unwrap();
         let paths0 = crate::paths::Paths::new(dir0.path());
@@ -693,6 +786,11 @@ mod tests {
         assert_eq!(u["effort"], "high");
         let with_pct = json!({"context_window": {"used_percentage": 42.5}});
         assert_eq!(session_usage(&with_pct)["context_pct"], 42.5, "native percentage wins");
+        // agy 那一帧：窗口明写着 0，百分比也是 0——那是「不知道」，不是「用了 0%」
+        let unknown = json!({"context_window": {"used_percentage": 0, "context_window_size": 0,
+            "current_usage": {"input_tokens": 6088, "cache_read_input_tokens": 8119}}});
+        assert!(session_usage(&unknown)["context_pct"].is_null(), "窗口是 0 时百分比不算数");
+        assert_eq!(session_usage(&unknown)["cache_read_tokens"], 8119, "token 数照给");
         assert!(session_usage(&with_pct)["cache_hit_pct"].is_null(), "没有 current_usage 就不算");
         let p = plan_usage(&body).unwrap();
         assert_eq!(p["five_hour"]["used_percentage"], 32);
