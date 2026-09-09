@@ -18,10 +18,11 @@
 //! - `PreCompact` / `PostCompact` expose "整理上下文中" so a silent half minute
 //!   has an explanation; `StopFailure` exposes the error kind (rate limit…).
 //!
-//! All observational hooks are `async` (Claude never waits on us). A session
-//! that has produced at least one hook event is "hooked": from then on the
-//! screen heuristics stand down for it. Sessions without hooks (shell, an old
-//! Claude Code) keep the old behaviour.
+//! All observational hooks are `async` (the agent never waits on us).
+//! `Session.hooked` 在**开会话时**定：这次到底有没有把钩子装上（claude 写成了
+//! `--settings` 片段、agy 写进了它的全局 hooks.json）。装上了，屏幕启发式就此让位；
+//! 没装上（终端、写不出文件）照旧看屏幕。第一条事件到达时也会补设一次，
+//! 那是给「老 daemon 起的会话重启后被接管」留的兜底。
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -54,19 +55,112 @@ pub const EVENTS: &[&str] = &[
 
 pub const STATUSLINE_EVENT: &str = "statusline";
 
-/// statusLine 命令：把 Claude Code 推来的状态 JSON 原样转给 daemon，自己不打印任何字——
-/// 终端里不再占一行（claude-hud 那种状态栏就是这份 JSON 画出来的）。
-pub fn statusline_script(port: u16, token: &str) -> String {
+/// 把 stdin 上那段 JSON 原样转给 daemon 的 `/hooks/$1`，自己**不打印任何字**
+/// （claude 的 statusLine 就是拿它当状态栏命令：终端里一行不占）。
+///
+/// 一个脚本管两处：claude 的 statusLine（`aaa-hook.sh statusline`）和 agy 那几个
+/// 命令型钩子（`aaa-hook.sh UserPromptSubmit`…）。两边此前各写了一遍同样的 curl。
+/// `AAA_SESSION` 没设就立刻退出——用户自己在终端里跑 agent 时不该往 daemon 发东西。
+pub fn hook_script(port: u16, token: &str) -> String {
     format!(
-        "#!/bin/sh\n# AAA: forward Claude Code status JSON to the daemon; print nothing.\n\
-         curl -s -m 2 -X POST -H 'Authorization: Bearer {token}' -H \"X-AAA-Session: ${{{env}:-}}\" \\\n  -H 'Content-Type: application/json' --data-binary @- \\\n  http://127.0.0.1:{port}/api/v1/hooks/{ev} >/dev/null 2>&1\nexit 0\n",
+        "#!/bin/sh\n# AAA: forward a hook/status payload to the daemon. $1 = event name.\n\
+         [ -n \"${{{env}:-}}\" ] || exit 0\n\
+         curl -s -m 2 -X POST -H 'Authorization: Bearer {token}' -H \"X-AAA-Session: ${env}\" \\\n           -H 'Content-Type: application/json' --data-binary @- \\\n           \"http://127.0.0.1:{port}/api/v1/hooks/$1\" >/dev/null 2>&1\nexit 0\n",
         env = SESSION_ENV,
-        ev = STATUSLINE_EVENT,
     )
 }
 
-pub fn statusline_path(paths: &crate::paths::Paths) -> PathBuf {
-    paths.state_dir().join("aaa-statusline.sh")
+pub fn hook_script_path(paths: &crate::paths::Paths) -> PathBuf {
+    paths.state_dir().join("aaa-hook.sh")
+}
+
+// ---- agy（Antigravity CLI）的 hooks ----
+//
+// agy 没有 `--settings`，钩子只有全局一份 `~/.gemini/config/hooks.json`，而且只认
+// `type:"command"`。所以这里不像 claude 那样直接给 URL，而是写一个转发脚本，
+// **事件名的映射放在 hooks.json 里**（agy 的 `PreInvocation` 打到 daemon 的
+// `UserPromptSubmit`）——按 agent 分派的只能是事实来源，判定仍然只有一份。
+//
+// 那份文件是用户的：我们只写自己那个 `aaa` 键，别人的（比如 orca-status）原样保留；
+// 解析不动就整个放弃，宁可这次没有钩子，也不能把人家的键盖没了。卸载时的清理见 `service.rs`。
+// 脚本在 `AAA_SESSION` 没设时立刻退出：用户自己在终端里跑 agy 不该往 daemon 发东西。
+
+/// agy 事件 → daemon 事件。`PreToolUse` 不接：daemon 那边它是 claude 专用的
+/// AskUserQuestion 匹配器，agy 没有对应的结构化提问，接了只是噪声。
+pub const AGY_EVENTS: &[(&str, &str)] = &[
+    ("PreInvocation", "UserPromptSubmit"),
+    ("Stop", "Stop"),
+    ("PostToolUse", "PostToolUse"),
+];
+
+/// 我们在 agy 的 hooks.json 里占的键
+pub const AGY_KEY: &str = "aaa";
+
+pub fn agy_hooks_path(paths: &crate::paths::Paths) -> PathBuf {
+    paths.home.join(".gemini").join("config").join("hooks.json")
+}
+
+/// 我们那一段的内容（`hooks.json` 里 `aaa` 键的值）
+pub fn agy_hooks_entry(script: &Path) -> Value {
+    let cmd = |daemon_event: &str| {
+        json!({
+            "type": "command",
+            "command": format!("{} {daemon_event}", crate::agents::shell_quote(&script.to_string_lossy())),
+            "timeout": 10
+        })
+    };
+    let mut m = serde_json::Map::new();
+    for (agy_event, daemon_event) in AGY_EVENTS {
+        // 带工具名的事件要 matcher + 嵌套 hooks，其余是平铺的（照 agy 自己的文件学的）
+        let v = if agy_event.ends_with("ToolUse") {
+            json!([{ "matcher": "*", "hooks": [cmd(daemon_event)] }])
+        } else {
+            json!([cmd(daemon_event)])
+        };
+        m.insert(agy_event.to_string(), v);
+    }
+    Value::Object(m)
+}
+
+/// 把 `aaa` 那一段装进（或刷新）用户的 `hooks.json`，别人的键原样保留。
+/// 返回是否可用——写不出来就让调用方退回屏幕差分，而不是让会话永远停在「在跑」。
+pub fn ensure_agy_hooks(app: &App) -> std::io::Result<()> {
+    let port = match app.bound_port.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => app.cfg.port,
+        p => p,
+    };
+    let script = write_hook_script(&app.paths, port, &app.cfg.token)?;
+    let path = agy_hooks_path(&app.paths);
+    // 两个 daemon 线程同时开 agy 会话时的 read-modify-write：`write_atomic` 的 tmp 名字
+    // 是固定的，不加锁两边会互相盖掉
+    static AGY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _g = AGY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // **文件不存在**才当空表。读得出来却解析不动（用户手改坏了一个逗号）时必须报错退出——
+    // 否则我们会拿 `{"aaa":…}` 盖掉人家所有的钩子。调用方收到 Err 会退回屏幕差分，
+    // 这是唯一一处 AAA 写别人的文件，出错方向只能选「什么都不做」。
+    let mut root = match std::fs::read_to_string(&path) {
+        Ok(text) if text.trim().is_empty() => serde_json::Map::new(),
+        Ok(text) => serde_json::from_str::<Value>(&text)
+            .ok()
+            .and_then(|v| v.as_object().cloned())
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("{} 不是一个 JSON 对象，不敢覆盖", path.display()),
+                )
+            })?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::Map::new(),
+        Err(e) => return Err(e),
+    };
+    let want = agy_hooks_entry(&script);
+    if root.get(AGY_KEY) == Some(&want) {
+        return Ok(());
+    }
+    root.insert(AGY_KEY.to_string(), want);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    crate::paths::write_atomic(&path, &serde_json::to_vec_pretty(&Value::Object(root))?)
 }
 
 pub fn settings_json_with(port: u16, token: &str, statusline: &Path) -> Value {
@@ -94,8 +188,44 @@ pub fn settings_json_with(port: u16, token: &str, statusline: &Path) -> Value {
     json!({
         "hooks": Value::Object(hooks),
         "remoteControlAtStartup": false,
-        "statusLine": { "type": "command", "command": statusline.to_string_lossy(), "padding": 0 }
+        "statusLine": { "type": "command", "command": format!("{} {STATUSLINE_EVENT}", crate::agents::shell_quote(&statusline.to_string_lossy())), "padding": 0 }
     })
+}
+
+/// 写（或刷新）那个转发脚本，返回它的路径。claude 的 statusLine 与 agy 的钩子共用它。
+fn write_hook_script(paths: &crate::paths::Paths, port: u16, token: &str) -> std::io::Result<PathBuf> {
+    let script = hook_script_path(paths);
+    let body = hook_script(port, token).into_bytes();
+    if std::fs::read(&script).map(|cur| cur != body).unwrap_or(true) {
+        if let Some(dir) = script.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        crate::paths::write_atomic(&script, &body)?;
+    }
+    // 权限每次都设：内容没变但模式被谁放宽过时，token 就一直躺在一个可读的文件里
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700));
+    }
+    Ok(script)
+}
+
+/// 把我们塞进 agy 全局 `hooks.json` 的那一段摘掉（`aaa-daemon service uninstall` 调）。
+/// 不摘的话卸载之后那份配置里会留下一条指向已删脚本的命令，agy 每次事件都去跑它。
+/// 文件不在、解析不动、里面本来就没有我们那一段：都当没事发生。
+pub fn remove_agy_hooks(paths: &crate::paths::Paths) -> std::io::Result<bool> {
+    let path = agy_hooks_path(paths);
+    let Ok(text) = std::fs::read_to_string(&path) else { return Ok(false) };
+    let Some(mut root) = serde_json::from_str::<Value>(&text).ok().and_then(|v| v.as_object().cloned())
+    else {
+        return Ok(false);
+    };
+    if root.remove(AGY_KEY).is_none() {
+        return Ok(false);
+    }
+    crate::paths::write_atomic(&path, &serde_json::to_vec_pretty(&Value::Object(root))?)?;
+    Ok(true)
 }
 
 /// Write (or refresh) the settings file; returns its path. Token is inside, so
@@ -106,22 +236,18 @@ pub fn ensure_settings(app: &App) -> std::io::Result<PathBuf> {
         p => p,
     };
     let path = settings_path(&app.paths);
-    let script = statusline_path(&app.paths);
+    let script = write_hook_script(&app.paths, port, &app.cfg.token)?;
     let body = serde_json::to_vec_pretty(&settings_json_with(port, &app.cfg.token, &script))?;
-    let script_body = statusline_script(port, &app.cfg.token).into_bytes();
-    let same = |p: &Path, want: &[u8]| std::fs::read(p).map(|cur| cur == want).unwrap_or(false);
-    if same(&path, &body) && same(&script, &script_body) {
+    if std::fs::read(&path).map(|cur| cur == body).unwrap_or(false) {
         return Ok(path);
     }
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    crate::paths::write_atomic(&script, &script_body)?;
     crate::paths::write_atomic(&path, &body)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700));
         let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
     }
     Ok(path)
@@ -132,11 +258,14 @@ pub fn settings_path(paths: &crate::paths::Paths) -> PathBuf {
 }
 
 /// Append `--settings <file>` to a claude command line.
-pub fn with_settings(cmd: String, agent: &crate::agents::AgentDef, path: &Path) -> String {
+/// 返回 `(命令行, 装上了没有)`。**两件事只判一次**：此前调用方还要自己再写一遍
+/// `agent.id == "claude"` 来决定 `hooked`，两处一旦不一致就会出现「自称装了钩子、
+/// 命令行里却没有 --settings」的会话。
+pub fn with_settings(cmd: String, agent: &crate::agents::AgentDef, path: &Path) -> (String, bool) {
     if agent.id == "claude" {
-        format!("{cmd} --settings {}", crate::agents::shell_quote(&path.to_string_lossy()))
+        (format!("{cmd} --settings {}", crate::agents::shell_quote(&path.to_string_lossy())), true)
     } else {
-        cmd
+        (cmd, false)
     }
 }
 
@@ -456,7 +585,7 @@ pub fn resolve(app: &App, header: Option<&str>, body: &Value) -> Option<Arc<Sess
         .into_iter()
         .filter(|s| {
             let m = s.meta.lock().unwrap();
-            m.agent == "claude" && m.state != State::Exited && m.project_path == cwd
+            m.agent != "shell" && m.state != State::Exited && m.project_path == cwd
         })
         .collect();
     if by_cwd.len() == 1 {
@@ -488,14 +617,64 @@ mod tests {
         assert!(hooks["Stop"][0].get("matcher").is_none());
     }
 
+    /// agy 的钩子写在用户全局那份 `hooks.json` 里：只许动我们自己那个键，
+    /// 而且事件名的映射（agy 的 PreInvocation → daemon 的 UserPromptSubmit）在这一层做完，
+    /// daemon 那边仍然只有一套判定。
+    #[test]
+    fn agy_hooks_map_events_and_leave_other_keys_alone() {
+        let e = agy_hooks_entry(Path::new("/s/aaa-hook.sh"));
+        assert_eq!(e["PreInvocation"][0]["type"], "command");
+        assert_eq!(e["PreInvocation"][0]["command"], "/s/aaa-hook.sh UserPromptSubmit");
+        assert_eq!(e["Stop"][0]["command"], "/s/aaa-hook.sh Stop");
+        // 带工具名的事件是 matcher + 嵌套 hooks（agy 自己的文件就是这个形状）
+        assert_eq!(e["PostToolUse"][0]["matcher"], "*");
+        assert_eq!(e["PostToolUse"][0]["hooks"][0]["command"], "/s/aaa-hook.sh PostToolUse");
+        // PreToolUse 不接：daemon 那边它是 claude 专用的 AskUserQuestion 匹配器
+        assert!(e.get("PreToolUse").is_none());
+
+        // 坏 JSON 不能当空文件：那会拿 {"aaa":…} 盖掉人家所有的钩子
+        let dir0 = tempfile::tempdir().unwrap();
+        let paths0 = crate::paths::Paths::new(dir0.path());
+        let bad = agy_hooks_path(&paths0);
+        std::fs::create_dir_all(bad.parent().unwrap()).unwrap();
+        std::fs::write(&bad, "{\"orca-status\": {,,,}").unwrap();
+        // 摘不掉也不许写坏：remove 对坏文件是个空操作
+        assert!(!remove_agy_hooks(&paths0).unwrap());
+        assert_eq!(std::fs::read_to_string(&bad).unwrap(), "{\"orca-status\": {,,,}", "原样没动");
+
+        // 摘掉我们那一段，别人的留着
+        let good = agy_hooks_path(&paths0);
+        std::fs::write(&good, r#"{"orca-status":{"Stop":[]},"aaa":{"Stop":[]}}"#).unwrap();
+        assert!(remove_agy_hooks(&paths0).unwrap());
+        let left: serde_json::Map<String, Value> =
+            serde_json::from_str(&std::fs::read_to_string(&good).unwrap()).unwrap();
+        assert_eq!(left.keys().collect::<Vec<_>>(), vec!["orca-status"]);
+        assert!(!remove_agy_hooks(&paths0).unwrap(), "没有我们那一段时是空操作");
+
+        // 合并进已有文件：别人的键原样留着
+        let dir = tempfile::tempdir().unwrap();
+        let paths = crate::paths::Paths::new(dir.path());
+        let path = agy_hooks_path(&paths);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, r#"{"orca-status":{"Stop":[{"type":"command","command":"theirs"}]}}"#).unwrap();
+        let mut root: serde_json::Map<String, Value> =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        root.insert(AGY_KEY.to_string(), agy_hooks_entry(Path::new("/s/aaa-hook.sh")));
+        assert_eq!(root["orca-status"]["Stop"][0]["command"], "theirs");
+        assert!(root.contains_key("aaa") && root.len() == 2);
+    }
+
     #[test]
     fn statusline_is_forwarded_and_summarised() {
-        let v = settings_json_with(2730, "tk", Path::new("/s/aaa-statusline.sh"));
+        // statusLine 与 agy 的钩子共用同一个转发脚本，事件名当参数传
+        let v = settings_json_with(2730, "tk", Path::new("/s/aaa-hook.sh"));
         assert_eq!(v["statusLine"]["type"], "command");
-        assert_eq!(v["statusLine"]["command"], "/s/aaa-statusline.sh");
-        let sh = statusline_script(2730, "tk");
+        assert_eq!(v["statusLine"]["command"], "/s/aaa-hook.sh statusline");
+        let sh = hook_script(2730, "tk");
         assert!(sh.starts_with("#!/bin/sh\n"));
-        assert!(sh.contains("Bearer tk") && sh.contains("X-AAA-Session: ${AAA_SESSION:-}") && sh.contains("/api/v1/hooks/statusline"));
+        assert!(sh.contains("Bearer tk") && sh.contains("X-AAA-Session: $AAA_SESSION"));
+        assert!(sh.contains("/api/v1/hooks/$1"), "事件名由调用方给");
+        assert!(sh.contains("[ -n \"${AAA_SESSION:-}\" ] || exit 0"), "不是 AAA 起的会话不发");
         let body = json!({
             "model": {"id": "claude-fable-5-1", "display_name": "Fable 5.1"},
             "context_window": {"context_window_size": 200000, "total_input_tokens": 1200, "total_output_tokens": 300,
@@ -535,11 +714,17 @@ mod tests {
         let p = Path::new("/Users/x/.local/state/aaa-daemon/claude-hooks.json");
         assert_eq!(
             with_settings("claude --dangerously-skip-permissions".into(), claude, p),
-            "claude --dangerously-skip-permissions --settings /Users/x/.local/state/aaa-daemon/claude-hooks.json"
+            (
+                "claude --dangerously-skip-permissions --settings /Users/x/.local/state/aaa-daemon/claude-hooks.json"
+                    .to_string(),
+                true
+            )
         );
-        assert_eq!(with_settings("exec zsh -l".into(), shell, p), "exec zsh -l");
+        // 「命令行有没有 --settings」与「算不算 hooked」是同一件事，只判一次
+        assert_eq!(with_settings("exec zsh -l".into(), shell, p), ("exec zsh -l".to_string(), false));
         let sp = Path::new("/tmp/a b/x.json");
-        assert!(with_settings("claude".into(), claude, sp).ends_with("--settings '/tmp/a b/x.json'"));
+        let (cmd, hooked) = with_settings("claude".into(), claude, sp);
+        assert!(cmd.ends_with("--settings '/tmp/a b/x.json'") && hooked);
     }
 
     fn body(event: &str, extra: Value) -> Value {

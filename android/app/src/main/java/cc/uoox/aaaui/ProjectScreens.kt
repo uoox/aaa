@@ -97,15 +97,6 @@ data class ProjectRow(
     val alive: Boolean get() = status.isNotBlank() && status != "paused"
 }
 
-/**
- * 五态的先后，PROTOCOL「项目列表：顺序 = 黄底 → 在跑 → 时间」那张表的镜像。
- * 认不出来的状态（老 daemon 的空串、以后新增的词）沉到最后：宁可排在底下，也不假装懂它。
- */
-private val STATUS_RANK = mapOf("asking" to 0, "running" to 1, "background" to 2, "active" to 3, "paused" to 4)
-
-/** 排序档位，见 [STATUS_RANK]。 */
-fun statusRank(status: String): Int = STATUS_RANK[status] ?: STATUS_RANK.size
-
 /** 淡蓝底：它还在动，你不用管（自己在跑，或后台任务还没回来）。`asking` 不蓝——那是在等你。 */
 fun statusRunning(s: String) = s == "running" || s == "background"
 
@@ -124,10 +115,9 @@ fun projectRows(projects: List<Project>, sessions: List<Session>, unread: Set<St
     return projects.map { p ->
         ProjectRow(p, p.session_id?.let { byId[it] }, pathListContains(unread, p.path))
     }.sortedWith(
-        compareByDescending<ProjectRow> { it.unread }
-            .thenBy { statusRank(it.status) }
-            .thenByDescending { it.updatedIso }
-            .thenBy { it.project.path },
+        // 2026-09-10 用户拍板：就按行尾那个「xxx 分钟前」从新到旧排，不分档。
+        // 状态已经由整行底色说了，再拿它排一遍是同一件事说两遍，而且行会因为状态翻转跳位置。
+        compareByDescending<ProjectRow> { it.updatedIso }.thenBy { it.project.path },
     )
 }
 

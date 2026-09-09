@@ -556,6 +556,10 @@ pub struct SpawnSpec {
     pub cmd: String,
     pub resume_id: Option<String>,
     pub feed_inbox: bool,
+    /// 这个会话的钩子**确实装上了**：running/waiting 从此只认 hooks，不看屏幕。
+    /// 由调用方按「装没装成」给，不是按 agent 名猜——写不出钩子文件的会话若还当
+    /// 自己 hooked，就会永远停在「在跑」。
+    pub hooked: bool,
 }
 
 impl SessionPool {
@@ -706,8 +710,9 @@ impl SessionPool {
         // claude 会话从第一刻起就由 hooks 驱动（settings 是我们注入的）：起始状态是
         // waiting——TUI 起来就停在输入框，轮到你；第一次 UserPromptSubmit 才是 running。
         // 以前起始 running 又没人把它翻回来（Stop 只在一轮结束时来），resume 出来的
-        // 会话会一直显示「执行中」（2026-09-06 修）。shell 没有 hooks，仍按屏幕静默判断。
-        let hooked = spec.agent == "claude";
+        // 会话会一直显示「执行中」（2026-09-06 修）。没装上钩子的（shell、写不出钩子
+        // 文件的 agy）仍按屏幕静默判断。
+        let hooked = spec.hooked;
         let meta = Meta {
             title: spec.title,
             custom_title: false,

@@ -180,22 +180,12 @@ pub struct SessionCard {
 // ── 五态（PROTOCOL「/projects」那张 5 行表的镜像）─────────────────────────────
 //
 // `asking | running | background | active | paused` 由 daemon 算出来下发（项目行、看板卡
-// 片、CLI 同一套）。客户端**不判定**状态，只对着这个字符串做两件纯显示的事：排第几、
-// 线画不画成蓝的。所以这里只留两个查表函数，没有枚举——有枚举就会有人往 `of()` 里塞
-// 判定逻辑，v1.22 删掉的正是那个（三端各写一遍，同一个项目在两台设备上状态不一样）。
-
-/// 侧栏 / 看板从上往下的优先级：待回复 > 运行 > 后台 > 激活 > 暂停。
-/// 不认识的状态（新 daemon 加了第六态）排最后，不假装懂它。
-pub fn status_rank(s: &str) -> u8 {
-    match s {
-        "asking" => 0,
-        "running" => 1,
-        "background" => 2,
-        "active" => 3,
-        "paused" => 4,
-        _ => 5,
-    }
-}
+// 片、CLI 同一套）。客户端**不判定**状态，只对着这个字符串做一件纯显示的事：底色画不画成
+// 蓝的。所以这里只剩一个查表函数，没有枚举——有枚举就会有人往 `of()` 里塞判定逻辑，
+// v1.22 删掉的正是那个（三端各写一遍，同一个项目在两台设备上状态不一样）。
+//
+// 2026-09-10 排序档位表（`status_rank`）也删了：列表改成纯按时间排，状态由底色说，
+// 不再拿它排第二遍。
 
 /// 淡蓝底（项目行）/ 蓝线（看板卡片）：它还在动，不用你管（自己在跑，或后台任务还没回来）。
 /// `asking` 不算——那是在等你。
@@ -371,6 +361,17 @@ pub struct Artifact {
     pub ts: String,
 }
 
+/// `GET /inbox?path=` 的一项：排给这个项目的一句话，agent 空下来时 daemon 自动喂进去
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+pub struct InboxEntry {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub created_at: String,
+}
+
 // ── v1.17 详情栏：GET /sessions/:id/detail ──────────────────────────────────
 
 /// 一次子代理调用（Agent / Task 工具）
@@ -500,7 +501,7 @@ pub struct Project {
     /// 不是打开），一个都没有 → None
     #[serde(default)]
     pub session_id: Option<String>,
-    /// v1.22：五态之一，见 [`status_rank`]。没有活会话 = `paused`；老 daemon 不给 → 空串
+    /// v1.22：五态之一（PROTOCOL「/projects」那张 5 行表）。没有活会话 = `paused`；老 daemon 不给 → 空串
     #[serde(default)]
     pub status: String,
     /// v1.22：标题回退链（活会话标题 → session_title → 目录名）daemon 走完的结果
@@ -722,6 +723,11 @@ pub enum DaemonEvent {
     Usage {
         #[serde(default)]
         plan: Option<PlanUsage>,
+    },
+    /// v1.28：这个项目排着的任务变了（加了 / 被喂掉了 / 删了）
+    InboxChanged {
+        #[serde(default)]
+        path: String,
     },
     /// 未知帧向前兼容（已移除的 session_stalled 也落到这里）
     #[serde(other)]
@@ -1025,15 +1031,9 @@ mod tests {
         assert_eq!(old.asking_seq, None);
     }
 
-    /// 五态查表：PROTOCOL 那张 5 行表的镜像，客户端只拿它排序和决定线的颜色
+    /// 五态里唯一还被客户端读的一件事：底色画不画成蓝的
     #[test]
-    fn status_rank_and_running_mirror_the_protocol_table() {
-        let order = ["asking", "running", "background", "active", "paused"];
-        let ranks: Vec<u8> = order.iter().map(|s| status_rank(s)).collect();
-        assert_eq!(ranks, vec![0, 1, 2, 3, 4]);
-        // 认不出的（老 daemon 的空串、将来的第六态）排最后，不假装懂它
-        assert_eq!(status_rank(""), 5);
-        assert_eq!(status_rank("teleporting"), 5);
+    fn status_running_mirrors_the_protocol_table() {
         assert!(status_running("running") && status_running("background"));
         // asking 不蓝：那是在等你，不是「它还在动」
         assert!(!status_running("asking") && !status_running("active") && !status_running("paused"));
@@ -1167,9 +1167,12 @@ mod tests {
         assert!(
             matches!(e, DaemonEvent::MessagesChanged { ref id, last_seq: 42 } if id == "s_1")
         );
-        // 已删掉的帧（inbox_changed 等）落进 Unknown，不能反序列化失败
+        // v1.28 收件箱有入口了，这一帧重新被读：路径对得上才刷新那一节
         let e: DaemonEvent =
             serde_json::from_str(r#"{"t":"inbox_changed","path":"/p/x"}"#).unwrap();
+        assert!(matches!(e, DaemonEvent::InboxChanged { ref path } if path == "/p/x"));
+        // 真正不认识的帧仍然落进 Unknown，不能反序列化失败
+        let e: DaemonEvent = serde_json::from_str(r#"{"t":"session_stalled","id":"s_1"}"#).unwrap();
         assert!(matches!(e, DaemonEvent::Unknown));
         // usage 帧：plan 可为 null
         let e: DaemonEvent = serde_json::from_str(r#"{"t":"usage","plan":null}"#).unwrap();

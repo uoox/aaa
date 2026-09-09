@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.OutlinedTextField
@@ -72,6 +73,8 @@ fun SessionDetailScreen(store: AppStore, nav: NavHostController, sessionId: Stri
     var artifacts by remember(sessionId) { mutableStateOf<List<ArtifactInfo>?>(null) }
     var error by remember(sessionId) { mutableStateOf<String?>(null) }
     var renameDialog by remember { mutableStateOf(false) }
+    var inbox by remember(sessionId) { mutableStateOf<List<InboxEntry>>(emptyList()) }
+    var inboxDraft by rememberSaveable(sessionId) { mutableStateOf("") }
     var urlsDialog by remember { mutableStateOf<List<String>?>(null) }
 
     fun toast(msg: String) = Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
@@ -86,9 +89,20 @@ fun SessionDetailScreen(store: AppStore, nav: NavHostController, sessionId: Stri
         artifacts = runCatching { sortArtifacts(api.artifacts(sessionId)) }
             .recover { if (it is DaemonHttpException && it.code == 404) emptyList() else throw it }
             .getOrNull() ?: artifacts
+        s?.project_path?.takeIf { it.isNotBlank() }?.let { p ->
+            inbox = runCatching { api.inboxList(p) }.getOrDefault(inbox)
+        }
     }
     LaunchedEffect(sessionId) { fetch() }
     // 消息流有动静就重拉：子代理起没起来、后台任务回没回来，都从 transcript 来
+    // 队列被喂掉一条 / 别处加了一条：那一节跟着走。两边都去尾斜杠再比——
+    // daemon 发的是 realpath 过的路径，会话行上的可能带尾斜杠（与黄点同一个口径）
+    LaunchedEffect(sessionId, s?.project_path) {
+        val mine = s?.project_path?.trimEnd('/') ?: return@LaunchedEffect
+        store.frames.collectLatest { f ->
+            if (f is EventFrame.InboxChanged && f.path.trimEnd('/') == mine) fetch()
+        }
+    }
     LaunchedEffect(sessionId) {
         store.frames.collectLatest { f ->
             if (f is EventFrame.MessagesChanged && f.id == sessionId) {
@@ -180,6 +194,50 @@ fun SessionDetailScreen(store: AppStore, nav: NavHostController, sessionId: Stri
                 else if (d.skills.isEmpty()) EmptyHint("这个会话还没用过技能")
                 else d.skills.forEach { u ->
                     TwoLineRow(u.name, if (u.count > 1) "${u.count} 次" else "1 次", relativeTime(u.last_ts))
+                }
+            }
+
+            // ── 收件箱：这个项目排着的几句话，agent 每跑完一轮空下来，daemon 自动喂下一句。
+            // 这套东西 daemon 里一直跑着，只是两端从来没给过入口，队列永远是空的（v1.28 补上）。
+            DetailSection("收件箱", inbox.size.takeIf { it > 0 }) {
+                if (inbox.isEmpty()) EmptyHint("队列是空的：排一句话，它跑完这一轮就自己接上")
+                else inbox.forEachIndexed { i, e ->
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("${i + 1}.", color = Tok.Faint, fontSize = 11.sp, modifier = Modifier.width(20.dp))
+                        Text(e.text, color = Tok.Ink, fontSize = 14.sp, modifier = Modifier.weight(1f))
+                        Box(
+                            Modifier.size(28.dp).clickable {
+                                scope.launch {
+                                    runCatching { store.client?.inboxDelete(e.id); fetch() }
+                                        .onFailure { toast("删不掉：${it.message}") }
+                                }
+                            },
+                            contentAlignment = Alignment.Center,
+                        ) { Text("×", color = Tok.Faint, fontSize = 16.sp) }
+                    }
+                }
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    RoundedTextField(
+                        inboxDraft, { inboxDraft = it }, "排一句话，空下来自动发",
+                        modifier = Modifier.weight(1f), singleLine = true,
+                    )
+                    TextButton(onClick = {
+                        val text = inboxDraft.trim()
+                        val path = s.project_path
+                        if (text.isNotBlank() && path.isNotBlank()) {
+                            inboxDraft = ""
+                            scope.launch {
+                                runCatching { store.client?.inboxAdd(path, text); fetch() }
+                                    .onFailure { toast("排不进去：${it.message}") }
+                            }
+                        }
+                    }) { Text("排队", color = Tok.Accent, fontSize = 13.sp) }
                 }
             }
 

@@ -89,12 +89,12 @@ class ProjectRowsTest {
         assertFalse(rows.first { it.project.path == "/p/bare" }.unread)
     }
 
-    /** 不认识的状态（老 daemon 的空串）沉到最后，也不画淡蓝底：宁可排在底下，也不假装懂它 */
-    @Test fun `未知状态排最后且不画淡蓝底`() {
-        assertTrue(statusRank("") > statusRank("paused"))
+    /** 不认识的状态（老 daemon 的空串）不画淡蓝底：不假装懂它。排序只看时间，与状态无关 */
+    @Test fun `未知状态不画淡蓝底且只按时间排`() {
         assertFalse(statusRunning(""))
+        // 状态认不出来不影响它排在哪儿：2099 是最新的，就排第一
         val unknown = Project(path = "/p/z", name = "z", status = "", updated_at = "2099-01-01T00:00:00Z")
-        assertEquals("/p/z", projectRows(projects + unknown, emptyList(), emptySet()).last().project.path)
+        assertEquals("/p/z", projectRows(projects + unknown, emptyList(), emptySet()).first().project.path)
     }
 
     /** 代表会话是 daemon 指的那一条；池子里没有它（已被 daemon 清掉）也照样成行 */

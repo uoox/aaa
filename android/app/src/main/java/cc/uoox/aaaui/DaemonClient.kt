@@ -133,6 +133,15 @@ class DaemonClient(
         json.decodeFromString(get("/sessions/$id/messages?after=$after&limit=$limit"))
 
     /** v1.16：替用户答权限对话框（allow / deny） */
+    /** 项目任务队列：排着的几句话（agent 空下来 daemon 自动喂下一句） */
+    suspend fun inboxList(path: String): List<InboxEntry> =
+        json.decodeFromString(ListSerializer(InboxEntry.serializer()), get("/inbox?path=" + java.net.URLEncoder.encode(path, "UTF-8")))
+
+    suspend fun inboxAdd(path: String, text: String): String =
+        post("/inbox", buildJsonObject { put("path", path); put("text", text) }.toString())
+
+    suspend fun inboxDelete(id: String): String = delete("/inbox/$id")
+
     /** 紧急制动：收掉还活着的项目会话（终端不收） */
     suspend fun killAll(runningOnly: Boolean = true): String =
         post("/sessions/kill_all", buildJsonObject { put("running_only", runningOnly) }.toString())

@@ -833,7 +833,20 @@ async fn sessions_create(
         let no_parent_refs = dir
             .components()
             .all(|c| !matches!(c, std::path::Component::ParentDir));
-        if no_parent_refs && dir.starts_with(&app.cfg.project_root) {
+        // **两边都得是同一种写法**：项目根装载时已 canonicalize，客户端给的路径却可能
+        // 走软链接（`/var` vs `/private/var`），裸 `starts_with` 会把根底下的目录判成外人。
+        // 目录还不存在，只能拿它最深的那个存在的祖先去解。
+        let mut probe = dir.as_path();
+        let under_root = loop {
+            match std::fs::canonicalize(probe) {
+                Ok(real) => break real.starts_with(&app.cfg.project_root),
+                Err(_) => match probe.parent() {
+                    Some(p) => probe = p,
+                    None => break false,
+                },
+            }
+        };
+        if no_parent_refs && under_root {
             std::fs::create_dir_all(&dir)
                 .map_err(|e| ApiError::internal(format!("mkdir: {e}")))?;
         } else {
@@ -925,14 +938,22 @@ async fn sessions_create(
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| canon_str.clone());
-    // hooks 设置片段（事件源，见 hooks.rs）；写不出来只是退回屏幕启发式，不阻止开会话
-    let cmd = match crate::hooks::ensure_settings(&app) {
+    // hooks（事件源，见 hooks.rs）：claude 走 `--settings` 片段，agy 走它全局那份
+    // `hooks.json` 里我们自己的一段。**写不出来只是退回屏幕启发式，不阻止开会话**——
+    // 但那时 `hooked` 必须是 false，不然会话会永远停在「在跑」。
+    let (cmd, mut hooked) = match crate::hooks::ensure_settings(&app) {
         Ok(p) => crate::hooks::with_settings(cmd, agent, &p),
         Err(e) => {
             eprintln!("hooks settings unavailable ({e}); session runs without hooks");
-            cmd
+            (cmd, false)
         }
     };
+    if agent.id == "agy" {
+        match crate::hooks::ensure_agy_hooks(&app) {
+            Ok(()) => hooked = true,
+            Err(e) => eprintln!("agy hooks unavailable ({e}); session falls back to screen diffing"),
+        }
+    }
     let spec = SpawnSpec {
         project_path: canon_str.clone(),
         project_name: project_name.clone(),
@@ -941,6 +962,7 @@ async fn sessions_create(
         cmd,
         resume_id,
         feed_inbox: body.feed_inbox,
+        hooked,
     };
     let sess = app.pool.spawn(spec).map_err(ApiError::internal)?;
     // 进度清单跟着对话走：resume 出来的新会话把同一对话上一份清单带过来（先找池子里

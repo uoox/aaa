@@ -263,6 +263,16 @@ impl Net {
     pub fn clean_exited(&self) -> impl Future<Output = Result<serde_json::Value>> + use<> {
         self.post_json("/sessions/clean_exited", serde_json::json!({}))
     }
+    /// 项目任务队列：排着的几句话（agent 空下来 daemon 自动喂下一句）
+    pub fn inbox_list(&self, path: &str) -> impl Future<Output = Result<Vec<crate::model::InboxEntry>>> + use<> {
+        self.get_json(&format!("/inbox?path={}", percent_encode(path)))
+    }
+    pub fn inbox_add(&self, path: String, text: String) -> impl Future<Output = Result<serde_json::Value>> + use<> {
+        self.post_json("/inbox", serde_json::json!({"path": path, "text": text}))
+    }
+    pub fn inbox_delete(&self, id: &str) -> impl Future<Output = Result<serde_json::Value>> + use<> {
+        self.request_raw(reqwest::Method::DELETE, format!("/inbox/{id}"), None)
+    }
     pub fn session_permission(&self, id: &str, behavior: &str) -> impl Future<Output = Result<serde_json::Value>> + use<> {
         self.post_json(&format!("/sessions/{id}/permission"), serde_json::json!({ "behavior": behavior }))
     }

@@ -1,4 +1,4 @@
-//! Auto-accept Claude Code's folder trust dialog.
+//! Auto-accept the agent's folder trust dialog (Claude Code 与 agy 同一套话术)。
 //!
 //! A fresh project's first screen is the trust dialog. The user has already
 //! chosen the folder in AAA, so asking again is pure friction; the daemon
@@ -11,11 +11,16 @@
 //!   folder」below → Down, then Enter. Pressing plain Enter here exits Claude,
 //!   which is exactly what an unaware daemon did.
 //!
+//! agy 问的是同两行（「Yes, I trust this folder」/「No, exit」），只是高亮标记用
+//! `>` 而不是 `❯`，而且默认就落在 Yes 上。v1.28 起它也走这条路——**检测本来就是
+//! 认屏幕上那两行，不认 agent**，此前只替 claude 按，agy 就永远卡在对话框上，
+//! 而用户发过去的每句话又被当成「对话框挡着」收进收件箱，看起来像消息丢了。
+//!
 //! This is the one place the daemon still reads the screen to act — kept
 //! deliberately narrow: the prompt and an option line must both be visible,
-//! only claude sessions, at most [`MAX_PRESSES`] tries spaced [`RETRY_SECS`]
-//! apart. The real record of the decision is written by claude itself into
-//! `~/.claude.json` (the daemon never writes that file; see `feed`).
+//! 终端（shell）除外，at most [`MAX_PRESSES`] tries spaced [`RETRY_SECS`]
+//! apart. 决定本身由 agent 自己记下来（claude 写 `~/.claude.json`，agy 写它自己的
+//! 项目配置）；daemon 从不写那些文件，只负责替你按那一下（见 `feed`）。
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -50,7 +55,15 @@ pub fn next_key(screen: &vt100::Screen) -> Option<&'static [u8]> {
     }
     // 新对话框：提示行可能滚出屏幕（行数少的手机终端），认「Yes, I trust」+「No, exit」两行选项
     if has(ACCEPT_NEW) && has(REJECT_NEW) {
-        let highlighted = |needle: &str| rows.iter().any(|r| r.contains('❯') && r.contains(needle));
+        // 高亮标记：claude 用 `❯`，agy 用 `>`，而且**必须在行首**。只要求「行里有」是不行的：
+        // `>` 在 `->`、markdown 引用、diff 里到处都是，屏幕上正好显示着这两句选项的源码
+        // （比如本文件）就会让 daemon 往一个活着的会话里敲回车。
+        let highlighted = |needle: &str| {
+            rows.iter().any(|r| {
+                let t = r.trim_start();
+                (t.starts_with('❯') || t.starts_with('>')) && t.contains(needle)
+            })
+        };
         return if highlighted(ACCEPT_NEW) {
             Some(ENTER)
         } else if highlighted(REJECT_NEW) {
@@ -81,7 +94,7 @@ pub fn should_press(
     since_last: Option<Duration>,
 ) -> bool {
     enabled
-        && agent == "claude"
+        && agent != "shell"
         && alive
         && visible
         && presses < MAX_PRESSES
@@ -94,7 +107,7 @@ pub fn on_tick(app: &SharedApp, sess: &Arc<Session>) {
         let meta = sess.meta.lock().unwrap();
         (meta.agent.clone(), meta.trust_presses, meta.trust_pressed_inst)
     };
-    if !app.cfg.auto_trust || agent != "claude" || presses >= MAX_PRESSES {
+    if !app.cfg.auto_trust || agent == "shell" || presses >= MAX_PRESSES {
         return;
     }
     let alive = sess.live.lock().unwrap().is_some();
@@ -158,6 +171,24 @@ mod tests {
         let mid = screen_of("   No, exit\n   Yes, I trust this folder\n");
         assert!(dialog_visible(mid.screen()));
         assert_eq!(next_key(mid.screen()), None);
+        // agy 问的是同两行，只是标记用 `>`，而且默认就落在 Yes 上（实机抓的画面）
+        let agy = screen_of(
+            "Antigravity CLI requires permission to read, edit, and execute files here.\n\n> Yes, I trust this folder\n  No, exit\n\n  ↑/↓ Navigate · enter Confirm",
+        );
+        assert!(dialog_visible(agy.screen()));
+        assert_eq!(next_key(agy.screen()), Some(ENTER), "agy 默认高亮在 Yes：直接回车");
+        // 屏幕上**显示着**这两句（读源码、看 diff、markdown 引用）不算对话框在等你：
+        // 标记必须在行首。否则 daemon 会往一个正干活的会话里连敲 8 次回车。
+        let quoted = screen_of(
+            "let dlg = \"> Yes, I trust this folder\";\nassert!(has(\"No, exit\"));\n-> Yes, I trust this folder",
+        );
+        assert!(dialog_visible(quoted.screen()), "两句都在屏幕上，检测本来就会命中");
+        assert_eq!(next_key(quoted.screen()), None, "但高亮标记不在行首，一个键都不许按");
+
+        // 替它按这件事对 claude / agy 一视同仁，终端（shell）永远不按
+        assert!(should_press(true, "agy", true, true, 0, None));
+        assert!(should_press(true, "claude", true, true, 0, None));
+        assert!(!should_press(true, "shell", true, true, 0, None));
         // 只有提示没有选项行（比如被引用在输出里）不算
         let doc = screen_of("It said: Quick safety check: Is this a project you created? — then I answered.");
         assert!(!dialog_visible(doc.screen()));

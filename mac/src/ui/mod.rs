@@ -73,7 +73,7 @@ fn kill_needs_confirm(s: &Session) -> bool {
 struct ProjectRow {
     path: String,
     title: String,
-    /// daemon 给的五态字符串（`model::status_rank` / `status_running`）。v1.22 之前这里是
+    /// daemon 给的五态字符串（`model::status_running`）。v1.22 之前这里是
     /// 个本地枚举，由会话的 state/asking/background 现推——三端各推一套，同一个项目在
     /// mac 和手机上能显示成两种状态，所以整条阶梯删掉了。
     status: String,
@@ -99,7 +99,7 @@ impl ProjectRow {
 
 /// 项目 → 侧栏行。**v1.22：一行的内容全部现成**——标题、五态、代表会话、排序时间都由
 /// daemon 算好放在 `Project` 上（PROTOCOL「版本兼容」），这里只做两件纯本机的事：
-/// 把 `session_id` 换成手里的 `Session` 对象，和按「黄点 > 状态 > 时间」排。
+/// 把 `session_id` 换成手里的 `Session` 对象，和按 `updated_at` 从新到旧排。
 ///
 /// 删掉的旧做法（别再加回来）：① 遍历 `sessions` 按 project_path 挑「最近更新的活会话」
 /// 当代表、顺带算最新时间——Android 挑法不同，两端标题和状态对不上；② 标题回退链
@@ -131,15 +131,12 @@ fn project_rows(projects: &[Project], sessions: &[Session], unread: &[String]) -
             unread: path_list_contains(unread, &p.path),
         })
         .collect();
-    // 2026-09-08 用户拍板：有黄点 > 在跑 > 其余，同一档里最近更新的在前，同刻按标题稳住
-    // （置顶那一档 2026-09-10 拿掉了）。黄底排在蓝底前面——蓝的还在自己往前走，黄的那个在等你。
-    rows.sort_by(|a, b| {
-        b.unread
-            .cmp(&a.unread)
-            .then_with(|| status_rank(&a.status).cmp(&status_rank(&b.status)))
-            .then_with(|| b.sort_key.cmp(&a.sort_key))
-            .then_with(|| a.title.cmp(&b.title))
-    });
+    // 2026-09-10 用户拍板：就按行尾那个「xxx 分钟前」从新到旧排，不分档。
+    // 此前是「黄底 > 状态 > 时间」——状态已经由整行底色说了，再拿它排一遍是同一件事
+    // 说两遍，而且行会因为状态翻转在列表里跳位置。同刻按标题稳住。
+    // 同刻按**路径**稳住，不按标题：标题会被改名和 AI 命名改写，一改行就跳位置。
+    // 两端认同一个并列键，共享向量里有一对同刻的项目盯着这条（见 fixtures/projects.json）。
+    rows.sort_by(|a, b| b.sort_key.cmp(&a.sort_key).then_with(|| a.path.cmp(&b.path)));
     rows
 }
 
@@ -165,7 +162,8 @@ const SCHEMA_MIN: u32 = 2;
 
 /// 这一行的状态底色（2026-09-10 用户拍板：「去掉竖线状态的设计，改为背景色，用浅色」）：
 /// **淡黄** = 跑完了 / 在等你回话而这台机器还没进去看；**淡蓝** = 在跑（含后台任务还没回来）；
-/// `None` = 已读，没什么要你操心的，就是侧栏自己的底。黄盖过蓝——排序也是黄在前，那个在等你。
+/// `None` = 已读，没什么要你操心的，就是侧栏自己的底。黄盖过蓝——黄的那个在等你。
+/// 底色只管底色：2026-09-10 起排序不看状态，只看时间。
 /// 行高不随状态跳，也没有任何按帧重画的动画。
 fn row_bg(status: &str, unread: bool) -> Option<u32> {
     if unread {
@@ -361,8 +359,10 @@ pub struct RootView {
     pub win_w: f32,
     /// 每会话的产物 / 改动状态（含各自的拉取节流器）
     detail: HashMap<String, detail_panel::SessionDetail>,
-    /// 项目路径 → 收件箱条目
+    /// 项目路径 → 排着的任务（GET /inbox）
+    pub inbox: HashMap<String, Vec<InboxEntry>>,
     /// 收件箱新增输入框（回车提交，根节点接住）
+    pub inbox_input: Entity<MiniInput>,
 
     // 输入框
     /// 侧栏顶部的新建项目输入框：内容即文件夹名，回车 / ＋ 创建
@@ -451,6 +451,11 @@ impl RootView {
         let token_input = cx.new(|cx| MiniInput::new(cx, "aaa_tk_…"));
         let root_input = cx.new(|cx| MiniInput::new(cx, "~/project"));
         let history_input = cx.new(|cx| MiniInput::new(cx, "搜索：标题 / 项目 / 条目"));
+        let inbox_input = cx.new(|cx| MiniInput::new(cx, "排一句话，空下来自动发"));
+        cx.subscribe(&inbox_input, |this, _, _: &mini_input::InputEvent, cx| {
+            this.submit_inbox(cx);
+        })
+        .detach();
         // 输入法送来的回车（见 MiniInput::replace_text_in_range）与键盘回车同一出口
         cx.subscribe(&new_input, |this, _, _: &mini_input::InputEvent, cx| {
             if matches!(this.modal, Modal::None) {
@@ -493,6 +498,8 @@ impl RootView {
             plan: None,
             dashboard: Dashboard::default(),
             history_input,
+            inbox: HashMap::new(),
+            inbox_input,
             dash_show_deleted: false,
             dash_show_gone: false,
             dash_scroll: scrollbar::Scrollbar::default(),
@@ -602,7 +609,13 @@ impl RootView {
                 self.plan = plan;
                 cx.notify();
             }
-            // 收件箱（待发送）由消息流自己管；mac 详情栏 v1.15 起不再画它
+            // 队列被喂掉一条 / 别处加了一条：详情栏那一节跟着走
+            DaemonEvent::InboxChanged { path } => {
+                // 两边都去尾斜杠再比（与未读同一个口径）：daemon 发的是 realpath 过的
+                if self.current_project_path().as_deref() == Some(path.trim_end_matches('/')) {
+                    self.refresh_inbox(cx);
+                }
+            }
             DaemonEvent::Unknown => {}
         }
     }
@@ -886,6 +899,7 @@ impl RootView {
         self.reassert_visible_size(cx);
         // 详情面板开着就把这个会话的产物 / 改动 / 收件箱补齐
         self.refresh_detail(&id, cx);
+        self.refresh_inbox(cx);
         cx.notify();
     }
 

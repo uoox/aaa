@@ -151,6 +151,8 @@ const val SCHEMA_PROJECT_STATUS = 2
 /** kind：permission（能替答）| elicitation（MCP 表单，只能去终端） */
 @Serializable data class PermissionPrompt(val kind: String = "permission", val tool_name: String = "", val summary: String = "", val since: String = "")
 @Serializable data class ScreenText(val text: String = "")
+/** `GET /inbox?path=` 的一项：排给这个项目的一句话，agent 空下来时 daemon 自动喂进去 */
+@Serializable data class InboxEntry(val id: String = "", val text: String = "", val created_at: String = "")
 /**
  * `GET /agents`：有哪些 agent、这台机器装没装（PROTOCOL「Agent 表」）。
  * 客户端不自己硬编码这张表——硬编码就会给一个没装的 agent 开会话，然后对着
@@ -299,6 +301,8 @@ sealed class EventFrame {
     data class MessagesChanged(val id: String, val lastSeq: Long) : EventFrame()
     /** 套餐用量变了：plan 为 null 表示 daemon 暂时拿不到 */
     data class UsageUpdate(val plan: PlanUsage?) : EventFrame()
+    /** v1.28：这个项目排着的任务变了（加了 / 被喂掉了 / 删了）。`path` 是 daemon realpath 过的 */
+    data class InboxChanged(val path: String) : EventFrame()
     data class Unknown(val type: String) : EventFrame()
 
     companion object {
@@ -314,6 +318,7 @@ sealed class EventFrame {
                     "health" -> HealthUpdate(obj["ssd_mounted"]?.jsonPrimitive?.booleanOrNull ?: true)
                     "messages_changed" -> MessagesChanged(obj["id"]!!.jsonPrimitive.content, obj["last_seq"]?.jsonPrimitive?.longOrNull ?: 0)
                     "usage" -> UsageUpdate(obj["plan"]?.takeIf { it !is kotlinx.serialization.json.JsonNull }?.let { ProtocolJson.instance.decodeFromJsonElement(PlanUsage.serializer(), it) })
+                    "inbox_changed" -> InboxChanged(obj["path"]?.jsonPrimitive?.content ?: "")
                     else -> Unknown(t)
                 }
             } catch (_: Exception) { Unknown(t) }

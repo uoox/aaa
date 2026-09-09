@@ -306,6 +306,8 @@ class AppStore private constructor(context: Context) {
                 _health.value = (_health.value ?: Health()).copy(ssd_mounted = frame.ssdMounted)
             }
             is EventFrame.MessagesChanged -> _frames.tryEmit(frame)
+            // 详情屏的收件箱那一节自己订这条（屏幕没开就没人收，白广播一次也无所谓）
+            is EventFrame.InboxChanged -> _frames.tryEmit(frame)
             is EventFrame.UsageUpdate -> _planUsage.value = frame.plan
             is EventFrame.Unknown -> { }
         }

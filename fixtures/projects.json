@@ -2,7 +2,7 @@
   "note": [
     "三端共享向量：项目列表（GET /projects 的一行 + 本机的黄点）→ 侧栏行。",
     "v1.22 起 status / title / session_id / updated_at 都是 daemon 算好的（PROTOCOL「版本兼容」），",
-    "客户端只剩两件事：按「黄底 > 状态 > 时间」排，和「这一行的底色画不画成蓝的 / 黄的」。",
+    "客户端只剩两件事：按 updated_at 从新到旧排，和「这一行的底色画不画成蓝的 / 黄的」。",
     "置顶于 2026-09-10 拿掉（用户拍板），行上不再有 pinned。",
     "两端的测试都读这一份——此前两端各测各的一套，所以谁都没发现两边推出来的标题和状态不一样。",
     "改动这个文件要同时跑 mac 与 Android 两边的测试。"
@@ -100,19 +100,21 @@
   "unread": ["/p/unread", "/p/bg/"],
   "expect": {
     "order": [
-      "/p/bg",
-      "/p/unread",
       "/p/ask",
       "/p/run",
+      "/p/bg",
       "/p/act",
+      "/p/unread",
       "/p/old",
       "/p/fallback",
       "/p/bare"
     ],
     "order_why": [
-      "先是两个有黄底的（/p/bg 在跑、/p/unread 已退出），黄底档内部仍按状态再按时间；",
-      "剩下的按 asking > running > background > active > paused，同档比时间；",
-      "/p/old、/p/fallback、/p/bare 都是 paused，09-05 > 09-04 > 09-03。"
+      "2026-09-10 用户拍板：就按行尾那个「xxx 分钟前」从新到旧排，不再分档。",
+      "此前是「黄底 > 状态 > 时间」三档——状态已经由整行底色说了，再拿它排一遍",
+      "等于同一件事说两遍，而且行会因为状态翻转跳位置。",
+      "/p/tie-a 与 /p/tie-b 同刻：按**路径**排，a 在 b 前——两端认同一个并列键，",
+      "不按标题：标题会被改名和 AI 命名改写，一改这一行就跳位置。"
     ],
     "running": ["/p/run", "/p/bg"],
     "running_why": "淡蓝底 = status ∈ {running, background}：它还在动，不用你管。asking 不蓝——那是在等你。",
@@ -124,6 +126,7 @@
       "/p/bare": "bare"
     },
     "titles_why": "标题回退链（活会话标题 → session_title → 目录名）v1.22 起在 daemon 里走完，客户端直接用 title。",
+    "tie_break": "同一个 updated_at 时按 project.path 升序。此前 mac 按标题、Android 按路径，而向量里没有同刻的两行，两边的测试都绿着谁也没发现。",
     "unread_path_normalized": {
       "/p/bg": true,
       "/p/bg/": true,

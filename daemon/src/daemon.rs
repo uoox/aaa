@@ -41,6 +41,12 @@ pub fn main_entry() {
         }
         ("service", Some("uninstall")) => {
             let paths = Paths::from_env();
+            // 顺手把塞进 agy 全局 hooks.json 的那一段摘掉，别在别人的配置里留垃圾
+            match crate::hooks::remove_agy_hooks(&paths) {
+                Ok(true) => println!("removed the aaa entry from agy's hooks.json"),
+                Ok(false) => {}
+                Err(e) => eprintln!("could not clean agy hooks: {e}"),
+            }
             if let Err(e) = crate::service::uninstall(&paths) {
                 eprintln!("service uninstall failed: {e}");
                 std::process::exit(1);
