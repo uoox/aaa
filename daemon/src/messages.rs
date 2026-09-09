@@ -2,8 +2,9 @@
 //! parse it into a structured message list (mobile main view).
 //!
 //! claude: full support (user/assistant/tool_use/tool_result/thinking, filters
-//! isSidechain/isMeta and injected blocks). 本应用只认 Claude Code；终端
-//! （shell）`supported:false`。
+//! isSidechain/isMeta and injected blocks). 只有 claude 有可跟读的 transcript：
+//! agy 的对话存在 SQLite 里、shell 压根没有存储，两者一律 `supported:false`，
+//! 客户端据此回落到终端画面。
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};

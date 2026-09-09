@@ -35,9 +35,15 @@ impl Paths {
         Self { home: home.into() }
     }
 
-    // ---- Claude Code 会话存储（本应用只认 Claude Code） ----
+    // ---- agent 会话存储 ----
     pub fn claude_root(&self) -> PathBuf {
         self.home.join(".claude").join("projects")
+    }
+
+    /// Antigravity CLI（`agy`）的存储根：`cache/last_conversations.json` 是
+    /// `cwd -> 最近对话 id`，对话本体在 `conversations/<id>.db`。
+    pub fn agy_root(&self) -> PathBuf {
+        self.home.join(".gemini").join("antigravity-cli")
     }
 
     /// `~/.cache/aaa-cwds.json` — shared with the aaa CLI, format-compatible.

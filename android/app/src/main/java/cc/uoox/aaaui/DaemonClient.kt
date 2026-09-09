@@ -86,6 +86,13 @@ class DaemonClient(
     suspend fun restartDaemon(force: Boolean): String = post("/restart", """{"force":$force}""")
     suspend fun projects(): List<Project> = json.decodeFromString(ListSerializer(Project.serializer()), get("/projects"))
 
+    /** agent 表；老 daemon 没有这个路由，调用方 runCatching 落空即空表 */
+    suspend fun agents(): List<AgentInfo> = json.decodeFromString(ListSerializer(AgentInfo.serializer()), get("/agents"))
+
+    /** 换这个项目下次开哪个 agent：只动注册表，活着的会话不碰 */
+    suspend fun setProjectAgent(path: String, agent: String): String =
+        post("/projects/agent", buildJsonObject { put("path", path); put("agent", agent) }.toString())
+
     suspend fun createProject(name: String?, agent: String?): Project {
         val body = buildJsonObject { if (!name.isNullOrBlank()) put("name", name); if (!agent.isNullOrBlank()) put("agent", agent) }
         return json.decodeFromString(post("/projects", body.toString()))

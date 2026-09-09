@@ -23,7 +23,7 @@ pub const FAINT: u32 = 0x91908a;
 pub const TERM_BG: u32 = 0xfffdf7;
 /// 终端字 = 墨
 pub const TERM_FG: u32 = INK;
-/// 主操作 / 选中 / 链接 / 选中项目标题的下划线（陶土橙；原「CYAN」角色）
+/// 主操作 / 选中 / 链接 / 选中那一行的边框（陶土橙；原「CYAN」角色）
 pub const ACCENT: u32 = 0xd97757;
 /// 品牌辅色：哑紫，不取橙的邻色，否则和 accent 分不开。mac 目前没有调用点
 /// （Android 配对页大标题用），留着是因为令牌表两端要齐、共享向量钉着它

@@ -559,6 +559,72 @@ async fn projects_create(
     })))
 }
 
+/// v1.26 恢复（2026-09-08 删过一次，理由是「给一个常量做服务发现」）：agent 表
+/// 加回 agy 之后不再是常量，而「这台机器装没装」也只有 daemon 知道——客户端硬
+/// 编码一份表就会给没装的 agent 开会话，然后拿到一屏 command not found。
+/// `shell` 不在这张表里：终端是面板，不是 agent（PROTOCOL「终端」）。
+async fn agents_list(State(app): State<SharedApp>) -> ApiResult<Json<Value>> {
+    let home = app.paths.home.clone();
+    let list = blocking(move || {
+        agents::AGENTS
+            .iter()
+            .filter(|a| a.id != "shell")
+            .map(|a| {
+                json!({
+                    "id": a.id,
+                    "label": a.label,
+                    "available": agents::which(agents::agent_bin(a), &home).is_some(),
+                })
+            })
+            .collect::<Vec<Value>>()
+    })
+    .await?;
+    Ok(Json(json!(list)))
+}
+
+#[derive(Deserialize)]
+struct SetAgent {
+    path: String,
+    agent: String,
+}
+
+/// 换 agent：只动注册表一行。旧对话 id 由 `Registry::set` 顺手清掉——它是**上一个**
+/// agent 的 id，留着下次 resume 就会拿 claude 的 id 去喂 agy。
+/// 已经活着的会话不动：换的是「下次在这个项目开什么」。
+async fn projects_agent(
+    State(app): State<SharedApp>,
+    Json(body): Json<SetAgent>,
+) -> ApiResult<Json<Value>> {
+    let agent = agents::get(&body.agent)
+        .filter(|a| a.id != "shell")
+        .ok_or_else(|| ApiError::agent_unknown(&body.agent))?;
+    let app2 = Arc::clone(&app);
+    let (raw, agent_id) = (body.path.clone(), agent.id);
+    // 注册表的键有两种写法：`POST /projects` 存的是原样路径，开会话时存的是
+    // canonicalize 过的（项目根本身带软链接时两者不同）。删项目那边两个都 unset，
+    // 这里同理——**存在的都改**。只改命中的那一个，另一个会留着旧 agent，下次
+    // `POST /sessions` 按 canonicalize 路径去查，刚换的就白换了。
+    let path = blocking(move || {
+        let _reg_lock = crate::registry::lock();
+        let mut reg = Registry::load(&app2.cfg.project_root);
+        let mut keys = vec![raw.clone()];
+        let canon = stores::realpath(&raw);
+        if canon != raw {
+            keys.push(canon);
+        }
+        keys.retain(|k| reg.get(k).is_some());
+        let first = keys.first().cloned().ok_or_else(|| format!("not registered: {raw}"))?;
+        for k in &keys {
+            reg.set(k, agent_id).map_err(|e| format!("registry: {e}"))?;
+        }
+        Ok::<String, String>(first)
+    })
+    .await?
+    .map_err(ApiError::not_found)?;
+    app.hub.projects_changed();
+    Ok(Json(json!({"path": path, "agent": agent.id})))
+}
+
 #[derive(Deserialize)]
 struct HistoryQuery {
     limit: Option<usize>,
@@ -705,11 +771,10 @@ async fn projects_delete(
                 }
             };
             let target = target_dir.to_string_lossy().into_owned();
-            // 线上形状不变（PROTOCOL.md「删除项目」）：只有 Claude 一个存储，
-            // 所以这个数组最多一项
-            let n = stores::purge(&app2.paths, &mut cache, &target);
-            let purged: Vec<Value> =
-                if n > 0 { vec![json!({"agent_label": "Claude", "count": n})] } else { vec![] };
+            let purged: Vec<Value> = stores::purge(&app2.paths, &mut cache, &target)
+                .into_iter()
+                .map(|(label, count)| json!({"agent_label": label, "count": count}))
+                .collect();
             let _ = reg.unset(p);
             let _ = reg.unset(&target);
             let rm_ok = if target_dir.exists() {
@@ -829,7 +894,7 @@ async fn sessions_create(
         let agent_id = agent.id;
         let sid = blocking(move || {
             let mut cache = CwdCache::load(&app2.paths.cwd_cache());
-            let mut sid = stores::find(&app2.paths, &mut cache, &target);
+            let mut sid = stores::find(&app2.paths, &mut cache, &target, agent_id);
             if cache.dirty() {
                 let _g = app2.store_lock.lock().unwrap();
                 cache.save();
@@ -843,7 +908,7 @@ async fn sessions_create(
                 // 已被 GC 的 id 去撞墙。
                 if reg.get(&target) == Some(agent_id) {
                     let cand = reg.get_id(&target).unwrap_or_default().to_string();
-                    if stores::id_exists(&app2.paths, &cand) {
+                    if stores::id_exists(&app2.paths, agent_id, &cand) {
                         sid = cand;
                     } else {
                         let _ = reg.clear_id(&target);
@@ -1804,7 +1869,9 @@ async fn events_loop(app: SharedApp, mut socket: WebSocket) {
 pub fn router(app: SharedApp) -> Router {
     Router::new()
         .route("/api/v1/health", get(health))
+        .route("/api/v1/agents", get(agents_list))
         .route("/api/v1/projects", get(projects_list).post(projects_create))
+        .route("/api/v1/projects/agent", post(projects_agent))
         .route("/api/v1/projects/delete", post(projects_delete))
         .route("/api/v1/history", get(history_list))
         .route("/api/v1/history/backfill", post(history_backfill))

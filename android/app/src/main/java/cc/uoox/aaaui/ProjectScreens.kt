@@ -5,6 +5,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -55,7 +56,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -64,7 +64,7 @@ import kotlinx.coroutines.launch
 
 // ---------- A6 首页 = 项目列表 ----------
 
-/** 这个 app 只跑 Claude Code：新建项目、没登记 agent 的旧项目都用它。 */
+/** 表里第一个、也是没登记 agent 的旧项目的回退。真正开谁以注册表 / `GET /agents` 为准。 */
 const val DEFAULT_AGENT = "claude"
 
 /** 首页一行要的全部东西，纯数据，方便单测。 */
@@ -150,12 +150,29 @@ fun MarkBar(color: Color, modifier: Modifier = Modifier) {
 }
 
 /** 新建项目：POST /projects + /sessions，返回新会话。名字留空 = 按日期命名。 */
-suspend fun createProjectSession(store: AppStore, name: String?): Session {
+suspend fun createProjectSession(store: AppStore, name: String?, agent: String = DEFAULT_AGENT): Session {
     val api = store.client ?: throw IllegalStateException("未连接 daemon")
     // agent 显式写进注册表：daemon 对「没有登记」的目录会自己猜，不留给它猜
-    val path = api.createProject(name, DEFAULT_AGENT).path
-    return api.createSession(path, DEFAULT_AGENT, resume = false)
+    val path = api.createProject(name, agent).path
+    return api.createSession(path, agent, resume = false)
 }
+
+/**
+ * 表里下一个装了的 agent。只装了一个就是 null——没有「换」这回事，切换入口整个不画
+ * （老 daemon 不给 `/agents`，表是空的，同样不画）。例外：当前这个**没装**（卸载了 /
+ * 换了台机器）时给一条回到装了的那个的路，否则这一行永远换不回来。
+ */
+fun nextAgent(agents: List<AgentInfo>, current: String): String? {
+    val usable = agents.filter { it.available }
+    val first = usable.firstOrNull() ?: return null
+    val i = usable.indexOfFirst { it.id == current }
+    if (i < 0) return first.id
+    if (usable.size < 2) return null
+    return usable[(i + 1) % usable.size].id
+}
+
+fun agentLabel(agents: List<AgentInfo>, id: String): String =
+    agents.firstOrNull { it.id == id }?.label ?: id
 
 fun createErrorText(e: Exception): String =
     if (e is DaemonHttpException && e.errorCode == "conflict") "项目已存在" else "新建失败：${e.message}"
@@ -172,10 +189,20 @@ fun NewProjectField(
     creating: Boolean,
     onCreate: () -> Unit,
     modifier: Modifier = Modifier,
+    agentMark: String? = null,
+    onSwapAgent: () -> Unit = {},
 ) {
     OutlinedTextField(
         value, onValueChange,
         placeholder = { Text("新建项目：文件夹名，回车", color = Tok.Faint, fontSize = 13.sp) },
+        // 新项目开谁：点一下在装了的 agent 之间轮换。只有一个可用时 agentMark 是 null，整个不画
+        leadingIcon = agentMark?.let { mark ->
+            {
+                Box(Modifier.size(28.dp).clickable(onClick = onSwapAgent), contentAlignment = Alignment.Center) {
+                    Text(mark, color = Tok.Accent, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+        },
         modifier = modifier.onPreviewKeyEvent { ev ->
             if (ev.type == KeyEventType.KeyDown && (ev.key == Key.Enter || ev.key == Key.NumPadEnter)) { onCreate(); true } else false
         },
@@ -197,7 +224,7 @@ fun NewProjectField(
  * 项目面板 = 以前的首页整块（2026-09-07 用户拍板：☰ 抽屉要有首页所有按钮和功能，首页就没
  * 必要单独存在了）。会话页的 ☰ 抽屉和「一个会话都没打开」时的落地页画的都是它：顶栏
  * 一行（额度 / 看板 / 设置，2026-09-08 用户拍板砍到这三样）、新建项目框、项目列表（点开、长按操作）、
- * 下拉刷新。`currentPath` / `currentTerminalId` 标出正在看的那一行（标题加下划线，二选一：
+ * 下拉刷新。`currentPath` / `currentTerminalId` 标出正在看的那一行（强调色标题 + 整行边框，二选一：
  * 会话屏给项目路径，终端屏给终端 id——终端不是项目，按 cwd 去点亮项目行是错的）；
  * `onBeforeNavigate` 在抽屉里就是「先关抽屉」。
  *
@@ -224,6 +251,8 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
     var planDialog by remember { mutableStateOf(false) }
     /** 顶上那个框里的字：**只是新项目的文件夹名**，不是搜索词（v1.22 用户拍板） */
     var newName by rememberSaveable { mutableStateOf("") }
+    /** 下一个新建项目用哪个 agent（表里第一个装了的；只有一个可用时不画切换） */
+    var newAgent by rememberSaveable { mutableStateOf(DEFAULT_AGENT) }
     var refreshing by remember { mutableStateOf(false) }
     // 正在 POST /sessions 的项目路径：挡双击（daemon 虽幂等，但两次并发到达仍可能各开一个）
     var busy by remember { mutableStateOf(setOf<String>()) }
@@ -251,6 +280,14 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
     // 双端都不要」）——所以这里不再按框里的字过滤，mac 侧本来也没有过滤，两端就此一致。
     val unread = settings.unreadProjects
     val rows = remember(projects, sessions, unread) { projectRows(projects, sessions, unread) }
+    val agents by store.agents.collectAsState()
+    // 选中的 agent 没装（或表里没有）就退到第一个装了的
+    LaunchedEffect(agents) {
+        if (agents.none { it.id == newAgent && it.available }) {
+            agents.firstOrNull { it.available }?.let { newAgent = it.id }
+        }
+    }
+    val swapNewAgent = nextAgent(agents, newAgent)
 
     fun toast(msg: String) = Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
 
@@ -261,7 +298,7 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
         val name = newName.trim().ifBlank { null }
         scope.launch {
             try {
-                val sess = createProjectSession(store, name)
+                val sess = createProjectSession(store, name, newAgent)
                 newName = ""
                 focusManager.clearFocus()
                 onBeforeNavigate(); openSession(sess.id, "")
@@ -294,8 +331,7 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
         if (row.alive) p.session_id?.let { onBeforeNavigate(); openSession(it, ""); return }
         // 注册表里没有这个目录（在别处 aaa open 开出来的），daemon 不认它，resume 只会建错东西
         if (!p.registered) { toast("这个目录不在项目注册表里，只能在它还有会话时打开"); return }
-        // 注册表里登记了什么就跑什么（旧项目可能还是别的 agent，daemon 那头照样认）；
-        // 没登记的一律 claude——这个 app 只跑 Claude Code，没有别的可选
+        // 注册表里登记了什么就跑什么；没登记的回退到默认 agent（长按单里可以换）
         val agent = p.agent ?: row.primary?.agent ?: DEFAULT_AGENT
         if (p.path in busy) return
         busy = busy + p.path
@@ -332,8 +368,14 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
             onHistory = { onBeforeNavigate(); nav.navigate("history") },
             onSettings = { onBeforeNavigate(); nav.navigate("settings") },
         )
-        // 与 mac 侧栏同一件东西：边输入边过滤列表，回车或右边 ＋ 就按这个名字新建项目
-        NewProjectField(newName, { newName = it }, creating, onCreate = { create() }, modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp))
+        // 与 mac 侧栏顶上那一行同一件东西：框里的字就是文件夹名，回车或右边 ＋ 新建；
+        // 左边的小标是「新项目开谁」（v1.22 拍板这个框不当搜索框，所以它不过滤列表）
+        NewProjectField(
+            newName, { newName = it }, creating, onCreate = { create() },
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+            agentMark = swapNewAgent?.let { agentLabel(agents, newAgent).take(1) },
+            onSwapAgent = { swapNewAgent?.let { newAgent = it } },
+        )
 
         PullToRefreshBox(
             isRefreshing = refreshing,
@@ -429,7 +471,7 @@ private fun LazyListScope.terminalSection(
     /** 项目根，用来把终端的工作目录缩成一个短名字 */
     root: String,
     creatingTerminal: Boolean,
-    /** 正在看的那个终端（终端屏才有），标题加下划线 */
+    /** 正在看的那个终端（终端屏才有），强调色标题 + 整行边框 */
     currentTerminalId: String? = null,
     onOpen: (Session) -> Unit,
     onClose: (Session) -> Unit,
@@ -587,8 +629,9 @@ fun PlanUsageDialog(plan: PlanUsage, onDismiss: () -> Unit) {
 
 /**
  * 一行到底：标题 + 更新时间。不再有第二行——目录大小等细节在长按单里。状态由整行的淡底色说
- * （[rowBackground]，2026-09-10 用户拍板），行上不画任何记号；选中的那一行标题用强调色 + 一条
- * 强调色下划线——底色归状态用了，选中态不能再拿整行底色去抢它（此前是 `Raised` 底）。
+ * （[rowBackground]，2026-09-10 用户拍板），行上不画任何记号；选中的那一行标题用强调色、整行
+ * 套一圈强调色边框——底色归状态用了，选中态不能再拿整行底色去抢它（此前是 `Raised` 底）。
+ * 边框画在自己的边界内，不占布局，所以选中与否行高一样。
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -597,6 +640,7 @@ private fun ProjectRowItem(row: ProjectRow, timeText: String, busy: Boolean, cur
         Row(
             Modifier.fillMaxWidth()
                 .background(rowBackground(row.status, row.unread, busy) ?: Color.Transparent)
+                .border(1.dp, if (current) Tok.Accent else Color.Transparent)
                 .combinedClickable(onClick = onClick, onLongClick = onLongClick)
                 .padding(horizontal = 16.dp, vertical = 11.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -604,7 +648,6 @@ private fun ProjectRowItem(row: ProjectRow, timeText: String, busy: Boolean, cur
             Text(
                 row.title,
                 color = if (current) Tok.Accent else if (row.alive) Tok.Ink else Tok.Dim,
-                textDecoration = if (current) TextDecoration.Underline else null,
                 fontSize = 15.sp, fontWeight = FontWeight.Bold,
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
             )
@@ -622,19 +665,21 @@ private fun ProjectRowItem(row: ProjectRow, timeText: String, busy: Boolean, cur
  * 28dp 见方的可点 Box，IconButton 那 48dp 的触摸区本身就把整行撑得比项目行还高。
  *
  * 终端行没有状态底色（终端没有状态可言）；[current] = 正在看的那个终端，标题跟项目行用同一
- * 套选中语言：强调色 + 下划线。
+ * 套选中语言：强调色 + 整行一圈强调色边框。
  */
 @Composable
 private fun TerminalRowItem(label: String, onClick: () -> Unit, onClose: () -> Unit, current: Boolean = false, modifier: Modifier = Modifier) {
     Column(modifier) {
         Row(
-            Modifier.fillMaxWidth().clickable(onClick = onClick).padding(start = 16.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
+            Modifier.fillMaxWidth()
+                .border(1.dp, if (current) Tok.Accent else Color.Transparent)
+                .clickable(onClick = onClick)
+                .padding(start = 16.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
                 label,
                 color = if (current) Tok.Accent else Tok.Ink,
-                textDecoration = if (current) TextDecoration.Underline else null,
                 fontSize = 13.5.sp,
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
             )
@@ -684,6 +729,7 @@ fun ProjectActionsSheet(
     val openSession = LocalOpenSession.current
     val settings by store.settings.flow.collectAsState(initial = AppSettings())
     val sessions by store.sessions.collectAsState()
+    val agents by store.agents.collectAsState()
     // 代表会话是 daemon 指的（`session_id`）；这里只按 id 去池子里取那条会话，取不到就当它不在池子里
     val primary = p.session_id?.let { id -> sessions.firstOrNull { it.id == id } }
     var deleteConfirm by remember { mutableStateOf(false) }
@@ -733,6 +779,18 @@ fun ProjectActionsSheet(
             if (!alive && primary != null) {
                 // 点行 = resume 新会话；上一条已退出的会话只要还在池子里就留着 transcript 回放入口
                 SheetItem("↺", "上次会话回放", "消息流 · 终端回放") { onDismiss(); onBeforeNavigate(); openSession(primary.id, "") }
+            }
+            // 换 agent：只改注册表里的一行「下次开谁」，活着的会话不碰。
+            // 没登记的目录换不了（daemon 认的就是注册表）。
+            if (p.registered) nextAgent(agents, p.agent ?: DEFAULT_AGENT)?.let { next ->
+                SheetItem("⇄", "换成 ${agentLabel(agents, next)}", "下次开会话时生效") {
+                    scope.launch {
+                        runCatching { store.client?.setProjectAgent(p.path, next) }
+                            .onSuccess { store.refreshProjects() }
+                            .onFailure { toast("失败：${it.message}") }
+                    }
+                    onDismiss()
+                }
             }
             SheetItem("＞", "在此目录开终端", "zsh") {
                 scope.launch {

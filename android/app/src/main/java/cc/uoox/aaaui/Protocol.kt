@@ -151,6 +151,13 @@ const val SCHEMA_PROJECT_STATUS = 2
 /** kind：permission（能替答）| elicitation（MCP 表单，只能去终端） */
 @Serializable data class PermissionPrompt(val kind: String = "permission", val tool_name: String = "", val summary: String = "", val since: String = "")
 @Serializable data class ScreenText(val text: String = "")
+/**
+ * `GET /agents`：有哪些 agent、这台机器装没装（PROTOCOL「Agent 表」）。
+ * 客户端不自己硬编码这张表——硬编码就会给一个没装的 agent 开会话，然后对着
+ * 一屏 `command not found` 发呆。老 daemon 没有这个路由 → 空表 → 不画切换入口。
+ */
+@Serializable data class AgentInfo(val id: String = "", val label: String = "", val available: Boolean = false)
+
 @Serializable data class PurgedAgent(val agent_label: String, val count: Int)
 @Serializable data class ProjectDeleteResult(val path: String, val ok: Boolean, val purged: List<PurgedAgent> = emptyList())
 

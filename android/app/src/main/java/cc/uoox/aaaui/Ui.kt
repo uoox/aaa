@@ -56,7 +56,7 @@ object Tok {
     val Ink = Color(0xFF141413)
     val Dim = Color(0xFF5E5D59)
     val Faint = Color(0xFF91908A)
-    /** 主操作 / 链接 / 选中项目的标题与下划线。 */
+    /** 主操作 / 链接 / 选中那一行的标题与边框。 */
     val Accent = Color(0xFFD97757)
     /** 压在强调色上的文字（FAB 的 ＋、键位条选中态）。 */
     val OnAccent = Color(0xFF141413)

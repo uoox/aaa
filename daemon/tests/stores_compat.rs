@@ -72,8 +72,8 @@ fn find_claude_newest_by_mtime() {
     fx.claude_session("p1", "sid-new", &fx.cwd, 2_000_000);
     fx.claude_session("p2", "sid-elsewhere", &fx.other, 3_000_000);
     let mut cache = CwdCache::load(&fx.cache_path);
-    assert_eq!(stores::find(&fx.paths, &mut cache, &fx.cwd), "sid-new");
-    assert_eq!(stores::find(&fx.paths, &mut cache, "/nope"), "");
+    assert_eq!(stores::find(&fx.paths, &mut cache, &fx.cwd, "claude"), "sid-new");
+    assert_eq!(stores::find(&fx.paths, &mut cache, "/nope", "claude"), "");
     // cache write-back uses aaa-compatible `claude:<path>` keys
     cache.save();
     let raw: serde_json::Value =
@@ -96,8 +96,8 @@ fn find_honours_preexisting_cli_cache() {
     )
     .unwrap();
     let mut cache = CwdCache::load(&fx.cache_path);
-    assert_eq!(stores::find(&fx.paths, &mut cache, &fx.cwd), "");
-    assert_eq!(stores::find(&fx.paths, &mut cache, "/somewhere/else"), "sid-x");
+    assert_eq!(stores::find(&fx.paths, &mut cache, &fx.cwd, "claude"), "");
+    assert_eq!(stores::find(&fx.paths, &mut cache, "/somewhere/else", "claude"), "sid-x");
 }
 
 // ---------- collect ----------
@@ -137,11 +137,11 @@ fn purge_removes_claude_sessions_of_the_target_only() {
     let keep_claude = fx.claude_session("p1", "keep", &fx.other, 1_000_000);
 
     let mut cache = CwdCache::load(&fx.cache_path);
-    assert_eq!(stores::purge(&fx.paths, &mut cache, &fx.cwd), 2);
+    assert_eq!(stores::purge(&fx.paths, &mut cache, &fx.cwd), vec![("Claude", 2)]);
     assert!(keep_claude.exists(), "unrelated cwd untouched");
 
     // second purge: nothing left to report
-    assert_eq!(stores::purge(&fx.paths, &mut cache, &fx.cwd), 0);
+    assert!(stores::purge(&fx.paths, &mut cache, &fx.cwd).is_empty());
     // non-absolute target refused outright
-    assert_eq!(stores::purge(&fx.paths, &mut cache, "relative/path"), 0);
+    assert!(stores::purge(&fx.paths, &mut cache, "relative/path").is_empty());
 }

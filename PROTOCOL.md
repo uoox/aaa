@@ -41,11 +41,12 @@ namer = true                  # haiku 会话命名开关（对应 AAA_NAMER）
 
 历史上的 `[ntfy]` / `[watchdog]`（2026-09-02）与 `[checkpoint]`（2026-09-05）段已废弃，旧文件里留着也能解析，只是被忽略。
 
-## Agent 表（2026-09-03 起只支持 Claude Code）
+## Agent 表（2026-09-10：Claude Code + Antigravity）
 
 | id | label | 新会话命令 | resume 命令（%ID% 替换） |
 |---|---|---|---|
 | claude | Claude | `claude --dangerously-skip-permissions` | `claude --resume %ID% --dangerously-skip-permissions` |
+| agy | Antigravity | `agy --dangerously-skip-permissions` | `agy --conversation %ID% --dangerously-skip-permissions` |
 | shell | 终端 | `exec zsh -l` | —（shell 无 resume）。**不是 agent**：新建项目 / 换 agent 的选择里没有它，见「终端」 |
 
 启动方式：`zsh -lc 'cd <dir> && <cmd>'`，并**由 daemon 显式设置 `PATH`**。
@@ -54,7 +55,16 @@ launchd 起的 daemon 因此会让每个 agent 都 `command not found`，`shell`
 daemon 在启动时用 `zsh -lic` 问一次「终端里应有的 PATH」（带超时），再把 `~/.local/bin`、
 `~/.npm-global/bin` 等常见安装位置并进去兜底；这份 PATH 也是查 agent 可执行文件用的，
 所以「显示可用」与「真能启动」不会打架。
-会话查找（resume 用）、cwd 探测、purge 只针对 Claude Code 的存储（`~/.claude/projects/<cwd 编码>/<id>.jsonl`，cwd 取自 jsonl 头部记录；`~/.cache/aaa-cwds.json` 里 `claude:<path>` 键与旧 CLI 兼容）。codex / pi / reasonix / agy / grok 的存储读取、解析、purge 已于 2026-09-03 全部移除——本应用是 Claude Code 的指挥台，不再是多 agent 启动器。`Project.agent` / `Session.agent` 字段保留（值只会是 `claude`，终端是 `shell`）。
+每个 agent 的会话存储各一套，daemon 按 agent 分派。**只有事实来源分派，判定不分派**：五态、代表会话、标题回退、排序、未读全程只有一份实现，客户端除了标签之外不需要知道跑的是谁。
+
+| agent | 存储 | resume id | 消息流 |
+|---|---|---|---|
+| claude | `~/.claude/projects/<cwd 编码>/<id>.jsonl`，cwd 取自 jsonl 头部记录 | 扫该 cwd 最新的 jsonl，文件名即 id | 支持：逐行读 transcript |
+| agy | `~/.gemini/antigravity-cli/`：`cache/last_conversations.json` 就是现成的 `cwd → 最近对话 id`，对话本体在 `conversations/<id>.db` | 直接查表，再确认 `.db`/`.pb` 还在（表里可能指向已被 GC 的对话） | 不支持：对话存在 SQLite 里，没有可跟读的 transcript。客户端回落到终端画面 |
+
+**选 agent 的入口**（`GET /agents` 说有哪些、装没装；两端只画）：新建项目时是输入框边上一个字母小标，点一下在装了的之间轮换；换已有项目**下次**开谁，mac 是项目行尾一个字母小标（默认 agent 的行悬停才现身，非默认的常显——一列扫下来看得出哪几个不是 claude），Android 在长按操作单里。**这处两端故意不一样**：mac 有悬停、Android 没有，✕/删 早就是这么分的（mac 行尾悬停按钮，Android 长按单），agent 跟着同一条线走，不为了「一致」在手机每一行上多挂一个字母。装了的少于两个时两端都不画任何入口。
+
+`~/.cache/aaa-cwds.json` 里 `claude:<path>` 键与旧 CLI 兼容。agy 没有 hooks 也没有 statusLine 接入，五态由屏幕差分给出（见「状态」），`asking` 恒为 false，用量/模型/上下文占比为空。pi / reasonix / codex / grok 的存储支持仍在 2026-09-03 删除的状态，没有恢复。
 
 ## 终端（2026-09-02：常驻工具，不与 agent 平齐）
 
@@ -134,10 +144,10 @@ GUI 列表口径（mac 侧栏 / Android 项目面板一致）——**单列，�
 - **Android 没有独立首页了（v1.13.1，2026-09-07 用户拍板）**：会话页 ☰ 抽屉画的就是完整的项目面板（顶栏一行、新建项目框、项目列表与长按操作、下拉刷新），当前项目高亮；只有「一个会话都没打开」时（首次进入、按返回退出会话）同一块面板铺满屏当落地页。app 起来直接回最近打开的会话（本机记 `last_session`）。
 - **Android 项目面板顶栏只有一行（2026-09-08 用户拍板）**：左边**额度**（套餐用量那串 5h / 7d / 按模型，点开看重置时间），右边 **▦ 看板**、**⚙ 设置**。`AAA` 标题和 `IP · 延迟` 去掉了——app 只有一个，标题是废话；IP 和毫秒数连着好的时候没人看。连接**不**正常时（连接中 / 已断开 / 未配对）左边那一格改写连接状态，断了得说一声，但这不值得常年占一整行；SSD 掉了仍在顶栏加一个 `SSD ✗`。以前额度是顶栏底下单独一行，现在并进这一行。
 - **Android 的☰ 左侧栏：小屏铺满，大屏半屏（2026-09-08 用户拍板：「整个左侧栏的宽度：小屏情况下，直接铺满，大屏情况下，半屏」——此前先收对话界面、再给项目列表封顶 400dp，都改错了地方）**：门槛是 `screenWidthDp < 600`（Material 的 compact / medium 分界）——小于就 `fillMaxWidth(1f)` 铺满并去掉抽屉圆角（不然右缘两个角漏出底色），否则 `fillMaxWidth(0.5f)` 占半屏，右半屏留着正在看的那个对话，切之前先看得见要切去哪儿。手机竖屏（343dp）与折叠机外屏走铺满，折叠机内屏（≈674dp）/ 平板 / 横屏走半屏。**宽度只在抽屉那一层定**（会话屏与终端屏各一处 `ModalDrawerSheet`），`ProjectPanel` 自己不管宽度、铺满给它的地方——所以「一个会话都没打开」时它就是整屏。**对话界面、终端、看板都不收**——那几个宽了是有用的。
-- **状态用整行的淡底色说，不再画任何记号（2026-09-10 用户拍板：「去掉竖线状态的设计，改为背景色，用浅色」；2026-09-08 那四版记号——转圈 → 蓝点 → 竖线 → 行尾竖线——全部作废）**：**淡蓝底**（令牌 `row_running`）= 它还在动（`running`，或 `waiting` 且 `background`——后台 Bash / 异步子代理 / Monitor 还没回来，会自己被叫醒）；**淡黄底**（令牌 `row_unread`）= 跑完了 / 在等你回话，而**这台设备**还没进去看过；**无底色** = 已读，没什么要你操心的。黄盖过蓝（黄的那个在等你）。两端同一对令牌、同一套判定；行高不随状态跳，也没有任何按帧重画的动画。**选中的项目（当前打开的会话所属的那一行）标题用强调色并带一条强调色下划线**——底色现在归状态用，选中态不能再靠整行强调色底 + 描边去抢它（mac 此前正是那样画的；Android 此前是 `raised` 底）。终端（shell）不算。**一行到底：标题 + 更新时间**，没有第二行摘要——标题顶格起，时间在行尾，两端一致。**时间自己会走**：两端各有一个一分钟一次的空转重画——这一屏平时只在 daemon 推东西时重画，整套系统闲着时那行字会一直停在「刚刚」。
+- **状态用整行的淡底色说，不再画任何记号（2026-09-10 用户拍板：「去掉竖线状态的设计，改为背景色，用浅色」；2026-09-08 那四版记号——转圈 → 蓝点 → 竖线 → 行尾竖线——全部作废）**：**淡蓝底**（令牌 `row_running`）= 它还在动（`running`，或 `waiting` 且 `background`——后台 Bash / 异步子代理 / Monitor 还没回来，会自己被叫醒）；**淡黄底**（令牌 `row_unread`）= 跑完了 / 在等你回话，而**这台设备**还没进去看过；**无底色** = 已读，没什么要你操心的。黄盖过蓝（黄的那个在等你）。两端同一对令牌、同一套判定；行高不随状态跳，也没有任何按帧重画的动画。**选中的项目（当前打开的会话所属的那一行）标题用强调色，整行套一圈 1px 强调色边框**（2026-09-10 用户拍板：下划线改边框）——底色现在归状态用，选中态不能再靠整行强调色底去抢它（mac 此前是那样画的；Android 此前是 `raised` 底）。行高不因选中而变：mac 每一行都留着这 1px 的边框位、平时透明，Android 的 `border` 本来就画在自己的边界内。终端（shell）不算。**一行到底：标题 + 更新时间**，没有第二行摘要——标题顶格起，时间在行尾，两端一致。**时间自己会走**：两端各有一个一分钟一次的空转重画——这一屏平时只在 daemon 推东西时重画，整套系统闲着时那行字会一直停在「刚刚」。
   - 「激活 / 未激活 / 暂停」这些字于 2026-09-08 去掉（用户：对着一列项目说不出任何有用的东西）。`asking` / `background` 等状态仍在协议里，它们是「底色是不是蓝的」和排序的依据，只是不再写成字。
   - **黄点是客户端本地状态，不进 daemon**（用户 2026-09-08 拍板）：打点的时机与三种系统通知完全一样（`asking` 翻 true / `running→waiting` / 出错），进这个项目的会话就清掉。mac 存 `~/.config/aaa-ui/ui.toml` 的 `unread_projects`，Android 存 DataStore 的 `unread_projects`，**两端各看各的**——黄点说的是「我这台还没看」，跨设备同步反而会替另一台把话说了。静音只关通知，不关黄点。
-  - **终端行没有状态底色、没有记号**（2026-09-08 用户拍板拿掉三道横杠）：终端没有状态可言；当前打开的终端行与项目行一样用标题下划线表示选中。两端的终端行顶格起（Android 还比项目行更矮一档：上下各 6dp、字号小半档、行尾一个 28dp 的小 ×——它那边的行本来就比 mac 高得多；mac 侧栏项目行与终端行共用同一套 `sidebar_row`，本来就只有 5px 的上下内边距，不再另做一档），一列扫下来「项目在上、终端在下」靠的是分节和行高，不是图标。
+  - **终端行没有状态底色、没有记号**（2026-09-08 用户拍板拿掉三道横杠）：终端没有状态可言；当前打开的终端行与项目行同一种说法：整行一圈强调色边框。两端的终端行顶格起（Android 还比项目行更矮一档：上下各 6dp、字号小半档、行尾一个 28dp 的小 ×——它那边的行本来就比 mac 高得多；mac 侧栏项目行与终端行共用同一套 `sidebar_row`，本来就只有 5px 的上下内边距，不再另做一档），一列扫下来「项目在上、终端在下」靠的是分节和行高，不是图标。
   - CLI 的 `ls` / 交互菜单仍按五个词分组打印：那是一次性文本输出，词在那里是有用的。
 - **`exited` 会话不代表项目**——进程没了它就只是历史，这一行没有底色（或淡黄底，若还没看过），点一下即 resume（`POST /sessions` `resume:true`）。
 - **顺序 = 黄底 → 在跑 → 时间**（2026-09-08 用户拍板；2026-09-10 拿掉置顶——用户拍板「去掉置顶功能」，`POST /projects/pin`、`pins.json` 与行上的 `pinned` 一并删除）：先是有黄底的——蓝底的还在自己往前走，黄底的那个在等你；再按 `asking` > `running` > `background` > `active` > `paused` 的老次序分档——**这两样都读 `/projects` 行上的 `status` 与 `updated_at`，客户端只留一张 5 行的 rank 表，不再自己判状态**；**同档**里才比时间，同刻按路径 / 标题稳住。`updated_at` 只在状态翻转 / 改名时变，所以几个会话同时在跑时行不互相换位。
@@ -154,6 +164,7 @@ CLI 的 `ls` / 交互菜单按五组打印（v1.13 起；以前是「执行中 /
 - `schema >= 2`：直接用 `status` / `title` / `session_id` / `updated_at` / `asking_seq` / `checklist`。
 - `schema` 缺失或 `< 2`（老 daemon）：客户端**不保留第二套算法**——留着就等于把刚删掉的分歧又养回来。项目行按「没有活会话」画（无底色、标题退到目录名），并在项目列表顶上挂一条**明说的**横幅「daemon 版本过旧（vX.Y.Z），项目状态不可用 —— 请更新 daemon」。这是个几分钟的窗口（daemon 和 mac App 同机同版发布，只有手机可能先更新），值不上养一套影子实现。
 - 反过来（老客户端配新 daemon）照旧能用：新字段都是**增量**，老客户端忽略未知字段，仍走它自己那套。
+- v1.26 加 agy 走的也是这条路：`GET /agents` / `POST /projects/agent` 是**新增路由**，老 daemon 404 → 客户端拿到空表 → 一个 agent 切换入口都不画，其余照常。加路由不是改语义，`schema` 不动。
 
 **三端共享测试向量**（`fixtures/`，一端改口径就得先改这里，两端的测试都读同一份）：`dashboard.json` = 看板（daemon 的输入 → 必须产出的卡片 → 客户端的过滤与分节）；`projects.json` = 项目列表（daemon 算好的一行 + 本机黄点 → 侧栏的顺序 / 蓝底 / 黄底 / 标题 / 路径归一）；`tokens.json` = 设计令牌与终端 16 色（只有一套主题）。**「两端一致」这句话只有被一份共同的向量盯着才成立**——此前两端各测各的一套，所以 A1–A8 那八处口径分歧谁都没发现。
 
@@ -165,12 +176,14 @@ CLI 的 `ls` / 交互菜单按五组打印（v1.13 起；以前是「执行中 /
 |---|---|---|
 | GET | `/health` | `{version, schema, ssd_mounted, root_state, project_root, uptime_s}`；`root_state ∈ ok\|unmounted\|denied`，`ssd_mounted = (root_state==ok)`（向后兼容：对客户端它一直就是「能不能用」）。**`schema` 是客户端唯一的兼容闸门**（v1.22 起 = `2`，见下方「版本兼容」） |
 | GET | `/projects` | collect 移植：`[{path,name,mtime,dir_size,agent,session_title}]`，按 mtime 降序（`pinned` 于 v1.25 随置顶功能一起删除）。**注册表就是项目名册**：根目录下未登记的目录（顺手 clone 的仓库、杂物）不出现在列表里；经 daemon 建项目/开会话的目录都会自动登记。**v1.22 起每行还带这一项目此刻的样子，daemon 算一次、两端只画**：`session_id`（代表这个项目的那个会话，没有活会话时是最近退出的那个；一个都没有 → null）、`status` ∈ `asking\|running\|background\|active\|paused`（与看板、CLI 同一套五态；没有活会话 = `paused`）、`title`（活会话的标题 → agent 存储读出的 `session_title` → 目录名，这条回退链此前三端各写一遍）、`updated_at`（排序键：该项目最新一条**非终端**会话的 `updated_at`，含已退出的；一个会话都没有 → 目录 mtime）。还有 `registered`：注册表里的项目为 `true`；在别处 `aaa open` 开出来、注册表里没有但**此刻有活会话**的目录，daemon 也补一行（`registered:false`，不能 resume / 删项目），否则它无处可点——这一行 mac 此前自己补、Android 压根没补，同一台 daemon 在两端连行数都不一样。客户端**不得**再自己从 `/sessions` 推这几样——两端此前的推法就不一样（mac 取 `updated_at` 最大，Android 先按 agent 过滤再按 `待回复<执行中<其它` 排），同一个项目在两台设备上会显示不同的标题和状态 |
+| GET | `/agents` | `[{id,label,available}]`——agent 表加上「这台机器装没装」（`which` 走的是 daemon 给 agent 用的那份 PATH，所以「显示可用」与「真能启动」不会打架）。**不含 `shell`**：终端是面板，不是 agent。客户端据此画「新项目开谁 / 换成谁」，可用的少于两个就一个入口都不画；老 daemon 没有这个路由 → 空表 → 同样不画 |
+| POST | `/projects/agent` | `{path, agent}` → `{path, agent}`：换这个项目**下次**开哪个 agent。只改注册表那一行，活着的会话不碰；注册表第三列的对话 id 顺手清掉（那是上一个 agent 的 id，留着就会拿 claude 的 id 去喂 agy）。目录不在注册表里 → 404 |
 | POST | `/projects` | `{name?, agent?}`；name 经 slugify，空则 `YYYY-MM-DD-HHMM`；已存在 → 409；agent 给了就写注册表。**响应 = 完整项目对象（至少 `{path,name,agent}`）**，客户端依赖 `path` 直接开会话 |
 | GET | `/history?limit=<n=200>` | v1.9 会话日志 `{entries:[{id, project_path, project_name, agent, title, created_at, ended_at, exit_code, deleted_at, summary, last_state}]}`：**所有出现过的会话，含已退出、已删除**，最新在前，最多 500 条（`~/.local/state/aaa-daemon/history.json`）。daemon 每秒把池子里的会话同步进去（标题 / 状态 / 清单变了就更新）；`DELETE /sessions/:id`、删项目盖 `deleted_at`。v1.11 起客户端改用 `/history/dashboard`；本接口仍是原始日志（调试 / 兼容旧客户端） |
 | GET | `/history/days` | **已移除（v1.13）**：日历 / haiku 日摘要没人看，daemon 不再每 5 分钟跑 haiku 写日摘要 |
 | GET | `/history/dashboard` | v1.13 **看板 = 所有会话的进度，没有时间维度**（2026-09-07 用户拍板第二版；聚合只在 daemon 算一次，两端只画）。**v1.15 第三版：瀑布流、全展开**——一会话一张卡，全部清单项直接列出（没勾的在前、做完的灰掉），不折叠不分组，卡片按估算高度塞进最短的一列（mac 按窗口宽度算列数，Android `LazyVerticalStaggeredGrid` 自适应 300dp），一眼看全；已删除默认藏起来一个开关；**点清单项直接勾 / 取消勾**（`POST /sessions/:id/checklist`）：`{counts:{open_items}, sessions:[{id, title, project_name, project_path, status, alive, deleted, done, open, items:[{done,text}], updated_at}]}`。`status` ∈ asking/running/background/active/paused 与列表五态同口径（池子里 exited 的 = paused；不在池子里的 = paused 且 `alive:false` 不能点开）；`sessions` 已按 待回复 > 运行 > 后台 > 激活 > 暂停 排好，同状态里已删除的沉到组尾、其余最近更新在前；终端不进；已删除的进（`deleted:true`）但不计数。客户端（v1.17 起）：顶上只有未完成条目数 + 搜索；一会话一张卡：**蓝点**（status ∈ running/background）/ 什么都没有 + 标题 + 项目、进度条 `done/total`、没勾的项直接列、做完的折成「已做 N」；已删除默认不显示。**五态计数条与状态字于 2026-09-08 拿掉**（用户拍板：看板和项目列表要说同一套话），`counts` 因此只剩 `open_items`；`status` 仍在协议里——它是排序和「画不画蓝点」的依据。v1.11 的 today/week/days/spark/date 全部删除。**v1.21 两端分成两节**（2026-09-08 用户拍板「看板里东西太多了」）：「**在 AAA 里**」= `alive && status != "paused"`——此刻**还活着**的会话（在跑，或停在输入框等你说话），也就是项目列表上那几行；「**不在 AAA 里**」= 其余全部（进程退出了的，哪怕还在池子里点得开；以及只剩一条记录的），默认**折起来**只写一行「不在 AAA 里 N」，点开才铺。**`alive` 不是这条线**（用户拍板时的实测：318 张卡里 174 张 `alive`，其中 164 张是已退出只为回放留在池子里的，按 `alive` 切等于没切）；`alive` 仍然只管一件事——卡片上有没有「打开」。共享向量 `fixtures/dashboard.json` 里的 `poolpau`（`alive:true` 而 `status:paused`）就是这条线的分水岭，三端测试都盯着它。搜索框里有字时两节都展开——不然搜到的东西藏在折叠节里等于没搜到。分节只在客户端做，daemon 的 `sessions` 顺序不变（分节内部沿用它）。两端的看板都有**滚动条**（mac 右缘一条可拖的细条，Android 一条随内容长短的指示条）：瀑布流全展开之后一屏装不下，没有滚动条就不知道自己在哪儿 |
 | POST | `/projects/pin` | **已移除（v1.25，2026-09-10 用户拍板「去掉置顶功能」）**：daemon 不再存 `pins.json`，`GET /projects` 行上也没有 `pinned` 了；旧客户端仍发这个请求会得到 404。列表口径见「会话模型」：黄底 → 在跑 → 时间 |
-| POST | `/projects/delete` | `{paths:[…]}` → `{results:[{path, ok, purged:[{agent_label,count}]}], killed:[标题…]}`；目录删除 + Claude Code 会话存储 purge（`purged` 里只会有 `Claude` 一项）。**v1.11.2 起先收会话**：这些目录下还活着的会话（含终端）一起终止（并行，与 `/restart` 同一套）、摘出池子、在会话日志里盖 `deleted_at`，`killed` 报出它们的标题。此前只删目录不动进程——手机上的「删除项目…」对活着的项目也能按，删完 PTY 还在，cwd 成幽灵，`/sessions` 里赖着，mac 侧栏还会为「有会话但没登记」的目录补一行 |
+| POST | `/projects/delete` | `{paths:[…]}` → `{results:[{path, ok, purged:[{agent_label,count}]}], killed:[标题…]}`；目录删除 + 会话存储 purge（`purged` 每个 agent 一项，只报删掉了东西的那些）。agy 的 purge 还要摘掉 `cache/last_conversations.json` 里这个 cwd 的条目——那张表按 cwd 记，不摘的话同名目录重建之后会 resume 到上一个项目的对话。**v1.11.2 起先收会话**：这些目录下还活着的会话（含终端）一起终止（并行，与 `/restart` 同一套）、摘出池子、在会话日志里盖 `deleted_at`，`killed` 报出它们的标题。此前只删目录不动进程——手机上的「删除项目…」对活着的项目也能按，删完 PTY 还在，cwd 成幽灵，`/sessions` 里赖着，mac 侧栏还会为「有会话但没登记」的目录补一行 |
 | GET | `/sessions` | 全部会话（含 exited） |
 | POST | `/sessions` | `{project_path, agent, resume}`；resume=true 时按 aaa 逻辑找最近会话套 resume 模板；目录不存在则创建（但见 SSD 守卫） |
 | POST | `/sessions/:id/input`（信任对话框在屏上时整句消息改进收件箱，返回 `{"ok":true,"queued":true}`）| `{text, enter}`：写入 PTY（enter 补 `\r`）。composer 用。**多行文本**：TUI 开着 bracketed paste（DECSET 2004）时包成一次粘贴、换行归一为 CR，否则每个换行都是一次提交；没开 2004 的 shell 只做 CR 归一 |
@@ -332,8 +345,8 @@ Claude 以 `--dangerously-skip-permissions` 运行，`PermissionRequest` 不会�
 
 **2026-09-08（v1.18）：一批「声明了但没人读」的东西。** 跑了一遍全仓的过度设计审计，删掉的都是功能被砍之后留在原地的残留：
 - **`preview`**（`/sessions` 与 `session` 帧里那段「最近 4 行纯文本」）。v1.17 拿掉状态字之后两端都不读它，而 `Session::to_json` 每次都要拿终端解析器的锁、把整屏逐行剥框线。`screen.rs` 因此只剩 `screen_contains`（answer 驱动确认对话框关掉用）。
-- **`GET /agents`** 与 `Agent` DTO：agent 表 2026-09-03 就冻结成 claude + shell 两个，两端都硬编码 `claude`，这是给一个常量做服务发现。
-- **`ctx_size`**（`/projects` 行上的字段）：算到了线上，两端都只声明不读。store 层为「多 agent」准备的形状一并拆掉（`stores::detect`、`id_exists` / `find` 的 `agent` 参数、`purge` 那个只可能装一项的 `Vec`、`push` 的 8 参数签名）。删项目返回的 `purged: [{agent_label, count}]` **形状不变**。
+- ~~**`GET /agents`** 与 `Agent` DTO~~：2026-09-08 删掉的理由是「agent 表冻结成一个常量，给常量做服务发现」。v1.26 加回 agy 之后表不再是常量，接口**已恢复**（见「接口」），这次还带上「这台机器装没装」。
+- **`ctx_size`**（`/projects` 行上的字段）：算到了线上，两端都只声明不读。store 层为「多 agent」准备的形状当时一并拆掉（`stores::detect`、`id_exists` / `find` 的 `agent` 参数、`purge` 那个只装一项的 `Vec`、`push` 的 8 参数签名）——**除 `detect` 与 `push` 外都在 v1.26 随 agy 回来了**。删项目返回的 `purged: [{agent_label, count}]` 形状始终没变。
 - **摄像头 / 麦克风权限探测**：`/mac/permissions` 少了这两项。`perms.rs` 自己的提示就写着「daemon 没有 Info.plist，系统不给弹窗」——状态永远读不出来，request 也只是打开系统设置。那段 `objc_msgSend` transmute 的裸 FFI 跟着走了。
 - **明亮主题 / 黑暗主题**（2026-09-08 / 2026-09-10）：见「设计令牌」——现在只有一套。
 - **置顶**（2026-09-10）：`POST /projects/pin`、`pins.json`、行上的 `pinned`、两端的「顶 / 置顶」按钮与排序档一并删除。
@@ -377,15 +390,15 @@ Claude 以 `--dangerously-skip-permissions` 运行，`PermissionRequest` 不会�
 | edge | `#dad8ce` / light `#c8c6bc` | 描边 |
 | ink / dim / faint | `#141413` / `#5e5d59` / `#91908a` | 文字三级 |
 | term-bg / term-fg | `#fffdf7` / `#141413` | 终端底（暖白纸面，和界面一体）/ 终端字（= ink） |
-| accent / on_accent | `#d97757` / `#141413` | 主操作 / 选中 / 链接 / 选中项目标题的下划线（陶土橙）；实心主按钮上的字 = ink（v1.25 对齐：mac 此前按亮度算出 `#21120d`，Android 直接用 ink，两端差一丁点也是差） |
+| accent / on_accent | `#d97757` / `#141413` | 主操作 / 选中 / 链接 / 选中那一行的边框（陶土橙）；实心主按钮上的字 = ink（v1.25 对齐：mac 此前按亮度算出 `#21120d`，Android 直接用 ink，两端差一丁点也是差） |
 | magenta | `#9b6b9e` | 品牌辅色（哑紫；不取橙的邻色，否则和 accent 分不开） |
 | green / amber / red | `#2f855a` / `#b8860b` / `#c0392b` | 执行中 / 已激活（轮到你）/ 出错、已退出 |
 | blue | `#3f6ea8` | 看板卡片标题前「在跑」那根线。green/amber/red 各有旧含义，accent 是橙，只有蓝读作「它自己在动」 |
 | inset | `#fffefa` | 输入框 / 折叠面板这类「下沉底」，比 surface 更亮一点点 |
 | row_running / row_unread | `#dde7f1` / `#f6e7c9` | **项目列表行的状态底色**（2026-09-10）：淡蓝 = 在跑，淡黄 = 未读；已读无底色 |
-| agent 色 | 已取消（只有 Claude 一个 agent，不再按 agent 着色） | — |
+| agent 色 | 已取消（2026-09-03）。v1.26 加回 agy 之后也没恢复：agent 在侧栏是一个字母小标，不是一种颜色 | — |
 
-项目列表的状态（2026-09-10 用户拍板）：**整行的淡底色**，`row_running` 淡蓝 = 在跑、`row_unread` 淡黄 = 未读、没有底色 = 已读；选中的那一行标题用 accent 并带一条 accent 下划线。**不再有竖线、圆点、转圈，也没有置顶底**。看板卡片上「在跑」仍是标题前一根 2px/2.5dp × 14px/16dp 的蓝竖线——那是一张卡不是一行，卡片有自己的底。连接状态行、工具步骤等处的小色点照旧。
+项目列表的状态（2026-09-10 用户拍板）：**整行的淡底色**，`row_running` 淡蓝 = 在跑、`row_unread` 淡黄 = 未读、没有底色 = 已读；选中的那一行标题用 accent、整行套一圈 1px accent 边框。**不再有竖线、圆点、转圈、下划线，也没有置顶底**。看板卡片上「在跑」仍是标题前一根 2px/2.5dp × 14px/16dp 的蓝竖线——那是一张卡不是一行，卡片有自己的底。连接状态行、工具步骤等处的小色点照旧。
 终端字体：等宽（mac 端 Menlo，Android 端打包 JetBrains Mono NL）。
 **终端 ANSI 16 色写死在令牌里，两端逐色相同**（v1.23 统一，v1.25 只剩这一套）：gruvbox-light——浅底上 8–15 比 0–7 更沉而不是更亮，7 white 给成暖灰 `#a89984`，15 bright white = ink。**没有「主题不带就用 xterm 默认」这条回退**（Android 此前深色主题正是走的 termux 出厂表，同一段输出在两端颜色完全不一样），共享向量 `fixtures/tokens.json` 钉着全部 20 个角色和 16 色。
 

@@ -306,6 +306,10 @@ pub struct RootView {
     pub ssd_mounted: bool,
     pub sessions: Vec<Session>,
     pub projects: Vec<Project>,
+    /// agent 表（GET /agents）。老 daemon 没有这个路由 → 空表 → 一个切换入口都不画
+    pub agents: Vec<AgentInfo>,
+    /// 下一个新建项目用哪个 agent（表里第一个装了的）
+    pub new_agent: String,
     /// 配对二维码模块（(宽, 黑白位图)；fetch 时编码一次，渲染帧只读）
     pub qr_modules: Option<(usize, Vec<bool>)>,
     pub endpoint_from_config: bool,
@@ -463,6 +467,8 @@ impl RootView {
             ssd_mounted: true,
             sessions: Vec::new(),
             projects: Vec::new(),
+            agents: Vec::new(),
+            new_agent: "claude".into(),
             qr_modules: None,
             endpoint_from_config,
             terminals: HashMap::new(),
@@ -806,6 +812,21 @@ impl RootView {
         self.fetch_projects(cx);
         self.fetch_usage(cx);
         self.spawn_fetch(
+            self.net.agents(),
+            |r, a: Vec<AgentInfo>, cx| {
+                // 选中的 agent 没装（或表里没有）就退到第一个装了的
+                if !a.iter().any(|x| x.id == r.new_agent && x.available) {
+                    if let Some(first) = a.iter().find(|x| x.available) {
+                        r.new_agent = first.id.clone();
+                    }
+                }
+                r.agents = a;
+                cx.notify();
+            },
+            false,
+            cx,
+        );
+        self.spawn_fetch(
             self.net.pair(),
             |r, p: PairResponse, cx| {
                 r.qr_modules = settings::qr_encode(&p.payload);
@@ -915,6 +936,37 @@ impl RootView {
 
     fn session(&self, id: &str) -> Option<&Session> {
         self.sessions.iter().find(|s| s.id == id)
+    }
+
+    /// 表里下一个装了的 agent。只装了一个就是 `None`——没有「换」这回事，
+    /// 切换入口整个不画。例外：当前这个**没装**（卸载了 / 换了台机器）时给一条
+    /// 回到装了的那个的路，否则这一行永远换不回来。
+    fn next_agent(&self, cur: &str) -> Option<String> {
+        let usable: Vec<&AgentInfo> = self.agents.iter().filter(|a| a.available).collect();
+        let first = usable.first()?.id.clone();
+        match usable.iter().position(|a| a.id == cur) {
+            None => Some(first),
+            Some(_) if usable.len() < 2 => None,
+            Some(i) => Some(usable[(i + 1) % usable.len()].id.clone()),
+        }
+    }
+
+    fn agent_label(&self, id: &str) -> String {
+        self.agents
+            .iter()
+            .find(|a| a.id == id)
+            .map(|a| a.label.clone())
+            .unwrap_or_else(|| id.to_string())
+    }
+
+    /// 换这个项目下次开哪个 agent。乐观改本地那一行：daemon 会推 projects_changed，
+    /// 但要等一次往返，不先改的话点下去像没反应。
+    fn swap_project_agent(&mut self, path: String, agent: String, cx: &mut Context<Self>) {
+        if let Some(p) = self.projects.iter_mut().find(|p| p.path == path) {
+            p.agent = Some(agent.clone());
+        }
+        cx.notify();
+        self.spawn_fetch_ignore(self.net.set_project_agent(path, agent), true, cx);
     }
 
     // ── 渲染 ────────────────────────────────────────────────────────────
@@ -1084,7 +1136,7 @@ impl RootView {
     }
 
     /// 侧栏的一个项目行：标题 + 行尾按钮（悬停才现身）+ 更新时间。状态是整行的淡底色
-    /// （[`row_bg`]），选中是标题下一条强调色线（2026-09-10 用户拍板）。
+    /// （[`row_bg`]），选中是整行一圈强调色边框（2026-09-10 用户拍板）。
     fn render_project_row(
         &self,
         row: ProjectRow,
@@ -1113,6 +1165,8 @@ impl RootView {
         let mut el = sidebar_row(row_id.into())
             .group("sb-row")
             .when_some(bg, |el, bg| el.bg(c(bg)))
+            // 选中 = 整行一圈强调色边框：底色归状态用了，选中态不再抢整行的底
+            .when(active, |el| el.border_color(c(theme::ACCENT)))
             .hover(move |st| st.bg(c(hover_bg)))
             // 点一下：活着的会话直接进；未激活的 resume（daemon 幂等，找不到旧对话开新的）
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -1130,10 +1184,42 @@ impl RootView {
                     .whitespace_nowrap()
                     .text_size(px(12.5))
                     .text_color(c(if active { theme::ACCENT } else if dim_title { theme::DIM } else { theme::INK }))
-                    // 选中 = 标题下一条强调色线：底色归状态用了，选中态不再抢整行的底
-                    .when(active, |el| el.text_decoration_1().text_decoration_color(c(theme::ACCENT)))
                     .child(SharedString::from(title)),
             );
+        // agent 小标兼开关：表里只有一个可用 agent 时整个不画。默认 agent 的行也不画
+        // （一列扫下来还是只有标题和时间），非默认的常显——「这个项目下次开谁」得看得见。
+        // 没登记的行（daemon 给「有活会话但不在名册」的目录补的）换不了。
+        // 行上没写 agent（老 daemon / 客户端自己拼的行）时按默认那个算——不然
+        // `agent_label("")` 取不到首字母，每一行都会常驻一个「?」
+        let agent = row
+            .project
+            .as_ref()
+            .and_then(|p| p.agent.clone())
+            .filter(|a| !a.is_empty())
+            .or_else(|| self.agents.iter().find(|a| a.available).map(|a| a.id.clone()))
+            .unwrap_or_default();
+        let swap = row
+            .project
+            .as_ref()
+            .filter(|p| p.registered)
+            .map(|p| p.path.clone())
+            .zip(self.next_agent(&agent));
+        if let Some((path, next)) = swap {
+            let is_default = self.agents.iter().find(|a| a.available).is_some_and(|a| a.id == agent);
+            let mark = self.agent_label(&agent).chars().next().unwrap_or('?').to_string();
+            el = el.child(
+                row_btn(
+                    SharedString::from(format!("sb-agent:{}", row.path)),
+                    active || !is_default,
+                )
+                .hover(|st| st.text_color(c(theme::ACCENT)).bg(c(theme::EDGE_LIGHT)))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.swap_project_agent(path.clone(), next.clone(), cx);
+                }))
+                .child(SharedString::from(mark)),
+            );
+        }
         // 行尾按钮（非当前行悬停才现身；invisible 连命中盒一起去掉）：
         // 活着的 × = 结束会话（只有执行中的才确认，被顺手点掉最伤）；未激活的「删」= 删项目
         let button = row_btn(act_id, active)
@@ -1175,7 +1261,8 @@ impl RootView {
         el
     }
 
-    /// 侧栏顶上的新建项目行：一个输入框（字即文件夹名，回车或 ＋ 创建；⌘N 把光标放进来）
+    /// 侧栏顶上的新建项目行：输入框（字即文件夹名，回车或 ＋ 创建；⌘N 把光标放进来）
+    /// + agent 轮换小标（装了不止一个 agent 时才出现）
     fn render_new_project_row(&self, cx: &mut Context<Self>) -> gpui::Div {
         div()
             .mt(px(10.))
@@ -1185,6 +1272,35 @@ impl RootView {
             .items_center()
             .gap(px(6.))
             .child(div().flex_1().min_w(px(0.)).child(self.new_input.clone()))
+            // 新项目开谁：点一下在装了的 agent 之间轮换。只有一个可用就不画
+            .when_some(self.next_agent(&self.new_agent), |el, next| {
+                el.child(
+                    div()
+                        .id("sb-new-agent")
+                        .flex_none()
+                        .h(px(28.))
+                        .w(px(28.))
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(c(theme::EDGE_LIGHT))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .text_size(px(12.))
+                        .text_color(c(theme::DIM))
+                        .hover(|st| st.border_color(c(theme::ACCENT)).text_color(c(theme::ACCENT)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.new_agent = next.clone();
+                            cx.notify();
+                        }))
+                        // 首字母，和项目行的小标同一套写法：侧栏最窄 180px，
+                        // 一个「Antigravity」就把输入框挤没了
+                        .child(SharedString::from(
+                            self.agent_label(&self.new_agent).chars().next().unwrap_or('?').to_string(),
+                        )),
+                )
+            })
             .child(
                 div()
                     .id("sb-new")
@@ -1353,7 +1469,7 @@ impl RootView {
         match &self.page {
             Page::Session(id) => {
                 if let Some(s) = self.session(id) {
-                    // 只有 Claude 一种 agent，不再报 agent 名；有 resume id 才多一格
+                    // 不报 agent 名（侧栏那一行的小标已经说了）；有 resume id 才多一格
                     let resume_part = s
                         .resume_id
                         .as_deref()

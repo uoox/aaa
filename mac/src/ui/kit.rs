@@ -103,22 +103,27 @@ const MARK_W: f32 = 2.0;
 const MARK_H: f32 = 14.0;
 
 /// 竖线本体：看板卡片标题前「在跑」那一根。项目行 2026-09-10 起不再画它——
-/// 行的状态改成整行淡底（`theme::ROW_RUNNING` / `ROW_UNREAD`），选中是标题下划线。
+/// 行的状态改成整行淡底（`theme::ROW_RUNNING` / `ROW_UNREAD`），选中是整行边框。
 pub fn mark_bar(color: u32) -> Div {
     div().flex_none().w(px(MARK_W)).h(px(MARK_H)).rounded(px(MARK_W / 2.)).bg(c(color))
 }
 
 /// 侧栏一行的底子：项目行和终端行共用——同一套内边距和圆角，才看得出是平级的。
+/// 侧栏的一行（项目 / 终端 / 新增终端）。**每一行都留着 1px 的边框位**，平时透明、
+/// 选中的那一行才上强调色（2026-09-10 用户拍板：选中从下划线改成边框）——不留位的话
+/// 选中一瞬整列会往下挤 2px。内边距相应各减 1px，外框尺寸与改之前分毫不差。
 pub fn sidebar_row(id: gpui::ElementId) -> Stateful<Div> {
     div()
         .id(id)
         .flex()
         .items_center()
         .gap(px(8.))
-        .px(px(10.))
-        .py(px(5.))
+        .px(px(9.))
+        .py(px(4.))
         .mx(px(6.))
         .rounded(px(6.))
+        .border_1()
+        .border_color(ca(theme::ACCENT, 0.))
         .cursor_pointer()
 }
 

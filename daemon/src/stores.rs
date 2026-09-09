@@ -1,11 +1,10 @@
-//! Line-by-line port of AAA_PY (embedded in ~/.local/bin/aaa):
-//! session-store iterators, find / detect / collect / purge.
+//! 各 agent 会话存储的读写：find / collect / purge。claude 那部分是
+//! `~/.local/bin/aaa` 里 AAA_PY 的逐行移植（cwd 缓存的键因此保持兼容）。
 //!
-//! Store layout (unchanged from the script comments):
+//! Store layout:
 //!   claude:   ~/.claude/projects/*/<sid>.jsonl          (cwd field in lines)
-//!   codex:    ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl (first line session_meta with cwd/id)
-//!   pi:       ~/.pi/agent/sessions/--<cwd>--/<ts>_<uuid>.jsonl (first line type=session with cwd/id)
-//!   grok:     ~/.grok/sessions/<url-enc-cwd>/<sid>/    (legacy; purge only)
+//!   agy:      ~/.gemini/antigravity-cli/cache/last_conversations.json (cwd -> id)
+//!             + conversations/<id>.db                   (对话本体，SQLite)
 //!
 //! SAFETY: every path this module deletes is composed from the injected
 //! `Paths` roots (home-derived). Nothing here touches the real HOME unless
@@ -143,19 +142,28 @@ fn val_str(v: &Value) -> String {
 
 // ---- session iterators ----
 
-/// 注册表第三列兜底 id 还在不在。claude 的会话文件名就是 id，扫一层目录即可。
-/// 目的：Claude Code 那边把会话 GC 掉之后，别拿着坏 id 反复 resume 失败。
-///
-/// 2026-09-08：以前带 `agent` 参数、返回 `Option<bool>`（`None` = 那个 agent 没有
-/// 便宜的验证手段），是 codex / pi 还在支持列表里时的形状。现在只有 claude 会走到
-/// 这里，shell 没有会话文件。
-pub fn id_exists(paths: &Paths, id: &str) -> bool {
-    if id.is_empty() || id.contains('/') || id.contains("..") {
+/// 注册表第三列兜底 id 还在不在。目的：agent 那边把对话 GC 掉之后，别拿着坏 id
+/// 反复 resume 失败。claude 的会话文件名就是 id，扫一层目录即可；agy 看对话文件在不在。
+pub fn id_exists(paths: &Paths, agent: &str, id: &str) -> bool {
+    if !safe_id(id) {
         return false;
     }
-    let name = format!("{id}.jsonl");
-    let Ok(rd) = std::fs::read_dir(paths.claude_root()) else { return false };
-    rd.flatten().any(|e| e.path().join(&name).is_file())
+    match agent {
+        "claude" => {
+            let name = format!("{id}.jsonl");
+            let Ok(rd) = std::fs::read_dir(paths.claude_root()) else { return false };
+            rd.flatten().any(|e| e.path().join(&name).is_file())
+        }
+        "agy" => agy_conv_mtime(paths, id).is_some(),
+        _ => false,
+    }
+}
+
+/// 会话 id 只当一个文件名用。**白名单**，不是黑名单：两边的 id 都是 uuid 形状，
+/// 而 `purge` 会拿它去 `remove_dir_all(brain/<id>)`——放过一个 `.` 就等于删掉整个
+/// `brain/`（`join(".")` 解析成父目录本身）。存储里出现坏 id 就当没有，不冒这个险。
+fn safe_id(id: &str) -> bool {
+    !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
 }
 
 pub fn claude_sessions(paths: &Paths, cache: &mut CwdCache) -> Vec<SessRec> {
@@ -194,6 +202,57 @@ pub fn claude_sessions(paths: &Paths, cache: &mut CwdCache) -> Vec<SessRec> {
     out
 }
 
+// ---- agy (Antigravity CLI) ----
+//
+// 与 claude 完全不同的形状：`cache/last_conversations.json` 本身就是
+// `cwd -> 最近对话 id` 的现成映射（每个 cwd 只留最后一条），所以没有
+// 「扫一遍所有会话」这一步；对话本体是 SQLite，读不出 transcript，
+// 因此 agy 只参与 resume 与 agent 判定，不喂消息流、不出标题。
+
+fn agy_map(paths: &Paths) -> serde_json::Map<String, Value> {
+    let p = paths.agy_root().join("cache").join("last_conversations.json");
+    std::fs::read_to_string(p)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default()
+}
+
+/// 表里对应 `target` 的键。`target` 是我们 realpath 过的，表里的是 agy 自己记下的
+/// cwd——同一个目录可能写成软链接路径（`/tmp` vs `/private/tmp`），也可能只差大小写
+/// （macOS 文件系统大小写不敏感）。三步：原样 → 解到同一个真实路径 → 大小写无关。
+fn agy_key(map: &serde_json::Map<String, Value>, target: &str) -> Option<String> {
+    if map.contains_key(target) {
+        return Some(target.to_string());
+    }
+    map.keys()
+        .find(|k| realpath(k) == target)
+        .or_else(|| map.keys().find(|k| k.eq_ignore_ascii_case(target)))
+        .cloned()
+}
+
+/// 对话本体的 mtime；`.db`（当前）与 `.pb`（旧版）都认，都不在 = 已被 GC。
+fn agy_conv_mtime(paths: &Paths, id: &str) -> Option<f64> {
+    if !safe_id(id) {
+        return None;
+    }
+    let dir = paths.agy_root().join("conversations");
+    [".db", ".pb"].iter().find_map(|ext| {
+        std::fs::metadata(dir.join(format!("{id}{ext}")))
+            .ok()
+            .map(|m| mtime_f(&m))
+    })
+}
+
+fn agy_find(paths: &Paths, target: &str) -> String {
+    let map = agy_map(paths);
+    let id = agy_key(&map, target)
+        .and_then(|k| map.get(&k).and_then(|v| v.as_str()).map(String::from))
+        .unwrap_or_default();
+    // 表里可能指着一个已经被删掉的对话：那就别 resume，回落开新的
+    if agy_conv_mtime(paths, &id).is_some() { id } else { String::new() }
+}
+
 // ---- find ----
 
 fn newest<I: IntoIterator<Item = (f64, String)>>(pairs: I) -> String {
@@ -209,15 +268,19 @@ fn newest<I: IntoIterator<Item = (f64, String)>>(pairs: I) -> String {
     best.map(|b| b.1).unwrap_or_default()
 }
 
-/// Find the most recent claude session id for `cwd`. `target` should already
-/// be realpath'd by the caller (as the zsh caller does with `pwd -P`).
-pub fn find(paths: &Paths, cache: &mut CwdCache, target: &str) -> String {
-    newest(
-        claude_sessions(paths, cache)
-            .into_iter()
-            .filter(|r| r.cwd == target)
-            .map(|r| (r.mtime, r.sid)),
-    )
+/// `cwd` 下该 agent 最近一次会话的 id（找不到 = 空串，调用方回落开新会话）。
+/// `target` 由调用方 realpath 过。
+pub fn find(paths: &Paths, cache: &mut CwdCache, target: &str, agent: &str) -> String {
+    match agent {
+        "claude" => newest(
+            claude_sessions(paths, cache)
+                .into_iter()
+                .filter(|r| r.cwd == target)
+                .map(|r| (r.mtime, r.sid)),
+        ),
+        "agy" => agy_find(paths, target),
+        _ => String::new(),
+    }
 }
 
 // ---- collect ----
@@ -271,6 +334,13 @@ pub fn collect(paths: &Paths, cache: &mut CwdCache, root: &Path) -> Vec<ProjectR
     for r in claude_sessions(paths, cache) {
         mark(&mut det, &mut memo, &r.cwd, r.mtime, "claude", &r.path.to_string_lossy());
     }
+    // agy 没有可读的 transcript，`det_path` 留空——标题回退链因此跳过「从存储里
+    // 读上次对话名」这一档，直接落到目录名
+    for (cwd, id) in agy_map(paths) {
+        if let Some(mt) = id.as_str().and_then(|id| agy_conv_mtime(paths, id)) {
+            mark(&mut det, &mut memo, &cwd, mt, "agy", "");
+        }
+    }
 
     fn dir_size_one_level(d: &Path) -> u64 {
         let mut total = 0u64;
@@ -321,20 +391,61 @@ pub fn collect(paths: &Paths, cache: &mut CwdCache, root: &Path) -> Vec<ProjectR
 
 // ---- purge ----
 
-/// Purge the Claude store for `target` (an absolute, realpath'd cwd)；返回删掉几个。
-/// 以前返回 `Vec<(label, count)>`，但那个 Vec 只可能装 `("Claude", n)` 一项——线上的
-/// `purged: [{agent_label, count}]` 形状不变，由调用方拼（PROTOCOL.md「删除项目」）。
-pub fn purge(paths: &Paths, cache: &mut CwdCache, target: &str) -> u64 {
+/// 清掉各 agent 存储里属于 `target`（绝对、已 realpath 的 cwd）的会话；
+/// 返回 `[(agent 标签, 删掉几个)]`，只列真删掉了东西的那些——线上的
+/// `purged: [{agent_label, count}]` 就是它（PROTOCOL.md「删除项目」）。
+pub fn purge(paths: &Paths, cache: &mut CwdCache, target: &str) -> Vec<(&'static str, u64)> {
     if !target.starts_with('/') {
-        return 0; // safety: only absolute cwds, same contract as the CLI
+        return vec![]; // safety: only absolute cwds, same contract as the CLI
     }
+    let mut out = Vec::new();
     let mut n = 0u64;
     for r in claude_sessions(paths, cache) {
         if r.cwd == target && std::fs::remove_file(&r.path).is_ok() {
             n += 1;
         }
     }
-    n
+    if n > 0 {
+        out.push(("Claude", n));
+    }
+    if agy_purge(paths, target) {
+        out.push(("Antigravity", 1));
+    }
+    out
+}
+
+/// agy 侧的删除。**非删不可的是 `cache/last_conversations.json` 里这个 cwd 的
+/// 条目**：那张表按 cwd 记，留着的话同名目录重建之后第一次 resume 会接到上一个
+/// 项目的对话上。对话本体（`conversations/<id>.db` 与 brain / annotations /
+/// implicit 三处衍生文件）只在没有别的 cwd 也指着它时才删。
+///
+/// `history.jsonl`（上翻箭头用的提示词历史）不动：agy 正开着的时候我们重写它会
+/// 丢行，而它不影响 resume。
+fn agy_purge(paths: &Paths, target: &str) -> bool {
+    let root = paths.agy_root();
+    let mut map = agy_map(paths);
+    let Some(key) = agy_key(&map, target) else { return false };
+    let id = map
+        .remove(&key)
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_default();
+    // 还被别的目录指着的对话，本体不能删——先问，再把表写回去（`map` 就地交出去）
+    let shared = map.values().any(|v| v.as_str() == Some(id.as_str()));
+    let lc = root.join("cache").join("last_conversations.json");
+    if let Ok(body) = serde_json::to_vec(&Value::Object(map)) {
+        let _ = crate::paths::write_atomic(&lc, &body);
+    }
+    if !safe_id(&id) || shared {
+        return true; // 条目摘掉了就算删过
+    }
+    // `-wal` / `-shm`：agy 正常退出会 checkpoint 掉，崩了就会留下，留着是纯垃圾
+    for ext in [".db", ".db-wal", ".db-shm", ".pb"] {
+        let _ = std::fs::remove_file(root.join("conversations").join(format!("{id}{ext}")));
+    }
+    let _ = std::fs::remove_dir_all(root.join("brain").join(&id));
+    let _ = std::fs::remove_file(root.join("annotations").join(format!("{id}.pbtxt")));
+    let _ = std::fs::remove_file(root.join("implicit").join(format!("{id}.pb")));
+    true
 }
 
 #[cfg(test)]
@@ -358,11 +469,84 @@ mod id_exists_tests {
         let proj = paths.claude_root().join("-Volumes-SSD-project-x");
         std::fs::create_dir_all(&proj).unwrap();
         std::fs::write(proj.join("live-id.jsonl"), "{}\n").unwrap();
-        assert!(id_exists(&paths, "live-id"));
-        assert!(!id_exists(&paths, "gone-id"), "被 GC 的 id 要报 false");
-        // 非 claude（终端）没有可验证的存储
-        // 别让奇怪的 id 变成路径穿越
-        assert!(!id_exists(&paths, "../../etc/passwd"));
-        assert!(!id_exists(&paths, ""));
+        assert!(id_exists(&paths, "claude", "live-id"));
+        assert!(!id_exists(&paths, "claude", "gone-id"), "被 GC 的 id 要报 false");
+        // 终端没有可验证的存储
+        assert!(!id_exists(&paths, "shell", "live-id"));
+        // 别让奇怪的 id 变成路径：`.` 尤其致命，purge 会拿它去 remove_dir_all(brain/<id>)
+        for bad in ["../../etc/passwd", "", ".", "..", ".hidden", "a/b"] {
+            assert!(!id_exists(&paths, "claude", bad), "{bad} 不该被当成 id");
+            assert!(!id_exists(&paths, "agy", bad), "{bad} 不该被当成 id");
+        }
+    }
+
+    /// agy 的三件事一起验：查得到、指向已删对话时不 resume、删项目之后 cwd 条目
+    /// 必须消失（不消失的话同名目录重建会接到上一个项目的对话上）。
+    #[test]
+    fn agy_find_and_purge() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path());
+        let root = paths.agy_root();
+        std::fs::create_dir_all(root.join("cache")).unwrap();
+        std::fs::create_dir_all(root.join("conversations")).unwrap();
+        std::fs::write(root.join("conversations").join("cid-1.db"), b"x").unwrap();
+        std::fs::write(
+            root.join("cache").join("last_conversations.json"),
+            r#"{"/p/a":"cid-1","/p/b":"cid-gone"}"#,
+        )
+        .unwrap();
+        let mut cache = CwdCache::load(&paths.cwd_cache());
+
+        assert_eq!(find(&paths, &mut cache, "/p/a", "agy"), "cid-1");
+        assert_eq!(find(&paths, &mut cache, "/p/b", "agy"), "", "对话文件没了就别 resume");
+        assert_eq!(find(&paths, &mut cache, "/p/a", "claude"), "", "别拿 agy 的 id 喂 claude");
+        assert!(id_exists(&paths, "agy", "cid-1") && !id_exists(&paths, "agy", "cid-gone"));
+
+        assert_eq!(purge(&paths, &mut cache, "/p/a"), vec![("Antigravity", 1)]);
+        assert!(!root.join("conversations").join("cid-1.db").exists());
+        assert_eq!(find(&paths, &mut cache, "/p/a", "agy"), "");
+        let left = std::fs::read_to_string(root.join("cache").join("last_conversations.json")).unwrap();
+        assert!(!left.contains("/p/a") && left.contains("/p/b"), "只摘自己那一条：{left}");
+    }
+
+    /// 存储里出现坏 id（手改花了 / 别的程序写坏了）时，purge 只许摘掉那条 cwd 记录，
+    /// 绝不能顺着 id 去删目录——`brain/.` 就是 `brain/` 本身。
+    #[test]
+    fn agy_purge_never_follows_a_bad_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path());
+        let root = paths.agy_root();
+        std::fs::create_dir_all(root.join("cache")).unwrap();
+        std::fs::create_dir_all(root.join("brain").join("someone-elses")).unwrap();
+        std::fs::write(
+            root.join("cache").join("last_conversations.json"),
+            r#"{"/p/a":"."}"#,
+        )
+        .unwrap();
+        let mut cache = CwdCache::load(&paths.cwd_cache());
+        purge(&paths, &mut cache, "/p/a");
+        assert!(root.join("brain").join("someone-elses").is_dir(), "brain/ 不能被删空");
+        let left = std::fs::read_to_string(root.join("cache").join("last_conversations.json")).unwrap();
+        assert!(!left.contains("/p/a"), "那条 cwd 记录还是要摘掉：{left}");
+    }
+
+    /// 同一个对话被两个 cwd 指着时，删掉其中一个项目不能删对话本体。
+    #[test]
+    fn agy_purge_keeps_a_conversation_another_dir_still_points_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path());
+        let root = paths.agy_root();
+        std::fs::create_dir_all(root.join("cache")).unwrap();
+        std::fs::create_dir_all(root.join("conversations")).unwrap();
+        std::fs::write(root.join("conversations").join("shared.db"), b"x").unwrap();
+        std::fs::write(
+            root.join("cache").join("last_conversations.json"),
+            r#"{"/p/a":"shared","/p/b":"shared"}"#,
+        )
+        .unwrap();
+        let mut cache = CwdCache::load(&paths.cwd_cache());
+        purge(&paths, &mut cache, "/p/a");
+        assert!(root.join("conversations").join("shared.db").exists());
+        assert_eq!(find(&paths, &mut cache, "/p/b", "agy"), "shared");
     }
 }

@@ -16,6 +16,12 @@ pub const AGENTS: &[AgentDef] = &[
         resume_cmd: Some("claude --resume %ID% --dangerously-skip-permissions"),
     },
     AgentDef {
+        id: "agy",
+        label: "Antigravity",
+        cmd: "agy --dangerously-skip-permissions",
+        resume_cmd: Some("agy --conversation %ID% --dangerously-skip-permissions"),
+    },
+    AgentDef {
         id: "shell",
         label: "终端",
         cmd: "exec zsh -l",
@@ -273,14 +279,18 @@ mod tests {
 
     #[test]
     fn table_matches_protocol() {
-        // 2026-09-03 起只支持 Claude Code；shell 是终端面板，不是 agent
-        assert_eq!(AGENTS.len(), 2);
+        // claude + agy 两个 agent；shell 是终端面板，不是 agent
+        assert_eq!(AGENTS.len(), 3);
         assert_eq!(get("claude").unwrap().cmd, "claude --dangerously-skip-permissions");
         assert_eq!(
             build_resume_cmd(get("claude").unwrap(), "abc-123").unwrap(),
             "claude --resume abc-123 --dangerously-skip-permissions"
         );
-        assert!(get("codex").is_none() && get("agy").is_none());
+        assert_eq!(
+            build_resume_cmd(get("agy").unwrap(), "abc-123").unwrap(),
+            "agy --conversation abc-123 --dangerously-skip-permissions"
+        );
+        assert!(get("codex").is_none() && get("pi").is_none());
         assert!(build_resume_cmd(get("shell").unwrap(), "x").is_none());
     }
 
@@ -319,5 +329,6 @@ mod tests {
     fn bin_extraction() {
         assert_eq!(agent_bin(get("shell").unwrap()), "zsh");
         assert_eq!(agent_bin(get("claude").unwrap()), "claude");
+        assert_eq!(agent_bin(get("agy").unwrap()), "agy");
     }
 }

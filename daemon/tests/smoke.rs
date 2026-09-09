@@ -172,6 +172,59 @@ async fn full_session_lifecycle() {
     let reg = std::fs::read_to_string(env.root.join(".aaa-agents")).unwrap();
     assert_eq!(reg, format!("{proj_path}\tshell\n"));
 
+    // ---- agent 表 + 换 agent ----
+    // 表里是 claude 与 agy，没有 shell（终端是面板，不是 agent）
+    let (code, list) = http("GET", port, "/api/v1/agents", Some(TOKEN), None);
+    assert_eq!(code, 200);
+    let ids: Vec<&str> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["claude", "agy"]);
+    assert!(list[0]["available"].is_boolean() && list[0]["label"] == "Claude");
+
+    // 换 agent 只改注册表那一行
+    let (code, sw) = http(
+        "POST",
+        port,
+        "/api/v1/projects/agent",
+        Some(TOKEN),
+        Some(serde_json::json!({"path": proj_path, "agent": "agy"})),
+    );
+    assert_eq!(code, 200);
+    assert_eq!(sw["agent"], "agy");
+    let reg = std::fs::read_to_string(env.root.join(".aaa-agents")).unwrap();
+    assert_eq!(reg, format!("{proj_path}\tagy\n"));
+    // 没登记的目录换不了；shell 不是 agent，换不成它
+    let (code, _) = http(
+        "POST",
+        port,
+        "/api/v1/projects/agent",
+        Some(TOKEN),
+        Some(serde_json::json!({"path": "/nope/gone", "agent": "agy"})),
+    );
+    assert_eq!(code, 404);
+    let (code, e) = http(
+        "POST",
+        port,
+        "/api/v1/projects/agent",
+        Some(TOKEN),
+        Some(serde_json::json!({"path": proj_path, "agent": "shell"})),
+    );
+    assert_eq!(code, 400);
+    assert_eq!(e["error"]["code"], "agent_unknown");
+    // 换回来，后面的用例照旧按 shell 走
+    let (code, _) = http(
+        "POST",
+        port,
+        "/api/v1/projects/agent",
+        Some(TOKEN),
+        Some(serde_json::json!({"path": proj_path, "agent": "claude"})),
+    );
+    assert_eq!(code, 200);
+
     // unknown agent rejected
     let (code, e) = http(
         "POST",

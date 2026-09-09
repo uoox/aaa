@@ -108,4 +108,26 @@ class ProjectRowsTest {
         assertEquals(null, withSession.first { it.project.path == "/p/run" }.primary)
         assertEquals(null, rows.first { it.project.path == "/p/bare" }.primary)
     }
+
+    /**
+     * agent 轮换：只在装了不止一个时才有「下一个」。少于两个返回 null，
+     * 两端据此整个不画切换入口（老 daemon 不给 /agents，表是空的，同样不画）。
+     */
+    @Test
+    fun next_agent_cycles_only_over_installed_ones() {
+        val both = listOf(
+            AgentInfo("claude", "Claude", true),
+            AgentInfo("agy", "Antigravity", true),
+        )
+        assertEquals("agy", nextAgent(both, "claude"))
+        assertEquals("claude", nextAgent(both, "agy"))
+        assertEquals("当前这个没装就给条路回到装了的", "claude", nextAgent(both, "没见过的"))
+        assertNull(nextAgent(listOf(AgentInfo("claude", "Claude", true)), "claude"))
+        assertNull("老 daemon：空表不画切换", nextAgent(emptyList(), "claude"))
+        val onlyClaude = both.map { it.copy(available = it.id == "claude") }
+        assertNull("没装的不算", nextAgent(onlyClaude, "claude"))
+        assertEquals("agy 卸载了，这一行还能换回 claude", "claude", nextAgent(onlyClaude, "agy"))
+        assertEquals("Antigravity", agentLabel(both, "agy"))
+        assertEquals("表里没有就报 id", "agy", agentLabel(emptyList(), "agy"))
+    }
 }

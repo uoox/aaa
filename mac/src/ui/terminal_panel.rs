@@ -233,6 +233,8 @@ impl RootView {
             col = col.child(
                 sidebar_row(("sb-term", ix).into())
                     .group("sb-row")
+                    // 当前终端与当前项目同一种说法：整行一圈强调色边框（2026-09-10）
+                    .when(active, |el| el.border_color(c(theme::ACCENT)))
                     .hover(|st| st.bg(c(theme::SURFACE_RAISED)))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.focus_terminal(id_click.clone(), cx);
@@ -245,8 +247,6 @@ impl RootView {
                             .whitespace_nowrap()
                             .text_size(px(12.5))
                             .text_color(c(if active { theme::ACCENT } else { theme::DIM }))
-                            // 当前终端与当前项目同一种说法：标题下一条强调色线（2026-09-10）
-                            .when(active, |el| el.text_decoration_1().text_decoration_color(c(theme::ACCENT)))
                             .child(SharedString::from(label)),
                     )
                     // × 关终端：当前行常显，其余悬停才现身（与项目行一致）

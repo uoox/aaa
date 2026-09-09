@@ -513,6 +513,17 @@ pub struct Project {
     pub registered: bool,
 }
 
+/// `GET /agents`：有哪些 agent、这台机器装没装（PROTOCOL「Agent 表」）。
+/// 客户端不自己硬编码这张表——硬编码就会给一个没装的 agent 开会话，
+/// 然后对着一屏 `command not found` 发呆。
+#[derive(Debug, Clone, Deserialize)]
+pub struct AgentInfo {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub available: bool,
+}
+
 // `registered` 的默认是 true，derive 出来的 Default 会给 false —— 手写一份，免得
 // 「构造一个空 Project」时悄悄变成「没登记的目录」（那会连删除按钮都不给画）。
 impl Default for Project {

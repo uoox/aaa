@@ -52,8 +52,8 @@ impl RootView {
             let t = self.new_input.read(cx).text().trim().to_string();
             if t.is_empty() { None } else { Some(t) }
         };
-        // 唯一的 agent；显式写进注册表（名册以注册表为准），不靠 daemon 端兜底
-        let agent = "claude".to_string();
+        // 显式写进注册表（名册以注册表为准），不靠 daemon 端兜底
+        let agent = self.new_agent.clone();
         let project_agent = Some(agent.clone());
         let fallback_path = name.as_ref().and_then(|n| {
             self.health
@@ -317,7 +317,7 @@ impl RootView {
             };
             body = body.child(modal_hint(line));
         }
-        body.child(modal_hint("将同时清除 Claude Code 在这些目录下的会话存储。").pt(px(8.)))
+        body.child(modal_hint("将同时清除所有 agent 在这些目录下的会话存储。").pt(px(8.)))
             .child(
                 div()
                     .pt(px(8.))

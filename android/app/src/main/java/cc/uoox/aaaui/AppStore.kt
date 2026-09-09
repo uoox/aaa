@@ -76,6 +76,9 @@ class AppStore private constructor(context: Context) {
     val sessions: StateFlow<List<Session>> = _sessions.asStateFlow()
     private val _projects = MutableStateFlow<List<Project>>(emptyList())
     val projects: StateFlow<List<Project>> = _projects.asStateFlow()
+    private val _agents = MutableStateFlow<List<AgentInfo>>(emptyList())
+    /** agent 表（GET /agents）。空 = 老 daemon 或只有一个可用：不画任何切换入口 */
+    val agents: StateFlow<List<AgentInfo>> = _agents.asStateFlow()
     private val _health = MutableStateFlow<Health?>(null)
     val health: StateFlow<Health?> = _health.asStateFlow()
     /** 套餐用量（5h / 7d / 按模型）；null = 没数据，首页不显示 */
@@ -180,6 +183,7 @@ class AppStore private constructor(context: Context) {
             scope.launch { runCatching { api.health() }.onSuccess { h -> _health.value = h; settings.noteProjectRoot(h.project_root) } }
             scope.launch { refreshProjects() }
             scope.launch { refreshUsage() }
+            scope.launch { runCatching { api.agents() }.onSuccess { _agents.value = it } }
             runEventsUntilClosed(api) // suspends while WS is healthy
             if (settings.current().server == null) continue
             _connState.value = ConnState.Connecting(host)
