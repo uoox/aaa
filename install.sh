@@ -58,10 +58,12 @@ esac
 
 if [ "$OS" = "Darwin" ]; then
   if security find-identity -v -p codesigning 2>/dev/null | grep -q "AAA Local Signing"; then
-    codesign --force --sign "AAA Local Signing" "$BIN/aaa-daemon"
+    # -i 把 identifier 钉死：授权认的是 `identifier "aaa-daemon" and certificate leaf = …`
+    # 这一整句，不钉死就得靠「codesign 会拿文件名当 identifier」这个巧合
+    codesign --force --sign "AAA Local Signing" -i aaa-daemon "$BIN/aaa-daemon"
     say "已用 AAA Local Signing 签名（TCC 授权跨升级保留）"
   else
-    codesign --force --sign - "$BIN/aaa-daemon"
+    codesign --force --sign - -i aaa-daemon "$BIN/aaa-daemon"
     say "ad-hoc 签名。若项目根在外置卷上，建议做一个「AAA Local Signing」自签名证书，见 daemon/README.md"
   fi
 fi

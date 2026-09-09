@@ -380,6 +380,17 @@ Claude 以 `--dangerously-skip-permissions` 运行，`PermissionRequest` 不会�
 - **`aaa` CLI**：不用改——它的 `probe()` 早就在连不上时先 `launchctl kickstart` 再试一次。
 - **Android**：没有这个按钮，也不可能有——手机上跑不了 Mac 的命令，而 REST 那条路在 daemon 关着时按不动。手机上 daemon 掉线只能等它自己回来，或者去 Mac 上重启。
 
+## 代码签名与升级（v1.33：授权别再掉）
+
+macOS 的隐私授权（辅助功能 / 屏幕录制 / 输入监控 / 自动化）**认的是二进制的代码身份，不是路径**：授权那一刻系统记下它的 designated requirement，之后每次请求都拿这一句去比。本机自签证书签出来的是 `identifier "aaa-daemon" and certificate leaf = H"<证书指纹>"`——**与文件内容无关**，所以同一张证书、同一个 identifier 签出来的新版本还是「同一个 App」，授权一直有效。
+
+由此有两条硬规矩，升级 daemon 时一条都不能破：
+
+1. **绝不就地覆盖。** `cp` / `install` 是把新内容写进同一个 inode，**正在跑**的那个 daemon 的代码页当场失效，它立刻就通不过 TCC 校验——不用等重启，手里的授权当场没（严重时进程被 `SIGKILL`）。正确做法是写临时文件、签好、`rename` 顶上去：rename 只换目录项，跑着的进程还拿着老 inode，一路有效到它自己退出。
+2. **签成固定身份。** cargo 直接产出的是 ad-hoc 签名，identifier 是 `aaa_daemon-<构建哈希>`、DR 里还带 cdhash，装上去等于换了一个 App，之前给的授权全部作废。签的时候把 identifier 钉死（`-i aaa-daemon`），不要依赖「codesign 会拿文件名当 identifier」这个巧合。
+
+落到工具上：`daemon/packaging/install.sh`（编译产物 → 临时文件 → 签 → rename → `service restart`）、顶层 `install.sh`、以及 `aaa-daemon service install` 都按这两条走。已经装歪了有两条自愈的路：`aaa-daemon service sign` 只补签，`aaa-daemon service restart` 先补签再重启——**mac 设置页那个「重启 daemon」按钮走的就是后者**，所以「更新之后按一下重启」本身就把签名修回来了。没有那张自签证书的机器退回 ad-hoc，功能照常，只是每次升级要重新授权一次；做一张证书的办法在 `daemon/README.md`。
+
 ## aaa CLI（工具箱，v2.0 / 2026-09-07 用户拍板）
 
 `aaa` 不再是「第三个客户端」：项目与会话管理是 Mac App 和手机的事，CLI 只做**工具性**的事——授权、重启、配置、迁根、看状态。

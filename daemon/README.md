@@ -16,7 +16,10 @@ aaa perms all                  # 一次申请全部 macOS 权限，授权归到 
 config.toml：`port`（默认 2730）、`token`、`project_root`（默认 `~/project`）、`namer`（haiku 会话命名）、
 `auto_trust`（默认 true，新项目的 Claude Code 信任对话框自动回车）。
 
-升级二进制先 `rm` 再 `cp`：直接覆盖运行中的二进制会写坏签名，之后每次执行都被 macOS `SIGKILL`。
+**升级用 `daemon/packaging/install.sh`，别用 `cp`。** 它做的三件事一件都不能少：写临时文件 →
+用固定身份签 → `rename` 顶上去 → `service restart`。就地覆盖会让**正在跑的**那个 daemon 的
+代码页当场失效，它立刻通不过 TCC 校验（辅助功能 / 屏幕录制那些授权当场就没了，不用等重启），
+严重时还会被 `SIGKILL`；而不签或用 ad-hoc 签，新进程就是「另一个 App」，授权也得重给。
 换了二进制路径要重新 `service uninstall && service install`，plist 记的是绝对路径。
 
 ## 项目根在外置卷上
@@ -26,15 +29,25 @@ macOS 把 `/Volumes/…` 挡在 TCC 后面，launchd 起的进程没有「负责
 把 `~/.local/bin/aaa-daemon` 加进去，再重装 service。读不到项目根时 daemon 照常监听，
 `/health.root_state=denied`，错误里给出这段修法。
 
-TCC 授权绑定代码签名，ad-hoc 签名（`--sign -`）每次构建都不同，授权随之失效。
-在钥匙串访问里做一个「代码签名」类型的自签名证书（下面叫 `AAA Local Signing`），每次装 daemon 都用它签：
+**TCC 授权认的是代码身份，不是路径。** 授权时系统记下这个二进制的 designated requirement，
+之后每次请求都拿它比对；本机自签证书签出来的是
+
+```
+designated => identifier "aaa-daemon" and certificate leaf = H"<证书指纹>"
+```
+
+——**与文件内容无关**，所以只要每次都用同一张证书、同一个 identifier 签，重新编译多少次授权都还在。
+ad-hoc 签名（`--sign -`）的身份里带着随构建变的 identifier 和 cdhash，换一次就等于换一个 App。
+
+一次性：在「钥匙串访问 → 证书助理 → 创建证书」里做一个**代码签名**类型的自签名证书，
+名字叫 `AAA Local Signing`。之后 `install.sh`、`daemon/packaging/install.sh`、
+`aaa-daemon service install` 都会自动用它。
+
+已经装歪了（比如有人用 `cp` 覆盖过）就补一刀，**它会自己走临时文件 + rename，不动正在跑的进程**：
 
 ```bash
-if security find-identity -v -p codesigning | grep -q "AAA Local Signing"; then
-  codesign --force --sign "AAA Local Signing" ~/.local/bin/aaa-daemon
-else
-  codesign --force --sign - ~/.local/bin/aaa-daemon
-fi
+aaa-daemon service sign      # 只补签
+aaa-daemon service restart   # 补签 + 重启（daemon 关着也能用）
 ```
 
 ## 开发

@@ -32,8 +32,10 @@ open -a "AAA UI"
 
 - Bundle ID `cc.uoox.aaaui`，图标来自 `../brand/out/aaa-ui.icns`，版本号取自 Cargo.toml，
   build 号取 git 短 hash。
-- **ad-hoc 签名的已知坑**：本机无开发者证书，`codesign --sign -` 没有稳定身份，
-  每次重新构建安装后系统会视为「新 app」，TCC 授权（通知/自动化等）随之失效。
+- **签名**：有本机自签证书 `AAA Local Signing` 就用它（`bundle.sh` 自己找），
+  designated requirement 与内容无关，重新构建安装不会被系统当成「新 app」。
+  **没有那张证书才退回 ad-hoc**（`codesign --sign -`），那时每次重装 TCC 授权都会失效——
+  做一张证书的办法见 `daemon/README.md`。
   因此权限全部归责到 aaa-daemon（见 PROTOCOL.md），UI 本体不申请任何 TCC 权限；
   系统通知走 `osascript` 子进程，归属不受重签影响。
 - 本机构建无 quarantine，可直接打开；拷到别的机器首次打开需在
