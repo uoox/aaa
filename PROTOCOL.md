@@ -84,7 +84,8 @@ daemon 在启动时用 `zsh -lic` 问一次「终端里应有的 PATH」（带�
 - **一条会话三种看法**：终端 / 消息流 / 浏览。mac 状态栏三格并排，当前那格是主色，⌘E 按 终端 → 消息流 → 浏览 → 终端 轮换；Android 顶栏那一格写着当前看法，点一下走同一个顺序。消息流画不出来的会话（`agent:"shell"`、老 daemon、探明 `supported:false`）**跳过那一档**——切到一个画不出来的视图，用户只会看见终端，还以为按钮坏了。**终端是兜底**：另外两种都可能没有，终端永远画得出来。
 - **只读**。没有写、改名、删除、上传。要改文件就跟 agent 说，那是 agent 的活；`_inbox/` 那条上传通道另说（见「手机→项目文件通道」）。
 - **出不了项目根**，而且这件事只在 daemon 判一次：路径先 `canonicalize`（`..` 和软链接都在这一步解掉），再要求它落在同样 canonicalize 过的项目根底下；`starts_with` 按路径段比，`/Volumes/SSD/project-old` 不会被当成 `/Volumes/SSD/project` 的孩子。指到根外的软链接同样挡住。出根一律 404，不回显解析细节。
-- **不读二进制**：后缀先分类（`md`/`markdown`/`mdx` → markdown，图片/压缩包/音视频/字体/目标文件/数据库 → binary，其余 text），真读时 UTF-8 解不动的再改判 binary，只报大小、正文留空。文本上限 512 KB，超出截断并标 `truncated`——**截断切在多字节字符中间不等于二进制**，切口之前那一段照旧给。
+- **不读二进制**：后缀先分类（`md`/`markdown`/`mdx` → markdown，`html`/`htm` → html，图片/压缩包/音视频/字体/目标文件/数据库 → binary，其余 text），真读时 UTF-8 解不动的再改判 binary，只报大小、正文留空。文本上限 512 KB，超出截断并标 `truncated`——**截断切在多字节字符中间不等于二进制**，切口之前那一段照旧给。
+- **html（v1.32）**：正文照旧当文本给，两端各自决定怎么显示。**mac 交给系统默认程序**——daemon 与 App 在同一台机器上，打开的任何文件顶栏都有一个「默认程序打开」，一个 `open <路径>` 就完事（html 进浏览器、图片进预览、pdf 进 Preview）；gpui 里没有 webview，也不该为了看一个网页塞一个浏览器进来。**Android 用系统自带的 WebView 画出来**，右上角切「源码」看原文：文件在 Mac 上，手机根本没有这个文件，交给别的 app 就得先落本地缓存再发 Intent，绕一圈还是半成品。相对路径引的图片和 css 两端都拿不到（那要 daemon 当静态服务器），所以它是**预览**不是浏览器；WebView 里 JavaScript 关着。
 - 目录列表：**目录在前，其次按名字（大小写无关）**；点开头的照列（`.gitignore`、`.aaa-agents` 正是要看的）。一次最多 2000 条，超出标 `truncated`。
 - 打开的文件是**视图状态**不是另一页：「上一级」在看文件时是回到目录，在目录里才是回上一层；项目根没有上一级（`parent` 为 null）。切去终端再切回来，还在原处。
 - Markdown 用两端各自那套 CommonMark 渲染器画（与消息流里 assistant 文本同一个），其余文本等宽 + 横向滚动。
@@ -214,7 +215,7 @@ CLI 的 `ls` / 交互菜单按五组打印（v1.13 起；以前是「执行中 /
 | DELETE | `/sessions/:id` | 删除记录与回放（活着先 kill） |
 | POST | `/sessions/:id/rename` | `{title}` |
 | GET | `/sessions/:id/ports` | 进程树监听端口 `[{port,cmd}]`（mac「Web 预览」入口用；其它客户端未接） |
-| GET | `/files?path=<绝对路径>` | v1.30 目录浏览：`{path, parent, truncated, entries:[{name, path, dir, size, mtime, kind}]}`。`path` 是 canonicalize 之后的真实路径，`parent` 到项目根为止（根自己是 null），`kind` ∈ `markdown\|text\|binary`（目录是空串）。目录在前、其次按名字（大小写无关），最多 2000 条。**出项目根 → 404**（见「浏览」） |
+| GET | `/files?path=<绝对路径>` | v1.30 目录浏览：`{path, parent, truncated, entries:[{name, path, dir, size, mtime, kind}]}`。`path` 是 canonicalize 之后的真实路径，`parent` 到项目根为止（根自己是 null），`kind` ∈ `markdown\|html\|text\|binary`（目录是空串）。目录在前、其次按名字（大小写无关），最多 2000 条。**出项目根 → 404**（见「浏览」） |
 | GET | `/files/read?path=<绝对路径>` | v1.30 目录浏览：`{path, name, size, mtime, kind, text, truncated}`。`kind:"binary"` 时 `text` 为空只报大小；文本上限 512 KB，超出 `truncated:true`。**出项目根 / 不是文件 → 404** |
 | POST | `/hooks/:event` | Claude Code hooks 回调（见「Claude Code hooks」）；头 `X-AAA-Session`；永远 200 `{}`。`:event=statusline` 是 statusLine 命令转来的状态 JSON |
 | GET | `/usage` | `{plan}`：账号 plan 配额：`{five_hour:{used_percentage,resets_at}, seven_day:{…}, model_scoped:[{display_name,utilization,resets_at}]|null, updated_at}`。5h / 7d 来自最近一次 statusLine 的 `rate_limits`，也来自 daemon 每分钟对 claude.ai usage 接口的轮询；`model_scoped`（按模型的周窗口，如 Fable）**只**来自轮询——statusLine 从不带它。轮询用 Claude Code 自己登录的 OAuth 令牌（macOS 钥匙串 `Claude Code-credentials` / `~/.claude/.credentials.json`），只读不刷新；没登录或令牌过期时沿用旧值。两个来源都还没给过时 `plan=null` |
@@ -356,9 +357,9 @@ Claude 以 `--dangerously-skip-permissions` 运行，`PermissionRequest` 不会�
 - 自动喂入（2026-09-06 起**每秒重试**，不再每会话一次）：项目会话处于 `waiting` 且收件箱非空、门槛放行，daemon 就把条目写入 PTY（+ `\r`）并删除条目——状态翻转、`POST /inbox`、信任对话框刚被接受、表单刚答完，都在下一个 tick 内送达。一条就是那句话本身；多条拼成 `任务清单：\n1. …\n2. …`。`POST /sessions` 可带 `"feed_inbox":false` 禁用。**不喂的两种情形（都是结构化判断，不读屏）**：claude 会话 `asking`（对话框开着，自由文本会替用户按下高亮项）；claude 会话的目录在 `~/.claude.json` 里尚无 `hasTrustDialogAccepted` **且屏幕上正显示信任对话框**（新项目第一屏；父目录已信任时 claude 不问也不写记录，只看文件会永远挡住）。这两种情形条目留在箱里，下一次 waiting 再试。daemon 只读 `~/.claude.json`，永不写它（claude 自己频繁改写，读改写会撞）。
 - **自动信任（2026-09-03，2026-09-07 改为一键一 tick）**：config `auto_trust=true`（默认）时，daemon 在每秒 tick 里看 claude 会话的可见屏幕。新版对话框认「Yes, I trust this folder」+「No, exit」两行（提示行滚出屏幕也行）：高亮在 No → 只按 ↓；**高亮到了 Yes 才按 Enter**，绝不 ↓+Enter 连发——连发时 ↓ 偶尔丢（Ink 还没进 raw mode），Enter 落在「No, exit」上 Claude 就退出了，会话卡成 exited、对话框还画在屏上，只能重进项目再来一次。旧版对话框（Yes, proceed 高亮）直接 Enter。每键至少隔 1s，最多 8 键。用户在 AAA 里已经选定了目录，再问一遍纯属摩擦。信任记录仍由 claude 自己写进 `~/.claude.json`，daemon 不碰。这是 daemon 唯一保留的「读屏行动」，条件刻意收窄（两串同现、仅 claude、有上限）。
 - `POST /sessions` **幂等**：同项目 + 同 agent 已有存活会话时直接返回该会话（不孵第二个进程）；显式并行开第二个用 `"fresh":true`。事件 `{"t":"inbox_changed","path"}`。
-- **客户端呈现**：两端都在消息流末尾画 `queued`（标「待发送」，只读）。**发送一律 `POST /sessions/:id/input`**（v1.22；此前 Android 按 `running` / `asking` 分流去 `POST /inbox`，那是 AAA 自己那套队列）。输入框的草稿按会话保存在客户端本地，切出去再回来字还在。会话页左上角是 ☰（不是返回）：拉出与首页同一份项目列表，点一行切会话（回退栈始终 home → 当前会话）。mac 的收件箱仍在详情面板（⌘I）。
+- **客户端呈现**：两端都在消息流末尾画 `queued`（标「待发送」，只读）。**发送一律 `POST /sessions/:id/input`**（v1.22；此前 Android 按 `running` / `asking` 分流去 `POST /inbox`，那是 AAA 自己那套队列）。输入框的草稿按会话保存在客户端本地，切出去再回来字还在。会话页左上角是 ☰（不是返回）：拉出与首页同一份项目列表，点一行切会话（回退栈始终 home → 当前会话）。mac 没有收件箱入口（v1.32 删，见下）。
 
-**入口（v1.28）**：mac 在会话右侧详情栏、Android 在会话详情屏，各一节「收件箱」——排着的几句话按顺序列出，行尾 ✕ 删一条，底下一个输入框排新的。此前 daemon 里这套一直跑着，**两端却谁都没给过入口**（mac 在 v1.15 把那一节删了，Android 压根没做过），于是队列永远是空的，`GET/POST/DELETE /inbox` 三条路由没有任何客户端调用。2026-09-10 一度打算把路由当僵尸删掉，发现它是收件箱唯一的通用写入口（另一个写入者只有「信任对话框挡着屏幕时把整句话收下」那条岔路），删了 `feed.rs` 就只剩那个角落能触发——所以改成给它入口。`inbox_changed` 事件两端据此刷新那一节（路径两边都去尾斜杠再比：daemon 发的是 realpath 过的，会话行上的可能带斜杠——与黄点同一个口径）。
+**入口（v1.28；v1.32 起只剩手机）**：Android 在会话详情屏一节「收件箱」——排着的几句话按顺序列出，行尾 ✕ 删一条，底下一个输入框排新的。**mac 那一节 v1.32 删了**（2026-09-10 用户要求）：坐在 Mac 前面的时候直接在消息流里说话就行，排队是「人不在跟前」才需要的东西，那正是手机的场景。daemon 里这套照旧跑着（`feed.rs` 每秒重试），CLI 也还能写（`aaa` 的收件箱命令）。此前 daemon 里这套一直跑着，**两端却谁都没给过入口**（mac 在 v1.15 把那一节删了，Android 压根没做过），于是队列永远是空的，`GET/POST/DELETE /inbox` 三条路由没有任何客户端调用。2026-09-10 一度打算把路由当僵尸删掉，发现它是收件箱唯一的通用写入口（另一个写入者只有「信任对话框挡着屏幕时把整句话收下」那条岔路），删了 `feed.rs` 就只剩那个角落能触发——所以改成给它入口。`inbox_changed` 事件两端据此刷新那一节（路径两边都去尾斜杠再比：daemon 发的是 realpath 过的，会话行上的可能带斜杠——与黄点同一个口径）。
 
 ### 手机→项目文件通道
 
@@ -369,6 +370,15 @@ Claude 以 `--dangerously-skip-permissions` 运行，`PermissionRequest` 不会�
 砍掉的东西连同「为什么砍」搬到了 [`REMOVED.md`](REMOVED.md)。这里只留当下的契约——
 每加一个功能都要回头给历史条目打补丁，那份账就该单独放（v1.26 加回 agy 时，
 这一节已经被自己打脸两次）。
+
+## 重启 daemon（v1.32：命令是主路，REST 是它内部的一步）
+
+`POST /restart` 的前提是「daemon 还活着」，而**它关掉了正是最需要重启的时候**（2026-09-10 用户报的就是这个）。所以两端的「重启 daemon」不再直接打 REST：
+
+- **命令**：`aaa-daemon service restart`。① 它还答话 → 走 `POST /restart {force:true}`，**活着的会话被记进 `resume_after_restart.json`、起来之后自动 resume**；② 它不答话 → `launchctl kickstart -k gui/<uid>/com.aaa.daemon`（Linux 是 `systemctl --user restart`），服务没装就直接 spawn 一个 `aaa-daemon run`。顺序不能反：只有第一条能保住会话。之后等 `/health` 回来（最多 20s）再返回。
+- **mac App**：设置页那个按钮跑上面这个命令。.app 是 Finder 拉起来的，PATH 里没有 `~/.local/bin`，所以按 `~/.local/bin` → `/usr/local/bin` → `/opt/homebrew/bin` 挨个找二进制，都不在才退回 `zsh -lic`（交互式 zsh 才读 `.zshrc`，PATH 才全）。有活会话时照旧先弹确认框。
+- **`aaa` CLI**：不用改——它的 `probe()` 早就在连不上时先 `launchctl kickstart` 再试一次。
+- **Android**：没有这个按钮，也不可能有——手机上跑不了 Mac 的命令，而 REST 那条路在 daemon 关着时按不动。手机上 daemon 掉线只能等它自己回来，或者去 Mac 上重启。
 
 ## aaa CLI（工具箱，v2.0 / 2026-09-07 用户拍板）
 

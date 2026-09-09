@@ -2,7 +2,9 @@
 //!
 //! 只读，且只在**项目根底下**——守卫在 daemon 那一层（`files.rs`），这边不重判一遍。
 //! 点目录进去，点文件打开：`.md` 直接按 CommonMark 渲染（与消息流同一套块渲染器），
-//! 其余文本等宽显示，二进制只报大小。
+//! 其余文本等宽显示，二进制只报大小。**任何文件都能「用默认程序打开」**——daemon 与
+//! mac App 在同一台机器上，一个 `open <路径>` 就交给系统了：html 进浏览器、图片进
+//! 预览、pdf 进 Preview。渲染 html 这件事 gpui 做不了，也不该做（那是个浏览器）。
 //!
 //! 打开的文件是**视图状态**而不是另一页：返回目录不重新拉列表，翻文件时目录还在原处。
 
@@ -201,6 +203,26 @@ impl FilesView {
                     .text_color(c(theme::DIM))
                     .child(label),
             )
+            .when_some(self.open.as_ref().map(|f| f.path.clone()), |el, path| {
+                el.child(
+                    div()
+                        .id("files-open-ext")
+                        .px(px(6.))
+                        .rounded(px(4.))
+                        .text_size(px(11.))
+                        .text_color(c(theme::FAINT))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(c(theme::SURFACE_RAISED)).text_color(c(theme::ACCENT)))
+                        .on_click(cx.listener(move |v: &mut Self, _, _, cx| {
+                            // 文件就在本机（daemon 和 App 同一台），交给系统默认程序
+                            if let Err(e) = std::process::Command::new("open").arg(&path).spawn() {
+                                v.error = Some(format!("打开失败：{e}"));
+                                cx.notify();
+                            }
+                        }))
+                        .child("默认程序打开"),
+                )
+            })
             .child(
                 div()
                     .id("files-reload")

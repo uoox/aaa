@@ -256,15 +256,6 @@ impl Net {
         self.post_json("/sessions/clean_exited", serde_json::json!({}))
     }
     /// 项目任务队列：排着的几句话（agent 空下来 daemon 自动喂下一句）
-    pub fn inbox_list(&self, path: &str) -> impl Future<Output = Result<Vec<crate::model::InboxEntry>>> + use<> {
-        self.get_json(&format!("/inbox?path={}", percent_encode(path)))
-    }
-    pub fn inbox_add(&self, path: String, text: String) -> impl Future<Output = Result<serde_json::Value>> + use<> {
-        self.post_json("/inbox", serde_json::json!({"path": path, "text": text}))
-    }
-    pub fn inbox_delete(&self, id: &str) -> impl Future<Output = Result<serde_json::Value>> + use<> {
-        self.request_raw(reqwest::Method::DELETE, format!("/inbox/{id}"), None)
-    }
     pub fn session_permission(&self, id: &str, behavior: &str) -> impl Future<Output = Result<serde_json::Value>> + use<> {
         self.post_json(&format!("/sessions/{id}/permission"), serde_json::json!({ "behavior": behavior }))
     }
@@ -288,9 +279,6 @@ impl Net {
         )
     }
     /// `POST /restart`：force = 连存活会话一起终止
-    pub fn restart_daemon(&self, force: bool) -> impl Future<Output = Result<serde_json::Value>> + use<> {
-        self.post_json("/restart", serde_json::json!({ "force": force }))
-    }
     pub fn kill_session(&self, id: &str) -> impl Future<Output = Result<serde_json::Value>> + use<> {
         self.post_json(&format!("/sessions/{id}/kill"), serde_json::json!({}))
     }
@@ -561,7 +549,50 @@ impl std::fmt::Display for ApiFailure {
 
 impl std::error::Error for ApiFailure {}
 
-/// 从请求错误里取 HTTP 状态码；不是 REST 层失败（没连上、超时、解析错）就 None
+/// 重启 daemon = 跑 `aaa-daemon service restart`（2026-09-10 用户拍板：不能只有
+/// REST 那条路，daemon 关着的时候正是最需要重启按钮的时候）。命令自己判断走 REST
+/// 还是交给 launchd，见 `daemon/src/service.rs`。
+///
+/// **得自己找二进制**：.app 是 Finder 拉起来的，PATH 里没有 `~/.local/bin`。
+/// 按常见安装位置**挨个试到成功为止**（存在不等于能跑：装了一半、权限没了、
+/// 架构不对都可能失败），全都不行才退回 `zsh -lic`（交互式才读 `.zshrc`，PATH 才全）。
+/// 报错报最后一次的——它是最接近「用户真正装的那一个」的那次。
+pub fn run_daemon_restart() -> Result<()> {
+    use std::process::Command;
+    let home = std::env::var("HOME").unwrap_or_default();
+    let candidates = [
+        format!("{home}/.local/bin/aaa-daemon"),
+        "/usr/local/bin/aaa-daemon".to_string(),
+        "/opt/homebrew/bin/aaa-daemon".to_string(),
+    ];
+    let mut last = String::new();
+    for bin in candidates.iter().filter(|p| std::path::Path::new(p).is_file()) {
+        match Command::new(bin).args(["service", "restart"]).output() {
+            Ok(out) if out.status.success() => return Ok(()),
+            Ok(out) => last = one_line_err(&out.stderr),
+            Err(e) => last = e.to_string(),
+        }
+    }
+    let out = Command::new("zsh").args(["-lic", "aaa-daemon service restart"]).output()?;
+    if out.status.success() {
+        return Ok(());
+    }
+    if last.is_empty() {
+        last = one_line_err(&out.stderr);
+    }
+    Err(anyhow!("{last}"))
+}
+
+/// 子进程的 stderr 取最后一行有字的：整段日志塞进一个横幅没人读得下去
+fn one_line_err(stderr: &[u8]) -> String {
+    String::from_utf8_lossy(stderr)
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("没有输出")
+        .to_string()
+}
+
 /// 查询串里的路径 / 文件名：RFC 3986 unreserved 之外的一律 %XX
 pub fn percent_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -575,6 +606,7 @@ pub fn percent_encode(s: &str) -> String {
     out
 }
 
+/// 从请求错误里取 HTTP 状态码；不是 REST 层失败（没连上、超时、解析错）就 None
 pub fn http_status(e: &anyhow::Error) -> Option<u16> {
     e.downcast_ref::<ApiFailure>().map(|f| f.status)
 }

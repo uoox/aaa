@@ -136,7 +136,10 @@ impl RootView {
     /// 关通知是「别吵我」，不是「别记着」。
     fn render_notify_section(&self, cx: &mut Context<Self>) -> gpui::Div {
         let on = self.notify_on;
-        card()
+        // 与配对 / 配置两节同一个底座（`sect()` = 卡片底 + 14 内边距）。
+        // 此前这里直接用 `card()`，少了宽度和内边距：卡片按内容缩成一小块、
+        // 文字贴着描边，跟上下两节完全不是一套
+        sect()
             .child(sect_title("通知"))
             .child(
                 div()

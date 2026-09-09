@@ -33,6 +33,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.launch
 
 // ============================================================
@@ -40,7 +41,13 @@ import kotlinx.coroutines.launch
 //
 // 只读，且只在**项目根底下**——守卫在 daemon 那一层（`files.rs`），这边不重判一遍。
 // 点目录进去，点文件打开：`.md` 直接按 CommonMark 渲染（与消息流同一个 [MarkdownBody]），
-// 其余文本等宽 + 横向滚动，二进制只报大小。
+// `.html` 丢进 WebView 直接画出来（右上角可以切回源码），其余文本等宽 + 横向滚动，
+// 二进制只报大小。
+//
+// **html 为什么不是「交给系统默认程序打开」**：文件在 Mac 那台机器上，手机这边根本没有
+// 这个文件。要交给别的 app 就得先把正文落到本地缓存再发 Intent，绕一圈还只能看没有图片
+// 样式的半成品——而 WebView 本来就在系统里，`loadDataWithBaseURL` 一句就画出来了。
+// 相对路径引的图片和 css 仍然拿不到（那要 daemon 当静态服务器），所以它是预览不是浏览器。
 //
 // mac 那边同源同构（`mac/src/ui/files_view.rs`），两处的排序、大小写法、面包屑口径一致。
 // ============================================================
@@ -186,7 +193,17 @@ private fun FileRow(e: FileEntry, onClick: () -> Unit) {
 
 @Composable
 private fun FileBodyView(f: FileBody) {
+    // html 默认画出来；右上角切「源码」看原文。切换状态按文件路径记，翻到别的文件回到默认
+    var asSource by rememberSaveable(f.path) { mutableStateOf(false) }
+    if (f.kind == "html" && !asSource) {
+        Column(Modifier.fillMaxSize()) {
+            SourceToggle(asSource) { asSource = it }
+            HtmlPreview(f.text, Modifier.weight(1f))
+        }
+        return
+    }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 14.dp, vertical = 12.dp)) {
+        if (f.kind == "html") SourceToggle(asSource) { asSource = it }
         when {
             f.kind == "binary" -> Text("${f.name}：二进制文件，${humanSize(f.size)}", color = Tok.Faint, fontSize = 13.sp)
             f.kind == "markdown" -> MarkdownBody(f.text, 14.sp, Tok.Ink)
@@ -199,4 +216,45 @@ private fun FileBodyView(f: FileBody) {
             Text("文件太大，只读了前面一段（共 ${humanSize(f.size)}）", color = Tok.Amber, fontSize = 10.5.sp, modifier = Modifier.padding(top = 10.dp))
         }
     }
+}
+
+/** html 的「画出来 ⇄ 看源码」一行开关 */
+@Composable
+private fun SourceToggle(asSource: Boolean, onChange: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp), horizontalArrangement = Arrangement.End) {
+        Text(
+            if (asSource) "预览" else "源码",
+            color = Tok.Accent, fontSize = 12.sp, fontFamily = FontFamily.Monospace,
+            modifier = Modifier.clickable { onChange(!asSource) }.padding(horizontal = 8.dp, vertical = 4.dp),
+        )
+    }
+}
+
+/**
+ * html 预览：系统自带的 WebView，正文直接喂进去（不联网、不执行外部脚本——
+ * `baseUrl` 给 null，相对路径的图片和 css 本来也拿不到）。
+ */
+@Composable
+private fun HtmlPreview(html: String, modifier: Modifier = Modifier) {
+    AndroidView(
+        modifier = modifier.fillMaxWidth(),
+        factory = { ctx ->
+            android.webkit.WebView(ctx).apply {
+                settings.javaScriptEnabled = false
+                settings.loadsImagesAutomatically = true
+                // 项目里的 html 是别人写的：不给它读手机上的本地文件
+                settings.allowFileAccess = false
+                settings.allowContentAccess = false
+                isVerticalScrollBarEnabled = true
+            }
+        },
+        // **只在正文真的换了的时候重载**：`update` 每次重组都会跑，无脑 load 一次
+        // 页面就重画一次、滚动位置回到顶上（换主题、开合键盘都会重组）
+        update = { web ->
+            if (web.tag != html) {
+                web.tag = html
+                web.loadDataWithBaseURL(null, html, "text/html", "utf-8", null)
+            }
+        },
+    )
 }

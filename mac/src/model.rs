@@ -361,20 +361,9 @@ pub struct Artifact {
     pub ts: String,
 }
 
-/// `GET /inbox?path=` 的一项：排给这个项目的一句话，agent 空下来时 daemon 自动喂进去
-#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
-pub struct InboxEntry {
-    #[serde(default)]
-    pub id: String,
-    #[serde(default)]
-    pub text: String,
-    #[serde(default)]
-    pub created_at: String,
-}
-
 // ── v1.30 目录浏览：GET /files、GET /files/read ─────────────────────────────
 
-/// 目录里的一项。`kind` ∈ markdown | text | binary（目录是空串）。
+/// 目录里的一项。`kind` ∈ markdown | html | text | binary（目录是空串）。
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
 pub struct FileEntry {
     #[serde(default)]

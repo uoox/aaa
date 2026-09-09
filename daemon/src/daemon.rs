@@ -19,6 +19,8 @@ commands:
   service install           写 launchd plist 并 launchctl load
   service uninstall         launchctl unload 并删除 plist
   service status            查看服务状态
+  service restart           重启 daemon（它关着也能用：活着走 REST 保住会话，
+                            死了交给 launchd / systemd 拉起）
   perms status              macOS 权限体检 (只读)
   perms request-all         逐项触发授权弹窗 (弹窗出现在 Mac 屏幕上)
 ";
@@ -54,6 +56,13 @@ pub fn main_entry() {
             }
             if let Err(e) = crate::service::uninstall(&paths) {
                 eprintln!("service uninstall failed: {e}");
+                std::process::exit(1);
+            }
+        }
+        ("service", Some("restart")) => {
+            let paths = Paths::from_env();
+            if let Err(e) = crate::service::restart(&paths) {
+                eprintln!("service restart failed: {e}");
                 std::process::exit(1);
             }
         }

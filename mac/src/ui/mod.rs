@@ -401,10 +401,6 @@ pub struct RootView {
     pub win_w: f32,
     /// 每会话的产物 / 改动状态（含各自的拉取节流器）
     detail: HashMap<String, detail_panel::SessionDetail>,
-    /// 项目路径 → 排着的任务（GET /inbox）
-    pub inbox: HashMap<String, Vec<InboxEntry>>,
-    /// 收件箱新增输入框（回车提交，根节点接住）
-    pub inbox_input: Entity<MiniInput>,
 
     // 输入框
     /// 侧栏顶部的新建项目输入框：内容即文件夹名，回车 / ＋ 创建
@@ -493,11 +489,6 @@ impl RootView {
         let token_input = cx.new(|cx| MiniInput::new(cx, "aaa_tk_…"));
         let root_input = cx.new(|cx| MiniInput::new(cx, "~/project"));
         let history_input = cx.new(|cx| MiniInput::new(cx, "搜索：标题 / 项目 / 条目"));
-        let inbox_input = cx.new(|cx| MiniInput::new(cx, "排一句话，空下来自动发"));
-        cx.subscribe(&inbox_input, |this, _, _: &mini_input::InputEvent, cx| {
-            this.submit_inbox(cx);
-        })
-        .detach();
         // 输入法送来的回车（见 MiniInput::replace_text_in_range）与键盘回车同一出口
         cx.subscribe(&new_input, |this, _, _: &mini_input::InputEvent, cx| {
             if matches!(this.modal, Modal::None) {
@@ -542,8 +533,6 @@ impl RootView {
             plan: None,
             dashboard: Dashboard::default(),
             history_input,
-            inbox: HashMap::new(),
-            inbox_input,
             dash_show_deleted: false,
             dash_show_gone: false,
             dash_scroll: scrollbar::Scrollbar::default(),
@@ -654,13 +643,8 @@ impl RootView {
                 self.plan = plan;
                 cx.notify();
             }
-            // 队列被喂掉一条 / 别处加了一条：详情栏那一节跟着走
-            DaemonEvent::InboxChanged { path } => {
-                // 两边都去尾斜杠再比（与未读同一个口径）：daemon 发的是 realpath 过的
-                if self.current_project_path().as_deref() == Some(path.trim_end_matches('/')) {
-                    self.refresh_inbox(cx);
-                }
-            }
+            // 收件箱是手机那一侧的入口（mac 上直接说话），这边不画也就不用跟
+            DaemonEvent::InboxChanged { .. } => {}
             DaemonEvent::Unknown => {}
         }
     }
@@ -974,9 +958,8 @@ impl RootView {
         self.page = Page::Session(id.clone());
         self.pending_focus = Some(id.clone());
         self.reassert_visible_size(cx);
-        // 详情面板开着就把这个会话的产物 / 改动 / 收件箱补齐
+        // 详情面板开着就把这个会话的产物 / 改动补齐
         self.refresh_detail(&id, cx);
-        self.refresh_inbox(cx);
         cx.notify();
     }
 

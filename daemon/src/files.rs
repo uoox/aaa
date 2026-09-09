@@ -26,7 +26,7 @@ pub struct Entry {
     pub dir: bool,
     pub size: u64,
     pub mtime: f64,
-    /// markdown | text | binary（目录为空串）。客户端据此决定点开是渲染还是等宽显示。
+    /// markdown | html | text | binary（目录为空串）。客户端据此决定点开怎么显示。
     pub kind: &'static str,
 }
 
@@ -41,6 +41,9 @@ pub fn kind_of(name: &str) -> &'static str {
         .to_ascii_lowercase();
     match ext.as_str() {
         "md" | "markdown" | "mdx" => "markdown",
+        // html 单列一类：客户端要么渲染（Android 有 WebView），要么交给系统默认程序
+        // （mac 上文件就在本机，`open` 一下就是浏览器）。正文照旧当文本给，看源码也行
+        "html" | "htm" => "html",
         // 二进制的常见几类：点开只报大小，不灌乱码
         "png" | "jpg" | "jpeg" | "gif" | "webp" | "heic" | "ico" | "pdf" | "zip" | "gz"
         | "tar" | "bz2" | "xz" | "7z" | "rar" | "mp3" | "mp4" | "mov" | "wav" | "m4a"
@@ -114,7 +117,7 @@ pub struct FileBody {
 }
 
 /// 读一个文件的正文。后缀说是二进制的、或者读出来不是合法 UTF-8 的，
-/// 都只报大小（`kind:"binary"`，`text` 空）。
+/// 都只报大小（`kind:"binary"`，`text` 空）。html 与 markdown 一样按文本读出来。
 pub fn read_file(path: &Path) -> std::io::Result<FileBody> {
     use std::io::Read;
     let md = std::fs::metadata(path)?;
@@ -211,6 +214,10 @@ mod tests {
     #[test]
     fn read_handles_markdown_binary_and_truncation() {
         let root = tmp("read");
+        std::fs::write(root.join("page.html"), b"<h1>hi</h1>").unwrap();
+        let html = read_file(&root.join("page.html")).unwrap();
+        assert_eq!((html.kind, html.text.as_str()), ("html", "<h1>hi</h1>"), "html 是单独一类，正文照给");
+
         std::fs::write(root.join("a.md"), "# 标题\n正文".as_bytes()).unwrap();
         let md = read_file(&root.join("a.md")).unwrap();
         assert_eq!((md.kind, md.text.as_str(), md.truncated), ("markdown", "# 标题\n正文", false));

@@ -536,21 +536,24 @@ impl RootView {
         }
     }
 
-    pub(super) fn restart_daemon(&mut self, force: bool, cx: &mut Context<Self>) {
+    /// 重启 daemon：**跑的是 `aaa-daemon service restart` 这个命令，不是 REST**
+    /// （2026-09-10 用户拍板）。REST 那条路的前提是「daemon 还活着」，它关掉之后
+    /// 按钮就再也点不动了——而「它关掉了」正是最需要这个按钮的时候。命令自己会
+    /// 判断：它还答话就走 REST 的 force 重启（活着的会话记下来、起来后自动 resume），
+    /// 不答话就交给 launchd 拉起。`force` 在这里只用来决定要不要先弹确认框。
+    pub(super) fn restart_daemon(&mut self, _force: bool, cx: &mut Context<Self>) {
         self.modal = Modal::None;
-        let net = self.net.clone();
-        // 不走 spawn_fetch：失败要说的是「重启失败：…」，spawn_fetch 只会把
-        // 原始错误原样弹出来——这里的措辞是给人看的，不能丢
+        // exec 期间连接会断一下；先置成连接中，重连逻辑自己接上
+        self.conn = super::ConnState::Connecting;
+        self.health = None;
         cx.spawn(async move |this, cx| {
-            let res = net.restart_daemon(force).await;
+            let res = cx
+                .background_executor()
+                .spawn(async { crate::net::run_daemon_restart() })
+                .await;
             let _ = this.update(cx, |r, cx| {
-                match res {
-                    Ok(_) => {
-                        // exec 期间连接会断一下；置成连接中，重连逻辑自己接上
-                        r.conn = super::ConnState::Connecting;
-                        r.health = None;
-                    }
-                    Err(e) => r.set_error(format!("重启失败：{e}"), cx),
+                if let Err(e) = res {
+                    r.set_error(format!("重启失败：{e}"), cx);
                 }
                 cx.notify();
             });

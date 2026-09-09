@@ -2,7 +2,6 @@
 //!
 //! 面板五段：会话用量（模型 / 上下文条 / 费用 / 行数 / 时长）、产物（发布过的
 //! Artifact，点开浏览器）、改动（start 检查点 vs 工作区，可展开 patch、可回滚）、
-//! 收件箱（项目任务清单，Claude 空下来时 daemon 自动喂）。
 //!
 //! 拉取节流：整个面板共用一个 [`Throttle`]——`messages_changed` 帧来得很密
 //! （daemon 侧 ≥500ms 一帧），这里按「间隔内最多一次、间隔末尾补一次」收口：
@@ -21,7 +20,7 @@ use gpui::{Context, SharedString, div, prelude::*, px, relative};
 use super::kit::*;
 use super::{Page, RootView};
 use crate::model::{
-    Artifact, InboxEntry, PlanUsage, Session, SessionDetailResponse, SessionUsage,
+    Artifact, PlanUsage, Session, SessionDetailResponse, SessionUsage,
 };
 use crate::theme::{self, human_bytes};
 
@@ -343,45 +342,14 @@ impl RootView {
         );
     }
 
-    /// 当前会话所属项目的路径（收件箱按项目排，不按会话）。**去尾斜杠**再用：
-    /// daemon 的 `inbox_changed` 发的是 realpath 过的路径，而会话行上的可能带尾斜杠，
-    /// 裸字符串比会把事件丢掉，`inbox` 那张表也会存成两份（与未读同一个口径）。
+    /// 当前会话所属项目的路径。**去尾斜杠**再用：daemon 发的路径是 realpath 过的，
+    /// 而会话行上的可能带尾斜杠，裸字符串比会把 `/p/a` 和 `/p/a/` 当成两个项目
+    /// （与未读黄点同一个口径）。
     pub(super) fn current_project_path(&self) -> Option<String> {
         let Page::Session(id) = &self.page else { return None };
         self.session(id)
             .map(|s| s.project_path.trim_end_matches('/').to_string())
             .filter(|p| !p.is_empty())
-    }
-
-    pub(super) fn refresh_inbox(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = self.current_project_path() else { return };
-        let key = path.clone();
-        self.spawn_fetch(
-            self.net.inbox_list(&path),
-            move |r, list: Vec<InboxEntry>, cx| {
-                r.inbox.insert(key.clone(), list);
-                cx.notify();
-            },
-            false,
-            cx,
-        );
-    }
-
-    /// 输入框回车：排进队列。乐观清空输入框——失败会弹错，字还在 daemon 那边没进去
-    pub(super) fn submit_inbox(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = self.current_project_path() else { return };
-        let text = self.inbox_input.read(cx).text().trim().to_string();
-        if text.is_empty() {
-            return;
-        }
-        self.inbox_input.update(cx, |i, cx| i.set_text(String::new(), cx));
-        let fut = self.net.inbox_add(path, text);
-        self.spawn_fetch(fut, |r, _: serde_json::Value, cx| r.refresh_inbox(cx), true, cx);
-    }
-
-    fn drop_inbox(&mut self, id: String, cx: &mut Context<Self>) {
-        let fut = self.net.inbox_delete(&id);
-        self.spawn_fetch(fut, |r, _: serde_json::Value, cx| r.refresh_inbox(cx), true, cx);
     }
 
     // ── 渲染 ────────────────────────────────────────────────────────────
@@ -586,11 +554,7 @@ impl RootView {
             .child(Self::section_n("已上传", ex.uploads.len(), self.render_uploads(ex, &now, cx)))
             .child(Self::section_n("产物", d.map(|d| d.artifacts.len()).unwrap_or(0), self.render_artifacts_section(d, &now, cx)))
             .child(Self::section_n("已使用技能", ex.skills.len(), self.render_skills(ex, &now, cx)))
-            .child(Self::section_n(
-                "收件箱",
-                self.current_project_path().and_then(|p| self.inbox.get(&p)).map(Vec::len).unwrap_or(0),
-                self.render_inbox_section(cx),
-            ));
+            ;
 
         Some(
             div()
@@ -928,53 +892,6 @@ impl RootView {
             })
             .collect();
         self.detail_rows(rows, "这个会话还没用过技能", cx)
-    }
-
-    /// 收件箱 = 这个项目排着的几句话。agent 每跑完一轮空下来，daemon 自动喂下一句
-    /// （`feed.rs`）。**它一直在 daemon 里跑着，只是两端谁都没给过入口**——v1.15 mac
-    /// 把这一节删了，Android 压根没做过，于是这个队列从来没人能往里加东西。
-    fn render_inbox_section(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let entries = self
-            .current_project_path()
-            .and_then(|p| self.inbox.get(&p))
-            .cloned()
-            .unwrap_or_default();
-        let mut col = div().flex().flex_col().gap(px(4.));
-        for (i, e) in entries.iter().enumerate() {
-            let id = e.id.clone();
-            col = col.child(
-                div()
-                    .flex()
-                    .items_start()
-                    .gap(px(6.))
-                    .child(meta().flex_none().w(px(14.)).child(SharedString::from(format!("{}.", i + 1))))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .text_size(px(12.))
-                            .text_color(c(theme::INK))
-                            .child(SharedString::from(e.text.clone())),
-                    )
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("inbox-x-{}", e.id)))
-                            .flex_none()
-                            .px(px(3.))
-                            .rounded(px(4.))
-                            .text_size(px(10.))
-                            .text_color(c(theme::FAINT))
-                            .cursor_pointer()
-                            .hover(|st| st.text_color(c(theme::RED)).bg(c(theme::EDGE_LIGHT)))
-                            .on_click(cx.listener(move |this, _, _, cx| this.drop_inbox(id.clone(), cx)))
-                            .child("✕"),
-                    ),
-            );
-        }
-        if entries.is_empty() {
-            col = col.child(Self::empty_hint("队列是空的：排一句话，它跑完这一轮就自己接上"));
-        }
-        col.child(div().mt(px(6.)).child(self.inbox_input.clone()))
     }
 
     /// 侧栏最底部的套餐用量块；plan 为 null / 没有任何窗口有数就整块不画
