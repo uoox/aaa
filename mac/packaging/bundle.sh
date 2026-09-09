@@ -107,7 +107,12 @@ install_app() {
     rm -rf "$dest"
     ditto "$APP" "$dest"
     codesign --verify --strict "$dest"
-    echo "==> 已安装。提示：重新构建安装后 ad-hoc 签名变化，此前授予的 TCC 权限会失效。"
+    if [ "${SIGN_ID}" = "-" ]; then
+        echo "==> 已安装。提示：这次是 ad-hoc 签名，重装之后此前授予的 TCC 权限会失效——"
+        echo "    做一张「AAA Local Signing」自签证书就不会（见 daemon/README.md）。"
+    else
+        echo "==> 已安装（${SIGN_ID} 签名，代码身份不变，TCC 权限跨重装保留）。"
+    fi
     echo "    启动：open -a \"$APP_NAME\""
 }
 
