@@ -2,9 +2,11 @@
 //! parse it into a structured message list (mobile main view).
 //!
 //! claude: full support (user/assistant/tool_use/tool_result/thinking, filters
-//! isSidechain/isMeta and injected blocks). 只有 claude 有可跟读的 transcript：
-//! agy 的对话存在 SQLite 里、shell 压根没有存储，两者一律 `supported:false`，
-//! 客户端据此回落到终端画面。
+//! isSidechain/isMeta and injected blocks). agy 与 shell 目前一律 `supported:false`，
+//! 客户端据此回落到终端画面。**agy 不是没有 transcript**：它的 statusLine 负载里带
+//! `transcript_path`，指向 `brain/<对话id>/.system_generated/logs/transcript.jsonl`，
+//! 每行一条 `{step_index, source, type, status, created_at, content}`，能跟读——
+//! 缺的只是一个解析器（见 PROTOCOL「Agent 表」）。
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
