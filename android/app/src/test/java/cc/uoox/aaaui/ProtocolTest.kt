@@ -181,11 +181,8 @@ class ProtocolTest {
         val mc = EventFrame.parse("""{"t":"messages_changed","id":"s_4","last_seq":99}""")
         assertTrue(mc is EventFrame.MessagesChanged && mc.id == "s_4" && mc.lastSeq == 99L)
 
-        // inbox_changed：v1.28 收件箱有入口了，详情屏那一节据此重拉
-        val ic = EventFrame.parse("""{"t":"inbox_changed","path":"/p/x"}""")
-        assertTrue(ic is EventFrame.InboxChanged && ic.path == "/p/x")
-
-        // 2026-09-02 移除的帧：老 daemon 还会发，当未知帧忽略
+        // 2026-09-10 移除入口的帧（收件箱）与 2026-09-02 移除的帧：daemon 照发，当未知帧忽略
+        assertTrue(EventFrame.parse("""{"t":"inbox_changed","path":"/p/x"}""") is EventFrame.Unknown)
         assertTrue(EventFrame.parse("""{"t":"session_stalled","id":"s_5","quiet_s":900}""") is EventFrame.Unknown)
 
         assertTrue(EventFrame.parse("""{"t":"future_frame","x":1}""") is EventFrame.Unknown)

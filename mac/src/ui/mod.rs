@@ -1,7 +1,7 @@
 //! UI 根视图：侧栏（唯一的会话切换入口）+ 页面区 + 状态栏 + 模态框。
 
 mod detail_panel;
-mod files_view;
+mod doc_view;
 mod history;
 mod kit;
 mod messages_view;
@@ -26,7 +26,7 @@ use crate::model::*;
 use crate::net::{ConnState, Net, UiEvent};
 use crate::theme;
 use kit::*;
-use files_view::FilesView;
+use doc_view::DocView;
 use messages_view::MessagesView;
 use mini_input::MiniInput;
 use terminal_view::TerminalView;
@@ -42,14 +42,16 @@ pub enum Page {
     History,
 }
 
-/// 一条会话的三种看法（v1.30 加了「浏览」）。终端是**兜底那一个**：消息流可能
-/// 不支持（shell / 老 daemon），浏览要项目目录，终端永远画得出来。
+/// 一条会话的看法。**只有两种可以切**：终端与消息流；`Doc` 是详情栏里点开一份
+/// 产物 Markdown 时的临时状态，不进 ⌘E 的轮换（v1.35 删掉「浏览」时一并改的）。
+/// 终端是**兜底那一个**：消息流可能不支持（shell / 老 daemon），终端永远画得出来。
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum SessionView {
     #[default]
     Terminal,
     Messages,
-    Files,
+    /// 正在读一份产物 Markdown（详情栏「产物」点进来的）
+    Doc,
 }
 
 impl SessionView {
@@ -57,24 +59,21 @@ impl SessionView {
         match self {
             SessionView::Terminal => "终端",
             SessionView::Messages => "消息流",
-            SessionView::Files => "浏览",
+            SessionView::Doc => "产物",
         }
     }
 }
 
-/// ⌘E 的轮换顺序：终端 → 消息流 → 浏览 → 终端。`msgs` 为 false（shell、
-/// 老 daemon、探明不支持）时跳过消息流那一档——切到一个画不出来的视图，
-/// 用户按下去只会看见终端，还以为快捷键坏了。
+/// ⌘E 的轮换：终端 ⇄ 消息流。`msgs` 为 false（shell、老 daemon、探明不支持）时
+/// 哪儿也不去——切到一个画不出来的视图，用户按下去只会看见终端，还以为快捷键坏了。
+/// 正在读产物时按 ⌘E 回到消息流（读不了消息流的会话回终端）：那一屏是从详情栏
+/// 点进来的岔路，⌘E 的语义是「回到会话本身」。
 pub fn next_view(cur: SessionView, msgs: bool) -> SessionView {
-    let order = [SessionView::Terminal, SessionView::Messages, SessionView::Files];
-    let i = order.iter().position(|v| *v == cur).unwrap_or(0);
-    for step in 1..=order.len() {
-        let cand = order[(i + step) % order.len()];
-        if cand != SessionView::Messages || msgs {
-            return cand;
-        }
+    match cur {
+        _ if !msgs => SessionView::Terminal,
+        SessionView::Messages => SessionView::Terminal,
+        SessionView::Terminal | SessionView::Doc => SessionView::Messages,
     }
-    SessionView::Terminal
 }
 
 /// 关掉 `closed` 之后停在哪一页：只有关的正是当前页才换页，换到剩下的最近一个
@@ -362,10 +361,11 @@ pub struct RootView {
     /// （随后的 exited 帧不再重复删），session_removed 时清掉
     deleted_terminals: HashSet<String>,
 
-    // 会话的三种看法（⌘E 轮换，状态栏也能直接点）：视图按需创建，
-    // 没记过的会话默认终端——它永远画得出来
+    // 会话的两种看法（⌘E 轮换，状态栏也能直接点）：视图按需创建，
+    // 没记过的会话默认终端——它永远画得出来。`doc_views` 是详情栏点开一份产物
+    // Markdown 时那一屏，不在轮换里
     msg_views: HashMap<String, Entity<MessagesView>>,
-    files_views: HashMap<String, Entity<FilesView>>,
+    doc_views: HashMap<String, Entity<DocView>>,
     view_mode: HashMap<String, SessionView>,
 
     /// 详情栏里点开了的那几行（`sub:<i>` / `bg:<i>`）：**只预览**，没有干预的口子
@@ -403,7 +403,7 @@ pub struct RootView {
     detail: HashMap<String, detail_panel::SessionDetail>,
 
     // 输入框
-    /// 侧栏顶部的新建项目输入框：内容即文件夹名，回车 / ＋ 创建
+    /// 项目列表末尾那一行的输入框：内容即文件夹名，回车创建
     pub new_input: Entity<MiniInput>,
     /// 正在 POST /projects + /sessions：挡住第二次回车
     pub creating: bool,
@@ -482,7 +482,9 @@ impl RootView {
 
         let ui_state = UiState::load();
 
-        let new_input = cx.new(|cx| MiniInput::new(cx, "新建项目：文件夹名，回车"));
+        // 不画框（`bare`）：这一行要长得就是一个项目行，一个带底的输入框摆在
+        // 项目中间只会显得它不属于这张列表
+        let new_input = cx.new(|cx| MiniInput::new(cx, "＋ 新建项目：文件夹名，回车").bare());
         let name_input = cx.new(|cx| MiniInput::new(cx, "新名字"));
         let host_input = cx.new(|cx| MiniInput::new(cx, "127.0.0.1"));
         let port_input = cx.new(|cx| MiniInput::new(cx, "2730"));
@@ -521,7 +523,7 @@ impl RootView {
             active_terminal: None,
             deleted_terminals: HashSet::new(),
             msg_views: HashMap::new(),
-            files_views: HashMap::new(),
+            doc_views: HashMap::new(),
             view_mode: HashMap::new(),
             detail_open: HashSet::new(),
             user_killed: HashSet::new(),
@@ -616,7 +618,7 @@ impl RootView {
                 self.sessions.retain(|s| s.id != id);
                 self.terminals.remove(&id);
                 self.msg_views.remove(&id);
-                self.files_views.remove(&id);
+                self.doc_views.remove(&id);
                 self.view_mode.remove(&id);
                 self.open_order.retain(|x| x != &id);
                 self.user_killed.remove(&id);
@@ -684,17 +686,13 @@ impl RootView {
                         v.request_focus(cx);
                     });
             }
-            SessionView::Files => {
-                let net = self.net.clone();
-                let dir = self.session(&id).map(|s| s.project_path.clone()).unwrap_or_default();
-                match self.files_views.entry(id.clone()) {
-                    std::collections::hash_map::Entry::Occupied(e) => {
-                        // 会话换过项目（resume 到别处）时把浏览器指到新目录
-                        e.get().update(cx, |v, cx| v.set_dir(dir, cx));
-                    }
-                    std::collections::hash_map::Entry::Vacant(e) => {
-                        e.insert(cx.new(|cx| FilesView::new(net, dir, cx)));
-                    }
+            // 产物那一屏由 `open_doc` 建好之后才切进来；直接切这里（比如恢复上次
+            // 的视图）而它还不在，就当没有这一档，回终端
+            SessionView::Doc => {
+                if !self.doc_views.contains_key(&id) {
+                    self.view_mode.insert(id, SessionView::Terminal);
+                    cx.notify();
+                    return;
                 }
             }
         }
@@ -992,7 +990,7 @@ impl RootView {
     pub fn close_tab(&mut self, id: &str, cx: &mut Context<Self>) {
         self.terminals.remove(id);
         self.msg_views.remove(id);
-        self.files_views.remove(id);
+        self.doc_views.remove(id);
         self.view_mode.remove(id);
         self.open_order.retain(|x| x != id);
         self.page = page_after_close(&self.page, id, &self.open_order);
@@ -1152,7 +1150,7 @@ impl RootView {
         self.health.as_ref().is_some_and(|h| h.schema < SCHEMA_MIN)
     }
 
-    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_sidebar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let (conn_color, conn_text) = match self.conn {
             ConnState::Connected => (
                 theme::GREEN,
@@ -1176,7 +1174,6 @@ impl RootView {
             .flex_col()
             .overflow_hidden() // 拖窄时标题按 ellipsis 收，不许挤出侧栏
             .bg(c(theme::SURFACE))
-            .child(self.render_new_project_row(cx))
             .when(self.schema_too_old(), |el| el.child(self.render_schema_banner()))
             .child(
                 div()
@@ -1185,7 +1182,7 @@ impl RootView {
                     .min_h(px(0.))
                     .overflow_y_scroll()
                     .pt(px(4.))
-                    .child(self.render_sidebar_list(cx)),
+                    .child(self.render_sidebar_list(window, cx)),
             )
             // 会话日志入口
             .child(self.render_history_entry(cx))
@@ -1200,13 +1197,18 @@ impl RootView {
     ///   整行淡底色说状态：淡蓝 = 在跑 / 淡黄 = 未读 / 无底 = 已读（2026-09-10 用户拍板，竖线也去掉了）。
     ///   问题本身不在侧栏画：进消息流，表单原生呈现、原地作答。exited 会话不代表项目
     ///   （点一下 resume）；终端（shell）不在这里（归终端面板）。
-    fn render_sidebar_list(&self, cx: &mut Context<Self>) -> gpui::Div {
+    fn render_sidebar_list(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
         let rows = project_rows(&self.projects, &self.sessions, &self.unread_projects);
         let now = chrono::Local::now();
         let mut list_col = div().flex().flex_col().gap(px(1.));
         for row in rows {
             list_col = list_col.child(self.render_project_row(row, now, cx));
         }
+        // 新建项目就排在项目列表的末尾，长得和项目行一模一样（2026-09-10 用户拍板：
+        // 「加号去掉，仅回车」「放在『点一行进入消息流·长按查看项目操作』那个位置，
+        // 样式和项目列表的项目一样」）。它以前在侧栏顶上、是一个带 ＋ 的输入框——
+        // 那既不是导航的一部分，又天天占着最上面那一行。
+        list_col = list_col.child(self.render_new_project_row(window, cx));
         // 终端与对话同级（2026-09-08 用户拍板）：终端不再是侧栏底部通往标签页的
         // 一个入口，而是接着项目行排在同一列里，点一行就是那一个终端。
         list_col.child(self.render_terminal_rows(cx))
@@ -1304,68 +1306,44 @@ impl RootView {
         el
     }
 
-    /// 侧栏顶上的新建项目行：输入框（字即文件夹名，回车或 ＋ 创建；⌘N 把光标放进来）
-    /// + agent 轮换小标（装了不止一个 agent 时才出现）
-    fn render_new_project_row(&self, cx: &mut Context<Self>) -> gpui::Div {
-        div()
-            .mt(px(10.))
-            .mb(px(4.))
-            .mx(px(8.))
-            .flex()
-            .items_center()
-            .gap(px(6.))
-            .child(div().flex_1().min_w(px(0.)).child(self.new_input.clone()))
-            // 新项目开谁：点一下在装了的 agent 之间轮换。只有一个可用就不画
-            .when_some(self.next_agent(&self.new_agent), |el, next| {
-                el.child(
-                    div()
-                        .id("sb-new-agent")
-                        .flex_none()
-                        .h(px(28.))
-                        .w(px(28.))
-                        .rounded(px(6.))
-                        .border_1()
-                        .border_color(c(theme::EDGE_LIGHT))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .cursor_pointer()
-                        .text_size(px(12.))
-                        .text_color(c(theme::DIM))
-                        .hover(|st| st.border_color(c(theme::ACCENT)).text_color(c(theme::ACCENT)))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.new_agent = next.clone();
-                            cx.notify();
-                        }))
-                        // 首字母，和项目行的小标同一套写法：侧栏最窄 180px，
-                        // 一个「Antigravity」就把输入框挤没了
-                        .child(SharedString::from(
-                            self.agent_label(&self.new_agent).chars().next().unwrap_or('?').to_string(),
-                        )),
-                )
-            })
-            .child(
-                div()
-                    .id("sb-new")
-                    .flex_none()
-                    .h(px(28.))
-                    .w(px(28.))
-                    .rounded(px(6.))
-                    .border_1()
-                    .border_color(c(theme::EDGE_LIGHT))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor_pointer()
-                    .hover(|st| st.bg(c(theme::SURFACE_RAISED)).border_color(c(theme::ACCENT)))
-                    .on_click(cx.listener(|this, _, _, cx| this.create_project(cx)))
-                    .child(
-                        div()
-                            .text_size(px(14.))
-                            .text_color(c(if self.creating { theme::FAINT } else { theme::ACCENT }))
-                            .child(if self.creating { "…" } else { "＋" }),
-                    ),
-            )
+    /// 项目列表末尾那一行：新建项目。**长得就是一个项目行**——同样的 `sidebar_row`
+    /// 骨架、同样的字号，只是标题那一格是可以打字的（字即文件夹名，**回车创建**；
+    /// ⌘N 把光标放进来）。行尾是 agent 轮换小标（装了不止一个 agent 时才出现），
+    /// 位置正对着项目行的「✕ / 删」。
+    ///
+    /// 没有 ＋（2026-09-10 用户拍板「新建项目加号去掉，仅回车」）：一个按钮和一个
+    /// 回车是同一件事的两个入口，而那个按钮把这一行撑得比项目行高。
+    fn render_new_project_row(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
+        // 光标在这一行里 = 整行一圈强调色边框，和「当前打开的那个项目」同一套语言。
+        // 不画的话（bare 的输入框自己没有框）只剩一根一像素的光标在闪，看不出焦点在哪
+        let focused = self.new_input.read(cx).focus_handle.is_focused(window);
+        div().pt(px(2.)).child(
+            sidebar_row("sb-new".into())
+                .when(focused, |el| el.border_color(c(theme::ACCENT)))
+                .hover(|st| st.bg(c(theme::SURFACE_RAISED)))
+                .on_click(cx.listener(|this, _, window, cx| this.focus_new_project(window, cx)))
+                .child(div().flex_1().min_w(px(0.)).child(self.new_input.clone()))
+                .when(self.creating, |el| {
+                    el.child(meta().flex_none().child("…"))
+                })
+                // 新项目开谁：点一下在装了的 agent 之间轮换。只有一个可用就不画
+                .when_some(self.next_agent(&self.new_agent), |el, next| {
+                    el.child(
+                        row_btn("sb-new-agent")
+                            .hover(|st| st.text_color(c(theme::ACCENT)).bg(c(theme::EDGE_LIGHT)))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.new_agent = next.clone();
+                                cx.notify();
+                            }))
+                            // 首字母，和项目行的小标同一套写法：侧栏最窄 180px，
+                            // 一个「Antigravity」就把输入框挤没了
+                            .child(SharedString::from(
+                                self.agent_label(&self.new_agent).chars().next().unwrap_or('?').to_string(),
+                            )),
+                    )
+                }),
+        )
     }
 
     /// schema 闸门（PROTOCOL「版本兼容」）：老 daemon 不下发项目状态，客户端
@@ -1554,8 +1532,13 @@ impl RootView {
                             .flex()
                             .items_center()
                             .gap(px(2.))
-                            .children([SessionView::Terminal, SessionView::Messages, SessionView::Files].into_iter().filter_map(|v| {
+                            .children([SessionView::Terminal, SessionView::Messages, SessionView::Doc].into_iter().filter_map(|v| {
                                 if v == SessionView::Messages && !msgs_ok {
+                                    return None;
+                                }
+                                // 「产物」那一格只在真的读着一份的时候才画：它不是
+                                // 一种常在的看法，是从详情栏点进来的岔路
+                                if v == SessionView::Doc && cur != SessionView::Doc {
                                     return None;
                                 }
                                 let sid = sid.clone();
@@ -1564,7 +1547,7 @@ impl RootView {
                                         match v {
                                             SessionView::Terminal => "view-term",
                                             SessionView::Messages => "view-msgs",
-                                            SessionView::Files => "view-files",
+                                            SessionView::Doc => "view-doc",
                                         },
                                         v.label(),
                                         if v == cur { theme::ACCENT } else { theme::FAINT },
@@ -1694,7 +1677,7 @@ impl Render for RootView {
                     // 终端也没有才是「会话未打开」
                     let body: Option<gpui::AnyElement> = match self.view_of(&id, cx) {
                         SessionView::Messages => self.msg_views.get(&id).cloned().map(IntoElement::into_any_element),
-                        SessionView::Files => self.files_views.get(&id).cloned().map(IntoElement::into_any_element),
+                        SessionView::Doc => self.doc_views.get(&id).cloned().map(IntoElement::into_any_element),
                         SessionView::Terminal => None,
                     }
                     .or_else(|| self.terminals.get(&id).cloned().map(IntoElement::into_any_element));
@@ -1761,7 +1744,7 @@ impl Render for RootView {
             .text_color(c(theme::INK))
             .text_size(px(13.))
             .on_key_down(cx.listener(Self::on_root_key))
-            .child(self.render_sidebar(cx))
+            .child(self.render_sidebar(window, cx))
             .child(self.render_sidebar_resizer(cx))
             .child(main)
             // 会话页右侧的详情面板（⌘I；只在会话页且展开时存在）
@@ -1814,17 +1797,17 @@ mod tests {
         assert_eq!(relative_time("2026-09-08T12:00:30Z", now), "刚刚");
     }
 
-    /// ⌘E 的轮换：终端 → 消息流 → 浏览 → 终端；没有消息流的会话（shell、老 daemon）
-    /// 跳过那一档，两下就回到终端。
+    /// ⌘E：终端 ⇄ 消息流。没有消息流的会话（shell、老 daemon）哪儿也不去；
+    /// 正读着一份产物时它是「回到会话本身」。
     #[test]
     fn view_cycle_skips_what_cannot_be_drawn() {
         use SessionView::*;
         assert_eq!(next_view(Terminal, true), Messages);
-        assert_eq!(next_view(Messages, true), Files);
-        assert_eq!(next_view(Files, true), Terminal);
-        assert_eq!(next_view(Terminal, false), Files, "没有消息流就直接到浏览");
-        assert_eq!(next_view(Files, false), Terminal);
-        assert_eq!(next_view(Messages, false), Files, "记着消息流却已不支持：往下走，不卡住");
+        assert_eq!(next_view(Messages, true), Terminal);
+        assert_eq!(next_view(Doc, true), Messages, "读产物时 ⌘E 回会话");
+        assert_eq!(next_view(Terminal, false), Terminal, "没有消息流就没得切");
+        assert_eq!(next_view(Messages, false), Terminal, "记着消息流却已不支持：回终端，不卡住");
+        assert_eq!(next_view(Doc, false), Terminal);
     }
 
     #[test]

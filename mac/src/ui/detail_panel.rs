@@ -20,8 +20,9 @@ use gpui::{Context, SharedString, div, prelude::*, px, relative};
 use super::kit::*;
 use super::{Page, RootView};
 use crate::model::{
-    Artifact, PlanUsage, Session, SessionDetailResponse, SessionUsage,
+    Artifact, Doc, PlanUsage, Session, SessionDetailResponse, SessionUsage,
 };
+use super::doc_view::human_size;
 use crate::theme::{self, human_bytes};
 
 /// 面板宽度
@@ -157,6 +158,22 @@ where
     })
 }
 
+/// Markdown 的改动时间：`mtime` 是 epoch 秒，走同一套「今天给时分，别的给月日」。
+pub(super) fn fmt_epoch_time<Tz: TimeZone>(mtime: f64, now: &DateTime<Tz>, tz: &Tz) -> Option<String>
+where
+    Tz::Offset: std::fmt::Display,
+{
+    if mtime <= 0.0 {
+        return None;
+    }
+    let t = DateTime::from_timestamp(mtime as i64, 0)?.with_timezone(tz);
+    Some(if t.date_naive() == now.date_naive() {
+        t.format("%H:%M").to_string()
+    } else {
+        format!("{}月{}日", t.month(), t.day())
+    })
+}
+
 /// 时长人话：`45 秒` / `3 分 12 秒` / `1 小时 5 分` / `2 天 3 小时`
 pub(super) fn humanize_ms(ms: u64) -> String {
     let s = ms / 1000;
@@ -232,6 +249,8 @@ where
 
 pub(super) struct SessionDetail {
     pub artifacts: Vec<Artifact>,
+    /// v1.35：项目里的 Markdown，与上面的链接同排在「产物」一节（老 daemon 不给 → 空）
+    pub docs: Vec<Doc>,
     /// `GET /sessions/:id/detail` 的结果；老 daemon 404 时留空表
     pub extras: SessionDetailResponse,
     /// 两样一起拉，一个节流器管着
@@ -242,6 +261,7 @@ impl Default for SessionDetail {
     fn default() -> Self {
         SessionDetail {
             artifacts: Vec::new(),
+            docs: Vec::new(),
             extras: SessionDetailResponse::default(),
             fetch: Throttle::new(DETAIL_MIN),
         }
@@ -310,7 +330,10 @@ impl RootView {
             move |r, resp: crate::model::ArtifactsResponse, cx| {
                 let mut list = resp.artifacts;
                 sort_artifacts_newest_first(&mut list);
-                r.detail.entry(sid).or_default().artifacts = list;
+                let d = r.detail.entry(sid).or_default();
+                d.artifacts = list;
+                // docs 的顺序由 daemon 定（最近改的在前），这边不再排一遍
+                d.docs = resp.docs;
                 cx.notify();
             },
             false,
@@ -350,6 +373,27 @@ impl RootView {
         self.session(id)
             .map(|s| s.project_path.trim_end_matches('/').to_string())
             .filter(|p| !p.is_empty())
+    }
+
+    /// 详情栏「产物」里点开一份项目 Markdown：正文铺在会话区（[`super::doc_view::DocView`]），
+    /// 状态栏多出「产物」那一格，⌘E 或点「消息流 / 终端」就回来。
+    pub(super) fn open_doc(&mut self, path: String, cx: &mut Context<Self>) {
+        let Page::Session(id) = self.page.clone() else { return };
+        let root = self.current_project_path().unwrap_or_default();
+        let net = self.net.clone();
+        match self.doc_views.entry(id.clone()) {
+            std::collections::hash_map::Entry::Occupied(e) => {
+                e.get().update(cx, |v, cx| {
+                    v.set_root(root);
+                    v.open_file(path, cx);
+                });
+            }
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(cx.new(|cx| super::doc_view::DocView::new(net, root, path, cx)));
+            }
+        }
+        self.view_mode.insert(id, super::SessionView::Doc);
+        cx.notify();
     }
 
     // ── 渲染 ────────────────────────────────────────────────────────────
@@ -552,7 +596,8 @@ impl RootView {
             .child(Self::section_n("子代理", ex.subagents.len(), self.render_subagents(ex, &now, cx)))
             .child(Self::section_n("后台任务", ex.background_tasks.len(), self.render_background(ex, &now, cx)))
             .child(Self::section_n("已上传", ex.uploads.len(), self.render_uploads(ex, &now, cx)))
-            .child(Self::section_n("产物", d.map(|d| d.artifacts.len()).unwrap_or(0), self.render_artifacts_section(d, &now, cx)))
+            // 计数是「这一节里有几行」：链接与 Markdown 都算（与 Android 同一口径）
+            .child(Self::section_n("产物", d.map(|d| d.artifacts.len() + d.docs.len()).unwrap_or(0), self.render_artifacts_section(d, &now, cx)))
             .child(Self::section_n("已使用技能", ex.skills.len(), self.render_skills(ex, &now, cx)))
             ;
 
@@ -749,6 +794,8 @@ impl RootView {
         col.child(stats)
     }
 
+    /// 产物一节（v1.35 起是两样东西）：会话**发布过**的 Artifact 链接，
+    /// 再接上这个**项目**里的 Markdown。点链接进浏览器，点 Markdown 就在会话区读。
     fn render_artifacts_section(
         &self,
         d: Option<&SessionDetail>,
@@ -756,8 +803,9 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         let list: &[Artifact] = d.map(|d| d.artifacts.as_slice()).unwrap_or(&[]);
-        if list.is_empty() {
-            return Self::empty_hint("这个会话还没有发布产物");
+        let docs: &[Doc] = d.map(|d| d.docs.as_slice()).unwrap_or(&[]);
+        if list.is_empty() && docs.is_empty() {
+            return Self::empty_hint("这个项目还没有产物：发布过的链接和写出来的 Markdown 都会排在这里");
         }
         let mut col = div().flex().flex_col().gap(px(2.));
         for (ix, a) in list.iter().enumerate() {
@@ -765,49 +813,70 @@ impl RootView {
             let time = fmt_artifact_time(&a.ts, now, &chrono::Local).unwrap_or_default();
             let title = if a.title.is_empty() { a.url.clone() } else { a.title.clone() };
             col = col.child(
-                div()
-                    .id(("artifact", ix))
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.))
-                    .px(px(8.))
-                    .py(px(6.))
-                    .mx(px(-8.))
-                    .rounded(px(6.))
-                    .cursor_pointer()
-                    .hover(|st| st.bg(c(theme::SURFACE_RAISED)))
-                    .on_click(cx.listener(move |_, _, _, cx| cx.open_url(&url)))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .truncate()
-                                    .text_size(px(12.))
-                                    .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(c(theme::INK))
-                                    .child(SharedString::from(title)),
-                            )
-                            .child(
-                                meta().flex_none()
-                                    .child(SharedString::from(time)),
-                            ),
-                    )
-                    .when(!a.description.is_empty(), |el| {
-                        el.child(
-                            div()
-                                .line_clamp(2)
-                                .text_size(px(11.))
-                                .text_color(c(theme::DIM))
-                                .child(SharedString::from(a.description.clone())),
-                        )
-                    }),
+                Self::artifact_row(("artifact", ix), title, a.description.clone(), time)
+                    .on_click(cx.listener(move |_, _, _, cx| cx.open_url(&url))),
+            );
+        }
+        for (ix, doc) in docs.iter().enumerate() {
+            let path = doc.path.clone();
+            // 副标题给「它在项目里的哪一层」——同名的 README.md 可能有好几份
+            let sub = match doc.rel.rsplit_once('/') {
+                Some((dir, _)) => format!("{dir}/ · {}", human_size(doc.size)),
+                None => human_size(doc.size),
+            };
+            let time = fmt_epoch_time(doc.mtime, now, &chrono::Local).unwrap_or_default();
+            col = col.child(
+                Self::artifact_row(("doc", ix), doc.name.clone(), sub, time)
+                    .on_click(cx.listener(move |this, _, _, cx| this.open_doc(path.clone(), cx))),
             );
         }
         col
+    }
+
+    /// 产物一行：标题 + 一行副文 + 行尾时间。链接与 Markdown 共用同一套版式——
+    /// 它们在这一节里是平级的两种产物，长得不一样只会让人以为点法不同。
+    fn artifact_row(
+        id: (&'static str, usize),
+        title: String,
+        subtitle: String,
+        time: String,
+    ) -> gpui::Stateful<gpui::Div> {
+        div()
+            .id(id)
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .px(px(8.))
+            .py(px(6.))
+            .mx(px(-8.))
+            .rounded(px(6.))
+            .cursor_pointer()
+            .hover(|st| st.bg(c(theme::SURFACE_RAISED)))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .truncate()
+                            .text_size(px(12.))
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(c(theme::INK))
+                            .child(SharedString::from(title)),
+                    )
+                    .child(meta().flex_none().child(SharedString::from(time))),
+            )
+            .when(!subtitle.is_empty(), |el| {
+                el.child(
+                    div()
+                        .line_clamp(2)
+                        .text_size(px(11.))
+                        .text_color(c(theme::DIM))
+                        .child(SharedString::from(subtitle)),
+                )
+            })
     }
 
     /// 子代理：状态记号（跑着 ⋯ / 成了 ✓ / 挂了 ✗）+ 类型 + 它去干什么

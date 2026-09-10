@@ -93,5 +93,16 @@ fun artifactTimeLabel(ts: String, now: Instant = Instant.now(), zone: ZoneId = Z
     return if (t.toLocalDate() == today) t.format(HHMM) else "${t.monthValue}/${t.dayOfMonth}"
 }
 
+/**
+ * Markdown 的改动时间：`mtime` 是 epoch 秒（daemon 的 `docs` 就给这个），
+ * 走与 [artifactTimeLabel] 同一套「今天给时分，别的日子给月日」。
+ */
+fun epochTimeLabel(mtime: Double, now: Instant = Instant.now(), zone: ZoneId = ZoneId.systemDefault()): String {
+    if (mtime <= 0) return ""
+    val t = Instant.ofEpochSecond(mtime.toLong()).atZone(zone)
+    val today: LocalDate = now.atZone(zone).toLocalDate()
+    return if (t.toLocalDate() == today) t.format(HHMM) else "${t.monthValue}/${t.dayOfMonth}"
+}
+
 /** 产物列表新的在前 */
 fun sortArtifacts(list: List<ArtifactInfo>): List<ArtifactInfo> = list.sortedByDescending { it.ts }

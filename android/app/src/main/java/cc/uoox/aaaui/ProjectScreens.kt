@@ -6,6 +6,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.border
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,6 +28,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.platform.LocalFocusManager
@@ -53,6 +55,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -168,12 +173,19 @@ fun createErrorText(e: Exception): String =
     if (e is DaemonHttpException && e.errorCode == "conflict") "项目已存在" else "新建失败：${e.message}"
 
 /**
- * 新建项目的输入框（首页顶部、会话页 ☰ 抽屉共用）：框里有光标时按回车 = 新建。
- * 回车从三条路来都接住：软键盘的动作键（Go / Done / Send / Search，输入法各不相同）、
- * 实体键盘 / 折叠屏外接键盘的 Enter，以及右边的 ＋。
+ * 新建项目那一行：**长得就是一个项目行**——同样的左右内边距、同样的字号、下面同样一条
+ * 分隔线，只是标题那一格可以打字。字即文件夹名，**回车创建**。
+ *
+ * 2026-09-10 用户拍板：「新建项目加号去掉，仅回车」「这个交互位置也调整一下，放在
+ * 『点一行进入消息流·长按查看项目操作』这个位置，样式和项目列表的项目一样」。
+ * 它以前是列表顶上一个带 ＋ 的 `OutlinedTextField`：那既不是列表的一部分，又天天
+ * 占着第一屏最上面那一行；而 ＋ 和回车本来就是同一件事的两个入口。
+ *
+ * 回车从两条路来都接住：软键盘的动作键（Go / Done / Send / Search，输入法各不相同）、
+ * 实体键盘 / 折叠屏外接键盘的 Enter。
  */
 @Composable
-fun NewProjectField(
+fun NewProjectRow(
     value: String,
     onValueChange: (String) -> Unit,
     creating: Boolean,
@@ -182,32 +194,50 @@ fun NewProjectField(
     agentMark: String? = null,
     onSwapAgent: () -> Unit = {},
 ) {
-    OutlinedTextField(
-        value, onValueChange,
-        placeholder = { Text("新建项目：文件夹名，回车", color = Tok.Faint, fontSize = 13.sp) },
-        // 新项目开谁：点一下在装了的 agent 之间轮换。只有一个可用时 agentMark 是 null，整个不画
-        leadingIcon = agentMark?.let { mark ->
-            {
+    // 点这一行的任何地方都聚焦到输入框：光标只占标题那一格，行的上下内边距和右半边
+    // 都是点不着的死区（mac 那一行点哪儿都会 focus）
+    val focus = remember { FocusRequester() }
+    Column(modifier) {
+        Row(
+            Modifier.fillMaxWidth()
+                .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { focus.requestFocus() }
+                .padding(horizontal = 16.dp, vertical = 11.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            BasicTextField(
+                value, onValueChange,
+                modifier = Modifier.weight(1f).focusRequester(focus).onPreviewKeyEvent { ev ->
+                    if (ev.type == KeyEventType.KeyDown && (ev.key == Key.Enter || ev.key == Key.NumPadEnter)) { onCreate(); true } else false
+                },
+                singleLine = true,
+                textStyle = androidx.compose.ui.text.TextStyle(color = Tok.Ink, fontSize = 15.sp, fontWeight = FontWeight.Bold),
+                cursorBrush = SolidColor(Tok.Accent),
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
+                keyboardActions = KeyboardActions(onGo = { onCreate() }, onDone = { onCreate() }, onSend = { onCreate() }, onSearch = { onCreate() }),
+                // 占位符与正文**必须叠在一个 Box 里**：decorationBox 的 lambda 只能产出
+                // 一个可测量的节点，并排两个会被父布局按第一个量，光标位置就漂了
+                decorationBox = { inner ->
+                    Box {
+                        if (value.isEmpty()) {
+                            Text("＋ 新建项目：文件夹名，回车", color = Tok.Faint, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                        }
+                        inner()
+                    }
+                },
+            )
+            Spacer(Modifier.width(8.dp))
+            if (creating) {
+                CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = Tok.Accent)
+            } else if (agentMark != null) {
+                // 新项目开谁：点一下在装了的 agent 之间轮换。只有一个可用时整个不画。
+                // 位置正对着项目行行尾的时间
                 Box(Modifier.size(28.dp).clickable(onClick = onSwapAgent), contentAlignment = Alignment.Center) {
-                    Text(mark, color = Tok.Accent, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                    Text(agentMark, color = Tok.Accent, fontSize = 13.sp, fontWeight = FontWeight.Bold)
                 }
             }
-        },
-        modifier = modifier.onPreviewKeyEvent { ev ->
-            if (ev.type == KeyEventType.KeyDown && (ev.key == Key.Enter || ev.key == Key.NumPadEnter)) { onCreate(); true } else false
-        },
-        singleLine = true,
-        textStyle = androidx.compose.ui.text.TextStyle(color = Tok.Ink, fontSize = 14.sp),
-        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
-        keyboardActions = KeyboardActions(onGo = { onCreate() }, onDone = { onCreate() }, onSend = { onCreate() }, onSearch = { onCreate() }),
-        trailingIcon = {
-            if (creating) {
-                CircularProgressIndicator(Modifier.width(18.dp).height(18.dp), strokeWidth = 2.dp, color = Tok.Accent)
-            } else {
-                IconButton(onClick = onCreate) { Text("＋", color = Tok.Accent, fontSize = 22.sp) }
-            }
-        },
-    )
+        }
+        HorizontalDivider(color = Tok.Edge, thickness = 1.dp, modifier = Modifier.padding(start = 16.dp))
+    }
 }
 
 /**
@@ -219,11 +249,11 @@ fun NewProjectField(
  * `onBeforeNavigate` 在抽屉里就是「先关抽屉」。
  *
  * 点一行进该项目的消息流——会话活着直接进，退出了/没有就 `POST /sessions`（daemon 幂等，
- * 且 resume 找不到旧对话会自动开新会话）再进；长按出项目操作单。顶部输入框既过滤列表也
- * 新建项目（与 mac 侧栏一致）。
+ * 且 resume 找不到旧对话会自动开新会话）再进；长按出项目操作单。列表末尾那一行是新建
+ * 项目（[NewProjectRow]，与 mac 侧栏一致）。
  *
- * 面板本身画的东西分成四块：降级横幅 [SchemaTooOldBanner]、顶栏 [ProjectPanelHeader]、
- * 新建框 [NewProjectField]、列表（[projectSection] + [terminalSection]）。留在这里的是
+ * 面板本身画的东西分成三块：降级横幅 [SchemaTooOldBanner]、顶栏 [ProjectPanelHeader]、
+ * 列表（[projectSection] + 新建那一行 [NewProjectRow] + [terminalSection]）。留在这里的是
  * **状态和动作**——建项目 / 开终端 / 开会话都要 store 与导航，收不进任何一块里。
  */
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
@@ -239,7 +269,7 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
     val plan by store.planUsage.collectAsState()
     val settings by store.settings.flow.collectAsState(initial = AppSettings())
     var planDialog by remember { mutableStateOf(false) }
-    /** 顶上那个框里的字：**只是新项目的文件夹名**，不是搜索词（v1.22 用户拍板） */
+    /** 新建那一行里的字：**只是新项目的文件夹名**，不是搜索词（v1.22 用户拍板） */
     var newName by rememberSaveable { mutableStateOf("") }
     /** 下一个新建项目用哪个 agent（表里第一个装了的；只有一个可用时不画切换） */
     var newAgent by rememberSaveable { mutableStateOf(DEFAULT_AGENT) }
@@ -266,7 +296,7 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
     LaunchedEffect(Unit) { store.refreshProjects() }
 
     // 只在项目 / 会话 / 黄点变化时重算，不跟着 conn 延迟数字的重组一起算。
-    // v1.22 用户拍板：**顶上那个框只用来新建项目，不当搜索框**（「侧栏就不要做搜索框了，
+    // v1.22 用户拍板：**新建那个框只用来新建项目，不当搜索框**（「侧栏就不要做搜索框了，
     // 双端都不要」）——所以这里不再按框里的字过滤，mac 侧本来也没有过滤，两端就此一致。
     val unread = settings.unreadProjects
     val rows = remember(projects, sessions, unread) { projectRows(projects, sessions, unread) }
@@ -281,7 +311,7 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
 
     fun toast(msg: String) = Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
 
-    /** 顶部输入框回车 / ＋：框里的字就是文件夹名，留空 = 按日期命名；建完清空并进入。 */
+    /** 新建那一行按回车：框里的字就是文件夹名，留空 = 按日期命名；建完清空并进入。 */
     fun create() {
         if (creating) return
         creating = true
@@ -358,15 +388,6 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
             onHistory = { onBeforeNavigate(); nav.navigate("history") },
             onSettings = { onBeforeNavigate(); nav.navigate("settings") },
         )
-        // 与 mac 侧栏顶上那一行同一件东西：框里的字就是文件夹名，回车或右边 ＋ 新建；
-        // 左边的小标是「新项目开谁」（v1.22 拍板这个框不当搜索框，所以它不过滤列表）
-        NewProjectField(
-            newName, { newName = it }, creating, onCreate = { create() },
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
-            agentMark = swapNewAgent?.let { agentLabel(agents, newAgent).take(1) },
-            onSwapAgent = { swapNewAgent?.let { newAgent = it } },
-        )
-
         PullToRefreshBox(
             isRefreshing = refreshing,
             onRefresh = {
@@ -378,13 +399,21 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
             LazyColumn(Modifier.fillMaxSize().padding(top = 6.dp)) {
                 projectSection(
                     rows = rows,
-                    anyProject = projects.isNotEmpty(),
                     minuteTick = minuteTick,
                     busy = busy,
                     currentPath = currentPath,
                     onOpen = { row -> open(row) },
                     onLongPress = { p -> actionsFor = p },
                 )
+                // 新建项目就排在项目列表的末尾，长得和项目行一模一样
+                // （2026-09-10 用户拍板，见 [NewProjectRow]）。与 mac 侧栏同一处设计
+                item(key = "projects-new") {
+                    NewProjectRow(
+                        newName, { newName = it }, creating, onCreate = { create() },
+                        agentMark = swapNewAgent?.let { agentLabel(agents, newAgent).take(1) },
+                        onSwapAgent = { swapNewAgent?.let { newAgent = it } },
+                    )
+                }
                 // 终端与会话平级（2026-09-08 用户拍板）：项目列表下面直接是终端列表，
                 // 底部一行「新增终端」。以前它藏在顶栏一个 `>_` 按钮后面，是另一个世界。
                 terminalSection(
@@ -412,7 +441,8 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
 }
 
 /**
- * 列表的项目一节：空态 / 一项目一行 / 底下一句用法提示。
+ * 列表的项目一节：空态 / 一项目一行。「新建项目」那一行由调用点接在后面
+ * （它要 store 与导航，收不进这一节）。
  *
  * 写成 `LazyListScope` 的扩展而不是 `@Composable`：这一节是**若干个 item**（空态一项、项目
  * 若干项、提示一项），包进一个 composable 会把它们压成列表里的一项，行的复用和
@@ -423,8 +453,6 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
  */
 private fun LazyListScope.projectSection(
     rows: List<ProjectRow>,
-    /** 有没有项目（区分「一个都没有」和「被搜索词滤没了」两种空） */
-    anyProject: Boolean,
     minuteTick: Long,
     /** 正在 POST /sessions 的项目路径，行先按「在跑」画淡蓝底 */
     busy: Set<String>,
@@ -432,8 +460,8 @@ private fun LazyListScope.projectSection(
     onOpen: (ProjectRow) -> Unit,
     onLongPress: (Project) -> Unit,
 ) {
-    // 空态也是列表里的一项：下面还有终端一节，浮一层居中文字会盖住它
-    if (rows.isEmpty()) item(key = "projects-empty") { ProjectsEmpty(anyProject = anyProject) }
+    // 空态也是列表里的一项：下面还有新建那一行和终端一节，浮一层居中文字会盖住它们
+    if (rows.isEmpty()) item(key = "projects-empty") { ProjectsEmpty() }
     items(rows, key = { it.project.path }) { row ->
         // 顺序随最近更新变：Compose 按 key 做位移过渡，上移/下移都有动画
         ProjectRowItem(
@@ -444,13 +472,6 @@ private fun LazyListScope.projectSection(
             current = row.project.path == currentPath,
             onClick = { onOpen(row) },
             onLongClick = { onLongPress(row.project) },
-        )
-    }
-    if (rows.isNotEmpty()) item(key = "projects-hint") {
-        Text(
-            "点一行进入消息流 · 长按查看项目操作",
-            color = Tok.Faint, fontSize = 11.sp,
-            modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 4.dp),
         )
     }
 }
@@ -544,18 +565,17 @@ private fun ProjectPanelHeader(
 }
 
 /**
- * 项目列表的空态。它是列表里的**一项**而不是浮在中间的一层字：下面还有终端一节，
- * 居中浮层会盖住它。[anyProject] 分开两种空：一个项目都没有，还是搜索词把它们滤没了。
+ * 项目列表的空态。它是列表里的**一项**而不是浮在中间的一层字：下面还有新建那一行和
+ * 终端一节，居中浮层会盖住它们。
+ *
+ * 只有一种空（v1.35）：一个项目都没有。此前还分出「搜索词把它们滤没了」那一种，
+ * 而列表 v1.22 起就不再被那个框过滤——那半边是死代码。
  */
 @Composable
-private fun ProjectsEmpty(anyProject: Boolean) {
+private fun ProjectsEmpty() {
     Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 28.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-        if (!anyProject) {
-            Text("暂无项目", color = Tok.Faint)
-            Text("在上方输入文件夹名，回车新建", color = Tok.Faint, fontSize = 12.sp)
-        } else {
-            Text("没有匹配的项目", color = Tok.Faint)
-        }
+        Text("暂无项目", color = Tok.Faint)
+        Text("在下面那一行输入文件夹名，回车新建", color = Tok.Faint, fontSize = 12.sp)
     }
 }
 

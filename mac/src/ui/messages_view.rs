@@ -1376,7 +1376,7 @@ fn is_markdown(m: &ChatMessage) -> bool {
 // 需要 id 的元素（横向滚动容器、可点链接段落）用 (seq, 计数) 生成稳定且唯一的 id。
 
 /// 一条消息内的 id 发号器。`seq` 只是让 id 在整页里唯一——目录浏览那边
-/// （`files_view`）没有消息号，传一个固定值即可，一页只画一个文件。
+/// （`doc_view`）没有消息号，传一个固定值即可，一页只画一个文件。
 pub(super) struct MdIds {
     pub seq: u64,
     pub next: usize,

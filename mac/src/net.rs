@@ -356,11 +356,8 @@ impl Net {
         self.get_json(&format!("/sessions/{id}/messages?after={after}&limit=500"))
     }
 
-    /// v1.30 目录浏览：列一个目录（daemon 保证它在项目根底下）
-    pub fn files(&self, path: &str) -> impl Future<Output = Result<crate::model::FileListing>> + use<> {
-        self.get_json(&format!("/files?path={}", percent_encode(path)))
-    }
-    /// v1.30 目录浏览：读一个文件（二进制只回大小，正文空）
+    /// v1.35：读一份项目里的文件（详情栏「产物」点开一份 Markdown 就走这里；
+    /// 出项目根由 daemon 挡，二进制只回大小、正文空）
     pub fn file_read(&self, path: &str) -> impl Future<Output = Result<crate::model::FileBody>> + use<> {
         self.get_json(&format!("/files/read?path={}", percent_encode(path)))
     }

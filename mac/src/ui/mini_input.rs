@@ -277,6 +277,10 @@ pub struct MiniInput {
     metrics: Rc<RefCell<Option<Metrics>>>,
     /// 鼠标按住拖选中
     dragging: bool,
+    /// 不画框：没有边框、底色、圆角与左右内边距，字也用界面字体而不是 Menlo。
+    /// 侧栏「新建项目」那一行用它——那一行要长得**就是一个项目行**（v1.35），
+    /// 一个带底的输入框摆在项目中间只会显得它不属于这张列表。
+    bare: bool,
 }
 
 /// 单行框的事件：输入法以文本形式送来的回车 = 提交（键盘回车由根节点直接接）
@@ -295,7 +299,14 @@ impl MiniInput {
             focus_handle: cx.focus_handle(),
             metrics: Rc::new(RefCell::new(None)),
             dragging: false,
+            bare: false,
         }
+    }
+
+    /// 不画框的那一种（见 [`MiniInput::bare`]）
+    pub fn bare(mut self) -> Self {
+        self.bare = true;
+        self
     }
 
     /// 窗口坐标 x → 字节偏移；这一帧还没画过（或框是空的）就没有答案
@@ -537,20 +548,27 @@ impl Render for MiniInput {
         let selection = self.ed.selection();
         let marked = self.marked.clone();
         let metrics = self.metrics.clone();
+        let bare = self.bare;
+        // 不画框的那一种用界面字体（项目行的标题就是它）；带框的照旧 Menlo
+        let font = if bare { window.text_style().font() } else { gpui::font("Menlo") };
 
         div()
             .id("mini-input")
-            .h(px(28.))
+            // 不画框的那一种只留文字本身的高度（18 = 12.5px 的一行加一点余量），
+            // 好让它塞进一个和项目行一样高的行里；带框的照旧 28
+            .h(px(if bare { 18. } else { 28. }))
             .w_full()
-            .px(px(8.))
-            .rounded(px(6.))
-            .border_1()
-            .border_color(if focused {
-                c(theme::ACCENT)
-            } else {
-                c(theme::EDGE_LIGHT)
+            .when(!bare, |el| {
+                el.px(px(8.))
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(if focused {
+                        c(theme::ACCENT)
+                    } else {
+                        c(theme::EDGE_LIGHT)
+                    })
+                    .bg(c(theme::INSET))
             })
-            .bg(c(theme::INSET))
             .cursor_text()
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::on_key_down))
@@ -601,7 +619,7 @@ impl Render for MiniInput {
                         let color = if empty { theme::FAINT } else { theme::INK };
                         let runs = [gpui::TextRun {
                             len: display.len(),
-                            font: gpui::font("Menlo"),
+                            font: font.clone(),
                             color: c(color).into(),
                             background_color: None,
                             underline: marked.as_ref().map(|_| gpui::UnderlineStyle {
@@ -616,6 +634,10 @@ impl Render for MiniInput {
                                 .text_system()
                                 .shape_line(display, font_size, &runs, None);
                         let line_h = bounds.size.height;
+                        // 框内文字的上下留白：带框的一圈 6，不画框的只留 1
+                        let vpad = px(if bare { 1. } else { 6. });
+                        // 选区 / 光标比文字再高一点点，与旧版的 5 / 6 关系一致
+                        let vpad_sel = (vpad - px(1.)).max(px(0.));
                         let caret = if empty {
                             px(0.)
                         } else {
@@ -636,23 +658,22 @@ impl Render for MiniInput {
                             shift,
                         });
                         window.with_content_mask(Some(ContentMask { bounds }), |window| {
-                            let origin =
-                                point(bounds.origin.x - shift, bounds.origin.y + px(6.));
+                            let origin = point(bounds.origin.x - shift, bounds.origin.y + vpad);
                             // 选区底色画在文字下面
                             if let Some(r) = selection.as_ref().filter(|_| !empty) {
                                 let x0 = line.x_for_index(r.start);
                                 let x1 = line.x_for_index(r.end);
                                 window.paint_quad(fill(
                                     Bounds::new(
-                                        point(bounds.origin.x + x0 - shift, bounds.origin.y + px(5.)),
-                                        size(x1 - x0, bounds.size.height - px(10.)),
+                                        point(bounds.origin.x + x0 - shift, bounds.origin.y + vpad_sel),
+                                        size(x1 - x0, bounds.size.height - vpad_sel * 2.),
                                     ),
                                     ca(theme::ACCENT, if focused { 0.30 } else { 0.16 }),
                                 ));
                             }
                             let _ = line.paint(
                                 origin,
-                                line_h - px(12.),
+                                line_h - vpad * 2.,
                                 gpui::TextAlign::Left,
                                 None,
                                 window,
@@ -663,9 +684,9 @@ impl Render for MiniInput {
                                     Bounds::new(
                                         point(
                                             bounds.origin.x + caret - shift,
-                                            bounds.origin.y + px(5.),
+                                            bounds.origin.y + vpad_sel,
                                         ),
-                                        size(px(1.5), bounds.size.height - px(10.)),
+                                        size(px(1.5), bounds.size.height - vpad_sel * 2.),
                                     ),
                                     c(theme::ACCENT),
                                 ));

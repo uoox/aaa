@@ -85,7 +85,23 @@ import java.net.URLDecoder
     val file_path: String = "",
     val ts: String = "",
 )
-@Serializable data class ArtifactsResponse(val artifacts: List<ArtifactInfo> = emptyList())
+@Serializable data class ArtifactsResponse(
+    val artifacts: List<ArtifactInfo> = emptyList(),
+    /** v1.35：这个项目里的 Markdown（老 daemon 不给这一段 → 空） */
+    val docs: List<DocInfo> = emptyList(),
+)
+
+/**
+ * v1.35 产物里的一份 Markdown。`rel` 是它相对项目根的位置（`docs/api.md`），
+ * `path` 是绝对路径——点开就拿它去 `GET /files/read`。
+ */
+@Serializable data class DocInfo(
+    val name: String = "",
+    val path: String = "",
+    val rel: String = "",
+    val size: Long = 0,
+    val mtime: Double = 0.0,
+)
 
 // v1.17 详情屏（GET /sessions/:id/detail）：消息流里翻不出来的四样东西
 @Serializable data class Subagent(
@@ -156,8 +172,6 @@ const val SCHEMA_PROJECT_STATUS = 2
 /** kind：permission（能替答）| elicitation（MCP 表单，只能去终端） */
 @Serializable data class PermissionPrompt(val kind: String = "permission", val tool_name: String = "", val summary: String = "", val since: String = "")
 @Serializable data class ScreenText(val text: String = "")
-/** `GET /inbox?path=` 的一项：排给这个项目的一句话，agent 空下来时 daemon 自动喂进去 */
-@Serializable data class InboxEntry(val id: String = "", val text: String = "", val created_at: String = "")
 /**
  * `GET /agents`：有哪些 agent、这台机器装没装（PROTOCOL「Agent 表」）。
  * 客户端不自己硬编码这张表——硬编码就会给一个没装的 agent 开会话，然后对着
@@ -166,11 +180,9 @@ const val SCHEMA_PROJECT_STATUS = 2
 @Serializable data class AgentInfo(val id: String = "", val label: String = "", val available: Boolean = false)
 
 /**
- * v1.30 目录浏览（`GET /files` / `GET /files/read`）：项目根底下的只读文件浏览器。
- * `kind` ∈ markdown | text | binary（目录是空串）。出不出根由 daemon 保证，客户端只画。
+ * `GET /files/read`：读项目根底下的一个文件（详情屏「产物」里点开一份 Markdown 走这条）。
+ * `kind` ∈ markdown | html | text | binary。出不出根由 daemon 保证，客户端只画。
  */
-@Serializable data class FileEntry(val name: String = "", val path: String = "", val dir: Boolean = false, val size: Long = 0, val kind: String = "")
-@Serializable data class FileListing(val path: String = "", val parent: String? = null, val truncated: Boolean = false, val entries: List<FileEntry> = emptyList())
 @Serializable data class FileBody(val path: String = "", val name: String = "", val size: Long = 0, val kind: String = "", val text: String = "", val truncated: Boolean = false)
 
 @Serializable data class PurgedAgent(val agent_label: String, val count: Int)
@@ -314,8 +326,6 @@ sealed class EventFrame {
     data class MessagesChanged(val id: String, val lastSeq: Long) : EventFrame()
     /** 套餐用量变了：plan 为 null 表示 daemon 暂时拿不到 */
     data class UsageUpdate(val plan: PlanUsage?) : EventFrame()
-    /** v1.28：这个项目排着的任务变了（加了 / 被喂掉了 / 删了）。`path` 是 daemon realpath 过的 */
-    data class InboxChanged(val path: String) : EventFrame()
     data class Unknown(val type: String) : EventFrame()
 
     companion object {
@@ -331,7 +341,6 @@ sealed class EventFrame {
                     "health" -> HealthUpdate(obj["ssd_mounted"]?.jsonPrimitive?.booleanOrNull ?: true)
                     "messages_changed" -> MessagesChanged(obj["id"]!!.jsonPrimitive.content, obj["last_seq"]?.jsonPrimitive?.longOrNull ?: 0)
                     "usage" -> UsageUpdate(obj["plan"]?.takeIf { it !is kotlinx.serialization.json.JsonNull }?.let { ProtocolJson.instance.decodeFromJsonElement(PlanUsage.serializer(), it) })
-                    "inbox_changed" -> InboxChanged(obj["path"]?.jsonPrimitive?.content ?: "")
                     else -> Unknown(t)
                 }
             } catch (_: Exception) { Unknown(t) }

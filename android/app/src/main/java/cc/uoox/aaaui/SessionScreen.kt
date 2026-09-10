@@ -122,12 +122,11 @@ fun SessionScreen(
         messagesSupported == false -> "terminal"
         else -> settings.defaultUi
     }
-    // v1.30 起有三种看法（messages / terminal / files），顶栏点一下轮换。
-    // 消息流画不出来的会话（shell、老 daemon）跳过那一档——切到一个画不出来的
-    // 视图，用户只会看见终端，还以为按钮坏了
+    // 两种看法（messages / terminal），顶栏点一下换另一种。消息流画不出来的会话
+    // （shell、老 daemon）只剩终端——切到一个画不出来的视图，用户只会看见终端，
+    // 还以为按钮坏了。（v1.30 那个「浏览」2026-09-10 删掉了，见 REMOVED.md）
     val mode = if (effectiveMode == "messages" && messagesSupported == false) "terminal" else effectiveMode
     val showMessages = mode == "messages"
-    val showFiles = mode == "files"
 
     // 输入框：内容跟着会话存在 AppStore（并落盘），返回首页 / 切去别的 app 再回来字还在；
     // 通知带来的 prefill 优先，它本身也成为新草稿
@@ -290,17 +289,18 @@ fun SessionScreen(
             usage = s?.usage,
             state = s?.state ?: "",
             viewLabel = viewLabelOf(mode),
-            canSwitchView = true,
+            // 消息流画不出来的会话只剩终端一种看法：那一格整个不画，比画一个点不动的灰字诚实
+            canSwitchView = messagesSupported != false,
             onMenu = { scope.launch { drawerState.open() } },
             onToggleView = { uiMode = nextView(mode, messagesSupported != false) },
             onDetail = { nav.openDetail(sessionId) },
         )
-        if (!wsConnected && !showMessages && !showFiles) {
+        if (!wsConnected && !showMessages) {
             Text("连接中…", color = Tok.Amber, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 16.dp))
         }
 
         // 快捷键条（仅终端视图，且要先用 ⌨ 放出来）：放在终端上方，软键盘弹起时不会被顶到看不见
-        if (!showMessages && !showFiles && keysOpen) {
+        if (!showMessages && keysOpen) {
             TerminalKeyBar(
                 attachment = attachment,
                 ctrlStickyState = ctrlStickyState,
@@ -313,9 +313,7 @@ fun SessionScreen(
 
         // 主体
         Box(Modifier.weight(1f).fillMaxWidth()) {
-            if (showFiles) {
-                FilesView(store, s?.project_path.orEmpty())
-            } else if (showMessages) {
+            if (showMessages) {
                 MessagesView(
                     messages.value, messagesSupported, live = s?.state == "running",
                     sessionAlive = s?.state != "exited",
@@ -347,9 +345,8 @@ fun SessionScreen(
             }
         }
 
-        // composer：消息流视图始终在；终端视图下跟键位条一起收放；浏览视图没有 composer
-        // （那一屏是在看文件，不是在说话）
-        if (showMessages || (!showFiles && keysOpen)) {
+        // composer：消息流视图始终在；终端视图下跟键位条一起收放
+        if (showMessages || keysOpen) {
             SessionComposer(
                 text = composer,
                 onTextChange = { composer = it },
@@ -361,7 +358,7 @@ fun SessionScreen(
     }
     // 终端视图下键位条收起时：右下角一枚 ⌨ 把它放出来（悬浮在终端上，不占一行；
     // 条本身在顶部，按钮留在右下角是为了不盖住画面第一行的输出）
-    if (!showMessages && !showFiles && !keysOpen) {
+    if (!showMessages && !keysOpen) {
         Box(Modifier.align(Alignment.BottomEnd).padding(end = 14.dp, bottom = 14.dp)) { KeyChip("⌨") { keysOpen = true } }
     }
     }
@@ -370,24 +367,13 @@ fun SessionScreen(
 }
 
 /**
- * 三种看法的轮换顺序：终端 → 消息流 → 浏览 → 终端（与 mac 的 `next_view` 同一条线）。
- * `msgs` 为 false 时跳过消息流那一档。
+ * 两种看法：终端 ⇄ 消息流（与 mac 的 `next_view` 同一条线）。
+ * `msgs` 为 false 时哪儿也不去——那条会话只有终端画得出来。
  */
-fun nextView(cur: String, msgs: Boolean): String {
-    val order = listOf("terminal", "messages", "files")
-    val i = order.indexOf(cur).let { if (it < 0) 0 else it }
-    for (step in 1..order.size) {
-        val cand = order[(i + step) % order.size]
-        if (cand != "messages" || msgs) return cand
-    }
-    return "terminal"
-}
+fun nextView(cur: String, msgs: Boolean): String =
+    if (!msgs) "terminal" else if (cur == "messages") "terminal" else "messages"
 
-fun viewLabelOf(mode: String): String = when (mode) {
-    "messages" -> "消息流"
-    "files" -> "浏览"
-    else -> "终端"
-}
+fun viewLabelOf(mode: String): String = if (mode == "messages") "消息流" else "终端"
 
 /**
  * 会话顶栏：一行画完 ☰、标题、用量、视图切换、状态点、ⓘ 详情。
@@ -411,14 +397,16 @@ private fun SessionTopBar(
     onToggleView: () -> Unit,
     onDetail: () -> Unit,
 ) {
+    // 竖向内边距只留 4dp：☰ 与 ⓘ 两个 42dp 的方块自己把这一行撑到 50dp，
+    // 再加 8dp 就白高出去一截
     Row(
-        Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
+        Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(
-            "☰", color = Tok.Dim, fontSize = 20.sp,
-            modifier = Modifier.clickable(onClick = onMenu).padding(horizontal = 8.dp, vertical = 2.dp),
-        )
+        Box(
+            Modifier.size(42.dp).clickable(onClick = onMenu),
+            contentAlignment = Alignment.Center,
+        ) { Text("☰", color = Tok.Dim, fontSize = 24.sp) }
         Text(
             title,
             color = Tok.Ink, fontSize = 15.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis,
@@ -447,11 +435,13 @@ private fun SessionTopBar(
         }
         StateDot(Tok.stateColor(state))
         // 2026-09-08 用户拍板：⋮ 整个换成详情按钮——里面九项大半一年用一次，而
-        // 子代理 / 后台任务 / 已上传 / 产物 / 技能这些「发生过但翻不出来」的才该占这个位置
-        Text(
-            "ⓘ", color = Tok.Dim, fontSize = 20.sp,
-            modifier = Modifier.clickable(onClick = onDetail).padding(horizontal = 10.dp),
-        )
+        // 子代理 / 后台任务 / 已上传 / 产物 / 技能这些「发生过但翻不出来」的才该占这个位置。
+        // 2026-09-10 用户报「右上角的详情按钮太小了」：字号 20→26，触摸区从
+        // 「一个字加 10dp 左右内边距」补成 42dp 见方（☰ 同样处理，一行里两头得一样大）
+        Box(
+            Modifier.size(42.dp).clickable(onClick = onDetail),
+            contentAlignment = Alignment.Center,
+        ) { Text("ⓘ", color = Tok.Dim, fontSize = 26.sp) }
     }
 }
 

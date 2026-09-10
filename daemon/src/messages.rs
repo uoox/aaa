@@ -155,6 +155,13 @@ pub struct MsgStore {
     /// v1.17 详情屏：这个会话开过的子代理（按发起顺序），以及 tool_use id → 下标
     pub subagents: Vec<Subagent>,
     subagent_ix: HashMap<String, usize>,
+    /// v1.35 agy：这一步宣布了、还没被结果认领的工具调用 `(工具名, 摘要)`。
+    /// agy 不给 tool_use id，认领只能按顺序（见「agy」一节）
+    agy_calls: VecDeque<(String, String)>,
+    /// v1.35 agy：`invoke_subagent` 挂上、还等着对话 id 的那几条在 `subagents` 里的下标
+    agy_subs_awaiting: VecDeque<usize>,
+    /// v1.35 agy：子代理的对话 id → 它在 `subagents` 里的下标
+    agy_sub_conv: HashMap<String, usize>,
     /// v1.17 详情屏：用过的技能，按名字合并（首次出现的顺序）
     pub skills: Vec<SkillUse>,
     /// v1.22：Claude Code 此刻排着的待发送消息（见 [`QueuedMsg`]）。`<task-notification>`
@@ -200,6 +207,9 @@ impl MsgStore {
             bg_pending: HashMap::new(),
             subagents: Vec::new(),
             subagent_ix: HashMap::new(),
+            agy_calls: VecDeque::new(),
+            agy_subs_awaiting: VecDeque::new(),
+            agy_sub_conv: HashMap::new(),
             skills: Vec::new(),
             queued: Vec::new(),
             awaiting_result: HashSet::new(),
@@ -861,18 +871,25 @@ pub fn artifact_url(text: &str) -> Option<String> {
 
 // ---------- agy（Antigravity CLI）----------
 //
-// 形状与 claude 完全不同，一行一步：`{step_index, source, type, status, created_at, content}`。
-// `source` ∈ USER_EXPLICIT / MODEL / SYSTEM / SYSTEM_SDK，`type` ∈ USER_INPUT /
-// PLANNER_RESPONSE / GENERIC / SYSTEM_MESSAGE / ERROR_MESSAGE / CHECKPOINT。
-// 只追加、`step_index` 不重复（198 份实测无一重号），所以按偏移量尾随就够。
+// 形状与 claude 完全不同，一行一步：`{step_index, source, type, status, created_at,
+// content, thinking, tool_calls, truncated_fields}`。`source` ∈ USER_EXPLICIT / MODEL /
+// SYSTEM / SYSTEM_SDK，`type` ∈ USER_INPUT / PLANNER_RESPONSE / GENERIC / SYSTEM_MESSAGE /
+// ERROR_MESSAGE / CHECKPOINT。只追加、`step_index` 不重复（203 份实测无一重号），
+// 所以按偏移量尾随就够。
 //
-// **它不记工具名**：一次工具调用只留下结果文本（GENERIC），入参和工具名都不在文件里。
-// 所以工具那一栏是**看结果的形状认出来的**（命令 / 读文件 / 搜索 / 子代理），认不出就叫
-// 「工具」——宁可标签粗一点，也不假装知道它调的是什么。
+// **工具名和入参都在**（v1.35）：模型那一步（`PLANNER_RESPONSE`）除了 `content` 还带
+// `thinking`（模型的思考）和 `tool_calls`（`[{name, args}]`，args 里 agy 自己就写好了
+// `toolAction` / `toolSummary` 两句人话）。此前这一版按结果文本的形状去猜工具是什么
+// （「The command exited with code」→ 命令…），猜不出就一律叫「工具」——1819 条结果里
+// 有 217 条落在那个兜底里。现在改成**声明在前、结果认领**：一步宣布的工具调用排成
+// 一列，紧跟着的 GENERIC 结果按顺序认领，认不到才回落到看形状。
+//
+// 步序实测是严格的 planner → 结果，所以队列**每一步重置**而不是累积：某一次调用没有
+// 结果（见过 2 个调用只回 0 条的样本），错位也只错这一步之内。
 
 /// `<USER_REQUEST>…</USER_REQUEST>` 里那一句才是用户说的话；同一行后面还挂着
 /// `<ADDITIONAL_METADATA>`（本地时间）与 `<USER_SETTINGS_CHANGE>`（换模型）之类的
-/// 系统附文，那些不是用户打的字。实测 210 条用户输入全带这个包装。
+/// 系统附文，那些不是用户打的字。实测 217 条用户输入全带这个包装。
 fn agy_user_text(content: &str) -> String {
     between(content, "<USER_REQUEST>", "</USER_REQUEST>")
         .map(str::trim)
@@ -892,9 +909,80 @@ fn agy_result_body(content: &str) -> &str {
     rest.trim_start_matches('\n')
 }
 
-/// 认出这条结果是什么工具干的，给出 `(工具名, 摘要, 出没出错)`。
-/// 只看正文开头——agy 每类工具的结果都有固定的第一行。
-fn agy_tool_of(body: &str) -> (&'static str, String, bool) {
+/// agy 的工具名 → 消息流里那一栏写什么。表里没有的**原样用它的名字**——
+/// 「工具」这个词不告诉人任何事，`read_url_content` 至少说明它去读了个网页。
+fn agy_tool_label(name: &str) -> &str {
+    match name {
+        "run_command" => "命令",
+        "view_file" => "读文件",
+        "write_to_file" => "写文件",
+        "replace_file_content" => "改文件",
+        "grep_search" => "搜索",
+        "find_by_name" => "找文件",
+        "list_dir" => "列目录",
+        "search_web" => "网页搜索",
+        "read_url_content" => "读网页",
+        "invoke_subagent" | "define_subagent" | "manage_subagents" | "send_message" => "子代理",
+        "manage_task" => "后台任务",
+        "schedule" => "定时",
+        "finish" => "完成",
+        other => other,
+    }
+}
+
+/// `tool_calls[].args` 里每个值都是**再编码过一层的 JSON 字符串**
+/// （`"CommandLine": "\"grep …\""`、`"WaitMsBeforeAsync": "2000"`），
+/// 所以取出来还要解一层；解不动就按原样给。
+fn agy_arg(args: Option<&Value>, key: &str) -> String {
+    let raw = match args.and_then(|a| a.get(key)) {
+        Some(Value::String(s)) => s.clone(),
+        // 明写着 null 的字段是「没有」，不是四个字母
+        Some(Value::Null) | None => return String::new(),
+        Some(v) => return v.to_string(),
+    };
+    match serde_json::from_str::<Value>(&raw) {
+        Ok(Value::String(s)) => s,
+        Ok(Value::Null) => String::new(),
+        Ok(v) => v.to_string(),
+        Err(_) => raw,
+    }
+}
+
+/// 一次工具调用的摘要。**先用 agy 自己写的那句**（`toolSummary`，它比任何我们能从入参
+/// 拼出来的都准），退到 `toolAction`，再退到这个工具最像「它在干什么」的那个入参。
+fn agy_call_summary(name: &str, args: Option<&Value>) -> String {
+    let mut s = agy_arg(args, "toolSummary");
+    if s.trim().is_empty() {
+        s = agy_arg(args, "toolAction");
+    }
+    if s.trim().is_empty() {
+        s = match name {
+            "run_command" => agy_arg(args, "CommandLine"),
+            "view_file" => file_tail(&agy_arg(args, "AbsolutePath")),
+            "write_to_file" | "replace_file_content" => file_tail(&agy_arg(args, "TargetFile")),
+            "grep_search" => agy_arg(args, "Query"),
+            "find_by_name" => agy_arg(args, "Pattern"),
+            "list_dir" => file_tail(&agy_arg(args, "DirectoryPath")),
+            "search_web" => agy_arg(args, "query"),
+            "read_url_content" => agy_arg(args, "Url"),
+            "manage_task" => agy_arg(args, "TaskId"),
+            "schedule" => agy_arg(args, "Prompt"),
+            _ => String::new(),
+        };
+    }
+    cap(&one_line(s.trim()), SUMMARY_CAP)
+}
+
+/// 路径的最后一段（百分号编码解开）——摘要那一格放不下整条绝对路径。
+fn file_tail(p: &str) -> String {
+    let p = p.trim().trim_matches('`');
+    percent_decode(p.rsplit('/').next().unwrap_or(p))
+}
+
+/// 认不出工具名时的兜底：只看结果正文开头——agy 每类工具的结果都有固定的第一行。
+/// 给出 `(工具名, 摘要, 出没出错)`。`tool_calls` 被 agy 自己截掉的那些步（实测 86 条）
+/// 走这条路。
+fn agy_tool_of(body: &str) -> (String, String, bool) {
     let first = body.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
     if let Some(code) = first.strip_prefix("The command exited with code ") {
         let code = code.trim_end_matches('.');
@@ -910,30 +998,54 @@ fn agy_tool_of(body: &str) -> (&'static str, String, bool) {
             .unwrap_or("")
             .trim();
         let summary = if out.is_empty() { format!("退出码 {code}") } else { out.to_string() };
-        return ("命令", cap(&one_line(&summary), SUMMARY_CAP), failed);
+        return ("命令".into(), cap(&one_line(&summary), SUMMARY_CAP), failed);
     }
     if let Some(rest) = first.strip_prefix("File Path: ") {
-        let p = rest.trim().trim_matches('`');
-        let name = p.rsplit('/').next().unwrap_or(p);
-        return ("读文件", percent_decode(name), false);
+        return ("读文件".into(), file_tail(rest), false);
+    }
+    if let Some(rest) = first.strip_prefix("Created file ") {
+        let path = rest.split(" with requested content").next().unwrap_or(rest);
+        return ("写文件".into(), file_tail(path.trim_start_matches("file://")), false);
+    }
+    if let Some(rest) = first.strip_prefix("The following changes were made by the replace_file_content tool to: ") {
+        // 路径后面跟着一句写给模型的话（「. If relevant, proactively run…」）。
+        // 按第一个句点切会把扩展名也切掉（`messages.rs` → `messages`），路径里带点的
+        // 目录（`v1.35/`）更是直接截断在半路
+        let path = rest.split(". If ").next().unwrap_or(rest).trim().trim_end_matches('.');
+        return ("改文件".into(), file_tail(path), false);
     }
     if first.starts_with("No results found") {
-        return ("搜索", "没有匹配".to_string(), false);
+        return ("搜索".into(), "没有匹配".to_string(), false);
     }
     if let Some(n) = first.strip_prefix("Found ").and_then(|r| r.split_whitespace().next()) {
-        return ("搜索", format!("{n} 处匹配"), false);
+        return ("搜索".into(), format!("{n} 处匹配"), false);
     }
     if first.starts_with("{\"File\":") {
         let n = body.lines().filter(|l| l.starts_with("{\"File\":")).count();
-        return ("搜索", format!("{n} 处匹配"), false);
+        return ("搜索".into(), format!("{n} 处匹配"), false);
+    }
+    if let Some(q) = between(first, "The search for \"", "\" returned") {
+        return ("网页搜索".into(), cap(&one_line(q.trim_matches('"')), SUMMARY_CAP), false);
+    }
+    if first == "Empty directory" || first.starts_with("{\"name\":") {
+        let n = body.lines().filter(|l| l.trim_start().starts_with("{\"name\":")).count();
+        return ("列目录".into(), format!("{n} 项"), false);
     }
     if first.starts_with("Created the following subagents:")
+        || first.starts_with("You have ")
         || first.starts_with("Message sent to")
-        || first.starts_with("Task:")
     {
-        return ("子代理", cap(&one_line(first), SUMMARY_CAP), false);
+        return ("子代理".into(), cap(&one_line(first), SUMMARY_CAP), false);
     }
-    ("工具", cap(&one_line(first), SUMMARY_CAP), false)
+    if first.starts_with("Task:") {
+        let id = first.trim_start_matches("Task:").trim();
+        let st = first_line_after(body, "Status:");
+        return ("后台任务".into(), cap(&one_line(&format!("{} {}", id.rsplit('/').next().unwrap_or(id), st)), SUMMARY_CAP), false);
+    }
+    if let Some(id) = between(first, "Task \"", "\"") {
+        return ("后台任务".into(), format!("{} 已取消", id.rsplit('/').next().unwrap_or(id)), false);
+    }
+    ("工具".into(), cap(&one_line(first), SUMMARY_CAP), false)
 }
 
 /// `%E9%82%AE` → 「邮」。agy 的文件路径是 `file://` URL，非 ASCII 一律百分号编码，
@@ -946,9 +1058,12 @@ fn percent_decode(s: &str) -> String {
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
+        // **按字节判十六进制，不切 `&str`**：`%` 后面跟的可能是一个多字节字符
+        // （`%中文.md` 这样的文件名真的存在），`&s[i+1..i+3]` 会切在字符中间当场 panic，
+        // 解析线程就此死掉
         if b[i] == b'%' && i + 2 < b.len() {
-            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(v);
+            if let (Some(h), Some(l)) = (hex_val(b[i + 1]), hex_val(b[i + 2])) {
+                out.push(h * 16 + l);
                 i += 3;
                 continue;
             }
@@ -959,8 +1074,19 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8(out).unwrap_or_else(|_| s.to_string())
 }
 
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
 /// 结果文本这么开头 = 这一步转后台了，后面跟着任务 id。
 const AGY_BG_PREFIX: &str = "Tool is running as a background task with task id:";
+/// agy 服务端重启：挂着的后台任务和子代理**全都没了**，谁也不会再回来报信。
+const AGY_ALL_STOPPED: &str = "All your subagents and background tasks have been stopped";
 
 /// `<标签>` 后面那一行的内容（`Task Description: …`）。没有这个标签就是空串。
 fn first_line_after<'a>(s: &'a str, label: &str) -> &'a str {
@@ -971,13 +1097,41 @@ fn first_line_after<'a>(s: &'a str, label: &str) -> &'a str {
 
 /// `<SYSTEM_MESSAGE>` 那一段的正文。外面裹着一句「以下是系统消息，不是用户发的」，
 /// 那句本身也带着 `<SYSTEM_MESSAGE>` 三个字，所以开标签要从**后往前**找。
+/// 里面那层 `[Message] timestamp=… sender=… priority=… content=<正文>` 是投递信封，
+/// 人要读的只有 `content=` 之后那一段。
 fn system_message_body(content: &str) -> &str {
-    let Some(end) = content.find("</SYSTEM_MESSAGE>") else { return content };
-    let head = &content[..end];
-    match head.rfind("<SYSTEM_MESSAGE>") {
-        Some(i) => &head[i + "<SYSTEM_MESSAGE>".len()..],
+    let body = match content.find("</SYSTEM_MESSAGE>") {
+        Some(end) => {
+            let head = &content[..end];
+            match head.rfind("<SYSTEM_MESSAGE>") {
+                Some(i) => &head[i + "<SYSTEM_MESSAGE>".len()..],
+                None => content,
+            }
+        }
         None => content,
+    };
+    match body.trim_start().strip_prefix("[Message] ") {
+        Some(rest) => rest.split_once("content=").map(|(_, r)| r).unwrap_or(body),
+        None => body,
     }
+}
+
+/// 结果正文里所有 `"conversationId": "…"` 的值，按出现顺序。冒号和引号之间的空白
+/// 数目两条结果各不相同（建出来那条是对齐的两个空格，列表那条紧挨着），所以不按
+/// 固定分隔串切，而是找到键之后取下一对引号之间那段。
+fn agy_conversation_ids(body: &str) -> Vec<String> {
+    const KEY: &str = "\"conversationId\"";
+    let mut out = Vec::new();
+    let mut rest = body;
+    while let Some(i) = rest.find(KEY) {
+        let after = &rest[i + KEY.len()..];
+        let Some(open) = after.find('"') else { break };
+        let tail = &after[open + 1..];
+        let Some(close) = tail.find('"') else { break };
+        out.push(tail[..close].to_string());
+        rest = &tail[close + 1..];
+    }
+    out
 }
 
 pub fn parse_agy_line(store: &mut MsgStore, v: &Value) {
@@ -988,32 +1142,71 @@ pub fn parse_agy_line(store: &mut MsgStore, v: &Value) {
     let content = v.get("content").and_then(Value::as_str).unwrap_or("");
     match ty {
         "USER_INPUT" => {
+            store.agy_calls.clear();
             let text = agy_user_text(content);
             if !text.is_empty() {
                 store.push(&ts, "user", "text", cap(&text, TEXT_CAP), None);
             }
         }
-        // 模型这一步说的话。content 为空 = 这一步只调了工具没开口（实测 1820 步里 1736 步
-        // 如此），跳过——空气泡比没有更难读
+        // 模型这一步：思考、说的话、宣布的工具调用。三样都可能空——`content` 为空 =
+        // 这一步只调了工具没开口（实测 2054 步里 1959 步如此），空气泡比没有更难读
         "PLANNER_RESPONSE" => {
+            if let Some(t) = v.get("thinking").and_then(Value::as_str) {
+                if !t.trim().is_empty() {
+                    store.note_activity(&ts);
+                    store.push(&ts, "assistant", "thinking", cap(t.trim(), TEXT_CAP), None);
+                }
+            }
             let text = content.trim();
             if !text.is_empty() {
                 store.note_activity(&ts);
                 store.push(&ts, "assistant", "text", cap(text, TEXT_CAP), None);
             }
+            // 每一步重置：上一步没被认领的调用不许拖到这一步来（错位只错一步之内）。
+            // **在提前返回之前清**——只说话不调工具的那一步同样是新的一步
+            store.agy_calls.clear();
+            store.agy_subs_awaiting.clear();
+            let calls = v.get("tool_calls").and_then(Value::as_array).cloned().unwrap_or_default();
+            if calls.is_empty() {
+                return;
+            }
+            store.note_activity(&ts);
+            for call in &calls {
+                let name = call.get("name").and_then(Value::as_str).unwrap_or("").to_string();
+                let args = call.get("args");
+                let label = agy_tool_label(&name).to_string();
+                let summary = agy_call_summary(&name, args);
+                if name == "invoke_subagent" {
+                    agy_note_subagents(store, &ts, args, &summary);
+                }
+                store.agy_calls.push_back((label.clone(), summary.clone()));
+                store.push(
+                    &ts,
+                    "tool",
+                    "tool_use",
+                    String::new(),
+                    Some(ToolInfo { name: label, summary, status: "running".into() }),
+                );
+            }
         }
         "GENERIC" => {
             let body = agy_result_body(content);
             store.note_activity(&ts);
+            let claimed = store.agy_calls.pop_front();
             // 「这一步转后台了」：agy 把任务 id 写在结果里，完成时由一条 SYSTEM_MESSAGE
             // 报回来（见下）。挂着的条数就是会话的「后台」态
             if let Some(rest) = body.strip_prefix(AGY_BG_PREFIX) {
                 let id = rest.trim_start().lines().next().unwrap_or("").trim();
                 let desc = first_line_after(body, "Task Description:");
-                let summary = if desc.is_empty() {
-                    format!("后台任务 {}", id.rsplit('/').next().unwrap_or(id))
-                } else {
-                    cap(&one_line(desc), SUMMARY_CAP)
+                // 摘要优先用 agy 自己给这次调用写的那句（`toolSummary`），它比结果里那行
+                // `Task Description:`（往往是喂给模型的原始参数）更像人话
+                let (tool, summary) = match claimed.filter(|(_, s)| !s.is_empty()) {
+                    Some((name, s)) => (name, s),
+                    None if !desc.is_empty() => ("后台任务".to_string(), cap(&one_line(desc), SUMMARY_CAP)),
+                    None => (
+                        "后台任务".to_string(),
+                        format!("后台任务 {}", id.rsplit('/').next().unwrap_or(id)),
+                    ),
                 };
                 // 后半截「YOU MUST TAKE ONE OF THE FOLLOWING TWO ACTIONS…」是写给模型的
                 // 行动指令，不是发生过的事
@@ -1021,10 +1214,10 @@ pub fn parse_agy_line(store: &mut MsgStore, v: &Value) {
                 store.bg_pending.insert(
                     id.to_string(),
                     BgTask {
-                        tool: "后台任务".into(),
+                        tool: tool.clone(),
                         summary: summary.clone(),
                         ts: ts.clone(),
-                        // agy 不记入参，但结果文本里有任务书和日志路径，点开就看这个
+                        // 结果文本里有任务书和日志路径，点开就看这个
                         detail: cap(shown, PREVIEW_CAP),
                     },
                 );
@@ -1033,11 +1226,33 @@ pub fn parse_agy_line(store: &mut MsgStore, v: &Value) {
                     "tool",
                     "tool_result",
                     cap(shown, RESULT_CAP),
-                    Some(ToolInfo { name: "后台任务".into(), summary, status: "running".into() }),
+                    Some(ToolInfo { name: tool, summary, status: "running".into() }),
                 );
                 return;
             }
-            let (name, summary, failed) = agy_tool_of(body);
+            // `manage_task cancel` 的回执：那条后台任务就此销号，不等 SYSTEM_MESSAGE
+            if let Some(id) = between(body.lines().next().unwrap_or(""), "Task \"", "\"") {
+                store.bg_pending.remove(id);
+            }
+            // 子代理的两条实况：刚建出来那条带对话 id，列表那条说谁还活着
+            if body.starts_with("Created the following subagents:") {
+                agy_attach_subagent_ids(store, body);
+            } else if body.starts_with("You have ") && body.contains("active subagent(s)") {
+                agy_settle_subagents(store, &agy_conversation_ids(body));
+            }
+            let (name, summary, failed) = match claimed {
+                // 认领到了工具名，出没出错仍看正文（agy 的结果不带状态位）
+                Some((name, summary)) => {
+                    let failed = body
+                        .lines()
+                        .find(|l| !l.trim().is_empty())
+                        .and_then(|l| l.trim().strip_prefix("The command exited with code "))
+                        .is_some_and(|c| c.trim_end_matches('.') != "0");
+                    let summary = if summary.is_empty() { agy_tool_of(body).1 } else { summary };
+                    (name, summary, failed)
+                }
+                None => agy_tool_of(body),
+            };
             let st = if status == "RUNNING" {
                 "running"
             } else if failed {
@@ -1050,7 +1265,7 @@ pub fn parse_agy_line(store: &mut MsgStore, v: &Value) {
                 "tool",
                 "tool_result",
                 cap(body.trim_end(), RESULT_CAP),
-                Some(ToolInfo { name: name.to_string(), summary, status: st.to_string() }),
+                Some(ToolInfo { name, summary, status: st.to_string() }),
             );
         }
         // 周期性系统提醒（SYSTEM_SDK）是喂给模型的注入文本，不是发生过的事——
@@ -1065,11 +1280,73 @@ pub fn parse_agy_line(store: &mut MsgStore, v: &Value) {
                     store.note_activity(&ts);
                 }
             }
+            // agy 服务端重启：挂着的那些谁也不会回来了，别让「后台」一直亮着
+            if text.contains(AGY_ALL_STOPPED) {
+                store.bg_pending.clear();
+                for a in store.subagents.iter_mut().filter(|a| a.status == "running") {
+                    a.status = "err".into();
+                }
+                store.note_activity(&ts);
+            }
             if !text.is_empty() {
                 store.push(&ts, "system", "text", cap(text, RESULT_CAP), None);
             }
         }
         _ => {}
+    }
+}
+
+/// `invoke_subagent` 的 `Subagents` 入参 → 详情屏「子代理」一节里的几条。
+/// 对话 id 这会儿还没有（它在紧跟着的那条结果里），先挂进等认领的队列。
+fn agy_note_subagents(store: &mut MsgStore, ts: &str, args: Option<&Value>, fallback: &str) {
+    let raw = agy_arg(args, "Subagents");
+    let list = serde_json::from_str::<Value>(&raw)
+        .ok()
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default();
+    let items: Vec<Value> = if list.is_empty() { vec![Value::Null] } else { list };
+    for it in items {
+        let g = |k: &str| it.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+        let summary = match g("Role") {
+            s if !s.is_empty() => s,
+            _ => fallback.to_string(),
+        };
+        store.agy_subs_awaiting.push_back(store.subagents.len());
+        store.subagents.push(Subagent {
+            tool: "invoke_subagent".into(),
+            kind: g("TypeName"),
+            summary: cap(&one_line(&summary), SUMMARY_CAP),
+            status: "running".into(),
+            ts: ts.to_string(),
+            prompt: cap(g("Prompt").trim(), PREVIEW_CAP),
+            result: String::new(),
+        });
+    }
+}
+
+/// 「Created the following subagents:」那条结果里的对话 id，按顺序发给刚挂上的几条。
+fn agy_attach_subagent_ids(store: &mut MsgStore, body: &str) {
+    for id in agy_conversation_ids(body) {
+        let Some(ix) = store.agy_subs_awaiting.pop_front() else { break };
+        store.agy_sub_conv.insert(id, ix);
+    }
+}
+
+/// 「You have N active subagent(s)」是此刻还活着的全集：记过的、有对话 id 的、
+/// 不在这张表里的那些**已经跑完了**。
+fn agy_settle_subagents(store: &mut MsgStore, alive: &[String]) {
+    let done: Vec<usize> = store
+        .agy_sub_conv
+        .iter()
+        .filter(|(id, _)| !alive.contains(id))
+        .map(|(_, ix)| *ix)
+        .collect();
+    for ix in done {
+        if let Some(a) = store.subagents.get_mut(ix) {
+            if a.status == "running" {
+                a.status = "ok".into();
+            }
+        }
     }
 }
 
@@ -1775,7 +2052,129 @@ mod tests {
         ]);
         assert_eq!(st.pending_background(None), 0, "回来了就销掉");
         let last = st.msgs.back().unwrap();
-        assert!(last.text.starts_with("[Message]"), "外面那句「以下是系统消息」不重复给人看");
+        assert!(last.text.starts_with("Task id"), "外层的「以下是系统消息」和内层的投递信封都不给人读第二遍");
+    }
+
+    /// v1.35：模型那一步自己带着 `thinking` 和 `tool_calls`——工具名与入参**记在文件里**，
+    /// 不必再从结果文本的形状去猜。摘要用 agy 自己写的 `toolSummary`。
+    #[test]
+    fn agy_tool_calls_name_the_tools() {
+        let mut st = MsgStore::for_agent("agy");
+        feed_lines(&mut st, &[
+            json!({"step_index":0,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"t1","content":null,
+                   "thinking":"**Checking disk**\n先看看根目录",
+                   "tool_calls":[{"name":"run_command","args":{
+                       "CommandLine":"\"df -h /\"","Cwd":"\"/p\"","toolAction":"\"Checking disk\"","toolSummary":"\"Check root disk usage\""}}]}),
+            json!({"step_index":1,"source":"MODEL","type":"GENERIC","status":"DONE","created_at":"t2",
+                   "content":"Created At: x\nCompleted At: y\nThe command exited with code 0.\nOutput:\n/dev/vda1 97% /\n"}),
+        ]);
+        let m: Vec<_> = st.msgs.iter().collect();
+        assert_eq!(m.len(), 3);
+        assert_eq!((m[0].kind.as_str(), m[0].role.as_str()), ("thinking", "assistant"));
+        assert_eq!(m[1].kind, "tool_use");
+        assert_eq!(m[1].tool.as_ref().unwrap().name, "命令");
+        assert_eq!(m[1].tool.as_ref().unwrap().summary, "Check root disk usage", "摘要用 agy 自己写的那句");
+        assert_eq!(m[2].kind, "tool_result");
+        assert_eq!(m[2].tool.as_ref().unwrap().name, "命令", "结果认领了上一步宣布的那个调用");
+        assert_eq!(m[2].tool.as_ref().unwrap().status, "ok");
+
+        // 表里没有的工具名原样用它自己的名字——「工具」两个字不告诉人任何事
+        feed_lines(&mut st, &[
+            json!({"step_index":2,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"t3","content":null,
+                   "tool_calls":[{"name":"some_new_tool","args":{"Path":"\"/tmp/x\""}}]}),
+        ]);
+        assert_eq!(st.msgs.back().unwrap().tool.as_ref().unwrap().name, "some_new_tool");
+    }
+
+    /// `%` 后面跟着一个多字节字符时（`%中文.md` 这样的文件名真的有），
+    /// 百分号解码**不许 panic**——这条以前会把整个解析线程带走。
+    #[test]
+    fn percent_decode_never_slices_a_character_in_half() {
+        assert_eq!(percent_decode("%中文.md"), "%中文.md", "解不出来就原样给");
+        assert_eq!(percent_decode("%E9%82%AE%E4%BB%B6.py"), "邮件.py");
+        assert_eq!(percent_decode("100%"), "100%");
+        assert_eq!(percent_decode("a%zz"), "a%zz", "不是十六进制就不当转义");
+        assert_eq!(percent_decode("纯中文.md"), "纯中文.md");
+    }
+
+    /// 认领是**一步之内**的事：上一步没被认领的调用不许拖到下一步去
+    /// （实测有一步两个调用只回一条结果的样本，错位不能传染整条会话）。
+    #[test]
+    fn agy_unclaimed_calls_do_not_leak_into_the_next_step() {
+        let mut st = MsgStore::for_agent("agy");
+        feed_lines(&mut st, &[
+            json!({"step_index":0,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"t1","content":null,
+                   "tool_calls":[{"name":"view_file","args":{"toolSummary":"\"A\""}},{"name":"view_file","args":{"toolSummary":"\"B\""}}]}),
+            json!({"step_index":1,"source":"MODEL","type":"GENERIC","status":"DONE","created_at":"t2","content":"File Path: `file:///p/a.rs`"}),
+            json!({"step_index":2,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"t3","content":null,
+                   "tool_calls":[{"name":"grep_search","args":{"toolSummary":"\"C\""}}]}),
+            json!({"step_index":3,"source":"MODEL","type":"GENERIC","status":"DONE","created_at":"t4","content":"Found 3 results"}),
+        ]);
+        let last = st.msgs.back().unwrap().tool.clone().unwrap();
+        assert_eq!((last.name.as_str(), last.summary.as_str()), ("搜索", "C"), "没认领掉的 B 不该顶到这一条上");
+
+        // 只说话不调工具的那一步同样是新的一步：队列在它那儿就该清掉
+        feed_lines(&mut st, &[
+            json!({"step_index":4,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"t5",
+                   "tool_calls":[{"name":"view_file","args":{"toolSummary":"\"D\""}},{"name":"view_file","args":{"toolSummary":"\"E\""}}]}),
+            json!({"step_index":5,"source":"MODEL","type":"GENERIC","status":"DONE","created_at":"t6","content":"File Path: `file:///p/a.rs`"}),
+            json!({"step_index":6,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"t7","content":"说两句"}),
+            json!({"step_index":7,"source":"MODEL","type":"GENERIC","status":"DONE","created_at":"t8","content":"No results found"}),
+        ]);
+        let last = st.msgs.back().unwrap().tool.clone().unwrap();
+        assert_eq!((last.name.as_str(), last.summary.as_str()), ("搜索", "没有匹配"), "E 不该活过那一步纯文本");
+    }
+
+    /// 子代理：`invoke_subagent` 的入参进台账，紧跟着的结果给它对话 id，
+    /// 之后的「还活着的有谁」列表里没有它了 = 它跑完了。
+    #[test]
+    fn agy_subagents_settle_from_the_active_listing() {
+        let mut st = MsgStore::for_agent("agy");
+        feed_lines(&mut st, &[
+            json!({"step_index":0,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"t1","content":null,
+                   "tool_calls":[{"name":"invoke_subagent","args":{
+                       "Subagents":"[{\"Role\":\"Code Reviewer\",\"TypeName\":\"DeepInvestigator\",\"Prompt\":\"审一遍\"}]",
+                       "toolSummary":"\"Invoke DeepInvestigator\""}}]}),
+            json!({"step_index":1,"source":"MODEL","type":"GENERIC","status":"DONE","created_at":"t2",
+                   "content":"Created the following subagents:\n{\n  \"conversationId\":  \"c-1\"\n}\n"}),
+        ]);
+        assert_eq!(st.subagents.len(), 1);
+        assert_eq!(st.subagents[0].kind, "DeepInvestigator");
+        assert_eq!(st.subagents[0].summary, "Code Reviewer");
+        assert_eq!(st.subagents[0].prompt, "审一遍");
+        assert_eq!(st.subagents[0].status, "running");
+
+        feed_lines(&mut st, &[
+            json!({"step_index":2,"source":"MODEL","type":"GENERIC","status":"DONE","created_at":"t3",
+                   "content":"You have 1 active subagent(s):\n[{\"conversationId\":\"c-1\",\"state\":\"running\"}]"}),
+        ]);
+        assert_eq!(st.subagents[0].status, "running", "还列着就是还在跑");
+
+        feed_lines(&mut st, &[
+            json!({"step_index":3,"source":"MODEL","type":"GENERIC","status":"DONE","created_at":"t4",
+                   "content":"You have 0 active subagent(s):\n[]"}),
+        ]);
+        assert_eq!(st.subagents[0].status, "ok", "不在活着的名单里了 = 跑完了");
+    }
+
+    /// agy 服务端重启那条通知：挂着的后台任务和子代理谁也不会再回来，当场收摊——
+    /// 不然「后台」会一直亮着，等一个永远不到的回音。
+    #[test]
+    fn agy_server_restart_notice_clears_everything_pending() {
+        let mut st = MsgStore::for_agent("agy");
+        feed_lines(&mut st, &[
+            json!({"step_index":0,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"t1","content":null,
+                   "tool_calls":[{"name":"invoke_subagent","args":{"Subagents":"[{\"Role\":\"R\",\"TypeName\":\"T\"}]"}}]}),
+            json!({"step_index":1,"source":"MODEL","type":"GENERIC","status":"RUNNING","created_at":"t2",
+                   "content":"Tool is running as a background task with task id: c/task-1\nTask Description: 跑一个长活"}),
+        ]);
+        assert_eq!((st.pending_background(None), st.subagents[0].status.as_str()), (1, "running"));
+        feed_lines(&mut st, &[
+            json!({"step_index":2,"source":"SYSTEM","type":"SYSTEM_MESSAGE","status":"DONE","created_at":"t3",
+                   "content":"<SYSTEM_MESSAGE>\n[Message] content=[Notice] All your subagents and background tasks have been stopped due to server restart.\n</SYSTEM_MESSAGE>"}),
+        ]);
+        assert_eq!(st.pending_background(None), 0);
+        assert_eq!(st.subagents[0].status, "err");
     }
 
     /// 非 0 退出码 = 这一步出错了（红），RUNNING = 还在跑。

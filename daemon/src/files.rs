@@ -1,4 +1,8 @@
-//! v1.30 目录浏览：项目根底下的只读文件浏览器（客户端第三种视图，见 PROTOCOL「浏览」）。
+//! v1.35 产物里的 Markdown：项目产出的 `.md` 清单 + 只读地读一个文件。
+//!
+//! v1.30 的目录 explorer（会话的第三种看法「浏览」）2026-09-10 删掉了，换成
+//! **项目自己产出的 Markdown 直接排进详情栏的「产物」一节**——手机上真正会去翻的
+//! 只有报告和笔记，而不是一个 `.git/objects` 也点得进去的文件管理器。
 //!
 //! **只读**：没有写、改名、删除。手机上要改文件就跟 agent 说，那是 agent 的活。
 //!
@@ -14,21 +18,16 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-/// 一次最多列这么多条：`.git/objects` 那种目录几万个文件，全发过去手机先卡死。
-pub const MAX_ENTRIES: usize = 2000;
+/// 一个项目最多列这么多份 Markdown（够多了；再多就不是「产物」而是一个仓库）。
+pub const MAX_DOCS: usize = 200;
+/// 往下找几层。报告放在根上或 `docs/`、`reports/` 底下，四层足够，
+/// 再深就该由 agent 告诉你它写在哪，而不是这里去爬整棵树。
+pub const MAX_DOC_DEPTH: usize = 4;
+/// 扫描时最多看这么多个目录项：`node_modules` 已经被跳掉了，这一条是兜底，
+/// 免得一个病态的目录树把这次请求拖死。
+const MAX_DOC_VISITS: usize = 20_000;
 /// 一次最多读这么多字节的正文，超出的截断（`truncated:true`）。
 pub const MAX_BYTES: usize = 512 * 1024;
-
-#[derive(Serialize, PartialEq, Debug)]
-pub struct Entry {
-    pub name: String,
-    pub path: String,
-    pub dir: bool,
-    pub size: u64,
-    pub mtime: f64,
-    /// markdown | html | text | binary（目录为空串）。客户端据此决定点开怎么显示。
-    pub kind: &'static str,
-}
 
 /// 后缀 → 这个文件点开该怎么显示。**只看后缀**：内容嗅探要把文件读进来，
 /// 而列目录时读几千个文件的头几个字节比列目录本身还贵。真读的时候
@@ -64,45 +63,89 @@ pub fn resolve(root: &Path, path: &str) -> Option<PathBuf> {
     (real == root || real.starts_with(root)).then_some(real)
 }
 
-/// 上一级——**到项目根为止**。根自己没有上一级（客户端据此不画「..」）。
-pub fn parent_of(root: &Path, dir: &Path) -> Option<String> {
-    if dir == root {
-        return None;
-    }
-    dir.parent()
-        .filter(|p| p.starts_with(root) || *p == root)
-        .map(|p| p.to_string_lossy().into_owned())
+/// 一份项目产出的 Markdown（详情栏「产物」一节里的一行）。
+#[derive(Serialize, PartialEq, Debug)]
+pub struct Doc {
+    pub name: String,
+    pub path: String,
+    /// 相对项目根的位置（`docs/api.md`）。就在根上时等于 `name`
+    pub rel: String,
+    pub size: u64,
+    pub mtime: f64,
 }
 
-/// 目录列表：目录在前，其次按名字（大小写无关）。点开头的不特殊对待——
-/// `.gitignore`、`.aaa-agents` 正是要看的东西。
-pub fn list_dir(dir: &Path) -> std::io::Result<Vec<Entry>> {
-    let mut out = Vec::new();
-    for e in std::fs::read_dir(dir)? {
-        let Ok(e) = e else { continue };
-        let name = e.file_name().to_string_lossy().into_owned();
-        // 元数据取不到（断掉的软链接、刚被删掉）就当它不存在，不为一条坏项目废掉整个列表
-        let Ok(md) = e.metadata() else { continue };
-        let dir_flag = md.is_dir();
-        out.push(Entry {
-            kind: if dir_flag { "" } else { kind_of(&name) },
-            path: e.path().to_string_lossy().into_owned(),
+/// 不进「产物」的目录：点开头的（`.git`、`.venv`…）、装依赖和放构建产物的，
+/// 还有 `_inbox`——那是**传进来的**文件，详情栏里自有「已上传」一节。
+fn skip_dir(name: &str) -> bool {
+    name.starts_with('.')
+        || matches!(
             name,
-            dir: dir_flag,
-            size: if dir_flag { 0 } else { md.len() },
-            mtime: crate::stores::mtime_f(&md),
-        });
-        if out.len() >= MAX_ENTRIES {
-            break;
+            "node_modules" | "target" | "build" | "dist" | "out" | "vendor" | "venv"
+                | "__pycache__" | "_inbox" | "Pods"
+        )
+}
+
+/// 项目根底下的 Markdown，**最近改的在前**。广度优先，一层层往下，到
+/// [`MAX_DOC_DEPTH`] 为止；`project` 必须已经是 canonicalize 过的路径。
+///
+/// 为什么是「扫目录」而不是「从 transcript 里认」：报告常常是**上一次**会话写的，
+/// 而 transcript 只认得这一条会话干过的事。项目里有哪些 Markdown 是项目的属性，
+/// 不是某一条对话的属性。
+pub fn find_docs(project: &Path) -> Vec<Doc> {
+    let mut out: Vec<Doc> = Vec::new();
+    let mut queue: std::collections::VecDeque<(PathBuf, usize)> =
+        std::collections::VecDeque::from([(project.to_path_buf(), 0)]);
+    let mut visits = 0usize;
+    while let Some((dir, depth)) = queue.pop_front() {
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for e in rd.flatten() {
+            visits += 1;
+            if visits > MAX_DOC_VISITS {
+                queue.clear();
+                break;
+            }
+            let name = e.file_name().to_string_lossy().into_owned();
+            // **软链接一律不跟**（`file_type` 是这一项自己的类型，不解链接）：指回上层的
+            // 链接会让广度优先在同一批文件上转圈、每层再列一遍；指到项目根外的链接会列出
+            // 一份点开就 404 的文件（读那一步的守卫会 canonicalize 后把它挡在外面）
+            let Ok(ft) = e.file_type() else { continue };
+            if ft.is_symlink() {
+                continue;
+            }
+            // 元数据取不到（刚被删掉）就当它不存在
+            let Ok(md) = e.metadata() else { continue };
+            if ft.is_dir() {
+                if depth + 1 < MAX_DOC_DEPTH && !skip_dir(&name) {
+                    queue.push_back((e.path(), depth + 1));
+                }
+                continue;
+            }
+            if kind_of(&name) != "markdown" {
+                continue;
+            }
+            let path = e.path();
+            let rel = path
+                .strip_prefix(project)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| name.clone());
+            out.push(Doc {
+                name,
+                path: path.to_string_lossy().into_owned(),
+                rel,
+                size: md.len(),
+                mtime: crate::stores::mtime_f(&md),
+            });
         }
     }
+    // 最近改的在前；同一刻按位置稳住，免得两次请求给出不同的顺序
     out.sort_by(|a, b| {
-        b.dir
-            .cmp(&a.dir)
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-            .then_with(|| a.name.cmp(&b.name))
+        b.mtime
+            .partial_cmp(&a.mtime)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.rel.cmp(&b.rel))
     });
-    Ok(out)
+    out.truncate(MAX_DOCS);
+    out
 }
 
 #[derive(Serialize)]
@@ -188,26 +231,50 @@ mod tests {
         std::fs::create_dir_all(&outside).unwrap();
         std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
         assert_eq!(resolve(&root, root.join("link").to_str().unwrap()), None, "软链接不是后门");
-        assert_eq!(parent_of(&root, &root), None, "根没有上一级");
-        assert_eq!(parent_of(&root, &root.join("a/b")), Some(root.join("a").to_string_lossy().into_owned()));
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// 列表：目录在前、名字大小写无关排序；点开头的照列。
+    /// 产物里的 Markdown：只收 `.md` 一类，最近改的在前，装依赖 / 放上传的目录不进去。
     #[test]
-    fn list_puts_directories_first() {
-        let root = tmp("list");
-        std::fs::create_dir_all(root.join("src")).unwrap();
-        std::fs::write(root.join("README.md"), b"# hi").unwrap();
-        std::fs::write(root.join("app.rs"), b"fn main(){}").unwrap();
-        std::fs::write(root.join(".gitignore"), b"target").unwrap();
-        let e = list_dir(&root).unwrap();
-        let names: Vec<&str> = e.iter().map(|x| x.name.as_str()).collect();
-        assert_eq!(names, vec!["src", ".gitignore", "app.rs", "README.md"]);
-        assert_eq!(e[0].kind, "", "目录不谈 kind");
-        assert_eq!(e[2].kind, "text");
-        assert_eq!(e[3].kind, "markdown");
+    fn docs_are_markdown_only_newest_first() {
+        let root = tmp("docs");
+        for d in ["docs", "node_modules/pkg", ".git", "_inbox", "a/b/c/d"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        let write = |rel: &str, secs: u64| {
+            let p = root.join(rel);
+            std::fs::write(&p, b"# hi").unwrap();
+            let t = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_780_000_000 + secs);
+            filetime(&p, t);
+        };
+        write("README.md", 10);
+        write("docs/api.md", 30);
+        write("app.rs", 40);
+        write("node_modules/pkg/readme.md", 50);
+        write(".git/notes.md", 50);
+        write("_inbox/传进来的.md", 50);
+        write("a/b/c/d/deep.md", 60);
+        // 指回上层的软链接：跟着它走会在同一批文件上转圈，每层再列一遍
+        std::os::unix::fs::symlink(&root, root.join("loop")).unwrap();
+        std::os::unix::fs::symlink(root.join("README.md"), root.join("alias.md")).unwrap();
+
+        let docs = find_docs(&root);
+        let rels: Vec<&str> = docs.iter().map(|d| d.rel.as_str()).collect();
+        assert_eq!(rels, vec!["docs/api.md", "README.md"], "只剩这两份，新的在前；软链接一个都不跟");
+        assert_eq!(docs[1].name, "README.md");
+        assert!(docs[0].path.ends_with("docs/api.md"), "path 是绝对路径，读的时候直接用");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 改一个文件的 mtime（测试要的是确定的顺序，不是「写得快不快」）
+    fn filetime(p: &Path, t: std::time::SystemTime) {
+        let secs = t.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as libc::time_t;
+        let times = [
+            libc::timeval { tv_sec: secs, tv_usec: 0 },
+            libc::timeval { tv_sec: secs, tv_usec: 0 },
+        ];
+        let c = std::ffi::CString::new(p.to_string_lossy().as_bytes()).unwrap();
+        unsafe { libc::utimes(c.as_ptr(), times.as_ptr()) };
     }
 
     /// 读：markdown 出正文；二进制只报大小；超长截断但不把好的那半截扔掉。

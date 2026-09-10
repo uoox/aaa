@@ -128,6 +128,19 @@ fun AaaApp(
             composable("detail/{id}") { entry ->
                 SessionDetailScreen(store, nav, entry.arguments?.getString("id").orEmpty())
             }
+            composable(
+                "doc?path={path}&title={title}",
+                arguments = listOf(
+                    androidx.navigation.navArgument("path") { defaultValue = "" },
+                    androidx.navigation.navArgument("title") { defaultValue = "" },
+                ),
+            ) { entry ->
+                DocScreen(
+                    store, nav,
+                    path = Uri.decode(entry.arguments?.getString("path").orEmpty()),
+                    title = Uri.decode(entry.arguments?.getString("title").orEmpty()),
+                )
+            }
             composable("terminal?focus={focus}", arguments = listOf(androidx.navigation.navArgument("focus") { defaultValue = "" })) { entry ->
                 TerminalScreen(store, nav, focusId = entry.arguments?.getString("focus").orEmpty())
             }
@@ -148,6 +161,11 @@ fun AaaApp(
 /** 会话页右上角的详情按钮（顶替了原来的 ⋮） */
 fun NavHostController.openDetail(sessionId: String) {
     navigate("detail/" + Uri.encode(sessionId)) { launchSingleTop = true }
+}
+
+/** 详情屏「产物」里点开一份项目 Markdown */
+fun NavHostController.openDoc(path: String, title: String) {
+    navigate("doc?path=${Uri.encode(path)}&title=${Uri.encode(title)}") { launchSingleTop = true }
 }
 
 fun NavHostController.openTerminal(focusId: String? = null) {
@@ -253,8 +271,8 @@ fun PairScreen(store: AppStore, onConnected: () -> Unit) {
 // ---------- home：项目列表就是首页 ----------
 
 /**
- * 首页只有一屏：项目列表（含每个项目的会话三态），右上角齿轮进设置，顶部输入框
- * 既过滤列表也新建项目（输入文件夹名回车，与 mac 侧栏一致）。原来的「会话 / 项目 /
+ * 首页只有一屏：项目列表（含每个项目的会话三态），右上角齿轮进设置，列表末尾那一行
+ * 新建项目（输入文件夹名回车，与 mac 侧栏一致）。原来的「会话 / 项目 /
  * 设置」三 tab 和右下角 ＋ 都收掉了——一个项目一个 agent，项目即会话。
  * 2026-09-07：连这一屏也不再独立存在，见下面 HomeScreen。
  */

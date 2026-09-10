@@ -1106,14 +1106,26 @@ async fn usage_get(State(app): State<SharedApp>) -> Json<Value> {
     Json(json!({ "plan": plan }))
 }
 
-/// 会话里发布过的 Artifact（报告 / 原型 / 图的链接），来自 transcript 的 Artifact 工具调用
+/// 「产物」一节的两样东西：
+/// - `artifacts`：这条会话**发布过**的 Artifact（报告 / 原型 / 图的链接），来自 transcript
+///   的 Artifact 工具调用；
+/// - `docs`（v1.35）：这个**项目**里的 Markdown，最近改的在前。会话与项目在这里故意不同口径
+///   ——报告常常是上一次会话写的，而项目里有哪些 md 是项目的属性。点开一份走
+///   `GET /files/read`（守卫同一条：出项目根 404）。
 async fn session_artifacts(
     State(app): State<SharedApp>,
     UrlPath(id): UrlPath<String>,
 ) -> ApiResult<Json<Value>> {
     let sess = get_session(&app, &id)?;
     let list = sess.msgs.lock().unwrap().artifacts.clone();
-    Ok(Json(json!({ "artifacts": list })))
+    let dir = sess.meta.lock().unwrap().project_path.clone();
+    // 扫目录是同步 IO：外置卷上一个大项目能走上百毫秒，不许压在 tokio 的工作线程上
+    let docs = blocking(move || {
+        let p = std::path::PathBuf::from(&dir);
+        if p.is_dir() { crate::files::find_docs(&p) } else { Vec::new() }
+    })
+    .await?;
+    Ok(Json(json!({ "artifacts": list, "docs": docs })))
 }
 
 /// v1.17 详情屏：一次给齐「消息流里翻不出来」的四样东西——子代理、后台任务、上传、技能。
@@ -1823,7 +1835,7 @@ async fn inbox_delete(
     }
 }
 
-// ---- v1.30 目录浏览（消息流 / 终端之外的第三种视图）----
+// ---- 读一份项目里的文件（详情栏「产物」里点开一份 Markdown 就走这里）----
 
 #[derive(Deserialize)]
 struct PathQuery {
@@ -1835,25 +1847,6 @@ struct PathQuery {
 fn under_root(app: &App, path: &str) -> ApiResult<std::path::PathBuf> {
     crate::files::resolve(&app.cfg.project_root, path)
         .ok_or_else(|| ApiError::not_found(format!("no such path under the project root: {path}")))
-}
-
-async fn files_list(
-    State(app): State<SharedApp>,
-    axum::extract::Query(q): axum::extract::Query<PathQuery>,
-) -> ApiResult<Json<Value>> {
-    ssd_guard(&app)?;
-    let dir = under_root(&app, &q.path)?;
-    let listed = {
-        let dir = dir.clone();
-        blocking(move || crate::files::list_dir(&dir)).await?
-    };
-    let entries = listed.map_err(|e| ApiError::not_found(format!("no such directory: {e}")))?;
-    Ok(Json(json!({
-        "path": dir.to_string_lossy(),
-        "parent": crate::files::parent_of(&app.cfg.project_root, &dir),
-        "truncated": entries.len() >= crate::files::MAX_ENTRIES,
-        "entries": entries,
-    })))
 }
 
 async fn files_read(
@@ -2082,7 +2075,6 @@ pub fn router(app: SharedApp) -> Router {
             post(project_upload)
                 .layer(axum::extract::DefaultBodyLimit::max(UPLOAD_LIMIT)),
         )
-        .route("/api/v1/files", get(files_list))
         .route("/api/v1/files/read", get(files_read))
         .route("/api/v1/inbox", get(inbox_list).post(inbox_add))
         .route("/api/v1/inbox/{id}", delete(inbox_delete))

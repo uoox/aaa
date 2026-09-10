@@ -40,7 +40,7 @@ impl RootView {
         cx.notify();
     }
 
-    /// 侧栏输入框回车 / ＋：输入框里的字就是文件夹名，留空 = 时间戳目录名。
+    /// 侧栏「新建项目」那一行按回车：行里的字就是文件夹名，留空 = 时间戳目录名。
     /// 建完清空输入框并进入新会话。
     pub(super) fn create_project(&mut self, cx: &mut Context<Self>) {
         if self.creating {
@@ -61,7 +61,7 @@ impl RootView {
                 .map(|h| format!("{}/{}", h.project_root, n))
         });
         let net = self.net.clone();
-        // 不走 spawn_fetch：失败时也得把 `creating` 放掉（不然 ＋ 永远卡在「…」），
+        // 不走 spawn_fetch：失败时也得把 `creating` 放掉（不然那一行永远卡在「…」），
         // 而 spawn_fetch 的失败分支只会弹错，碰不到 self
         cx.spawn(async move |this, cx| {
             let res: anyhow::Result<crate::model::Session> = async {

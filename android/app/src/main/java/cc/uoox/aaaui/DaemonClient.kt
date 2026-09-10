@@ -129,22 +129,9 @@ class DaemonClient(
     suspend fun messages(id: String, after: Long = 0, limit: Int = 200): MessagesResponse =
         json.decodeFromString(get("/sessions/$id/messages?after=$after&limit=$limit"))
 
-    /** v1.30 目录浏览：列一个目录（daemon 保证它在项目根底下） */
-    suspend fun files(path: String): FileListing =
-        json.decodeFromString(FileListing.serializer(), get("/files?path=" + urlEncode(path)))
-
-    /** v1.30 目录浏览：读一个文件（二进制只回大小，正文空） */
+    /** v1.35：读一份项目里的文件（详情屏「产物」点开一份 Markdown；二进制只回大小，正文空） */
     suspend fun fileRead(path: String): FileBody =
         json.decodeFromString(FileBody.serializer(), get("/files/read?path=" + urlEncode(path)))
-
-    /** 项目任务队列：排着的几句话（agent 空下来 daemon 自动喂下一句） */
-    suspend fun inboxList(path: String): List<InboxEntry> =
-        json.decodeFromString(ListSerializer(InboxEntry.serializer()), get("/inbox?path=" + java.net.URLEncoder.encode(path, "UTF-8")))
-
-    suspend fun inboxAdd(path: String, text: String): String =
-        post("/inbox", buildJsonObject { put("path", path); put("text", text) }.toString())
-
-    suspend fun inboxDelete(id: String): String = delete("/inbox/$id")
 
     /** 紧急制动：收掉还活着的项目会话（终端不收） */
     suspend fun killAll(runningOnly: Boolean = true): String =
@@ -187,8 +174,9 @@ class DaemonClient(
     /** 套餐用量；plan 为 null = daemon 暂时没有数据 */
     suspend fun usage(): PlanUsage? = json.decodeFromString(UsageResponse.serializer(), get("/usage")).plan
 
-    suspend fun artifacts(id: String): List<ArtifactInfo> =
-        json.decodeFromString(ArtifactsResponse.serializer(), get("/sessions/$id/artifacts")).artifacts
+    /** 「产物」一节的两样：发布过的链接 + 项目里的 Markdown */
+    suspend fun artifacts(id: String): ArtifactsResponse =
+        json.decodeFromString(ArtifactsResponse.serializer(), get("/sessions/$id/artifacts"))
 
     suspend fun upload(projectPath: String, name: String, bytes: ByteArray): UploadResult {
         val req = builder("/projects/upload?path=" + urlEncode(projectPath) + "&name=" + urlEncode(name))

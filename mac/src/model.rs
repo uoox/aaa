@@ -361,34 +361,22 @@ pub struct Artifact {
     pub ts: String,
 }
 
-// ── v1.30 目录浏览：GET /files、GET /files/read ─────────────────────────────
+// ── v1.35 产物里的 Markdown：GET /sessions/:id/artifacts 的 docs、GET /files/read ──
 
-/// 目录里的一项。`kind` ∈ markdown | html | text | binary（目录是空串）。
+/// 项目里的一份 Markdown（详情栏「产物」一节里的一行）
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
-pub struct FileEntry {
+pub struct Doc {
     #[serde(default)]
     pub name: String,
     #[serde(default)]
     pub path: String,
+    /// 相对项目根的位置（`docs/api.md`）
     #[serde(default)]
-    pub dir: bool,
+    pub rel: String,
     #[serde(default)]
     pub size: u64,
     #[serde(default)]
-    pub kind: String,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct FileListing {
-    #[serde(default)]
-    pub path: String,
-    /// 项目根自己没有上一级
-    #[serde(default)]
-    pub parent: Option<String>,
-    #[serde(default)]
-    pub truncated: bool,
-    #[serde(default)]
-    pub entries: Vec<FileEntry>,
+    pub mtime: f64,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -486,6 +474,9 @@ pub struct SessionDetailResponse {
 pub struct ArtifactsResponse {
     #[serde(default)]
     pub artifacts: Vec<Artifact>,
+    /// v1.35：项目里的 Markdown（老 daemon 不给这一段 → 空）
+    #[serde(default)]
+    pub docs: Vec<Doc>,
 }
 
 impl Session {

@@ -4,6 +4,10 @@ AAA 砍掉过的功能，连同砍它的理由。**这不是契约**——当下
 留着它是因为「为什么当初删了」比「删了什么」值钱：同一个想法过一阵会有人重新提，
 理由还成立就别再做一遍，不成立就大方加回来（`GET /agents` 就是这么回来的）。
 
+**2026-09-10（v1.35）：「浏览」——会话的第三种看法。** `GET /files`（列目录）、`files.rs` 的 `list_dir` / `Entry` / `parent_of`、mac 的 `FilesView`、Android 的 `FilesView`、两端视图轮换里的那一档全部删掉。理由（用户 2026-09-10）：「不需要『浏览』功能，取而代之是项目生成的 Markdown 也显示在产物里面，并支持阅读」。手机上真正会去翻的只有报告和笔记，不是一个 `.git/objects` 也点得进去的文件管理器；而报告本来就该和「发布过的产物链接」排在一起。**留下的是读文件那一半**：`GET /files/read` 还在（守卫也还是那一条：出项目根 404），`GET /sessions/:id/artifacts` 多带一段 `docs`（项目里的 Markdown，最近改的在前），两端在详情栏「产物」一节里画它、点开就读，见 PROTOCOL「产物」。⌘E 因此回到两档（终端 ⇄ 消息流）。
+
+**2026-09-10（v1.35）：Android 详情屏的收件箱。** 那一节、`InboxEntry` DTO、`inboxList` / `inboxAdd` / `inboxDelete` 三个调用、`inbox_changed` 帧的解析与订阅一并删掉。理由（用户 2026-09-10）：「Android 详情里面的收件箱也可以去掉」。v1.32 删 mac 那一节时留下的理由是「排队是人不在跟前才需要的，那正是手机的场景」——用下来手机上也不需要：**排队是 Claude Code 自己的行为**（消息流末尾那些「待发送」），AAA 这一套只是另一个要维护的队列。**daemon 那一套照旧跑着**（`feed.rs` 每秒重试、`GET/POST/DELETE /inbox` 三条路由都在、`inbox_changed` 照发），「信任对话框挡着屏幕时把整句话收下」那条岔路仍靠它落地；现在没有任何客户端入口。
+
 **2026-09-10（v1.32）：mac 详情栏的收件箱。** 那一节、`inbox` 状态表、输入框、`refresh_inbox` / `submit_inbox` / `drop_inbox` 与 mac 侧的三个 `/inbox` 调用一并删掉。理由（用户 2026-09-10）：坐在 Mac 前面的时候直接在消息流里说话就行——排队是「人不在跟前」才需要的东西，那正是手机的场景。**daemon 那一套照旧跑着**（`feed.rs` 每秒重试、`GET/POST/DELETE /inbox` 三条路由都在），入口只剩 Android 的会话详情屏与 CLI。v1.28 给 mac 加这一节时的理由是「daemon 里跑着却没人能往里加东西」，那个理由已经由 Android 那一侧承担了。
 
 **2026-09-10（v1.30）：换 agent。** `POST /projects/agent`、mac 项目行尾的 agent 字母小标、Android 长按单里的「换成 X」、两端的 `swap_project_agent` / `setProjectAgent` 全部拆掉。理由（用户 2026-09-10）：「不要有切换agent的功能，这个永远不要实现」。**保留**的是新建项目时选 agent 那一处——一个项目跑哪个 agent 在建它的时候定，之后不改；真要换就新建一个项目。注册表第三列（上一次 resume 的对话 id）还在，它是 resume 的兜底，与换 agent 无关。`GET /agents` 也还在：新建那个入口要靠它知道装了哪些。

@@ -968,10 +968,11 @@ async fn events_reconnect_snapshot_is_authoritative() {
 }
 
 
-/// v1.30 目录浏览：列目录、读 Markdown、出根被挡。守卫在 daemon 这一层做完，
+/// v1.35 产物里的 Markdown：`GET /sessions/:id/artifacts` 带上项目里的 md 清单，
+/// `GET /files/read` 读得到正文，出项目根一律 404。守卫在 daemon 这一层做完，
 /// 两端只画——所以这条必须端到端跑，而不是只测 `files.rs` 里的纯函数。
 #[test]
-fn files_browser_lists_reads_and_refuses_to_leave_the_root() {
+fn project_docs_are_listed_and_readable_but_never_outside_the_root() {
     let env = setup_env();
     let _guard = spawn_daemon(&env);
     let port = wait_port(&env);
@@ -984,30 +985,32 @@ fn files_browser_lists_reads_and_refuses_to_leave_the_root() {
         Some(serde_json::json!({"name": "browse"})),
     );
     let dir = proj["path"].as_str().unwrap().to_string();
-    std::fs::create_dir_all(Path::new(&dir).join("src")).unwrap();
+    std::fs::create_dir_all(Path::new(&dir).join("docs")).unwrap();
+    std::fs::create_dir_all(Path::new(&dir).join("node_modules")).unwrap();
     std::fs::write(Path::new(&dir).join("NOTE.md"), "# 标题\n正文").unwrap();
+    std::fs::write(Path::new(&dir).join("docs/api.md"), "# api").unwrap();
+    std::fs::write(Path::new(&dir).join("app.rs"), "fn main(){}").unwrap();
+    std::fs::write(Path::new(&dir).join("node_modules/dep.md"), "# dep").unwrap();
 
-    let (code, listing) = http("GET", port, &format!("/api/v1/files?path={dir}"), Some(TOKEN), None);
+    let (_, sess) = http(
+        "POST",
+        port,
+        "/api/v1/sessions",
+        Some(TOKEN),
+        Some(serde_json::json!({"project_path": dir, "agent": "shell"})),
+    );
+    let sid = sess["id"].as_str().unwrap().to_string();
+
+    let (code, arts) = http("GET", port, &format!("/api/v1/sessions/{sid}/artifacts"), Some(TOKEN), None);
     assert_eq!(code, 200);
-    let names: Vec<&str> = listing["entries"]
+    let mut rels: Vec<&str> = arts["docs"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|e| e["name"].as_str().unwrap())
+        .map(|d| d["rel"].as_str().unwrap())
         .collect();
-    assert_eq!(names, vec!["src", "NOTE.md"], "目录在前");
-    assert_eq!(listing["entries"][1]["kind"], "markdown");
-    assert!(listing["parent"].is_string(), "项目目录有上一级（项目根）");
-
-    let root = env.root.canonicalize().unwrap();
-    let (_, at_root) = http(
-        "GET",
-        port,
-        &format!("/api/v1/files?path={}", root.display()),
-        Some(TOKEN),
-        None,
-    );
-    assert!(at_root["parent"].is_null(), "项目根没有上一级");
+    rels.sort();
+    assert_eq!(rels, vec!["NOTE.md", "docs/api.md"], "只有 md，装依赖的目录不进来");
 
     let (code, file) = http(
         "GET",
@@ -1021,12 +1024,11 @@ fn files_browser_lists_reads_and_refuses_to_leave_the_root() {
     assert_eq!(file["kind"], "markdown");
 
     // 出根：`..` 与根之外的绝对路径都是 404，不是「读到了别人的文件」
-    for bad in ["/etc", "/etc/hosts"] {
-        let (code, _) = http("GET", port, &format!("/api/v1/files?path={bad}"), Some(TOKEN), None);
-        assert_eq!(code, 404, "{bad} 在项目根之外");
-    }
     let (code, _) = http("GET", port, "/api/v1/files/read?path=/etc/hosts", Some(TOKEN), None);
     assert_eq!(code, 404);
-    let (code, _) = http("GET", port, &format!("/api/v1/files?path={dir}/../.."), Some(TOKEN), None);
+    let (code, _) = http("GET", port, &format!("/api/v1/files/read?path={dir}/../../etc/hosts"), Some(TOKEN), None);
     assert_eq!(code, 404, "`..` 爬不出去");
+    // 老路由整个没了（目录 explorer 2026-09-10 删掉）
+    let (code, _) = http("GET", port, &format!("/api/v1/files?path={dir}"), Some(TOKEN), None);
+    assert_eq!(code, 404, "「浏览」那条列目录的路由不再存在");
 }
