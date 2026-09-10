@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "aaa-ui-mac"
-version = "1.40.1"
+version = "1.41.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",

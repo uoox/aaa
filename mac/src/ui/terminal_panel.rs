@@ -199,10 +199,13 @@ impl RootView {
             .flex()
             .flex_col()
             .gap(px(1.))
-            .child(super::section_header("shell", &[]))
-            // 新建那一行排在栏名底下第一行，与另外两栏同一个位置、同一个构件
-            // （2026-09-11 用户拍板：「终端也是放个输入框，回车新建，相当于给终端命名了」）
-            .child(self.render_new_project_row(new_live, "shell", window, cx));
+            // 表头与「新建」是同一行（v1.41），与另外两栏一模一样：记号 + 输入框。
+            // 终端那一栏没有配额，行尾是空的
+            .child(super::section_row(
+                "shell",
+                &[],
+                self.render_new_cell(new_live, "shell", window, cx),
+            ));
         for (ix, (id, label)) in self.live_terminal_tabs().into_iter().enumerate() {
             let active =
                 self.page == Page::Terminal && self.active_terminal.as_deref() == Some(id.as_str());

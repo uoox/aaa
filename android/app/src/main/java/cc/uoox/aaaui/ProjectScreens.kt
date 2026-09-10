@@ -11,6 +11,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -228,51 +229,41 @@ fun createErrorText(e: Exception): String =
  * 实体键盘 / 折叠屏外接键盘的 Enter。
  */
 @Composable
-fun NewProjectRow(
+fun RowScope.NewCell(
     value: String,
     onValueChange: (String) -> Unit,
     creating: Boolean,
     onCreate: () -> Unit,
-    modifier: Modifier = Modifier,
     placeholder: String = "＋ 新建项目：文件夹名，回车",
 ) {
-    // 点这一行的任何地方都聚焦到输入框：光标只占标题那一格，行的上下内边距和右半边
-    // 都是点不着的死区（mac 那一行点哪儿都会 focus）
+    // v1.41 起它不再自成一行，而是长在表头行上（用户：「logo 和新建项目放在一行里面」）：
+    // 那一行的上下内边距由这一格给，行本身不加——不然表头就比项目行还高。
     val focus = remember { FocusRequester() }
-    Column(modifier) {
-        Row(
-            Modifier.fillMaxWidth()
-                .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { focus.requestFocus() }
-                .padding(horizontal = 16.dp, vertical = ROW_PAD),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            BasicTextField(
-                value, onValueChange,
-                modifier = Modifier.weight(1f).focusRequester(focus).onPreviewKeyEvent { ev ->
-                    if (ev.type == KeyEventType.KeyDown && (ev.key == Key.Enter || ev.key == Key.NumPadEnter)) { onCreate(); true } else false
-                },
-                singleLine = true,
-                textStyle = androidx.compose.ui.text.TextStyle(color = Tok.Ink, fontSize = ROW_TEXT),
-                cursorBrush = SolidColor(Tok.Accent),
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
-                keyboardActions = KeyboardActions(onGo = { onCreate() }, onDone = { onCreate() }, onSend = { onCreate() }, onSearch = { onCreate() }),
-                // 占位符与正文**必须叠在一个 Box 里**：decorationBox 的 lambda 只能产出
-                // 一个可测量的节点，并排两个会被父布局按第一个量，光标位置就漂了
-                decorationBox = { inner ->
-                    Box {
-                        if (value.isEmpty()) {
-                            Text(placeholder, color = Tok.Faint, fontSize = ROW_TEXT)
-                        }
-                        inner()
-                    }
-                },
-            )
-            if (creating) {
-                Spacer(Modifier.width(8.dp))
-                CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = Tok.Accent)
+    BasicTextField(
+        value, onValueChange,
+        modifier = Modifier.weight(1f).focusRequester(focus).padding(vertical = ROW_PAD)
+            .onPreviewKeyEvent { ev ->
+                if (ev.type == KeyEventType.KeyDown && (ev.key == Key.Enter || ev.key == Key.NumPadEnter)) { onCreate(); true } else false
+            },
+        singleLine = true,
+        textStyle = androidx.compose.ui.text.TextStyle(color = Tok.Ink, fontSize = ROW_TEXT),
+        cursorBrush = SolidColor(Tok.Accent),
+        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
+        keyboardActions = KeyboardActions(onGo = { onCreate() }, onDone = { onCreate() }, onSend = { onCreate() }, onSearch = { onCreate() }),
+        // 占位符与正文**必须叠在一个 Box 里**：decorationBox 的 lambda 只能产出
+        // 一个可测量的节点，并排两个会被父布局按第一个量，光标位置就漂了
+        decorationBox = { inner ->
+            Box {
+                if (value.isEmpty()) {
+                    Text(placeholder, color = Tok.Faint, fontSize = ROW_TEXT, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                inner()
             }
-        }
-        HorizontalDivider(color = Tok.Edge, thickness = 1.dp, modifier = Modifier.padding(start = 16.dp))
+        },
+    )
+    if (creating) {
+        Spacer(Modifier.width(8.dp))
+        CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = Tok.Accent)
     }
 }
 
@@ -288,8 +279,9 @@ fun NewProjectRow(
  * 且 resume 找不到旧对话会自动开新会话）再进；长按出项目操作单。列表末尾那一行是新建
  * 项目（[NewProjectRow]，与 mac 侧栏一致）。
  *
- * 面板本身画的东西分成三块：降级横幅 [SchemaTooOldBanner]、列表（[projectSection] +
- * 新建那一行 [NewProjectRow] + [terminalSection]）、底下那一条 [ProjectPanelFooter]。留在这里的是
+ * 面板本身画的东西分成三块：顶上那一条 [ProjectPanelStatus]、降级横幅
+ * [SchemaTooOldBanner]、列表（[projectSection] + [terminalSection]，「新建」长在每栏
+ * 表头行上）。留在这里的是
  * **状态和动作**——建项目 / 开终端 / 开会话都要 store 与导航，收不进任何一块里。
  */
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
@@ -427,6 +419,15 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
         // 降级横幅（PROTOCOL「版本兼容」）：schema 是唯一的闸门，且降级必须说出来。老 daemon 不给
         // status / title / session_id，这一屏就画不出项目状态——**不留第二套算法**，留着就等于把
         // 刚删掉的分歧又养回来（daemon 与 mac App 同机同版发布，只有手机可能先更新，是几分钟的窗口）
+        // daemon 状态在**列表顶上**（v1.41，2026-09-11 用户：「daemon 状态放在列表顶部」）：
+        // 它是「这套东西还转不转」的总开关，列表里每一行的状态都以它为前提——前提该写在
+        // 前面。搬上来之后列表底下什么都不剩，一直铺到底。
+        ProjectPanelStatus(
+            conn = conn,
+            version = health?.version.orEmpty(),
+            ssdMissing = health?.ssd_mounted == false,
+            onRepair = { onBeforeNavigate(); nav.navigate("pair") },
+        )
         health?.takeIf { it.schema < SCHEMA_PROJECT_STATUS }?.let { h -> SchemaTooOldBanner(h.version) }
         PullToRefreshBox(
             isRefreshing = refreshing,
@@ -449,11 +450,11 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
                         currentPath = currentPath,
                         onOpen = { row -> open(row) },
                         onLongPress = { p -> actionsFor = p },
-                        // 新建那一行**排在栏名底下第一行**（2026-09-11 用户拍板）：
-                        // 项目多了不用滚到这一栏的底才能建
-                        newRow = if (!sec.available) null else {
+                        // 「新建」就长在表头那一行上（v1.41 用户：「logo 和新建项目放在
+                        // 一行里面，即合并这两行」）。没装这个 agent 就不给入口
+                        newCell = if (!sec.available) null else {
                             {
-                                NewProjectRow(
+                                NewCell(
                                     value = if (newFor == sec.agent) newName else "",
                                     onValueChange = { newFor = sec.agent; newName = it },
                                     creating = creating && newFor == sec.agent,
@@ -482,12 +483,6 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
                 )
             }
         }
-        ProjectPanelFooter(
-            conn = conn,
-            version = health?.version.orEmpty(),
-            ssdMissing = health?.ssd_mounted == false,
-            onRepair = { onBeforeNavigate(); nav.navigate("pair") },
-        )
     }
 
     actionsFor?.let { p ->
@@ -512,8 +507,8 @@ private fun LazyListScope.projectSection(
     section: AgentSection,
     /** 这一栏的订阅余额；没有就是空表（终端那一栏没有 agent，天然是空的） */
     planSegs: List<UsageSegment>,
-    /** 栏名底下第一行画什么；null = 这个 agent 这台机器没装，不给新建入口 */
-    newRow: (@Composable () -> Unit)?,
+    /** 表头行中间那一格；null = 这个 agent 这台机器没装，不给新建入口 */
+    newCell: (@Composable RowScope.() -> Unit)?,
     minuteTick: Long,
     /** 正在 POST /sessions 的项目路径，行先按「在跑」画淡蓝底 */
     busy: Set<String>,
@@ -523,9 +518,8 @@ private fun LazyListScope.projectSection(
 ) {
     // 老 daemon 不给 /agents：label 是空的，那就不画表头，一整列照旧
     if (section.label.isNotEmpty()) item(key = "hdr-" + section.agent) {
-        SectionHeader(section.agent, planSegs)
+        SectionRow(section.agent, planSegs, newCell)
     }
-    newRow?.let { row -> item(key = "new-" + section.agent) { row() } }
     items(section.rows, key = { it.project.path }) { row ->
         // 顺序随最近更新变：Compose 按 key 做位移过渡，上移/下移都有动画
         ProjectRowItem(
@@ -555,9 +549,13 @@ private fun LazyListScope.terminalSection(
     onClose: (Session) -> Unit,
     onNew: () -> Unit,
 ) {
-    item(key = "terminals-hdr") { SectionHeader("shell") }
-    // 新建那一行排在栏名底下第一行，与另外两栏同一个位置、同一个构件
-    item(key = "terminal-new") { NewTerminalRow(newName, onNameChange, creatingTerminal, onNew) }
+    // 表头与「新建」是同一行（v1.41），与另外两栏一模一样：记号 + 输入框。
+    // 终端那一栏没有配额，行尾是空的
+    item(key = "terminals-hdr") {
+        SectionRow("shell") {
+            NewCell(newName, onNameChange, creatingTerminal, onNew, placeholder = "＋ 新建终端：名字，回车")
+        }
+    }
     itemsIndexed(terminals, key = { _, t -> "term-" + t.id }) { i, t ->
         TerminalRowItem(
             terminalTabLabel(i, t, root),
@@ -588,9 +586,9 @@ private fun SchemaTooOldBanner(version: String) {
 }
 
 /**
- * 列表**底下**那一条：连接状态点 + `daemon v<版本>` + 「重新配对」，与 mac 侧栏底部
- * `render_sidebar_footer` 同一个形状、同一个顺序。它不随列表滚，永远贴在底上；
- * SSD 掉了在右边加一个 `SSD ✗`。
+ * 列表**最上面**那一条（v1.41 从底部搬上来，用户：「daemon 状态放在列表顶部」）：
+ * 连接状态点 + `daemon v<版本>` + 「重新配对」，与 mac 侧栏顶部 `render_sidebar_status`
+ * 同一个形状、同一个顺序。它不随列表滚；SSD 掉了在右边加一个 `SSD ✗`。
  *
  * **整条可点，点进配对页；而且它一直画着。** 设置页删了之后（2026-09-11 用户拍板：
  * 「Android 这边不用设置」），这是换主机 / 换 token **唯一的出路**——一度做成
@@ -599,7 +597,7 @@ private fun SchemaTooOldBanner(version: String) {
  * 指出）。首次配对不经过它（`gate` 看见没配过直接跳 `pair`）。
  */
 @Composable
-private fun ProjectPanelFooter(
+private fun ProjectPanelStatus(
     conn: ConnState,
     /** daemon 版本，连上了才有；空串就写个「?」 */
     version: String,
@@ -613,7 +611,6 @@ private fun ProjectPanelFooter(
         is ConnState.Failed -> Tok.Red to "已断开"
         ConnState.NoServer -> Tok.Dim to "未配对"
     }
-    HorizontalDivider(color = Tok.Edge)
     Row(
         Modifier.fillMaxWidth().clickable(onClick = onRepair).padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -653,50 +650,38 @@ fun sectionGlyph(agent: String): String? = when (agent) {
 }
 
 @Composable
-private fun SectionHeader(agent: String, planSegs: List<UsageSegment> = emptyList()) {
+private fun SectionRow(
+    agent: String,
+    planSegs: List<UsageSegment> = emptyList(),
+    /** 中间那一格：这一栏的「新建」输入框；null = 这台机器没装它，不给入口 */
+    newCell: (@Composable RowScope.() -> Unit)? = null,
+) {
     // 上面不留空（2026-09-11 用户：「Claude/Antigravity/终端 上面是有一点高度和空白的，
     // 可以去掉」）：只剩那条分隔线和一点点不让字贴着线的内边距
     HorizontalDivider(color = Tok.Edge, thickness = 1.dp)
     Row(
-        Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 3.dp, bottom = 3.dp),
+        Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // **这一行只剩那个记号**（2026-09-11 用户：「两个加粗大标题可以去掉，这个 LOGO
-        // 挺好的，已经很有标识度了」）：记号一眼就认得出是哪一栏，栏名再写一遍是同一件
-        // 事说两次，还把这一行撑高
+        // 记号一眼就认得出是哪一栏（2026-09-11 用户：「两个加粗大标题可以去掉，这个
+        // LOGO 挺好的，已经很有标识度了」）
         sectionGlyph(agent)?.let { g ->
             Text(g, color = Tok.Dim, fontSize = 13.sp, modifier = Modifier.width(18.dp))
         }
+        // 「新建」就长在这一行上（v1.41，用户：「logo 和新建项目放在一行里面」）
+        if (newCell != null) newCell() else Spacer(Modifier.weight(1f))
         if (planSegs.isNotEmpty()) {
             Spacer(Modifier.width(10.dp))
-            // 挤不下就从右边截：栏名不能被余额顶掉，它才是这一行的主语
+            // 余额 `flex_none`：打字长了挤的是输入框自己，不该把余额顶出去
             Text(
                 segmentsAnnotated(planSegs, Tok.Faint),
                 fontSize = 11.sp, fontFamily = FontFamily.Monospace,
                 maxLines = 1, overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
             )
         }
     }
 }
 
-/**
- * 列表最后一行「＋ 新增终端」，以及它下面那 80dp 留白——留白是给会话页右下角那枚悬浮
- * 按钮让位的，滚到底时最后一行不该被它盖住。
- */
-@Composable
-private fun NewTerminalRow(value: String, onValueChange: (String) -> Unit, creating: Boolean, onCreate: () -> Unit) {
-    // 与项目那一行同一个构件（2026-09-11 用户拍板：「终端也是放个输入框，回车新建，
-    // 相当于给终端命名了」）：三栏的新建行从此长得一模一样。名字空着回车照样建，
-    // 那就还叫「终端 N」——命名是可选的，不是门槛
-    NewProjectRow(
-        value = value,
-        onValueChange = onValueChange,
-        creating = creating,
-        onCreate = onCreate,
-        placeholder = "＋ 新建终端：名字，回车",
-    )
-}
 
 /**
  * 一行到底：标题 + 更新时间。不再有第二行——目录大小等细节在长按单里。状态由整行的淡底色说

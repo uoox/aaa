@@ -266,10 +266,22 @@ pub(super) fn section_glyph(agent: &str) -> Option<&'static str> {
     }
 }
 
-pub(super) fn section_header(agent: &str, segs: &[(String, Option<f64>)]) -> gpui::Div {
+/// 一栏的表头，**同时也是那一栏的「新建」行**（v1.41，2026-09-11 用户：「logo 和新建
+/// 项目放在一行里面，即合并这两行」）：一条上边线 + 记号 + 新建输入框 + 行尾的余额。
+///
+/// 合并之前这是上下两行，而它俩说的是同一件事——「这一栏是谁、在这儿建归它的东西」。
+/// 三栏就白占三行。
+///
+/// 布局：记号与余额都 `flex_none`，中间那格 `flex_1`——**余额始终看得见**，打字长了
+/// 挤的是输入框自己，不是把余额顶出去。
+pub(super) fn section_row(
+    agent: &str,
+    segs: &[(String, Option<f64>)],
+    new_row: gpui::AnyElement,
+) -> gpui::Div {
     // 上面不留空（2026-09-11 用户：「Claude/Antigravity/终端 上面是有一点高度和空白的，
     // 可以去掉」）：只剩那条分隔线和一点点不让字贴着线的内边距
-    let mut row = meta()
+    let mut row = div()
         .mx(px(6.))
         .px(px(10.))
         .pt(px(3.))
@@ -279,10 +291,8 @@ pub(super) fn section_header(agent: &str, segs: &[(String, Option<f64>)]) -> gpu
         .flex()
         .items_center()
         .gap(px(8.))
-        // **这一行只剩那个记号**（2026-09-11 用户：「两个加粗大标题可以去掉，这个 LOGO
-        // 挺好的，已经很有标识度了」）：记号短暂看一眼就认得出是哪一栏，栏名再写一遍
-        // 是同一件事说两次，还把这一行撑高。`label` 因此只剩一个用处——它是空的就
-        // 说明老 daemon 没给 `/agents`，那一栏整个不画表头。
+        // 记号一眼就认得出是哪一栏（2026-09-11 用户：「两个加粗大标题可以去掉，这个
+        // LOGO 挺好的，已经很有标识度了」）
         .when_some(section_glyph(agent), |el, g| {
             el.child(
                 div()
@@ -292,9 +302,10 @@ pub(super) fn section_header(agent: &str, segs: &[(String, Option<f64>)]) -> gpu
                     .text_color(c(theme::DIM))
                     .child(g),
             )
-        });
+        })
+        .child(div().flex_1().min_w(px(0.)).child(new_row));
     if !segs.is_empty() {
-        let mut line = div().flex_1().min_w(px(0.)).flex().overflow_hidden().whitespace_nowrap();
+        let mut line = meta().flex_none().flex().overflow_hidden().whitespace_nowrap();
         for (ix, (text, used)) in segs.iter().enumerate() {
             if ix > 0 {
                 line = line.child(div().px(px(4.)).text_color(c(theme::FAINT)).child("·"));
@@ -1328,6 +1339,11 @@ impl RootView {
             .flex_col()
             .overflow_hidden() // 拖窄时标题按 ellipsis 收，不许挤出侧栏
             .bg(c(theme::SURFACE))
+            // daemon 状态在**列表顶上**（v1.41，2026-09-11 用户：「daemon 状态放在
+            // 列表顶部」）：它是「这套东西还转不转」的总开关，列表里每一行的状态都
+            // 以它为前提——前提该写在前面。搬上来之后侧栏底下什么都不剩，列表一直
+            // 铺到底。
+            .child(self.render_sidebar_status(conn_color, conn_text, cx))
             .when(self.schema_too_old(), |el| el.child(self.render_schema_banner()))
             .child(
                 div()
@@ -1337,8 +1353,6 @@ impl RootView {
                     .overflow_y_scroll()
                     .child(self.render_sidebar_list(window, cx)),
             )
-            // 会话日志入口
-            .child(self.render_sidebar_footer(conn_color, conn_text, cx))
     }
 
     /// 侧栏主体那一列：一个 agent 一栏，终端是最后一栏。
@@ -1379,13 +1393,15 @@ impl RootView {
                     .get(&sec.agent)
                     .map(|p| detail_panel::plan_header_segs(p, &now, &chrono::Local))
                     .unwrap_or_default();
-                list_col = list_col.child(section_header(&sec.agent, &segs));
-            }
-            // 新建那一行**排在栏名底下第一行**（2026-09-11 用户拍板）：项目多了
-            // 不用滚到这一栏的底才能建
-            if sec.available {
+                // 表头与「新建」是同一行（v1.41）：记号 + 输入框 + 余额。这台机器
+                // 没装这个 agent 就只画记号与余额——开不起来的东西不给入口
                 let is_live = live.as_deref() == Some(sec.agent.as_str());
-                list_col = list_col.child(self.render_new_project_row(is_live, &sec.agent, window, cx));
+                let cell = if sec.available {
+                    self.render_new_cell(is_live, &sec.agent, window, cx)
+                } else {
+                    div().into_any_element()
+                };
+                list_col = list_col.child(section_row(&sec.agent, &segs, cell));
             }
             for row in sec.rows {
                 list_col = list_col.child(self.render_project_row(row, now, cx));
@@ -1496,46 +1512,50 @@ impl RootView {
     ///
     /// 没有 ＋（2026-09-10 用户拍板「新建项目加号去掉，仅回车」）：一个按钮和一个
     /// 回车是同一件事的两个入口，而那个按钮把这一行撑得比项目行高。
-    fn render_new_project_row(&self, live: bool, agent: &str, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
-        // 每栏各有一行，但**输入框只有一个**：那几个字打在哪一栏由 `new_agent` 说了算，
-        // 别的栏画一行同样版式的占位——点它就把输入框搬过去。两行同时显示同一串字会让人
-        // 以为回车会建两个
+    /// 表头行里「新建」那一格（v1.41 起它就长在表头行上，不再自成一行）。
+    ///
+    /// 每栏各有一格，但**输入框只有一个**：那几个字打在哪一栏由 `new_agent` 说了算，
+    /// 别的栏画同样版式的占位——点它就把输入框搬过去。两处同时显示同一串字会让人
+    /// 以为回车会建两个。
+    fn render_new_cell(&self, live: bool, agent: &str, window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         // 这一栏的新建行写什么（终端栏起的是名字，不是文件夹）
         let hint = new_row_hint(agent);
         if !live {
             let target = agent.to_string();
-            return div().pt(px(2.)).child(
-                sidebar_row(SharedString::from(format!("sb-new:{agent}")).into())
-                    .hover(|st| st.bg(c(theme::SURFACE_RAISED)))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.new_agent = target.clone();
-                        this.focus_new_project(window, cx);
-                    }))
-                    .child(
-                        div()
-                            .flex_1()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .whitespace_nowrap()
-                            .text_size(px(12.5))
-                            .text_color(c(theme::FAINT))
-                            .child(hint),
-                    ),
-            );
+            return div()
+                .id(SharedString::from(format!("sb-new:{agent}")))
+                .cursor_pointer()
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .text_size(px(12.5))
+                .text_color(c(theme::FAINT))
+                .hover(|st| st.text_color(c(theme::DIM)))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.new_agent = target.clone();
+                    this.focus_new_project(window, cx);
+                }))
+                .child(hint)
+                .into_any_element();
         }
-        // 光标在这一行里 = 整行一圈强调色边框，和「当前打开的那个项目」同一套语言。
-        // 不画的话（bare 的输入框自己没有框）只剩一根一像素的光标在闪，看不出焦点在哪
+        // 光标在这一格里 = 一层淡底。不画的话（bare 的输入框自己没有框）只剩一根
+        // 一像素的光标在闪，看不出焦点在哪。**不用边框**：这一行顶上那条分隔线已经
+        // 是边框了，再套一圈会打架
         let focused = self.new_input.read(cx).focus_handle.is_focused(window);
         // 输入框只有一个，它搬到哪一栏就换成哪一栏的占位字
         self.new_input.update(cx, |i, cx| i.set_placeholder(hint, cx));
-        div().pt(px(2.)).child(
-            sidebar_row("sb-new".into())
-                .when(focused, |el| el.border_color(c(theme::ACCENT)))
-                .hover(|st| st.bg(c(theme::SURFACE_RAISED)))
-                .on_click(cx.listener(|this, _, window, cx| this.focus_new_project(window, cx)))
-                .child(div().flex_1().min_w(px(0.)).child(self.new_input.clone()))
-                .when(self.creating, |el| el.child(meta().flex_none().child("…"))),
-        )
+        div()
+            .id("sb-new")
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .px(px(4.))
+            .rounded(px(4.))
+            .when(focused, |el| el.bg(c(theme::SURFACE_RAISED)))
+            .on_click(cx.listener(|this, _, window, cx| this.focus_new_project(window, cx)))
+            .child(div().flex_1().min_w(px(0.)).child(self.new_input.clone()))
+            .when(self.creating, |el| el.child(meta().flex_none().child("…")))
+            .into_any_element()
     }
 
     /// schema 闸门（PROTOCOL「版本兼容」）：老 daemon 不下发项目状态，客户端
@@ -1564,8 +1584,8 @@ impl RootView {
             )))
     }
 
-    /// 侧栏最底下那条：连接状态点 + daemon 版本 + ⚙ 设置入口
-    fn render_sidebar_footer(
+    /// 侧栏**最上面**那条（v1.41 从底部搬上来）：连接状态点 + daemon 版本 + ⚙ 设置入口
+    fn render_sidebar_status(
         &self,
         conn_color: u32,
         conn_text: String,
@@ -1577,7 +1597,7 @@ impl RootView {
             .gap(px(7.))
             .px(px(16.))
             .py(px(9.))
-            .border_t_1()
+            .border_b_1()
             .border_color(c(theme::EDGE))
             .child(dot(conn_color))
             .child(
