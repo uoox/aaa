@@ -5,6 +5,7 @@
     "客户端只剩两件事：按 updated_at 从新到旧排，和「这一行的底色画不画成蓝的 / 黄的」。",
     "置顶于 2026-09-10 拿掉（用户拍板），行上不再有 pinned。",
     "两端的测试都读这一份——此前两端各测各的一套，所以谁都没发现两边推出来的标题和状态不一样。",
+    "v1.36 起还盯着「分栏」：一个 agent 一栏，行归哪一栏与点开它跑哪个 agent 是同一句话。",
     "改动这个文件要同时跑 mac 与 Android 两边的测试。"
   ],
   "projects": [
@@ -95,9 +96,34 @@
       "status": "paused",
       "title": "bare",
       "updated_at": "2026-09-03T00:00:00Z"
+    },
+    {
+      "path": "/p/agy",
+      "name": "agy",
+      "mtime": "2026-09-01T00:00:00Z",
+      "agent": "agy",
+      "session_title": null,
+      "session_id": null,
+      "status": "paused",
+      "title": "跑在 Antigravity 上的",
+      "updated_at": "2026-09-02T00:00:00Z"
+    },
+    {
+      "path": "/p/noagent",
+      "name": "noagent",
+      "mtime": "2026-09-01T00:00:00Z",
+      "agent": null,
+      "session_title": null,
+      "session_id": null,
+      "status": "paused",
+      "title": "注册表没登记 agent",
+      "updated_at": "2026-09-01T12:00:00Z"
     }
   ],
-  "unread": ["/p/unread", "/p/bg/"],
+  "unread": [
+    "/p/unread",
+    "/p/bg/"
+  ],
   "expect": {
     "order": [
       "/p/ask",
@@ -107,7 +133,9 @@
       "/p/unread",
       "/p/old",
       "/p/fallback",
-      "/p/bare"
+      "/p/bare",
+      "/p/agy",
+      "/p/noagent"
     ],
     "order_why": [
       "2026-09-10 用户拍板：就按行尾那个「xxx 分钟前」从新到旧排，不再分档。",
@@ -116,9 +144,15 @@
       "/p/tie-a 与 /p/tie-b 同刻：按**路径**排，a 在 b 前——两端认同一个并列键，",
       "不按标题：标题会被改名和 AI 命名改写，一改这一行就跳位置。"
     ],
-    "running": ["/p/run", "/p/bg"],
+    "running": [
+      "/p/run",
+      "/p/bg"
+    ],
     "running_why": "淡蓝底 = status ∈ {running, background}：它还在动，不用你管。asking 不蓝——那是在等你。",
-    "unread_rows": ["/p/bg", "/p/unread"],
+    "unread_rows": [
+      "/p/bg",
+      "/p/unread"
+    ],
     "unread_rows_why": "淡黄底 = 本机 unread 集合里有它，且不管什么状态都盖过蓝底；黄 > 蓝 > 无底色。",
     "titles": {
       "/p/ask": "在等你回话",
@@ -132,6 +166,50 @@
       "/p/bg/": true,
       "/p/b": false
     },
-    "unread_path_why": "本机的未读 / 静音集合按路径存，/p/a 与 /p/a/ 必须算同一个项目（前缀相同的 /p/b 不算）。"
+    "unread_path_why": "本机的未读 / 静音集合按路径存，/p/a 与 /p/a/ 必须算同一个项目（前缀相同的 /p/b 不算）。",
+    "agents": [
+      {
+        "id": "claude",
+        "label": "Claude",
+        "available": true
+      },
+      {
+        "id": "agy",
+        "label": "Antigravity",
+        "available": true
+      }
+    ],
+    "sections": [
+      {
+        "agent": "claude",
+        "label": "Claude",
+        "rows": [
+          "/p/ask",
+          "/p/run",
+          "/p/bg",
+          "/p/act",
+          "/p/unread",
+          "/p/old",
+          "/p/fallback",
+          "/p/bare",
+          "/p/noagent"
+        ]
+      },
+      {
+        "agent": "agy",
+        "label": "Antigravity",
+        "rows": [
+          "/p/agy"
+        ]
+      }
+    ],
+    "sections_why": [
+      "2026-09-11 用户拍板「项目列表三栏：Claude/Antigravity/Terminal」。栏序按 GET /agents 给的表，",
+      "栏内顺序不动——那是 order 定的，一处算一次。",
+      "/p/noagent 注册表里没登记 agent，归第一栏：与「点开它跑哪个 agent」同一条回退链，",
+      "宁可排错一栏，也不能让一个项目在列表里整个消失。",
+      "终端不在这里：它不是 agent（GET /agents 里没有 shell），那一栏两端各自画。"
+    ],
+    "sections_no_agent_table": "老 daemon 不给 /agents：只有一栏、label 为空 = 不画表头，一整列照旧。"
   }
 }

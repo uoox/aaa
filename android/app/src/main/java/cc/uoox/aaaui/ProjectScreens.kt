@@ -39,7 +39,6 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -72,6 +71,15 @@ import kotlinx.coroutines.launch
 /** 表里第一个、也是没登记 agent 的旧项目的回退。真正开谁以注册表 / `GET /agents` 为准。 */
 const val DEFAULT_AGENT = "claude"
 
+/**
+ * 列表行的字号与上下内边距（2026-09-11 用户：「Android 列表字体小一些，不要加粗，
+ * 这样也可以显示更多」）。项目行、新建那一行、终端行、＋ 新增终端**共用这一对**——
+ * 一列里几种行本来就该一样高；此前项目行是 15sp 粗体 + 11dp，比终端行高出一截，
+ * 一屏少放三四个项目。mac 侧栏那一列早就是 12.5px 不加粗，这次是补齐两端。
+ */
+val ROW_TEXT = 13.5.sp
+val ROW_PAD = 7.dp
+
 /** 首页一行要的全部东西，纯数据，方便单测。 */
 data class ProjectRow(
     val project: Project,
@@ -100,6 +108,55 @@ data class ProjectRow(
 
     /** 激活 = 此刻还有活会话。`paused`（含没有会话）之外的四态都算。 */
     val alive: Boolean get() = status.isNotBlank() && status != "paused"
+
+    /**
+     * 这一行归哪一栏，也是点它时开哪个 agent：注册表登记的 → 代表会话在跑的 → 默认。
+     * **只此一处**：分栏和开会话读的是同一句话，不然列表把它排进 Claude 那一栏、
+     * 点下去却开了 agy。
+     */
+    val agentId: String
+        get() = project.agent?.takeIf { it.isNotBlank() }
+            ?: primary?.agent?.takeIf { it.isNotBlank() }
+            ?: DEFAULT_AGENT
+}
+
+/**
+ * 项目列表的一栏（2026-09-11 用户拍板「项目列表三栏：Claude/Antigravity/Terminal」）：
+ * 一个 agent 的表头 + 归它的项目行。终端是第三栏，但它不是 agent（`GET /agents` 里没有
+ * shell），所以那一栏由 [terminalSection] 单独画。
+ */
+data class AgentSection(
+    val agent: String,
+    /** 表头写什么。**空串 = 不画表头**（老 daemon 不给 `/agents`，编不出「这一栏是谁」） */
+    val label: String,
+    val rows: List<ProjectRow>,
+    /** 这台机器装了它——没装就不画那一栏的「新建项目」（开不起来的 agent 不该给入口） */
+    val available: Boolean,
+)
+
+/**
+ * 把排好序的项目行分进各栏，顺序按 `GET /agents` 给的表（daemon 的 AGENTS 表序：
+ * Claude、Antigravity）。栏内顺序不动——那是 [projectRows] 定的，一处算一次。
+ *
+ * 表里没有的 agent（装过 codex 之类留下的旧项目）归**第一栏**，与 [ProjectRow.agentId]
+ * 的回退同一条线：宁可排错一栏，也不能让一个项目在列表里整个消失。
+ *
+ * 空栏只在「这台机器装了它」时才留——没装又一个项目都没有的 agent，画一个空表头
+ * 只是告诉你有个东西你没装。
+ */
+fun agentSections(rows: List<ProjectRow>, agents: List<AgentInfo>): List<AgentSection> {
+    // 老 daemon 不给 /agents：不分栏，一整列照旧画，表头也不画
+    if (agents.isEmpty()) return listOf(AgentSection("", "", rows, true))
+    val ids = agents.map { it.id }.toSet()
+    val first = agents.first().id
+    return agents.map { a ->
+        AgentSection(
+            agent = a.id,
+            label = a.label.ifBlank { a.id },
+            rows = rows.filter { (if (it.agentId in ids) it.agentId else first) == a.id },
+            available = a.available,
+        )
+    }.filter { it.rows.isNotEmpty() || it.available }
 }
 
 /** 淡蓝底：它还在动，你不用管（自己在跑，或后台任务还没回来）。`asking` 不蓝——那是在等你。 */
@@ -152,23 +209,6 @@ suspend fun createProjectSession(store: AppStore, name: String?, agent: String =
     return api.createSession(path, agent, resume = false)
 }
 
-/**
- * 表里下一个装了的 agent。只装了一个就是 null——没有「换」这回事，切换入口整个不画
- * （老 daemon 不给 `/agents`，表是空的，同样不画）。例外：当前这个**没装**（卸载了 /
- * 换了台机器）时给一条回到装了的那个的路，否则这一行永远换不回来。
- */
-fun nextAgent(agents: List<AgentInfo>, current: String): String? {
-    val usable = agents.filter { it.available }
-    val first = usable.firstOrNull() ?: return null
-    val i = usable.indexOfFirst { it.id == current }
-    if (i < 0) return first.id
-    if (usable.size < 2) return null
-    return usable[(i + 1) % usable.size].id
-}
-
-fun agentLabel(agents: List<AgentInfo>, id: String): String =
-    agents.firstOrNull { it.id == id }?.label ?: id
-
 fun createErrorText(e: Exception): String =
     if (e is DaemonHttpException && e.errorCode == "conflict") "项目已存在" else "新建失败：${e.message}"
 
@@ -181,6 +221,9 @@ fun createErrorText(e: Exception): String =
  * 它以前是列表顶上一个带 ＋ 的 `OutlinedTextField`：那既不是列表的一部分，又天天
  * 占着第一屏最上面那一行；而 ＋ 和回车本来就是同一件事的两个入口。
  *
+ * **每一栏各有一行**（v1.36 分栏之后）：建出来的项目归哪个 agent 由**这一行在哪一栏**
+ * 决定，所以此前那个「点一下换 agent」的字母小标没有了——栏名已经把它说清楚了。
+ *
  * 回车从两条路来都接住：软键盘的动作键（Go / Done / Send / Search，输入法各不相同）、
  * 实体键盘 / 折叠屏外接键盘的 Enter。
  */
@@ -191,8 +234,6 @@ fun NewProjectRow(
     creating: Boolean,
     onCreate: () -> Unit,
     modifier: Modifier = Modifier,
-    agentMark: String? = null,
-    onSwapAgent: () -> Unit = {},
 ) {
     // 点这一行的任何地方都聚焦到输入框：光标只占标题那一格，行的上下内边距和右半边
     // 都是点不着的死区（mac 那一行点哪儿都会 focus）
@@ -201,7 +242,7 @@ fun NewProjectRow(
         Row(
             Modifier.fillMaxWidth()
                 .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { focus.requestFocus() }
-                .padding(horizontal = 16.dp, vertical = 11.dp),
+                .padding(horizontal = 16.dp, vertical = ROW_PAD),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             BasicTextField(
@@ -210,7 +251,7 @@ fun NewProjectRow(
                     if (ev.type == KeyEventType.KeyDown && (ev.key == Key.Enter || ev.key == Key.NumPadEnter)) { onCreate(); true } else false
                 },
                 singleLine = true,
-                textStyle = androidx.compose.ui.text.TextStyle(color = Tok.Ink, fontSize = 15.sp, fontWeight = FontWeight.Bold),
+                textStyle = androidx.compose.ui.text.TextStyle(color = Tok.Ink, fontSize = ROW_TEXT),
                 cursorBrush = SolidColor(Tok.Accent),
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
                 keyboardActions = KeyboardActions(onGo = { onCreate() }, onDone = { onCreate() }, onSend = { onCreate() }, onSearch = { onCreate() }),
@@ -219,21 +260,15 @@ fun NewProjectRow(
                 decorationBox = { inner ->
                     Box {
                         if (value.isEmpty()) {
-                            Text("＋ 新建项目：文件夹名，回车", color = Tok.Faint, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                            Text("＋ 新建项目：文件夹名，回车", color = Tok.Faint, fontSize = ROW_TEXT)
                         }
                         inner()
                     }
                 },
             )
-            Spacer(Modifier.width(8.dp))
             if (creating) {
+                Spacer(Modifier.width(8.dp))
                 CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = Tok.Accent)
-            } else if (agentMark != null) {
-                // 新项目开谁：点一下在装了的 agent 之间轮换。只有一个可用时整个不画。
-                // 位置正对着项目行行尾的时间
-                Box(Modifier.size(28.dp).clickable(onClick = onSwapAgent), contentAlignment = Alignment.Center) {
-                    Text(agentMark, color = Tok.Accent, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                }
             }
         }
         HorizontalDivider(color = Tok.Edge, thickness = 1.dp, modifier = Modifier.padding(start = 16.dp))
@@ -271,8 +306,11 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
     var planDialog by remember { mutableStateOf(false) }
     /** 新建那一行里的字：**只是新项目的文件夹名**，不是搜索词（v1.22 用户拍板） */
     var newName by rememberSaveable { mutableStateOf("") }
-    /** 下一个新建项目用哪个 agent（表里第一个装了的；只有一个可用时不画切换） */
-    var newAgent by rememberSaveable { mutableStateOf(DEFAULT_AGENT) }
+    /**
+     * 那几个字打在**哪一栏**的新建行里。每栏各有一行，但草稿只有一份：两行同时显示
+     * 同一串字会让人以为回车会建两个。空串 = 还没开始打，各栏都显示占位符。
+     */
+    var newFor by rememberSaveable { mutableStateOf("") }
     var refreshing by remember { mutableStateOf(false) }
     // 正在 POST /sessions 的项目路径：挡双击（daemon 虽幂等，但两次并发到达仍可能各开一个）
     var busy by remember { mutableStateOf(setOf<String>()) }
@@ -301,25 +339,24 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
     val unread = settings.unreadProjects
     val rows = remember(projects, sessions, unread) { projectRows(projects, sessions, unread) }
     val agents by store.agents.collectAsState()
-    // 选中的 agent 没装（或表里没有）就退到第一个装了的
-    LaunchedEffect(agents) {
-        if (agents.none { it.id == newAgent && it.available }) {
-            agents.firstOrNull { it.available }?.let { newAgent = it.id }
-        }
-    }
-    val swapNewAgent = nextAgent(agents, newAgent)
+    // 分栏：Claude / Antigravity / …（终端那一栏在下面单独画，它不是 agent）
+    val sections = remember(rows, agents) { agentSections(rows, agents) }
 
     fun toast(msg: String) = Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
 
-    /** 新建那一行按回车：框里的字就是文件夹名，留空 = 按日期命名；建完清空并进入。 */
-    fun create() {
+    /**
+     * 某一栏的新建行按回车：框里的字就是文件夹名，留空 = 按日期命名；建完清空并进入。
+     * **开哪个 agent 由这一行在哪一栏决定**——不再有另一个「下次用谁」的状态。
+     */
+    fun create(agent: String) {
         if (creating) return
         creating = true
         val name = newName.trim().ifBlank { null }
         scope.launch {
             try {
-                val sess = createProjectSession(store, name, newAgent)
+                val sess = createProjectSession(store, name, agent.ifBlank { DEFAULT_AGENT })
                 newName = ""
+                newFor = ""
                 focusManager.clearFocus()
                 onBeforeNavigate(); openSession(sess.id, "")
             } catch (e: Exception) {
@@ -351,8 +388,9 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
         if (row.alive) p.session_id?.let { onBeforeNavigate(); openSession(it, ""); return }
         // 注册表里没有这个目录（在别处 aaa open 开出来的），daemon 不认它，resume 只会建错东西
         if (!p.registered) { toast("这个目录不在项目注册表里，只能在它还有会话时打开"); return }
-        // 注册表里登记了什么就跑什么；没登记的回退到默认 agent（长按单里可以换）
-        val agent = p.agent ?: row.primary?.agent ?: DEFAULT_AGENT
+        // 注册表里登记了什么就跑什么；分栏读的是同一句话（[ProjectRow.agentId]），
+        // 不然列表把它排进 Claude 那一栏、点下去却开了 agy
+        val agent = row.agentId
         if (p.path in busy) return
         busy = busy + p.path
         scope.launch {
@@ -397,22 +435,26 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
             modifier = Modifier.fillMaxSize(),
         ) {
             LazyColumn(Modifier.fillMaxSize().padding(top = 6.dp)) {
-                projectSection(
-                    rows = rows,
-                    minuteTick = minuteTick,
-                    busy = busy,
-                    currentPath = currentPath,
-                    onOpen = { row -> open(row) },
-                    onLongPress = { p -> actionsFor = p },
-                )
-                // 新建项目就排在项目列表的末尾，长得和项目行一模一样
-                // （2026-09-10 用户拍板，见 [NewProjectRow]）。与 mac 侧栏同一处设计
-                item(key = "projects-new") {
-                    NewProjectRow(
-                        newName, { newName = it }, creating, onCreate = { create() },
-                        agentMark = swapNewAgent?.let { agentLabel(agents, newAgent).take(1) },
-                        onSwapAgent = { swapNewAgent?.let { newAgent = it } },
+                // 一个 agent 一栏（2026-09-11 用户拍板「项目列表三栏：
+                // Claude/Antigravity/Terminal」），每栏末尾各有一行新建项目——
+                // 建出来归哪个 agent 由它在哪一栏说了算
+                sections.forEach { sec ->
+                    projectSection(
+                        section = sec,
+                        minuteTick = minuteTick,
+                        busy = busy,
+                        currentPath = currentPath,
+                        onOpen = { row -> open(row) },
+                        onLongPress = { p -> actionsFor = p },
                     )
+                    if (sec.available) item(key = "new-" + sec.agent) {
+                        NewProjectRow(
+                            value = if (newFor == sec.agent) newName else "",
+                            onValueChange = { newFor = sec.agent; newName = it },
+                            creating = creating && newFor == sec.agent,
+                            onCreate = { create(sec.agent) },
+                        )
+                    }
                 }
                 // 终端与会话平级（2026-09-08 用户拍板）：项目列表下面直接是终端列表，
                 // 底部一行「新增终端」。以前它藏在顶栏一个 `>_` 按钮后面，是另一个世界。
@@ -441,18 +483,18 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
 }
 
 /**
- * 列表的项目一节：空态 / 一项目一行。「新建项目」那一行由调用点接在后面
+ * 列表的**一栏**：表头 + 归这个 agent 的项目行。「新建项目」那一行由调用点接在后面
  * （它要 store 与导航，收不进这一节）。
  *
- * 写成 `LazyListScope` 的扩展而不是 `@Composable`：这一节是**若干个 item**（空态一项、项目
- * 若干项、提示一项），包进一个 composable 会把它们压成列表里的一项，行的复用和
+ * 写成 `LazyListScope` 的扩展而不是 `@Composable`：这一节是**若干个 item**（表头一项、
+ * 项目若干项），包进一个 composable 会把它们压成列表里的一项，行的复用和
  * `animateItem` 的位移过渡都跟着没了。
  *
  * [minuteTick] 一分钟跳一次，只为让「N 分钟前」那一个 Text 自己会走：整套系统闲着时没有
  * 任何推送，时间字会一直停在「刚刚」。
  */
 private fun LazyListScope.projectSection(
-    rows: List<ProjectRow>,
+    section: AgentSection,
     minuteTick: Long,
     /** 正在 POST /sessions 的项目路径，行先按「在跑」画淡蓝底 */
     busy: Set<String>,
@@ -460,9 +502,9 @@ private fun LazyListScope.projectSection(
     onOpen: (ProjectRow) -> Unit,
     onLongPress: (Project) -> Unit,
 ) {
-    // 空态也是列表里的一项：下面还有新建那一行和终端一节，浮一层居中文字会盖住它们
-    if (rows.isEmpty()) item(key = "projects-empty") { ProjectsEmpty() }
-    items(rows, key = { it.project.path }) { row ->
+    // 老 daemon 不给 /agents：label 是空的，那就不画表头，一整列照旧
+    if (section.label.isNotEmpty()) item(key = "hdr-" + section.agent) { SectionHeader(section.label) }
+    items(section.rows, key = { it.project.path }) { row ->
         // 顺序随最近更新变：Compose 按 key 做位移过渡，上移/下移都有动画
         ProjectRowItem(
             row,
@@ -488,7 +530,7 @@ private fun LazyListScope.terminalSection(
     onClose: (Session) -> Unit,
     onNew: () -> Unit,
 ) {
-    item(key = "terminals-hdr") { TerminalsHeader() }
+    item(key = "terminals-hdr") { SectionHeader("终端") }
     itemsIndexed(terminals, key = { _, t -> "term-" + t.id }) { i, t ->
         TerminalRowItem(
             terminalTabLabel(i, t, root),
@@ -565,29 +607,15 @@ private fun ProjectPanelHeader(
 }
 
 /**
- * 项目列表的空态。它是列表里的**一项**而不是浮在中间的一层字：下面还有新建那一行和
- * 终端一节，居中浮层会盖住它们。
- *
- * 只有一种空（v1.35）：一个项目都没有。此前还分出「搜索词把它们滤没了」那一种，
- * 而列表 v1.22 起就不再被那个框过滤——那半边是死代码。
+ * 一栏的表头：一条分隔线 + 栏名（`Claude` / `Antigravity` / `终端`）。
+ * 三栏同一个写法——终端与会话平级（2026-09-08 用户拍板），它只是列表里的最后一栏，
+ * 不是另一个页面。栏名来自 `GET /agents` 的 `label`，客户端不自己编那张表。
  */
 @Composable
-private fun ProjectsEmpty() {
-    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 28.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-        Text("暂无项目", color = Tok.Faint)
-        Text("在下面那一行输入文件夹名，回车新建", color = Tok.Faint, fontSize = 12.sp)
-    }
-}
-
-/**
- * 终端一节的表头：一条分隔线 + 「终端」两个字。终端与会话平级（2026-09-08 用户拍板），
- * 所以它只是项目列表下面的一节，不是另一个页面。
- */
-@Composable
-private fun TerminalsHeader() {
+private fun SectionHeader(label: String) {
     HorizontalDivider(color = Tok.Edge, thickness = 1.dp, modifier = Modifier.padding(top = 10.dp))
     Text(
-        "终端",
+        label,
         color = Tok.Dim, fontSize = 11.sp, fontFamily = FontFamily.Monospace,
         modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 4.dp),
     )
@@ -601,9 +629,9 @@ private fun TerminalsHeader() {
 private fun NewTerminalRow(creating: Boolean, onClick: () -> Unit) {
     Text(
         if (creating) "＋ 新增终端…" else "＋ 新增终端",
-        color = if (creating) Tok.Faint else Tok.Accent, fontSize = 13.5.sp,
+        color = if (creating) Tok.Faint else Tok.Accent, fontSize = ROW_TEXT,
         modifier = Modifier.fillMaxWidth().clickable(enabled = !creating, onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 9.dp),
+            .padding(horizontal = 16.dp, vertical = ROW_PAD),
     )
     Spacer(Modifier.height(80.dp))
 }
@@ -660,17 +688,19 @@ private fun ProjectRowItem(
                 .background(rowBackground(row.status, row.unread, busy) ?: Color.Transparent)
                 .border(1.dp, if (current) Tok.Accent else Color.Transparent)
                 .combinedClickable(onClick = onClick, onLongClick = onLongClick)
-                .padding(horizontal = 16.dp, vertical = 11.dp),
+                .padding(horizontal = 16.dp, vertical = ROW_PAD),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            // 不加粗（2026-09-11 用户）：选中那一行本来就靠强调色 + 整行边框说话，
+            // 粗体只是把每一行都撑宽一点，一屏少放几个
             Text(
                 row.title,
                 color = if (current) Tok.Accent else if (row.alive) Tok.Ink else Tok.Dim,
-                fontSize = 15.sp, fontWeight = FontWeight.Bold,
+                fontSize = ROW_TEXT,
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
             )
             Spacer(Modifier.width(8.dp))
-            Text(timeText, color = Tok.Faint, fontSize = 11.sp)
+            Text(timeText, color = Tok.Faint, fontSize = 10.sp)
         }
         HorizontalDivider(color = Tok.Edge, thickness = 1.dp, modifier = Modifier.padding(start = 16.dp))
     }
@@ -692,13 +722,13 @@ private fun TerminalRowItem(label: String, onClick: () -> Unit, onClose: () -> U
             Modifier.fillMaxWidth()
                 .border(1.dp, if (current) Tok.Accent else Color.Transparent)
                 .clickable(onClick = onClick)
-                .padding(start = 16.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
+                .padding(start = 16.dp, end = 8.dp, top = ROW_PAD, bottom = ROW_PAD),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
                 label,
                 color = if (current) Tok.Accent else Tok.Ink,
-                fontSize = 13.5.sp,
+                fontSize = ROW_TEXT,
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
             )
             Box(Modifier.size(28.dp).clickable(onClick = onClose), contentAlignment = Alignment.Center) {

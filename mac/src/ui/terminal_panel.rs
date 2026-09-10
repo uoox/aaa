@@ -210,21 +210,12 @@ impl RootView {
     /// 同日用户「终端列表前面不需要三道杠」：行首那个记号（连同项目行的指示位）一起
     /// 拿掉了——终端没有状态可言，一个记号只是占着行首；标题现在顶格起，和项目行对齐。
     pub(super) fn render_terminal_rows(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        // 表头与 Claude / Antigravity 两栏同一个写法（2026-09-11 三栏）
         let mut col = div()
             .flex()
             .flex_col()
             .gap(px(1.))
-            .mt(px(10.))
-            .child(
-                meta()
-                    .mx(px(6.))
-                    .px(px(10.))
-                    .pt(px(8.))
-                    .pb(px(4.))
-                    .border_t_1()
-                    .border_color(c(theme::EDGE))
-                    .child("终端"),
-            );
+            .child(super::section_header("终端"));
         for (ix, (id, label)) in self.live_terminal_tabs().into_iter().enumerate() {
             let active =
                 self.page == Page::Terminal && self.active_terminal.as_deref() == Some(id.as_str());

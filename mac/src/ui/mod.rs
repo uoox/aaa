@@ -122,6 +122,10 @@ struct ProjectRow {
     sort_key: String,
     /// 黄点：跑完一轮 / 在等你回话，而这台机器还没进去看过（本机状态，UiState::unread_projects）
     unread: bool,
+    /// 这一行归哪一栏，也是点它时开哪个 agent：注册表登记的 → 代表会话在跑的 → 默认。
+    /// **只此一处**：分栏和开会话读的是同一句话，不然侧栏把它排进 Claude 那一栏、
+    /// 点下去却开了 agy。
+    agent: String,
 }
 
 impl ProjectRow {
@@ -165,6 +169,18 @@ fn project_rows(projects: &[Project], sessions: &[Session], unread: &[String]) -
                 .filter(|t| !t.is_empty())
                 .unwrap_or_else(|| p.mtime.clone()),
             unread: path_list_contains(unread, &p.path),
+            agent: p
+                .agent
+                .clone()
+                .filter(|a| !a.is_empty())
+                .or_else(|| {
+                    p.session_id
+                        .as_deref()
+                        .and_then(|id| sessions.iter().find(|s| s.id == id))
+                        .map(|s| s.agent.clone())
+                        .filter(|a| !a.is_empty())
+                })
+                .unwrap_or_else(|| DEFAULT_AGENT.to_string()),
         })
         .collect();
     // 2026-09-10 用户拍板：就按行尾那个「xxx 分钟前」从新到旧排，不分档。
@@ -174,6 +190,65 @@ fn project_rows(projects: &[Project], sessions: &[Session], unread: &[String]) -
     // 两端认同一个并列键，共享向量里有一对同刻的项目盯着这条（见 fixtures/projects.json）。
     rows.sort_by(|a, b| b.sort_key.cmp(&a.sort_key).then_with(|| a.path.cmp(&b.path)));
     rows
+}
+
+/// 表里第一个、也是没登记 agent 的旧项目的回退。真正开谁以注册表 / `GET /agents` 为准。
+/// 与 Android 的 `DEFAULT_AGENT` 同一句话。
+pub const DEFAULT_AGENT: &str = "claude";
+
+/// 项目列表的一栏（2026-09-11 用户拍板「项目列表三栏：Claude/Antigravity/Terminal」）：
+/// 一个 agent 的表头 + 归它的项目行。终端是第三栏，但它不是 agent（`GET /agents` 里没有
+/// shell），那一栏由 `render_terminal_rows` 单独画。
+#[derive(Debug, Clone)]
+struct AgentSection {
+    agent: String,
+    /// 表头写什么。**空串 = 不画表头**（老 daemon 不给 `/agents`，编不出「这一栏是谁」）
+    label: String,
+    rows: Vec<ProjectRow>,
+    /// 这台机器装了它——没装就不画那一栏的「新建项目」（开不起来的 agent 不该给入口）
+    available: bool,
+}
+
+/// 把排好序的项目行分进各栏，顺序按 `GET /agents` 给的表（daemon 的 AGENTS 表序：
+/// Claude、Antigravity）。栏内顺序不动——那是 [`project_rows`] 定的，一处算一次。
+///
+/// 表里没有的 agent（装过 codex 之类留下的旧项目）归**第一栏**，与 `ProjectRow::agent`
+/// 的回退同一条线：宁可排错一栏，也不能让一个项目在列表里整个消失。
+///
+/// 空栏只在「这台机器装了它」时才留——没装又一个项目都没有的 agent，画一个空表头
+/// 只是告诉你有个东西你没装。两端同一份共享向量盯着（`fixtures/projects.json`）。
+fn agent_sections(rows: Vec<ProjectRow>, agents: &[AgentInfo]) -> Vec<AgentSection> {
+    // 老 daemon 不给 /agents：不分栏，一整列照旧画，表头也不画
+    let Some(first) = agents.first() else {
+        return vec![AgentSection { agent: String::new(), label: String::new(), rows, available: true }];
+    };
+    let home = |r: &ProjectRow| -> String {
+        if agents.iter().any(|a| a.id == r.agent) { r.agent.clone() } else { first.id.clone() }
+    };
+    agents
+        .iter()
+        .map(|a| AgentSection {
+            agent: a.id.clone(),
+            label: if a.label.is_empty() { a.id.clone() } else { a.label.clone() },
+            rows: rows.iter().filter(|r| home(r) == a.id).cloned().collect(),
+            available: a.available,
+        })
+        .filter(|s| !s.rows.is_empty() || s.available)
+        .collect()
+}
+
+/// 一栏的表头：一条上边线 + 栏名（`Claude` / `Antigravity` / `终端`）。三栏同一个写法。
+/// 栏名来自 `GET /agents` 的 `label`，客户端不自己编那张表。
+pub(super) fn section_header(label: impl Into<SharedString>) -> gpui::Div {
+    meta()
+        .mx(px(6.))
+        .px(px(10.))
+        .mt(px(8.))
+        .pt(px(8.))
+        .pb(px(4.))
+        .border_t_1()
+        .border_color(c(theme::EDGE))
+        .child(label.into())
 }
 
 /// 行尾那个时间（2026-09-08 用户：「MacOS 这边也显示出来时间」——Android 项目列表
@@ -514,7 +589,7 @@ impl RootView {
             sessions: Vec::new(),
             projects: Vec::new(),
             agents: Vec::new(),
-            new_agent: "claude".into(),
+            new_agent: DEFAULT_AGENT.into(),
             qr_modules: None,
             endpoint_from_config,
             terminals: HashMap::new(),
@@ -1001,7 +1076,7 @@ impl RootView {
     /// 注册表里 agent=shell 的旧项目：没有会话页可开，改在该目录开终端标签
     /// （不 fresh：已有存活 shell 就切过去，双击「没反应」再点不会开出第二个）。
     pub fn open_project(&mut self, project: &Project, cx: &mut Context<Self>) {
-        let agent = project.agent.clone().unwrap_or_else(|| "claude".into());
+        let agent = project.agent.clone().unwrap_or_else(|| DEFAULT_AGENT.into());
         if agent == "shell" {
             self.create_terminal_in(project.path.clone(), false, cx);
             return;
@@ -1021,27 +1096,6 @@ impl RootView {
 
     fn session(&self, id: &str) -> Option<&Session> {
         self.sessions.iter().find(|s| s.id == id)
-    }
-
-    /// 表里下一个装了的 agent。只装了一个就是 `None`——没有「换」这回事，
-    /// 切换入口整个不画。例外：当前这个**没装**（卸载了 / 换了台机器）时给一条
-    /// 回到装了的那个的路，否则这一行永远换不回来。
-    fn next_agent(&self, cur: &str) -> Option<String> {
-        let usable: Vec<&AgentInfo> = self.agents.iter().filter(|a| a.available).collect();
-        let first = usable.first()?.id.clone();
-        match usable.iter().position(|a| a.id == cur) {
-            None => Some(first),
-            Some(_) if usable.len() < 2 => None,
-            Some(i) => Some(usable[(i + 1) % usable.len()].id.clone()),
-        }
-    }
-
-    fn agent_label(&self, id: &str) -> String {
-        self.agents
-            .iter()
-            .find(|a| a.id == id)
-            .map(|a| a.label.clone())
-            .unwrap_or_else(|| id.to_string())
     }
 
     // ── 渲染 ────────────────────────────────────────────────────────────
@@ -1191,9 +1245,14 @@ impl RootView {
             .when_some(self.render_plan_usage(), |el, block| el.child(block))
     }
 
-    /// 侧栏主体那一列：项目行一条条排下来，终端行接在同一列后面。
+    /// 侧栏主体那一列：一个 agent 一栏，终端是最后一栏。
     ///
-    /// ── 项目列表：单列（2026-09-06 用户拍板）──
+    /// ── 三栏（2026-09-11 用户拍板「项目列表三栏：Claude/Antigravity/Terminal」）──
+    ///   每栏都是「表头 + 行 + 新建那一行」同一个形状——终端那一栏本来就长这样，
+    ///   另外两栏照它来。建出来的项目归哪个 agent 由**新建那一行在哪一栏**说了算，
+    ///   所以此前那个「点一下换 agent」的字母小标没有了。
+    ///
+    /// ── 项目行 ──
     ///   整行淡底色说状态：淡蓝 = 在跑 / 淡黄 = 未读 / 无底 = 已读（2026-09-10 用户拍板，竖线也去掉了）。
     ///   问题本身不在侧栏画：进消息流，表单原生呈现、原地作答。exited 会话不代表项目
     ///   （点一下 resume）；终端（shell）不在这里（归终端面板）。
@@ -1201,14 +1260,27 @@ impl RootView {
         let rows = project_rows(&self.projects, &self.sessions, &self.unread_projects);
         let now = chrono::Local::now();
         let mut list_col = div().flex().flex_col().gap(px(1.));
-        for row in rows {
-            list_col = list_col.child(self.render_project_row(row, now, cx));
+        let sections = agent_sections(rows, &self.agents);
+        // 输入框只有一个，它待在 `new_agent` 那一栏。那一栏没画出来（卸载了 / 换了台
+        // 机器；或者老 daemon 根本没有栏名）就退到第一栏，否则 ⌘N 按下去没有落点
+        let live = sections
+            .iter()
+            .find(|s| s.agent == self.new_agent && s.available)
+            .or_else(|| sections.iter().find(|s| s.available))
+            .map(|s| s.agent.clone());
+        for sec in sections {
+            // 老 daemon 不给 /agents：label 是空的，那就不画表头，一整列照旧
+            if !sec.label.is_empty() {
+                list_col = list_col.child(section_header(sec.label.clone()));
+            }
+            for row in sec.rows {
+                list_col = list_col.child(self.render_project_row(row, now, cx));
+            }
+            if sec.available {
+                let is_live = live.as_deref() == Some(sec.agent.as_str());
+                list_col = list_col.child(self.render_new_project_row(is_live, &sec.agent, window, cx));
+            }
         }
-        // 新建项目就排在项目列表的末尾，长得和项目行一模一样（2026-09-10 用户拍板：
-        // 「加号去掉，仅回车」「放在『点一行进入消息流·长按查看项目操作』那个位置，
-        // 样式和项目列表的项目一样」）。它以前在侧栏顶上、是一个带 ＋ 的输入框——
-        // 那既不是导航的一部分，又天天占着最上面那一行。
-        list_col = list_col.child(self.render_new_project_row(window, cx));
         // 终端与对话同级（2026-09-08 用户拍板）：终端不再是侧栏底部通往标签页的
         // 一个入口，而是接着项目行排在同一列里，点一行就是那一个终端。
         list_col.child(self.render_terminal_rows(cx))
@@ -1313,7 +1385,31 @@ impl RootView {
     ///
     /// 没有 ＋（2026-09-10 用户拍板「新建项目加号去掉，仅回车」）：一个按钮和一个
     /// 回车是同一件事的两个入口，而那个按钮把这一行撑得比项目行高。
-    fn render_new_project_row(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
+    fn render_new_project_row(&self, live: bool, agent: &str, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
+        // 每栏各有一行，但**输入框只有一个**：那几个字打在哪一栏由 `new_agent` 说了算，
+        // 别的栏画一行同样版式的占位——点它就把输入框搬过去。两行同时显示同一串字会让人
+        // 以为回车会建两个
+        if !live {
+            let target = agent.to_string();
+            return div().pt(px(2.)).child(
+                sidebar_row(SharedString::from(format!("sb-new:{agent}")).into())
+                    .hover(|st| st.bg(c(theme::SURFACE_RAISED)))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.new_agent = target.clone();
+                        this.focus_new_project(window, cx);
+                    }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .text_size(px(12.5))
+                            .text_color(c(theme::FAINT))
+                            .child("＋ 新建项目：文件夹名，回车"),
+                    ),
+            );
+        }
         // 光标在这一行里 = 整行一圈强调色边框，和「当前打开的那个项目」同一套语言。
         // 不画的话（bare 的输入框自己没有框）只剩一根一像素的光标在闪，看不出焦点在哪
         let focused = self.new_input.read(cx).focus_handle.is_focused(window);
@@ -1323,26 +1419,7 @@ impl RootView {
                 .hover(|st| st.bg(c(theme::SURFACE_RAISED)))
                 .on_click(cx.listener(|this, _, window, cx| this.focus_new_project(window, cx)))
                 .child(div().flex_1().min_w(px(0.)).child(self.new_input.clone()))
-                .when(self.creating, |el| {
-                    el.child(meta().flex_none().child("…"))
-                })
-                // 新项目开谁：点一下在装了的 agent 之间轮换。只有一个可用就不画
-                .when_some(self.next_agent(&self.new_agent), |el, next| {
-                    el.child(
-                        row_btn("sb-new-agent")
-                            .hover(|st| st.text_color(c(theme::ACCENT)).bg(c(theme::EDGE_LIGHT)))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.new_agent = next.clone();
-                                cx.notify();
-                            }))
-                            // 首字母，和项目行的小标同一套写法：侧栏最窄 180px，
-                            // 一个「Antigravity」就把输入框挤没了
-                            .child(SharedString::from(
-                                self.agent_label(&self.new_agent).chars().next().unwrap_or('?').to_string(),
-                            )),
-                    )
-                }),
+                .when(self.creating, |el| el.child(meta().flex_none().child("…"))),
         )
     }
 
@@ -2078,6 +2155,33 @@ mod tests {
         for (path, want) in fx["expect"]["unread_path_normalized"].as_object().unwrap() {
             assert_eq!(path_list_contains(&unread, path), want.as_bool().unwrap(), "未读: {path}");
         }
+
+        // 分栏：一个 agent 一栏，栏序按 /agents，栏内顺序不动（Android 读同一份 expect）
+        let agents: Vec<AgentInfo> = serde_json::from_value(fx["expect"]["agents"].clone()).unwrap();
+        let got = agent_sections(rows.clone(), &agents);
+        let want = fx["expect"]["sections"].as_array().unwrap();
+        assert_eq!(got.len(), want.len());
+        for (g, w) in got.iter().zip(want) {
+            assert_eq!(g.agent, w["agent"].as_str().unwrap());
+            assert_eq!(g.label, w["label"].as_str().unwrap());
+            let paths: Vec<&str> = g.rows.iter().map(|r| r.path.as_str()).collect();
+            let want_paths: Vec<&str> =
+                w["rows"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+            assert_eq!(paths, want_paths, "栏 {}", g.agent);
+        }
+        // 老 daemon 不给 /agents：一栏、不画表头，一整列照旧
+        let one = agent_sections(rows.clone(), &[]);
+        assert_eq!((one.len(), one[0].label.as_str(), one[0].rows.len()), (1, "", rows.len()));
+        // 没装、又一个项目都没有的 agent 不占一栏；有项目的哪怕没装也留着
+        let ghost = AgentInfo { id: "codex".into(), label: "Codex".into(), available: false };
+        let mut with_ghost = agents.clone();
+        with_ghost.push(ghost);
+        assert_eq!(agent_sections(rows.clone(), &with_ghost).len(), 2, "空又没装的不占一栏");
+        let agy_gone: Vec<AgentInfo> = agents
+            .iter()
+            .map(|a| AgentInfo { available: a.id != "agy", ..a.clone() })
+            .collect();
+        assert_eq!(agent_sections(rows, &agy_gone).len(), 2, "agy 没装但有项目：那一栏还得在");
     }
 
     #[test]

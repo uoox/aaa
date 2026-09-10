@@ -107,24 +107,45 @@ class ProjectRowsTest {
     }
 
     /**
-     * agent 轮换：只在装了不止一个时才有「下一个」。少于两个返回 null，
-     * 两端据此整个不画切换入口（老 daemon 不给 /agents，表是空的，同样不画）。
+     * 分栏：一个 agent 一栏，栏序按 `GET /agents`，栏内顺序不动。向量与 mac 共用
+     * （`fixtures/projects.json` 的 `expect.sections`），两端排出来必须一模一样。
      */
     @Test
-    fun next_agent_cycles_only_over_installed_ones() {
-        val both = listOf(
-            AgentInfo("claude", "Claude", true),
-            AgentInfo("agy", "Antigravity", true),
-        )
-        assertEquals("agy", nextAgent(both, "claude"))
-        assertEquals("claude", nextAgent(both, "agy"))
-        assertEquals("当前这个没装就给条路回到装了的", "claude", nextAgent(both, "没见过的"))
-        assertNull(nextAgent(listOf(AgentInfo("claude", "Claude", true)), "claude"))
-        assertNull("老 daemon：空表不画切换", nextAgent(emptyList(), "claude"))
-        val onlyClaude = both.map { it.copy(available = it.id == "claude") }
-        assertNull("没装的不算", nextAgent(onlyClaude, "claude"))
-        assertEquals("agy 卸载了，这一行还能换回 claude", "claude", nextAgent(onlyClaude, "agy"))
-        assertEquals("Antigravity", agentLabel(both, "agy"))
-        assertEquals("表里没有就报 id", "agy", agentLabel(emptyList(), "agy"))
+    fun agent_sections_follow_the_shared_fixture() {
+        val agents = json.decodeFromJsonElement(ListSerializer(AgentInfo.serializer()), expect["agents"]!!)
+        val want = expect["sections"]!!.jsonArray
+        val got = agentSections(rows, agents)
+        assertEquals(want.size, got.size)
+        want.forEachIndexed { i, w ->
+            val o = w.jsonObject
+            assertEquals(o["agent"]!!.jsonPrimitive.content, got[i].agent)
+            assertEquals(o["label"]!!.jsonPrimitive.content, got[i].label)
+            assertEquals(
+                o["rows"]!!.jsonArray.map { it.jsonPrimitive.content },
+                got[i].rows.map { it.project.path },
+            )
+        }
+    }
+
+    /** 老 daemon 不给 `/agents`：一栏、不画表头，一整列照旧——不编「这一栏是谁」。 */
+    @Test
+    fun no_agent_table_means_one_unnamed_section() {
+        val one = agentSections(rows, emptyList())
+        assertEquals(1, one.size)
+        assertEquals("", one[0].label)
+        assertEquals(rows.size, one[0].rows.size)
+    }
+
+    /** 没装、又一个项目都没有的 agent 不占一栏；装了的哪怕是空的也留着（要有新建那一行）。 */
+    @Test
+    fun empty_section_stays_only_when_the_agent_is_installed() {
+        val agy = AgentInfo("agy", "Antigravity", true)
+        val claude = AgentInfo("claude", "Claude", true)
+        assertEquals(2, agentSections(rows, listOf(claude, agy)).size)
+        // agy 没装但有项目：那一栏还得在，不然 /p/agy 整个消失
+        assertEquals(2, agentSections(rows, listOf(claude, agy.copy(available = false))).size)
+        // 没装又没项目：不画
+        val ghost = AgentInfo("codex", "Codex", false)
+        assertEquals(2, agentSections(rows, listOf(claude, agy, ghost)).size)
     }
 }
