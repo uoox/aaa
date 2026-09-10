@@ -214,16 +214,18 @@ impl Net {
     /// 开一个终端（shell 会话）。`fresh:true` 是关键：POST /sessions 默认幂等
     /// （同目录同 agent 有存活会话就直接返回它），终端面板的「+」要的正是
     /// 第二个 shell，所以必须显式要求新开。shell 无 resume。
+    /// `title` 非空 = 用户给它起的名字（daemon 记成 `custom_title`，行上就叫它）
     pub fn create_terminal(
         &self,
         project_path: String,
         fresh: bool,
+        title: String,
     ) -> impl Future<Output = Result<Session>> + use<> {
         self.post_json(
             "/sessions",
             serde_json::json!({
                 "project_path": project_path, "agent": "shell",
-                "resume": false, "fresh": fresh,
+                "resume": false, "fresh": fresh, "title": title.trim(),
             }),
         )
     }
@@ -246,16 +248,6 @@ impl Net {
     /// 项目任务队列：排着的几句话（agent 空下来 daemon 自动喂下一句）
     pub fn session_permission(&self, id: &str, behavior: &str) -> impl Future<Output = Result<serde_json::Value>> + use<> {
         self.post_json(&format!("/sessions/{id}/permission"), serde_json::json!({ "behavior": behavior }))
-    }
-    pub fn session_answer(
-        &self,
-        id: &str,
-        answers: Vec<AnswerItem>,
-    ) -> impl Future<Output = Result<serde_json::Value>> + use<> {
-        self.post_json(
-            &format!("/sessions/{id}/answer"),
-            serde_json::json!({ "answers": answers }),
-        )
     }
     /// `POST /restart`：force = 连存活会话一起终止
     pub fn kill_session(&self, id: &str) -> impl Future<Output = Result<serde_json::Value>> + use<> {
@@ -734,7 +726,7 @@ mod tests {
         );
         let net = test_net(port);
         let s = futures::executor::block_on(
-            net.create_terminal("/Volumes/SSD/project".into(), true),
+            net.create_terminal("/Volumes/SSD/project".into(), true, String::new()),
         )
         .unwrap();
         assert_eq!(s.id, "s_t1");
@@ -761,45 +753,6 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&req[body_start..]).unwrap();
         assert_eq!(v["text"], "1");
         assert_eq!(v["enter"], true);
-    }
-
-    #[test]
-    fn rest_answer_body_and_409_status() {
-        // 对话框没吃下 → daemon 409；message 与状态码都要能到调用方手里
-        let (port, req_rx) = one_shot_server(
-            "HTTP/1.1 409 Conflict",
-            r#"{"error":{"code":"conflict","message":"the dialog did not take the answer; finish it in the terminal"}}"#,
-        );
-        let net = test_net(port);
-        let err = futures::executor::block_on(net.session_answer(
-            "s_1",
-            vec![
-                AnswerItem {
-                    selected: vec![0, 2],
-                    other: None,
-                },
-                AnswerItem {
-                    selected: vec![],
-                    other: Some("Zed".into()),
-                },
-            ],
-        ))
-        .unwrap_err();
-        assert_eq!(http_status(&err), Some(409), "{err}");
-        assert!(err.to_string().contains("finish it in the terminal"), "{err}");
-        let f = err.downcast_ref::<ApiFailure>().unwrap();
-        assert_eq!(f.code, "conflict");
-        let req = req_rx.recv().unwrap();
-        assert!(
-            req.starts_with("POST /api/v1/sessions/s_1/answer HTTP/1.1"),
-            "req: {req}"
-        );
-        let body_start = req.find("\r\n\r\n").unwrap() + 4;
-        let v: serde_json::Value = serde_json::from_str(&req[body_start..]).unwrap();
-        assert_eq!(v["answers"][0]["selected"], serde_json::json!([0, 2]));
-        assert!(v["answers"][0].get("other").is_none(), "other 为空时不发字段");
-        assert_eq!(v["answers"][1]["selected"], serde_json::json!([]));
-        assert_eq!(v["answers"][1]["other"], "Zed");
     }
 
     #[test]

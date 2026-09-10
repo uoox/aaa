@@ -17,6 +17,8 @@ import java.net.URLDecoder
 @Serializable data class Session(
     val id: String,
     val title: String = "",
+    /** v1.40：[title] 是不是用户自己起的（终端行据此决定叫名字还是「终端 N」） */
+    val custom_title: Boolean = false,
     val project_path: String = "",
     val project_name: String = "",
     val agent: String = "",
@@ -75,7 +77,18 @@ import java.net.URLDecoder
     val model_scoped: List<ModelScopedUsage>? = null,
     val updated_at: JsonElement? = null,
 )
-@Serializable data class UsageResponse(val plan: PlanUsage? = null)
+/**
+ * `GET /usage`。`plan` 是 claude 那一份，daemon 为老客户端留着；**这边读 [plans]**
+ * ——一个 agent 一份，键就是 `GET /agents` 的 id（`claude` / `agy`）。
+ * 老 daemon 不给 `plans`，[byAgent] 就把 `plan` 当 claude 的。
+ */
+@Serializable data class UsageResponse(
+    val plan: PlanUsage? = null,
+    val plans: Map<String, PlanUsage> = emptyMap(),
+) {
+    fun byAgent(): Map<String, PlanUsage> =
+        if (plans.isNotEmpty()) plans else plan?.let { mapOf(DEFAULT_AGENT to it) } ?: emptyMap()
+}
 
 // v1.4 产物（会话里发布的 Artifact 链接）
 @Serializable data class ArtifactInfo(
@@ -220,7 +233,6 @@ const val SCHEMA_PROJECT_STATUS = 2
     val tool: ToolInfo? = null,
     val question: QuestionSpec? = null,
 )
-@Serializable data class AnswerItem(val selected: List<Int> = emptyList(), val other: String? = null)
 @Serializable data class MessagesResponse(
     val supported: Boolean = false,
     val source: String = "none",
@@ -281,8 +293,15 @@ sealed class EventFrame {
     data object ProjectsChanged : EventFrame()
     data class HealthUpdate(val ssdMounted: Boolean) : EventFrame()
     data class MessagesChanged(val id: String, val lastSeq: Long) : EventFrame()
-    /** 套餐用量变了：plan 为 null 表示 daemon 暂时拿不到 */
+    /** 套餐用量变了：plan 为 null 表示 daemon 暂时拿不到。**这一帧永远是 claude 的** */
     data class UsageUpdate(val plan: PlanUsage?) : EventFrame()
+
+    /**
+     * v1.39 别的 agent 的配额（当前只有 `agy`）。daemon 另起了一个帧名而不是给
+     * `usage` 加字段：老客户端认得 `usage` 不认得这个，未知帧它们本来就丢掉——
+     * 一升 daemon 就把 Antigravity 的数字画到 Claude 头上，是那边唯一要防的事。
+     */
+    data class AgentUsageUpdate(val agent: String, val plan: PlanUsage?) : EventFrame()
     data class Unknown(val type: String) : EventFrame()
 
     companion object {
@@ -298,6 +317,10 @@ sealed class EventFrame {
                     "health" -> HealthUpdate(obj["ssd_mounted"]?.jsonPrimitive?.booleanOrNull ?: true)
                     "messages_changed" -> MessagesChanged(obj["id"]!!.jsonPrimitive.content, obj["last_seq"]?.jsonPrimitive?.longOrNull ?: 0)
                     "usage" -> UsageUpdate(obj["plan"]?.takeIf { it !is kotlinx.serialization.json.JsonNull }?.let { ProtocolJson.instance.decodeFromJsonElement(PlanUsage.serializer(), it) })
+                    "agent_usage" -> AgentUsageUpdate(
+                        obj["agent"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                        obj["plan"]?.takeIf { it !is kotlinx.serialization.json.JsonNull }?.let { ProtocolJson.instance.decodeFromJsonElement(PlanUsage.serializer(), it) },
+                    )
                     else -> Unknown(t)
                 }
             } catch (_: Exception) { Unknown(t) }

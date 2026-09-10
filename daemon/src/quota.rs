@@ -132,6 +132,138 @@ pub fn same_windows(a: &Value, b: &Value) -> bool {
     a["five_hour"] == b["five_hour"] && a["seven_day"] == b["seven_day"] && a["model_scoped"] == b["model_scoped"]
 }
 
+// ── Antigravity（agy）那一份 ────────────────────────────────────────────────
+//
+// 与上面 claude 那一份是同一件事的第二份实现：读 agy 自己登录留下的令牌，问它自己的
+// 配额接口，再压成**同一个 plan 形状**交出去——客户端因此只有一套画法（`plans` 这张
+// 表按 agent 取，见 PROTOCOL「GET /usage」）。
+//
+// 令牌：agy 把它写进 macOS 钥匙串（service `gemini` / account `antigravity`，值是
+// go-keyring 的 `go-keyring-base64:` + base64 的 JSON），钥匙串取不到时退回
+// `~/.gemini/jetski-standalone-oauth-token`。**只读不刷新**，与 claude 那份同一条规矩：
+// refresh token 是轮换的，daemon 抢着刷会把用户的 agy 登出；过期就等 agy 自己续。
+
+pub const AGY_USAGE_URL: &str =
+    "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary";
+const AGY_KEYCHAIN_SERVICE: &str = "gemini";
+const AGY_KEYCHAIN_ACCOUNT: &str = "antigravity";
+const GO_KEYRING_PREFIX: &str = "go-keyring-base64:";
+
+/// **这个 User-Agent 是必须的**，不是礼貌：不带它，后端按 Gemini Code Assist 的企业
+/// 授权判这个请求，个人账号一律 403 `SUBSCRIPTION_REQUIRED`；带上它才走 Antigravity
+/// 自己那条线。改这个字符串前先确认接口还认。
+pub const AGY_USER_AGENT: &str = "antigravity-cli/1.0";
+
+/// agy 令牌文件：`~/.gemini/jetski-standalone-oauth-token`
+pub fn agy_token_path(home: &Path) -> PathBuf {
+    home.join(".gemini").join("jetski-standalone-oauth-token")
+}
+
+/// go-keyring 存的值：`go-keyring-base64:<base64(JSON)>`，也可能就是裸 JSON
+pub fn decode_keyring_value(raw: &str) -> Option<Value> {
+    let t = raw.trim();
+    let json = match t.strip_prefix(GO_KEYRING_PREFIX) {
+        Some(b64) => {
+            use base64::Engine;
+            String::from_utf8(base64::engine::general_purpose::STANDARD.decode(b64.trim()).ok()?).ok()?
+        }
+        None => t.to_string(),
+    };
+    serde_json::from_str(&json).ok()
+}
+
+/// agy 凭据 JSON（`{"token":{access_token,expiry,…}}`）里取还没过期的 access token。
+/// `expiry` 是 RFC3339；解析不动就当它还有效（宁可问一次拿 401，也不要平白不问）。
+pub fn agy_token_from_json(v: &Value, now: chrono::DateTime<chrono::Utc>) -> Option<String> {
+    let t = v.get("token")?;
+    if let Some(exp) = t.get("expiry").and_then(Value::as_str) {
+        if let Ok(at) = chrono::DateTime::parse_from_rfc3339(exp.trim()) {
+            if at.with_timezone(&chrono::Utc) <= now {
+                return None;
+            }
+        }
+    }
+    t.get("access_token").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string)
+}
+
+fn read_agy_credentials(home: &Path) -> Option<Value> {
+    if cfg!(target_os = "macos") {
+        let out = std::process::Command::new("security")
+            .args(["find-generic-password", "-s", AGY_KEYCHAIN_SERVICE, "-a", AGY_KEYCHAIN_ACCOUNT, "-w"])
+            .output()
+            .ok();
+        if let Some(out) = out.filter(|o| o.status.success()) {
+            if let Some(v) = String::from_utf8(out.stdout).ok().and_then(|s| decode_keyring_value(&s)) {
+                return Some(v);
+            }
+        }
+    }
+    // 钥匙串没有（Linux、或者 agy 落回了文件）：读文件那一份
+    let s = std::fs::read_to_string(agy_token_path(home)).ok()?;
+    serde_json::from_str(&s).ok()
+}
+
+/// 当前可用的 agy access token；没登录 / 已过期 → None
+pub fn agy_access_token(home: &Path) -> Option<String> {
+    read_agy_credentials(home).and_then(|v| agy_token_from_json(&v, chrono::Utc::now()))
+}
+
+/// agy 的配额响应 → 与 claude 同一个 plan 形状。
+///
+/// 接口给的是**按模型分组**的桶：每组一个 `weekly` 和一个 `5h`，`remainingFraction`
+/// 是**还剩**的比例（0–1）——这里换成 plan 形状里一贯的「用掉的百分比」。
+///
+/// **取第一个真有周窗口的组**（实测是 Gemini 那组，也就是 agy 默认在用的那一档）当
+/// `seven_day` / `five_hour`——不死认 `groups[0]`：顺序和「首组会不会整个 disabled」
+/// 都是对面说了算的。其余各组（Claude / GPT 那些）**整个不要**——
+/// 2026-09-11 用户拍板：「antigravity 右边就不放 Other 了吧，反正也很少用」。
+/// 于是 Antigravity 那一栏行尾就是 `剩 51% · 13h 重置` 两段，没有 `model_scoped`。
+///
+/// 一个桶都没有 → None（没有的东西不编一个出来）。
+pub fn parse_agy_usage(body: &Value) -> Option<Value> {
+    let groups = body.get("groups")?.as_array()?;
+    let bucket = |g: &Value, window: &str| -> Option<Value> {
+        let b = g.get("buckets")?.as_array()?.iter().find(|b| {
+            b.get("window").and_then(Value::as_str).is_some_and(|w| w.eq_ignore_ascii_case(window))
+        })?;
+        // disabled 的桶不算数：那是「这一档你没有」，不是「用满了」
+        if b.get("disabled").and_then(Value::as_bool).unwrap_or(false) {
+            return None;
+        }
+        let frac = b.get("remainingFraction").and_then(Value::as_f64)?;
+        Some(json!({
+            "used_percentage": ((1.0 - frac.clamp(0.0, 1.0)) * 100.0 * 10.0).round() / 10.0,
+            "resets_at": b.get("resetTime").cloned().unwrap_or(Value::Null),
+        }))
+    };
+    // **取第一个真有周窗口的组**，不是死认 `groups[0]`（2026-09-11 agy 审阅指出）：
+    // 实测第一组是 Gemini 那档，但组的顺序、以及首组会不会整个 `disabled`，都是对面
+    // 说了算的。死认第一个的话，对面哪天换个顺序或把首档关掉，这一栏就整个空了——
+    // 而那时看不出是「没配额」还是「没解析出来」。
+    let first = groups.iter().find_map(|g| bucket(g, "weekly").map(|w| (g, w)));
+    let (g, seven) = first?;
+    Some(json!({
+        "five_hour": bucket(g, "5h").unwrap_or(Value::Null),
+        "seven_day": seven,
+        "model_scoped": Value::Null,
+    }))
+}
+
+/// 拉一次 agy 的配额接口。阻塞；在 spawn_blocking 里调
+pub fn agy_fetch(token: &str) -> Result<Value, String> {
+    let resp = ureq::post(AGY_USAGE_URL)
+        .set("Authorization", &format!("Bearer {token}"))
+        .set("User-Agent", AGY_USER_AGENT)
+        .set("Accept", "application/json")
+        .timeout(Duration::from_secs(10))
+        .send_json(json!({}))
+        .map_err(|e| match e {
+            ureq::Error::Status(code, _) => format!("HTTP {code}"),
+            other => other.to_string(),
+        })?;
+    resp.into_json::<Value>().map_err(|e| e.to_string())
+}
+
 /// statusLine 转来的 plan 缺 `model_scoped`（它从来没有），把上一次轮询到的带上
 pub fn carry_model_scoped(plan: &mut Value, cur: Option<&Value>) {
     if plan["model_scoped"].is_null() {
@@ -152,6 +284,59 @@ mod tests {
         assert!(token_from_credentials(&v, 2000).is_none(), "expired");
         assert!(token_from_credentials(&json!({}), 0).is_none());
         assert!(token_from_credentials(&json!({"claudeAiOauth": {"accessToken": ""}}), 0).is_none());
+    }
+
+    #[test]
+    fn agy_token_respects_expiry_and_keyring_encoding() {
+        let raw = r#"{"token":{"access_token":"ya29.x","expiry":"2026-09-11T02:44:25+08:00"},"auth_method":"consumer"}"#;
+        let v: Value = serde_json::from_str(raw).unwrap();
+        let before = chrono::DateTime::parse_from_rfc3339("2026-09-10T18:00:00Z").unwrap().with_timezone(&chrono::Utc);
+        let after = chrono::DateTime::parse_from_rfc3339("2026-09-10T19:00:00Z").unwrap().with_timezone(&chrono::Utc);
+        assert_eq!(agy_token_from_json(&v, before).as_deref(), Some("ya29.x"));
+        assert!(agy_token_from_json(&v, after).is_none(), "过期了就当没有");
+        // expiry 解析不动 → 照样给（宁可问一次拿 401）
+        let odd: Value = serde_json::from_str(r#"{"token":{"access_token":"ya29.y","expiry":"whenever"}}"#).unwrap();
+        assert_eq!(agy_token_from_json(&odd, after).as_deref(), Some("ya29.y"));
+        assert!(agy_token_from_json(&json!({}), before).is_none());
+        // 钥匙串里是 go-keyring 的 base64，也可能是裸 JSON
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(raw);
+        assert_eq!(decode_keyring_value(&format!("go-keyring-base64:{b64}")).unwrap(), v);
+        assert_eq!(decode_keyring_value(raw).unwrap(), v);
+        assert!(decode_keyring_value("not json").is_none());
+    }
+
+    #[test]
+    fn agy_groups_become_the_same_plan_shape() {
+        let body = json!({
+            "groups": [
+                {"displayName": "Gemini Models", "buckets": [
+                    {"bucketId": "gemini-weekly", "window": "weekly", "remainingFraction": 0.5108519,
+                     "resetTime": "2026-09-11T07:52:05Z"},
+                    {"bucketId": "gemini-5h", "window": "5h", "remainingFraction": 0.676,
+                     "resetTime": "2026-09-10T19:26:48Z"}
+                ]},
+                {"displayName": "Claude and GPT models", "buckets": [
+                    {"bucketId": "3p-weekly", "window": "weekly", "remainingFraction": 0.90338373,
+                     "resetTime": "2026-09-16T17:01:34Z"},
+                    {"bucketId": "3p-5h", "window": "5h", "remainingFraction": 1}
+                ]}
+            ]
+        });
+        let p = parse_agy_usage(&body).unwrap();
+        // remainingFraction 是**还剩**的，plan 形状里一贯存**用掉的**
+        assert_eq!(p["seven_day"]["used_percentage"], 48.9);
+        assert_eq!(p["seven_day"]["resets_at"], "2026-09-11T07:52:05Z");
+        assert_eq!(p["five_hour"]["used_percentage"], 32.4);
+        // 其余各组（Claude / GPT 那些）整个不要（2026-09-11 用户：「不放 Other 了」）
+        assert!(p["model_scoped"].is_null(), "只有主的那一档");
+        // disabled 的桶不算「用满了」，它整个不进来
+        let off = json!({"groups": [{"displayName": "G", "buckets": [
+            {"window": "weekly", "remainingFraction": 0.0, "disabled": true}
+        ]}]});
+        assert!(parse_agy_usage(&off).is_none());
+        assert!(parse_agy_usage(&json!({})).is_none());
+        assert!(parse_agy_usage(&json!({"groups": []})).is_none());
     }
 
     #[test]

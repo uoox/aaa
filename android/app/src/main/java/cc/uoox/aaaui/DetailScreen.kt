@@ -121,11 +121,11 @@ fun SessionDetailScreen(store: AppStore, nav: NavHostController, sessionId: Stri
             error?.let { Text("获取失败：$it", color = Tok.Red, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 18.dp, vertical = 4.dp)) }
 
             // ── 用量：顶栏只留了模型和上下文，缓存命中率、花费、时长、行数在这里
-            DetailSection("用量", null, initiallyOpen = true) { UsageBlock(s.usage) }
+            DetailSection("用量", null) { UsageBlock(s.usage) }
 
             // ── 进度：daemon 每轮 Stop 后让 haiku 重写的清单（v1.22 起连解析也在 daemon，这边直接画）
             val items = s.checklist
-            DetailSection("进度", items.size.takeIf { it > 0 }, initiallyOpen = true, note = if (items.isEmpty()) null else checklistProgress(items)) {
+            DetailSection("进度", items.size.takeIf { it > 0 }, note = if (items.isEmpty()) null else checklistProgress(items)) {
                 if (items.isEmpty()) {
                     EmptyHint("每轮回复结束后这里会更新一份「做了什么 / 还没做什么」")
                 } else {
@@ -240,7 +240,7 @@ fun SessionDetailScreen(store: AppStore, nav: NavHostController, sessionId: Stri
                             val fresh = api.createSession(s.project_path, s.agent, resume = true)
                             store.releaseAttachmentNow(sessionId)
                             nav.popBackStack()
-                            openSession(fresh.id, "")
+                            openSession(fresh.id, "", "")
                         } catch (e: Exception) { toast("重启失败：${e.message}") }
                     }
                 }
@@ -293,11 +293,14 @@ fun SessionDetailScreen(store: AppStore, nav: NavHostController, sessionId: Stri
 private fun DetailSection(
     label: String,
     count: Int?,
-    initiallyOpen: Boolean = false,
     note: String? = null,
     body: @Composable () -> Unit,
 ) {
-    var open by rememberSaveable(label) { mutableStateOf(initiallyOpen) }
+    // **进来时一律折叠**（2026-09-11 用户拍板：「Android 详情界面默认全部折叠」）。
+    // 此前「用量」和「进度」默认展开，一屏就被这两节吃掉大半，底下还有七节全看不见；
+    // 全折起来之后整屏是一张目录，哪一节有几条一眼扫完，要看哪节点哪节。
+    // 节名是 key：同一节展开过就记着，退出这一屏才忘。
+    var open by rememberSaveable(label) { mutableStateOf(false) }
     HorizontalDivider(color = Tok.Edge, thickness = 1.dp)
     Row(
         Modifier.fillMaxWidth().clickable { open = !open }.padding(horizontal = 18.dp, vertical = 13.dp),

@@ -4,6 +4,31 @@ AAA 砍掉过的功能，连同砍它的理由。**这不是契约**——当下
 留着它是因为「为什么当初删了」比「删了什么」值钱：同一个想法过一阵会有人重新提，
 理由还成立就别再做一遍，不成立就大方加回来（`GET /agents` 就是这么回来的）。
 
+**2026-09-11（v1.39）：在消息流里替用户答 AskUserQuestion。** `POST /sessions/:id/answer`、daemon 的 `answer.rs`（`Answer` / `validate` / `plan` / `has_review_tab` / `drive` 与那套按键协议）、只服务于它的 `screen.rs`、两端的 `AnswerItem` 与表单的可交互态（mac 的 `Draft` / `form_complete` / `form_interactive` / `FormMode` / `toggle_option` / `submit` / 每题的「其它」输入框，Android 的 `QuestionCard` 选择与提交、`DaemonClient.answer`）全部删掉。`answer.rs` 缩成只管权限的 `permission.rs`。理由（用户 2026-09-11：「信息流对于 claude code 的 qa 问答，选择是不是比较差？这个部分建议是不要设计进通知，而是有通知点进进来到终端界面」）：
+
+- **那是在盲操一个会变的 TUI**。按键协议实测于 Claude Code 2.1.258：多选自填要 `↓ × 选项数` 落到「Type something」行，而**那时按回车会把勾取消**，绝不能按；Tab 在文本态和非文本态语义不同；按键之间要留 70–160ms 节拍（Ink 一次 read 当一个输入事件）；最后靠屏幕上 `Ready to submit your answers?` 和 `Enter to select` 两行提示判断成没成，3 秒不消失就 409。Claude Code 一升级，这串序列就可能失配。
+- **失配的后果是答歪，不是答不了**。选错项、把勾取消、或者提交了一个不是你要的答案——比「答不了、你去终端」糟得多。
+- **终端里那个对话框是 Claude Code 自己画的**，按什么就是什么，没有中间层。
+
+**留下的**：`asking` / `asking_seq` 照旧（daemon 仍然知道「它在等你答」，通知与卡片都靠它），消息流里那张卡也照旧画——**只是只读**：题面、选项、末尾那条「其它…」都在，看得见它在问什么，待答时露出一个「去终端答」。`POST /sessions/:id/permission` 与横幅上的「允许 / 拒绝」**也留着**：权限对话框只有两个键（数字 `1` / `Esc`），不脆，且「不进 app 直接答」的价值大。
+
+**跟着走的**：通知点进去的落点从消息流改成**终端视图**（Android 的 `EXTRA_VIEW`、mac 同理）。
+
+**顺手修掉的一个 bug**（用户 2026-09-11：「消息流选项卡出现的时候为什么还会有个上层的弹窗」）：Claude Code 对 `AskUserQuestion` 同样发 `PermissionRequest`，而 daemon 那个分支不看工具名，于是选项卡出现时消息流上还浮着一张「允许 / 拒绝」。**它不只是难看**——按「允许」发出去的是 `1` + 回车，等于替用户盲选了第一个选项。契约本来就写着「结构化提问不给按钮」，漏的是那一个判断。只有一句 message 的 `Notification(permission_prompt)` 兜底也一并挡住了。
+
+**2026-09-11（v1.39）：Android 的设置页。** `SettingsScreen.kt` 整个文件、`settings` 路由、项目面板上的 ⚙ 入口，以及只有它在用的 `Modifier.surfaceCard` 一并删掉。理由（用户 2026-09-11）：「Android 这边不用设置，里面那些设置就是默认这些不用改了」。那一屏一共五样东西，逐样看下来确实没有一样是手机上要改的：
+
+- **系统通知**（默认开）、**默认视图**（默认消息流）：默认值就是想要的值，一个开关摆在那儿只是让人多点两下确认它没被改过。
+- **后台常驻**（默认关）：**明知的代价**——它是唯一启停前台服务的地方，删了之后这个值永远停在默认值，app 被系统回收之后收不到「跑完」通知。用户拍板时明说了默认就行。已经开过的机器上存的 `true` 还在，`AaaApplication` 起来照样把服务拉起来。
+- **重启 daemon**：`aaa restart` 和 Mac App 各有一个入口，手机上按它的场景本来就少。
+- **服务器 / 重新配对**：**这一件留着**，但换了地方（见下）。
+
+**跟着走的**：`formatUptime` / `SettingRow` / `ToggleRow` / `Group` 四个只有那一屏在用的私有构件。`POST_NOTIFICATIONS` 的运行时授权本来就在 `MainActivity` 里要，不受影响。
+
+**配对没有跟着删**：首次进 app 时 `gate` 看见 `server == null` 就直接跳 `pair`，那条路不经过设置页；配过之后想换主机 / 换 token，从**项目列表底下那一条**进——那一条只在连接不正常（连接中 / 已断开 / 未配对）或 SSD 掉了的时候才画，整条可点。连着好的时候它一行都不占。这是 2026-09-11 同一天里两次拍板叠出来的结果：先「设置按钮改成和 MacOS 一样 fix 在底部」，随即「不用设置」——底下那一条于是留了下来，但只剩「有事说一声 + 一条回配对页的路」。
+
+**两端在这里故意不一样**：mac 侧栏底部那一条照旧常驻（状态点 + `daemon v…` + ⚙ 设置），mac 的设置页还有东西。
+
 **2026-09-11（v1.38）：看板。** `GET /history/dashboard` 与 daemon 的 `dashboard()` / `SessionCard` / `Counts` / `Dashboard` / `LiveStatus` / `status_rank`、mac 的 `ui/history.rs` 与 `Page::History`、Android 的 `HistoryScreen.kt` 与 ▦ 入口、两端的 `Dashboard`/`SessionCard` DTO 与卡片过滤函数、共享向量 `fixtures/dashboard.json`、`daemon/examples/dashboard_debug.rs`、设计令牌里的 `blue`，全部删掉。理由（用户 2026-09-11，「我的使用次数非常少」）：
 
 - **顶上那个数是假的**。删它那天本机实测：430 张卡，其中 **262 张已删除、412 张 paused**，而「未完成条目 338」是在这 430 张上算的。那些清单是 haiku 在某次 Stop 时写的，属于**已经结束**的会话——不是「还没做完的事」，是做完的事留下的渣。

@@ -234,13 +234,40 @@ fn agent_sections(rows: Vec<ProjectRow>, agents: &[AgentInfo]) -> Vec<AgentSecti
         .collect()
 }
 
+/// 这一栏的新建行提示语。终端那一栏起的是**名字**（2026-09-11 用户拍板：
+/// 「终端也是放个输入框，回车新建，相当于给终端命名了」），另外两栏建的是目录。
+fn new_row_hint(agent: &str) -> SharedString {
+    if agent == "shell" {
+        "＋ 新建终端：名字，回车".into()
+    } else {
+        "＋ 新建项目：文件夹名，回车".into()
+    }
+}
+
 /// 一栏的表头：一条上边线 + 栏名（`Claude` / `Antigravity` / `终端`）+ 行尾的订阅余额。
 /// 三栏同一个写法。栏名来自 `GET /agents` 的 `label`，客户端不自己编那张表。
 ///
 /// `segs` 只有 `Claude` 那一栏有（v1.37 用户拍板把订阅余额放到这一行后面）：配额是
 /// claude.ai 那份订阅的，daemon 也只问那一家；Antigravity 与终端那两栏行尾就是空的
 /// ——没有的东西不编一个出来。挤不下就从右边截，栏名不能被余额顶掉。
+/// 栏名前面那个记号（2026-09-11 用户：「也可以换成好看的 logo」）。**用字符不用图片**：
+/// 真的品牌标志有商标问题，也要多带一份资源；一个字符就够把三栏在余光里分开，
+/// 而且跟着字号和主题走，不用为深浅色各出一张图。
+///
+/// 一律 [`theme::FAINT`]，**不给它们各自的品牌色**：这个 app 里颜色是有语义的
+/// （琥珀 = 在等你、蓝 = 在跑、红 = 出事），拿品牌色进来会跟状态色抢读者。
+/// 形状本来就够认了。两端同一张表（Android 的 `sectionGlyph`）。
+pub(super) fn section_glyph(agent: &str) -> Option<&'static str> {
+    match agent {
+        "claude" => Some("✳"),
+        "agy" => Some("▲"),
+        "shell" => Some("❯"),
+        _ => None,
+    }
+}
+
 pub(super) fn section_header(
+    agent: &str,
     label: impl Into<SharedString>,
     segs: &[(String, Option<f64>)],
 ) -> gpui::Div {
@@ -256,7 +283,26 @@ pub(super) fn section_header(
         .flex()
         .items_center()
         .gap(px(8.))
-        .child(div().flex_none().child(label.into()));
+        // 栏名是这一列的主语：粗体 + 比行文字大一档（2026-09-11 用户：「Anthropic 和
+        // Antigravity 都改成粗体，稍微大一点」）。行尾那段余额仍是 meta 的小号字。
+        .when_some(section_glyph(agent), |el, g| {
+            el.child(
+                div()
+                    .flex_none()
+                    .w(px(14.))
+                    .text_size(px(11.))
+                    .text_color(c(theme::FAINT))
+                    .child(g),
+            )
+        })
+        .child(
+            div()
+                .flex_none()
+                .text_size(px(14.))
+                .font_weight(gpui::FontWeight::BOLD)
+                .text_color(c(theme::INK))
+                .child(label.into()),
+        );
     if !segs.is_empty() {
         let mut line = div().flex_1().min_w(px(0.)).flex().overflow_hidden().whitespace_nowrap();
         for (ix, (text, used)) in segs.iter().enumerate() {
@@ -342,6 +388,12 @@ fn terminal_tabs<'a>(
     live.iter()
         .enumerate()
         .map(|(i, s)| {
+            // **自己起过名字的就叫那个名字**（v1.40）：`custom_title` 是 daemon 记的
+            // 「这是用户起的」，没有它就不能拿 `title` 当名字——终端没有 agent 给它
+            // 起名，那个字段平时就是目录名
+            if s.custom_title && !s.title.trim().is_empty() {
+                return (s.id.clone(), s.title.trim().to_string());
+            }
             let mut label = format!("终端 {}", i + 1);
             let path = s.project_path.trim_end_matches('/');
             if !path.is_empty() && path != root {
@@ -483,8 +535,10 @@ pub struct RootView {
     pub notify_on: bool,
     /// 有黄点的项目路径（本机，见 UiState::unread_projects）
     pub unread_projects: Vec<String>,
-    /// 套餐用量（GET /usage + usage 帧）；None = 没有套餐信息，侧栏不画
-    pub plan: Option<PlanUsage>,
+    /// 套餐用量（`GET /usage` + `usage` / `agent_usage` 帧）：**v1.39 起一个 agent
+    /// 一份**（键 = `GET /agents` 的 id）。以前只有一份、只画在 Claude 那一栏；
+    /// 现在 Antigravity 那一栏也有自己的。表里没有那个 agent = 拿不到，行尾空着
+    pub plans: std::collections::HashMap<String, PlanUsage>,
     /// 看板的滚动条（瀑布流一屏装不下，滚起来得知道自己在哪儿）
     /// 窗口宽度（render 开头刷新；看板按它算瀑布流列数）
     pub win_w: f32,
@@ -557,7 +611,12 @@ impl RootView {
                         crate::notify::NotifyAction::Open(id) => {
                             cx.activate(true);
                             if root.session(&id).is_some() {
-                                root.open_session(id, cx);
+                                root.open_session(id.clone(), cx);
+                                // **通知点进去一律落终端**（v1.39 用户拍板，见 PROTOCOL
+                                // 「通知」）：三种通知里最要紧的那种是「它在等你答」，
+                                // 而那道题只能在终端里答。Android 走 `EXTRA_VIEW`，
+                                // mac 走这里——两端同一条规矩
+                                root.set_view(id, SessionView::Terminal, cx);
                             }
                         }
                     })
@@ -582,7 +641,7 @@ impl RootView {
         // 输入法送来的回车（见 MiniInput::replace_text_in_range）与键盘回车同一出口
         cx.subscribe(&new_input, |this, _, _: &mini_input::InputEvent, cx| {
             if matches!(this.modal, Modal::None) {
-                this.create_project(cx);
+                this.create_from_new_row(cx);
             }
         })
         .detach();
@@ -620,7 +679,7 @@ impl RootView {
             detail_visible: ui_state.detail_visible,
             notify_on: ui_state.notify,
             unread_projects: ui_state.unread_projects,
-            plan: None,
+            plans: Default::default(),
             win_w: 1200.,
             detail: HashMap::new(),
             new_input,
@@ -725,12 +784,41 @@ impl RootView {
                 self.refresh_detail(&id, cx);
             }
             DaemonEvent::Usage { plan } => {
-                self.plan = plan;
+                self.set_plan(DEFAULT_AGENT, plan);
                 cx.notify();
+            }
+            DaemonEvent::AgentUsage { agent, plan } => {
+                if !agent.is_empty() {
+                    self.set_plan(&agent, plan);
+                    cx.notify();
+                }
             }
             // 收件箱是手机那一侧的入口（mac 上直接说话），这边不画也就不用跟
             DaemonEvent::InboxChanged { .. } => {}
             DaemonEvent::Unknown => {}
+        }
+    }
+
+    /// 侧栏那一行新建按回车：**建什么由输入框此刻在哪一栏说了算**。终端那一栏
+    /// （`shell`）建的是终端，框里的字是它的名字；别的栏建项目，字是文件夹名。
+    fn create_from_new_row(&mut self, cx: &mut Context<Self>) {
+        if self.new_agent == "shell" {
+            self.new_terminal(cx);
+        } else {
+            self.create_project(cx);
+        }
+    }
+
+    /// 收下某个 agent 的配额；`None` = daemon 暂时拿不到，那一栏行尾就空着
+    /// （不留上一次的数字：过期的余额比没有余额更误导人）
+    fn set_plan(&mut self, agent: &str, plan: Option<PlanUsage>) {
+        match plan {
+            Some(p) => {
+                self.plans.insert(agent.to_string(), p);
+            }
+            None => {
+                self.plans.remove(agent);
+            }
         }
     }
 
@@ -759,9 +847,20 @@ impl RootView {
                     .map(|s| (s.state != SessionState::Exited, s.state == SessionState::Running, s.permission.clone(), s.asking_seq, s.queued.clone()))
                     .unwrap_or((false, false, None, None, Vec::new()));
                 let project_path = self.session(&id).map(|s| s.project_path.clone()).unwrap_or_default();
+                if !self.msg_views.contains_key(&id) {
+                    let view = cx.new(|cx| MessagesView::new(sid, net, cx));
+                    // 待答表单上那个「去终端答」：视图归 RootView 管，消息流只喊一声
+                    let for_terminal = id.clone();
+                    cx.subscribe(&view, move |this, _, _: &messages_view::MsgEvent, cx| {
+                        this.set_view(for_terminal.clone(), SessionView::Terminal, cx);
+                    })
+                    .detach();
+                    self.msg_views.insert(id.clone(), view);
+                }
                 self.msg_views
-                    .entry(id.clone())
-                    .or_insert_with(|| cx.new(|cx| MessagesView::new(sid, net, cx)))
+                    .get(&id)
+                    .cloned()
+                    .expect("刚放进去")
                     .update(cx, |v, cx| {
                         v.set_project_path(project_path);
                         v.set_session(alive, running, perm, asking_seq, queued.clone(), cx);
@@ -981,8 +1080,11 @@ impl RootView {
         self.spawn_fetch(
             self.net.agents(),
             |r, a: Vec<AgentInfo>, cx| {
-                // 选中的 agent 没装（或表里没有）就退到第一个装了的
-                if !a.iter().any(|x| x.id == r.new_agent && x.available) {
+                // 选中的 agent 没装（或表里没有）就退到第一个装了的。
+                // **`shell` 除外**（2026-09-11 agy 审阅指出）：终端那一栏也承载这个
+                // 输入框，而 `GET /agents` 里天生没有 shell——不排除的话，正在终端行
+                // 里打名字时来一次刷新，草稿就被踢到 Claude 栏，回车建出来的是项目
+                if r.new_agent != "shell" && !a.iter().any(|x| x.id == r.new_agent && x.available) {
                     if let Some(first) = a.iter().find(|x| x.available) {
                         r.new_agent = first.id.clone();
                     }
@@ -1086,7 +1188,7 @@ impl RootView {
     pub fn open_project(&mut self, project: &Project, cx: &mut Context<Self>) {
         let agent = project.agent.clone().unwrap_or_else(|| DEFAULT_AGENT.into());
         if agent == "shell" {
-            self.create_terminal_in(project.path.clone(), false, cx);
+            self.create_terminal_in(project.path.clone(), false, String::new(), cx);
             return;
         }
         let fut = self.net.create_session(project.path.clone(), agent, true);
@@ -1194,7 +1296,7 @@ impl RootView {
             if self.new_input.read(cx).composing() {
                 return;
             }
-            self.create_project(cx);
+            self.create_from_new_row(cx);
             cx.stop_propagation();
             return;
         }
@@ -1267,32 +1369,42 @@ impl RootView {
         let sections = agent_sections(rows, &self.agents);
         // 输入框只有一个，它待在 `new_agent` 那一栏。那一栏没画出来（卸载了 / 换了台
         // 机器；或者老 daemon 根本没有栏名）就退到第一栏，否则 ⌘N 按下去没有落点
-        let live = sections
-            .iter()
-            .find(|s| s.agent == self.new_agent && s.available)
-            .or_else(|| sections.iter().find(|s| s.available))
-            .map(|s| s.agent.clone());
+        // 终端那一栏（`shell`）也能承载它：v1.40 起三栏的新建行长得一模一样
+        let live = if self.new_agent == "shell" {
+            Some("shell".to_string())
+        } else {
+            sections
+                .iter()
+                .find(|s| s.agent == self.new_agent && s.available)
+                .or_else(|| sections.iter().find(|s| s.available))
+                .map(|s| s.agent.clone())
+        };
         for sec in sections {
             // 老 daemon 不给 /agents：label 是空的，那就不画表头，一整列照旧
             if !sec.label.is_empty() {
-                // 配额是 claude.ai 那份订阅的，只挂在 Claude 那一栏
-                let segs: Vec<(String, Option<f64>)> = match (&self.plan, sec.agent == DEFAULT_AGENT) {
-                    (Some(p), true) => detail_panel::plan_header_segs(p, &now, &chrono::Local),
-                    _ => Vec::new(),
-                };
-                list_col = list_col.child(section_header(sec.label.clone(), &segs));
+                // 这一栏的订阅余额（v1.39 起 Claude 与 Antigravity 各有各的，
+                // 都由 daemon 压成同一个 plan 形状；终端那一栏没有 agent，天然是空的）
+                let segs: Vec<(String, Option<f64>)> = self
+                    .plans
+                    .get(&sec.agent)
+                    .map(|p| detail_panel::plan_header_segs(p, &now, &chrono::Local))
+                    .unwrap_or_default();
+                list_col = list_col.child(section_header(&sec.agent, sec.label.clone(), &segs));
             }
-            for row in sec.rows {
-                list_col = list_col.child(self.render_project_row(row, now, cx));
-            }
+            // 新建那一行**排在栏名底下第一行**（2026-09-11 用户拍板）：项目多了
+            // 不用滚到这一栏的底才能建
             if sec.available {
                 let is_live = live.as_deref() == Some(sec.agent.as_str());
                 list_col = list_col.child(self.render_new_project_row(is_live, &sec.agent, window, cx));
             }
+            for row in sec.rows {
+                list_col = list_col.child(self.render_project_row(row, now, cx));
+            }
         }
         // 终端与对话同级（2026-09-08 用户拍板）：终端不再是侧栏底部通往标签页的
         // 一个入口，而是接着项目行排在同一列里，点一行就是那一个终端。
-        list_col.child(self.render_terminal_rows(cx))
+        let term_live = live.as_deref() == Some("shell");
+        list_col.child(self.render_terminal_rows(term_live, window, cx))
     }
 
     /// 侧栏的一个项目行：标题 + 行尾按钮（悬停才现身）+ 更新时间。状态是整行的淡底色
@@ -1398,6 +1510,8 @@ impl RootView {
         // 每栏各有一行，但**输入框只有一个**：那几个字打在哪一栏由 `new_agent` 说了算，
         // 别的栏画一行同样版式的占位——点它就把输入框搬过去。两行同时显示同一串字会让人
         // 以为回车会建两个
+        // 这一栏的新建行写什么（终端栏起的是名字，不是文件夹）
+        let hint = new_row_hint(agent);
         if !live {
             let target = agent.to_string();
             return div().pt(px(2.)).child(
@@ -1415,13 +1529,15 @@ impl RootView {
                             .whitespace_nowrap()
                             .text_size(px(12.5))
                             .text_color(c(theme::FAINT))
-                            .child("＋ 新建项目：文件夹名，回车"),
+                            .child(hint),
                     ),
             );
         }
         // 光标在这一行里 = 整行一圈强调色边框，和「当前打开的那个项目」同一套语言。
         // 不画的话（bare 的输入框自己没有框）只剩一根一像素的光标在闪，看不出焦点在哪
         let focused = self.new_input.read(cx).focus_handle.is_focused(window);
+        // 输入框只有一个，它搬到哪一栏就换成哪一栏的占位字
+        self.new_input.update(cx, |i, cx| i.set_placeholder(hint, cx));
         div().pt(px(2.)).child(
             sidebar_row("sb-new".into())
                 .when(focused, |el| el.border_color(c(theme::ACCENT)))

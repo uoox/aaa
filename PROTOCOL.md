@@ -74,7 +74,7 @@ transcript 的位置优先认 hooks 报的 `session_id`（就是对话 id），�
 
 **agy 的钩子（v1.28）**：agy 没有 `--settings`，钩子只有全局一份 `~/.gemini/config/hooks.json`，而且只认 `type:"command"`。daemon 因此往那份文件里塞一个 **`aaa` 键**（别人的键原样保留，比如 orca-status），命令是一个转发脚本，**事件名的映射写在那份文件里**——agy 的 `PreInvocation` 打到 daemon 的 `UserPromptSubmit`，`Stop` 打到 `Stop`，`PostToolUse` 原样。按 agent 分派的仍然只有事实来源，daemon 那边判定只有一份。`PreToolUse` 不接：它在 daemon 那边是 claude 专用的 AskUserQuestion 匹配器。事件名与「要不要包一层工具名匹配器」都写死在 daemon 的表里，不从名字猜（agy 一共只有 `PreInvocation`/`PostInvocation`/`Stop`/`PreToolUse`/`PostToolUse` 五个，**没有会话启动事件**——收件箱在 agy 会话刚起来时靠每秒那一遍 tick 投喂，不靠事件；钩子装上的会话初始态本来就是 waiting）。脚本在 `AAA_SESSION` 没设时立刻退出，所以用户自己在终端里跑 agy 不会往 daemon 发东西。**装不上就退回屏幕差分**：`Session.hooked` 由「这次到底装没装上」决定，不是按 agent 名猜——猜错的后果是会话永远停在「在跑」。这段只在**第一次开 agy 会话时**才写进去，没用过 agy 的机器那份文件不会被碰；卸掉 AAA 之后 `aaa` 那个键会留在原地（脚本没了，agy 每次事件会跑一个不存在的命令然后继续），`aaa-daemon service uninstall` 会顺手摘掉它。agy 的 **statusLine 也接**（v1.29）：它推的 JSON 与 Claude Code 同一个形状（`model.display_name`、`context_window.*`），所以模型、token、缓存命中直接就有；没有 `cost` / `rate_limits`，费用与套餐配额留空。**只在那一格空着的时候才接**——用户装了别的状态栏（agy-hud 那类）就不抢，宁可没有用量也不动人家的东西；`service uninstall` 只还我们自己放的那一格。agy 刚起来的第一帧里 `context_window_size` 是 0、`used_percentage` 也是 0，那是「还不知道」不是「用了 0%」：**窗口明写着 0 时百分比不算数**（字段整个没有则照旧信任百分比——老 Claude Code 只给百分比不给大小）。
 
-**选 agent 的入口**（`GET /agents` 说有哪些、装没装；两端只画）：**由新建项目那一行在哪一栏决定**（v1.36 分栏之后）——项目列表一个 agent 一栏，每栏末尾各有一行「新建项目」，在 Antigravity 那一栏敲回车建出来的就是 agy 的项目。此前是那一行行尾一个「点一下换 agent」的字母小标，栏名把它说清楚了，小标就没有了。**换已有项目的 agent 这件事不存在**（2026-09-10 用户拍板：「不要有切换agent的功能，这个永远不要实现」）：mac 项目行尾的字母小标、Android 长按单里的「换成 X」、以及 daemon 的 `POST /projects/agent` 一并删除，见 REMOVED.md。一个项目跑哪个 agent 在建它的时候定，之后不改；真要换就新建一个项目。mac 项目行尾只剩一个按钮：活着的 ✕、没活会话的「删」，**排在更新时间后面**（2026-09-10 用户拍板「x/删 放在分钟数后面」），一直画着不再悬停才现身——字色是最淡的一档，常显不抢标题，而悬停才现身意味着鼠标不在那一行时根本看不出它能不能删。终端行的 ✕ 同样常显。
+**选 agent 的入口**（`GET /agents` 说有哪些、装没装；两端只画）：**由新建项目那一行在哪一栏决定**（v1.36 分栏之后）——项目列表一个 agent 一栏，每栏第一行各有一行「新建项目」，在 Antigravity 那一栏敲回车建出来的就是 agy 的项目。此前是那一行行尾一个「点一下换 agent」的字母小标，栏名把它说清楚了，小标就没有了。**换已有项目的 agent 这件事不存在**（2026-09-10 用户拍板：「不要有切换agent的功能，这个永远不要实现」）：mac 项目行尾的字母小标、Android 长按单里的「换成 X」、以及 daemon 的 `POST /projects/agent` 一并删除，见 REMOVED.md。一个项目跑哪个 agent 在建它的时候定，之后不改；真要换就新建一个项目。mac 项目行尾只剩一个按钮：活着的 ✕、没活会话的「删」，**排在更新时间后面**（2026-09-10 用户拍板「x/删 放在分钟数后面」），一直画着不再悬停才现身——字色是最淡的一档，常显不抢标题，而悬停才现身意味着鼠标不在那一行时根本看不出它能不能删。终端行的 ✕ 同样常显。
 
 `~/.cache/aaa-cwds.json` 里 `claude:<path>` 键与旧 CLI 兼容。agy 的 `asking` 恒为 false（它没有结构化提问）。pi / reasonix / codex / grok 的存储支持仍在 2026-09-03 删除的状态，没有恢复。
 
@@ -125,6 +125,9 @@ transcript 的位置优先认 hooks 报的 `session_id`（就是对话 id），�
                                   // **只此一处**：项目列表、CLI 的分组说的都是这一句；此前
                                   // daemon 一份、mac `RowStatus::of` 一份、Android `projectStateOf` 一份、
                                   // CLI `status_of` 一份，同一台机器同一时刻能给出不同的答案
+  "custom_title": false,          // v1.40：上面那个 title 是不是**用户自己起的**。终端行据此决定叫名字
+                                  // 还是「终端 N」——终端没有 agent 给它起名，title 平时就是目录名，
+                                  // 不看这一位会把目录名当成用户起的名字
   "asking": false,                // claude：transcript 里有一条 AskUserQuestion 还没被回答（结构化事实，不是猜的）
   "queued": [],                   // v1.22：此刻排着还没送进去的消息 `[{ts,text}]`——Claude Code 自己的队列
                                   // （transcript 的 queue-operation）加上信任对话框弹着时 daemon 替你收下的那几条。
@@ -166,27 +169,45 @@ transcript 的位置优先认 hooks 报的 `session_id`（就是对话 id），�
 ```
 
 状态机（2026-09-02 简化）：屏幕内容在变 → `running`；进程存活 + **可见屏幕 6s 没变** → `waiting`（这轮干完了，轮到你）；进程退出 → `exited`（保留屏幕 + 回滚缓冲，daemon 重启后仍可查看回放）。claude 会话（2026-09-06）：**起始就是 `waiting`、`hooked=true`**——TUI 起来停在输入框就是轮到你；`SessionStart`（startup / resume / clear，不含 compact）也置 `waiting` 并触发一次收件箱喂入；第一次 `UserPromptSubmit` 才是 `running`。以前起始 `running` 没人翻回来，resume 出来的会话会一直显示执行中。
+**v1.40 修：注册表被一次事件改错 agent。** 钩子学到会话 id 时往注册表写第三列（`registry::set_id`），agent 那一格**曾经写死 `claude`**。agy 的钩子同样报 session_id，于是一次 `UserPromptSubmit` 就把那个目录的 agent 从 `agy` 改成了 `claude`——项目从 Antigravity 那一栏跳到 Claude 那一栏，点进去开的还是 claude（2026-09-11 用户报「agy 项目怎么跑到 Claude 里面了」）。现在写**这个会话自己的** agent。注册表说了算的东西不该被一次事件改掉。
+
+**v1.40 修：agy 换对话后消息流永远空。** agy 的钩子**不带 `transcript_path`**，对话 id 就是 transcript 路径的一部分（`brain/<对话 id>/…`）。此前学到新的对话 id 时不去作废已经认定的文件，于是：daemon 重启 → 按旧对话 id 认下一个文件 → agy 起来其实开了新对话、钩子把新 id 报上来 → `store.file` 还锁在旧文件上，而 agy 那条发现路径给的一律是 `via_fallback = false`，「持续找新的、出现即升级」那条路走不到 → 旧对话被 agy 自己 GC 掉，一条消息都读不出来（用户报「MacOS 的 agy 消息流怎么没有出现」）。现在 **id 一变就把发现结果作废**，下一个 tick 按新 id 重新定位。本机实测两个 agy 项目在 `cache/last_conversations.json` 里根本没有记录，只能靠钩子报来的 id 定位，正是最容易踩中这条的情形。
+
 **v1.13 被叫醒**：后台任务 / 异步子代理完成后 Claude Code 把 `<task-notification>` 塞回去、模型重新开跑——这不是用户发言，`UserPromptSubmit` 不触发，以前状态会一直停在 `waiting`（列表上标着激活其实在干活）。现在 daemon 每秒看 transcript：waiting 的 hooked 会话在最近一次 `Stop` 之后（+2s，避免 Stop 前落盘、之后才 tail 到的那条最后回答误判）又出现 assistant 内容 / 工具调用 → 翻回 `running`，直到下一个 `Stop`；这样判出来的 running 若 Stop 一直不来，transcript 60s 没动就压回 `waiting` 兜底。
 
 daemon **不再读屏猜「它在问什么」**：没有 `idle`，没有 `question`，没有提示模式匹配。agent 在等一个具体回答这件事只认一个来源——claude transcript 里的 `AskUserQuestion` 工具调用（结构化，见「消息流」），`asking` 就是它的镜像；其它 agent 没有这种结构化信号，`asking` 恒为 false。
 
 GUI 列表口径（mac 侧栏 / Android 项目面板一致）——**单列，一项目一行，不分栏**：
-- **项目列表分三栏：`Claude` / `Antigravity` / `终端`**（v1.36，2026-09-11 用户拍板「项目列表三栏：Claude/Antigravity/Terminal」）。**三栏同一个形状**——表头（一条上边线 + 栏名）+ 若干行 + 末尾一行「新建」。表头**上面不留空**（v1.38，用户 2026-09-11：「上面是有一点高度和空白的，可以去掉」）：只剩那条线和 3px 不让字贴着线的内边距，列表顶上那点 padding 也去掉了。终端那一栏本来就长这样（「＋ 新增终端」），另外两栏照它来。
+- **项目列表分三栏：`Claude` / `Antigravity` / `终端`**（v1.36，2026-09-11 用户拍板「项目列表三栏：Claude/Antigravity/Terminal」）。**三栏同一个形状**——表头（一条上边线 + 栏名前一个字符记号 + 栏名）+ 第一行「新建」+ 若干行。表头**上面不留空**（v1.38，用户 2026-09-11：「上面是有一点高度和空白的，可以去掉」）：只剩那条线和 3px 不让字贴着线的内边距，列表顶上那点 padding 也去掉了。终端那一栏本来就长这样，另外两栏照它来；v1.40 反过来了——终端那一栏的「＋ 新增终端」也换成了同款输入框（输的字是终端的名字）。
   - **栏序按 `GET /agents` 给的表**（daemon 的 AGENTS 表序：Claude、Antigravity），**栏名用表里的 `label`**——客户端不自己编那张表。**栏内顺序不动**：那是项目列表的排序（更新时间从新到旧），一处算一次。
   - **一行归哪一栏 = 点它跑哪个 agent**，同一句话：注册表登记的 `agent` → 代表会话在跑的 → 默认 `claude`。表里没有的 agent（装过 codex 之类留下的旧项目）归**第一栏**——宁可排错一栏，也不能让一个项目在列表里整个消失。
   - **空栏只在「这台机器装了它」时才留**；没装但有项目的那一栏照画（那些项目得有地方待），只是不给「新建」那一行——开不起来的 agent 不该给入口。**老 daemon 不给 `/agents`**：一栏、不画表头，一整列照旧——编不出「这一栏是谁」就别编。
   - 两端同一份共享向量盯着（`fixtures/projects.json` 的 `expect.sections`）。终端不在里面：它不是 agent（`GET /agents` 里没有 shell），那一栏两端各自画。
-- **每一栏末尾那一行「新建项目」，长得就是一个项目行**（v1.35，2026-09-10 用户拍板：「新建项目加号去掉，仅回车」「这个交互位置也调整一下，放在『点一行进入消息流·长按查看项目操作』这个位置，样式和项目列表的项目一样」「MacOS 这边也可以这样设计」）：同样的左右内边距、同样的字号、下面同样一条分隔线，只是标题那一格可以打字；**回车即建**，没有 ＋（＋ 和回车是同一件事的两个入口，而那个按钮把这一行撑得比项目行高）。Android 那条「点一行进入消息流 · 长按查看项目操作」的提示由它顶替。**草稿只有一份**：几栏各有一行，但打的字只属于其中一栏（mac 是输入框本体待在那一栏、别的栏画同版式的占位，点一下把它搬过去；Android 记「这几个字打在哪一栏」）——两行同时显示同一串字会让人以为回车会建两个。
-- **订阅余额挂在 `Claude` 那一栏的表头行尾**（v1.37，2026-09-11 用户拍板：「订阅剩余额度直接放在列表上 Claude/Antigravity 这一行后面，不需要 5h，只需要 7d 和重置时间，claude 加个 Fable 剩余额度，重置时间应该是一样的所以不用显示」）：`Claude    7d 剩 22% · Fable 剩 9% · 重置 周日 17:59`。三条口径两端一字不差（mac `plan_header_segs` / Android `planLineSegments`）：
+- **每一栏的第一行是「新建」，长得就是一个项目行**（v1.40 从末尾挪到栏名底下，2026-09-11 用户拍板「新建项目放在第一栏」——项目多了不用滚到底才能建；这一行的长相定于 v1.35，2026-09-10 用户拍板：「新建项目加号去掉，仅回车」「这个交互位置也调整一下，放在『点一行进入消息流·长按查看项目操作』这个位置，样式和项目列表的项目一样」「MacOS 这边也可以这样设计」）：同样的左右内边距、同样的字号、下面同样一条分隔线，只是标题那一格可以打字；**回车即建**，没有 ＋（＋ 和回车是同一件事的两个入口，而那个按钮把这一行撑得比项目行高）。Android 那条「点一行进入消息流 · 长按查看项目操作」的提示由它顶替。**草稿只有一份**：几栏各有一行，但打的字只属于其中一栏（mac 是输入框本体待在那一栏、别的栏画同版式的占位，点一下把它搬过去；Android 记「这几个字打在哪一栏」）——两行同时显示同一串字会让人以为回车会建两个。
+- **订阅余额挂在那一栏的表头行尾**（v1.37 起先有 `Claude`，v1.39 起 `Antigravity` 也有；2026-09-11 用户拍板：「订阅剩余额度直接放在列表上 Claude/Antigravity 这一行后面，不需要 5h，只需要 7d 和重置时间」「Claude: 剩22% Fable 9% xdxh 重置；Antigravity：剩22% Other 70% xdxh 重置；5h 不显示」，其中 `Other` 那一段 v1.40 又拿掉了，见下）：
+
+  ```
+  Anthropic     剩 22% · Fable 9% · 2d16h 重置
+  Antigravity   剩 51% · 13h 重置
+  终端
+  ```
+
+  口径两端一字不差（mac `plan_header_segs` / Android `planLineSegments`），**两栏共用同一个函数**——daemon 把 agy 的配额压成了同一个 plan 形状，客户端不为第二个 agent 写第二套画法：
   - **说剩多少，不说用了多少**。`GET /usage` 给的是用掉的百分比，客户端换算成 `100 - round(used)`——**先把用掉的取整再相减**，两边各自取整时 61.5 会同时显示成「用了 62%」和「剩 39%」，加起来 101。着色仍按**用掉的**算（≥70 琥珀、≥90 红）。
   - **5h 不进这一行**：它每五小时翻一次，看它没有意义；周窗口才是真会把人卡住的那个。Android 那个「点开看重置时间」的弹窗一并删掉——这一行自己就把 7d、Fable 和重置时刻说完了。
-  - **重置时刻只出现一次**：7d 与按模型的周窗口实测同一时刻（`seven_day.resets_at` 与 `model_scoped[].resets_at` 逐秒相同）。真不一样了（差一分钟以上）那一条才补自己的一段——宁可多一段，也不能拿 7d 的时刻替 Fable 说话。
-  - **只挂 `Claude` 那一栏**：配额是 claude.ai 那份订阅的，daemon 也只问那一家（`quota.rs`）。Antigravity 与终端两栏行尾就是空的——没有的东西不编一个出来。mac 侧栏底部那一块、Android 顶栏左边那一格因此都空了出来（Android 那一格现在只在连接不正常时才有字）。
-  - 重置时刻的写法两端同一条（mac `fmt_reset` / Android `resetLabel`）：今天给 `HH:MM`，一周内给 `周X HH:MM`，**七天开外和已经过去的给 `M/D HH:MM`**——十天后的「周四」是哪个周四说不清楚。
+  - **重置写成「还剩多久」，不写「几点重置」**（v1.39，用户：「xdxh 指的是重置日还剩下 x 日 x 小时」）：`2d16h` / `13h` / `40m`，已经过了（轮询还没跟上）写 `0m`，不写负数。「周日 17:59」要你自己去减，而你想知道的本来就是那个差。跟着一分钟一跳的那个 tick 自己会走。
+  - **各段重置一样就只说一次**，摆在行尾（Claude 实测 7d 与 Fable 逐秒相同）；**不一样就每段各自带上自己的**，紧挨在自己后面。宁可长一点，也不能拿一组的时刻替另一组说话。
+  - **Antigravity 只取它默认在用的那一档**（v1.40，用户：「antigravity 右边就不放 Other 了吧，反正也很少用」）：接口按模型分组给（Gemini 一组、Claude/GPT 一组），daemon 只把**第一组**压进 `seven_day`，其余整组不要，`model_scoped` 恒为 null。所以那一栏行尾就是两段。
+  - **栏名前面一个字符记号**（v1.40，用户：「也可以换成好看的 logo」）：`✳` Anthropic / `▲` Antigravity / `❯` 终端。**用字符不用图片**——真的品牌标志有商标问题，也要多带一份资源；一个字符就够在余光里把三栏分开，还跟着字号和主题走。一律用最淡的那一档色，**不给它们各自的品牌色**：这个 app 里颜色是有语义的（琥珀 = 在等你、蓝 = 在跑、红 = 出事），品牌色进来会跟状态色抢读者。两端同一张表（mac `section_glyph` / Android `sectionGlyph`）。
+  - **栏名加粗、比行文字大一档**（v1.40，用户：「Anthropic 和 Antigravity 都改成粗体，稍微大一点」）；`Claude` 那一栏的名字同时改叫 **`Anthropic`**（栏名来自 `GET /agents` 的 `label`，客户端不自己编那张表）。
+  - **v1.39 起 `Antigravity` 那一栏也有自己的**（2026-09-11 用户拍板：「antigravity 的账户额度也要放在 Antigravity 的右边」）。终端那一栏没有 agent，行尾天然是空的。mac 侧栏底部那一块空了出来（只剩连接状态 + daemon 版本 + ⚙）。
 - **列表行的字号与行高（Android，v1.36，用户：「Android 列表字体小一些，不要加粗，这样也可以显示更多」）**：项目行、新建那一行、终端行、「＋ 新增终端」**共用一对令牌**（13.5sp / 上下 7dp），一列里几种行本来就该一样高。此前项目行是 15sp 粗体 + 11dp，比终端行高出一截，一屏少放三四个项目；**粗体也去掉**——选中那一行本来就靠强调色 + 整行边框说话。mac 侧栏那一列早就是 12.5px 不加粗，这次是补齐两端。
 - **这个框不做搜索，两端都不做（v1.22 用户拍板：「侧栏就不要做搜索框了，双端都不要，就是用来创建项目的」）**：**不边打字边过滤列表**（Android 此前顺手做了过滤，mac 没有——又是一处两端不一样）。要找一个项目就在列表里翻：一行只有标题 + 时间 + 一根线，本来就是给眼睛扫的。
-- **Android 没有独立首页了（v1.13.1，2026-09-07 用户拍板）**：会话页 ☰ 抽屉画的就是完整的项目面板（顶栏一行、项目列表与长按操作、末尾的新建项目行、终端列表、下拉刷新），当前项目高亮；只有「一个会话都没打开」时（首次进入、按返回退出会话）同一块面板铺满屏当落地页。app 起来直接回最近打开的会话（本机记 `last_session`）。
-- **Android 项目面板顶栏只有一行（2026-09-08 用户拍板）**：右边只剩 **⚙ 设置**（额度 v1.37 搬到 `Claude` 那一栏的表头行尾，▦ 看板 v1.38 删了）。`AAA` 标题和 `IP · 延迟` 去掉了——app 只有一个，标题是废话；IP 和毫秒数连着好的时候没人看。连接**不**正常时（连接中 / 已断开 / 未配对）左边那一格改写连接状态，断了得说一声，但这不值得常年占一整行；SSD 掉了仍在顶栏加一个 `SSD ✗`。以前额度是顶栏底下单独一行，后来并进这一行，v1.37 又搬去了列表里。
+- **Android 没有独立首页了（v1.13.1，2026-09-07 用户拍板）**：会话页 ☰ 抽屉画的就是完整的项目面板（三栏列表与长按操作、每栏第一行的新建、终端列表、底下那一条、下拉刷新），当前项目高亮；只有「一个会话都没打开」时（首次进入、按返回退出会话）同一块面板铺满屏当落地页。app 起来直接回最近打开的会话（本机记 `last_session`）。
+- **Android 项目面板既没有顶栏，也没有设置（v1.39，2026-09-11 用户同一天两次拍板：先「android 设置按钮的位置改成和 MacOS 一样 fix 在底部」，随即「Android 这边不用设置，里面那些设置就是默认这些不用改了」）**：⚙ 与整个设置页一起删了（见 [`REMOVED.md`](REMOVED.md)），顶栏也没有了——`AAA` 标题和 `IP · 延迟` 早在 2026-09-08 就去掉了，额度 v1.37 搬进了列表的表头行尾，▦ 看板 v1.38 删了，最后剩下的连接状态与 ⚙ 一个删一个搬，上面就没有东西留着了。**整屏都是项目列表。**
+  - **底下那一条只在「有事」时才画**：连接不正常（连接中 / 已断开 / 未配对）或 SSD 掉了。连着好的时候它一行都不占——没有的东西不占地方。
+  - **整条可点，点进配对页**。设置页没了，这是**换主机 / 换 token 唯一的出路**；首次配对不经过它（`gate` 看见 `server == null` 直接跳 `pair`）。
+  - **两端在这里故意不一样**：mac 侧栏底部那一条照旧常驻（状态点 + `daemon v<版本>` + ⚙ 设置），mac 的设置页还有东西（通知总开关、项目根），手机这边没有。
 - **Android 的☰ 左侧栏：小屏铺满，大屏半屏（2026-09-08 用户拍板：「整个左侧栏的宽度：小屏情况下，直接铺满，大屏情况下，半屏」——此前先收对话界面、再给项目列表封顶 400dp，都改错了地方）**：门槛是 `screenWidthDp < 600`（Material 的 compact / medium 分界）——小于就 `fillMaxWidth(1f)` 铺满并去掉抽屉圆角（不然右缘两个角漏出底色），否则 `fillMaxWidth(0.5f)` 占半屏，右半屏留着正在看的那个对话，切之前先看得见要切去哪儿。手机竖屏（343dp）与折叠机外屏走铺满，折叠机内屏（≈674dp）/ 平板 / 横屏走半屏。**宽度只在抽屉那一层定**（会话屏与终端屏各一处 `ModalDrawerSheet`），`ProjectPanel` 自己不管宽度、铺满给它的地方——所以「一个会话都没打开」时它就是整屏。**对话界面与终端都不收**——那两个宽了是有用的。
 - **状态用整行的淡底色说，不再画任何记号（2026-09-10 用户拍板：「去掉竖线状态的设计，改为背景色，用浅色」；2026-09-08 那四版记号——转圈 → 蓝点 → 竖线 → 行尾竖线——全部作废）**：**淡蓝底**（令牌 `row_running`）= 它还在动（`running`，或 `waiting` 且 `background`——后台 Bash / 异步子代理 / Monitor 还没回来，会自己被叫醒）；**淡黄底**（令牌 `row_unread`）= 跑完了 / 在等你回话，而**这台设备**还没进去看过；**无底色** = 已读，没什么要你操心的。黄盖过蓝（黄的那个在等你）。两端同一对令牌、同一套判定；行高不随状态跳，也没有任何按帧重画的动画。**选中的项目（当前打开的会话所属的那一行）标题用强调色，整行套一圈 1px 强调色边框**（2026-09-10 用户拍板：下划线改边框）——底色现在归状态用，选中态不能再靠整行强调色底去抢它（mac 此前是那样画的；Android 此前是 `raised` 底）。行高不因选中而变：mac 每一行都留着这 1px 的边框位、平时透明，Android 的 `border` 本来就画在自己的边界内。终端（shell）不算。**一行到底：标题 + 更新时间**，没有第二行摘要——标题顶格起，时间在行尾，两端一致。**时间自己会走**：两端各有一个一分钟一次的空转重画——这一屏平时只在 daemon 推东西时重画，整套系统闲着时那行字会一直停在「刚刚」。
   - 「激活 / 未激活 / 暂停」这些字于 2026-09-08 去掉（用户：对着一列项目说不出任何有用的东西）。`asking` / `background` 等状态仍在协议里，客户端拿它只做一件事：底色是不是蓝的（2026-09-10 起也不再拿它排序）。
@@ -228,11 +249,10 @@ CLI 的 `ls` / 交互菜单按五组打印（v1.13 起；以前是「执行中 /
 | POST | `/projects/pin` | **已移除（v1.25，2026-09-10 用户拍板「去掉置顶功能」）**：daemon 不再存 `pins.json`，`GET /projects` 行上也没有 `pinned` 了；旧客户端仍发这个请求会得到 404。列表口径见「会话模型」：按更新时间从新到旧 |
 | POST | `/projects/delete` | `{paths:[…]}` → `{results:[{path, ok, purged:[{agent_label,count}]}], killed:[标题…]}`；目录删除 + 会话存储 purge（`purged` 每个 agent 一项，只报删掉了东西的那些）。agy 的 purge 还要摘掉 `cache/last_conversations.json` 里这个 cwd 的条目——那张表按 cwd 记，不摘的话同名目录重建之后会 resume 到上一个项目的对话。**v1.11.2 起先收会话**：这些目录下还活着的会话（含终端）一起终止（并行，与 `/restart` 同一套）、摘出池子、在会话日志里盖 `deleted_at`，`killed` 报出它们的标题。此前只删目录不动进程——手机上的「删除项目…」对活着的项目也能按，删完 PTY 还在，cwd 成幽灵，`/sessions` 里赖着，mac 侧栏还会为「有会话但没登记」的目录补一行 |
 | GET | `/sessions` | 全部会话（含 exited） |
-| POST | `/sessions` | `{project_path, agent, resume}`；resume=true 时按 aaa 逻辑找最近会话套 resume 模板；目录不存在则创建（但见 SSD 守卫） |
+| POST | `/sessions` | `{project_path, agent, resume, title?}`；resume=true 时按 aaa 逻辑找最近会话套 resume 模板；目录不存在则创建（但见 SSD 守卫）。**`title`（v1.40）**：非空 = 用户给它起的名字，daemon 记成 `custom_title`（namer 不再改它）——**给终端用**（2026-09-11 用户拍板：「终端也是放个输入框，回车新建，相当于给终端命名了」），终端没有 agent 会给它起名，不自己写就只剩「终端 N」。空串 = 没写，照旧走标题回退链 |
 | POST | `/sessions/kill_all` | `{running_only?=true}` → `{count, killed:[标题…]}`：**紧急制动**。一把收掉还活着的项目会话（`running_only:false` 连停在输入框等你的一起收），**终端不收**——它不烧配额，多半是你自己开着在用。会话留在池子里、屏幕能回放，与一个个按 ✕ 完全等价；并行收，总耗时 = 最慢那一个。与 `/restart` 的区别：那个重启 daemon 并在起来后自动 resume，这个只是刹车 |
 | POST | `/sessions/clean_exited` | → `{removed:n}`：把池子里已退出的会话记录一次清干净。**只动记录**：项目目录、agent 存储都不碰，会话日志里照旧盖 `deleted_at`（`GET /history` 仍看得到）。几十个会话跑几天后池子里几百条已退出记录，此前想清只能一条条 `DELETE /sessions/:id`，或者去删整个项目目录 |
 | POST | `/sessions/:id/input`（信任对话框在屏上时整句消息改进收件箱，返回 `{"ok":true,"queued":true}`）| `{text, enter}`：写入 PTY（enter 补 `\r`）。composer 用。**多行文本**：TUI 开着 bracketed paste（DECSET 2004）时包成一次粘贴、换行归一为 CR，否则每个换行都是一次提交；没开 2004 的 shell 只做 CR 归一 |
-| POST | `/sessions/:id/answer` | `{answers:[{selected:[0,2], other:"自填文本"|null}, …]}`：回答当前待答的 AskUserQuestion 表单，一项对应一个问题（顺序同 `question.questions`），`selected` 是 0 起的选项下标，`other` 是「其它」自填。daemon 负责把选择翻译成 Claude Code 对话框的按键并确认对话框已关闭（见「回答表单」）。无待答问题 / 非 claude 会话 / 对话框没吃下 → 409；答案形状不对 → 400 |
 | POST | `/sessions/:id/permission` | v1.16 `{behavior: "allow"|"deny"}`：替用户答权限对话框。allow = 按对话框第 1 项（Yes，数字键即选中）再补一个 Return 兜底；deny = Esc（No，回到输入框让用户说要怎么改）。答完等 `permission` 被清掉（PostToolUse / Stop），2 秒还在 → 409「去终端里看一眼」。没有对话框在等 → 409。**根因**：以前 daemon 不订阅 `PermissionRequest`，Bash 授权 / ExitPlanMode 批准弹在终端里，消息流一无所知，用户切到终端才发现在等（2026-09-07 反馈） |
 | POST | `/sessions/:id/checklist` | **已移除（v1.38）**：勾 / 取消勾只在看板上有，看板删了它就没有调用方了。清单照旧由 daemon 每轮 Stop 后重写，两端**只读**——「清单不需要开关，默认就是一定要的」（用户 2026-09-11） |
 | POST | `/history/backfill` | v1.16.2：给池子里没有清单的 claude 会话补清单（后台跑，立刻返回 `{missing}`）。transcript 先按 `resume_id` 找，找不到（/clear 过、GC 了）就按项目目录 + 时间窗口（同 cwd 的 transcript 里落在这条会话 [created_at, last_output_at] 的记录最多的那个），按整段对话 haiku 生成一次。daemon 起来 90s 后自动补一轮、之后每小时补 20 条；`aaa backfill` 手动触发。用户 2026-09-07：没显示进度的那些对话要显示进度 |
@@ -243,7 +263,7 @@ CLI 的 `ls` / 交互菜单按五组打印（v1.13 起；以前是「执行中 /
 | GET | `/files` | **已移除（v1.35，2026-09-10 用户拍板「不需要浏览功能」）**：目录 explorer 整个删掉，见 REMOVED.md。旧客户端仍发这个请求会得到 404 |
 | GET | `/files/read?path=<绝对路径>` | 读一份项目里的文件（「产物」里点开一份 Markdown 就走这条）：`{path, name, size, mtime, kind, text, truncated}`。`kind:"binary"` 时 `text` 为空只报大小；文本上限 512 KB，超出 `truncated:true`。**出项目根 / 不是文件 → 404**（见「产物」） |
 | POST | `/hooks/:event` | Claude Code hooks 回调（见「Claude Code hooks」）；头 `X-AAA-Session`；永远 200 `{}`。`:event=statusline` 是 statusLine 命令转来的状态 JSON |
-| GET | `/usage` | `{plan}`：账号 plan 配额：`{five_hour:{used_percentage,resets_at}, seven_day:{…}, model_scoped:[{display_name,utilization,resets_at}]|null, updated_at}`。5h / 7d 来自最近一次 statusLine 的 `rate_limits`，也来自 daemon 每分钟对 claude.ai usage 接口的轮询；`model_scoped`（按模型的周窗口，如 Fable）**只**来自轮询——statusLine 从不带它。轮询用 Claude Code 自己登录的 OAuth 令牌（macOS 钥匙串 `Claude Code-credentials` / `~/.claude/.credentials.json`），只读不刷新；没登录或令牌过期时沿用旧值。两个来源都还没给过时 `plan=null` |
+| GET | `/usage` | `{plan, plans}`：账号 plan 配额。一份的形状是 `{five_hour:{used_percentage,resets_at}, seven_day:{…}, model_scoped:[{display_name,utilization,resets_at}]|null, updated_at}`。**`plans` 是一个 agent 一份**（v1.39，键 = `GET /agents` 的 id：`claude` / `agy`）；`plan` 是 `plans.claude`，**只为 v1.38 及更早的客户端留着**，新客户端读 `plans`。claude 那一份：5h / 7d 来自最近一次 statusLine 的 `rate_limits`，也来自 daemon 每分钟对 claude.ai usage 接口的轮询；`model_scoped`（按模型的周窗口，如 Fable）**只**来自轮询——statusLine 从不带它。轮询用 Claude Code 自己登录的 OAuth 令牌（macOS 钥匙串 `Claude Code-credentials` / `~/.claude/.credentials.json`），只读不刷新；没登录或令牌过期时沿用旧值。**agy 那一份（v1.39）只有轮询一个来源**：agy 的 statusLine 不带 `rate_limits`，daemon 每分钟 POST `https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary`，令牌读 agy 自己登录留下的那份（macOS 钥匙串 service `gemini` / account `antigravity`，值是 go-keyring 的 `go-keyring-base64:` + base64 的 JSON；取不到退回 `~/.gemini/jetski-standalone-oauth-token`），同样**只读不刷新**。**请求必须带 `User-Agent: antigravity-cli/…`**——不带它后端按 Gemini Code Assist 的企业授权判，个人账号一律 403 `SUBSCRIPTION_REQUIRED`。响应是按模型分组的桶（每组一个 `weekly`、一个 `5h`，`remainingFraction` 是**还剩**的比例），daemon 把它压成同一个 plan 形状：**第一个真有 weekly 桶的组**（实测是 Gemini 那组）进 `seven_day` / `five_hour`，其余各组**整个不要**、`model_scoped` 恒为 null（v1.40，用户：「antigravity 右边就不放 Other 了吧，反正也很少用」）。不死认 `groups[0]`：顺序和「首组会不会整个 disabled」都是对面说了算的，死认的话对面一改这一栏就整个空了，而那时看不出是「没配额」还是「没解析出来」。`disabled` 的桶整个不进来——那是「这一档你没有」，不是「用满了」。**没有订阅到期时间**：claude.ai 的 `oauth/profile` 和 agy 的 `loadCodeAssist` 都只给档位（`claude_max` / `free-tier`），没有到期日，所以两端都不画——没有的东西不编一个出来。两个来源都还没给过时 `plan=null`、`plans` 里没有那个键 |
 | GET | `/sessions/:id/artifacts` | `{artifacts:[{url,title,description,file_path,ts}], docs:[{name,path,rel,size,mtime}]}`：**「产物」一节的两样**——`artifacts` 是这条**会话**用 Artifact 工具发布过的链接（报告 / 原型 / 图，按 url 去重，来自 transcript）；`docs`（v1.35）是这个**项目**目录里的 Markdown，最近改的在前，最多 200 份（见「产物」）。老客户端忽略 `docs` |
 | GET | `/sessions/:id/detail` | v1.17 详情屏（mac 右侧详情栏 / Android 详情屏）一次要齐的四样「消息流里翻不出来」的东西：`{subagents:[{tool,kind,summary,status,ts}], background_tasks:[{tool,summary,ts}], uploads:[{name,path,size,ts}], skills:[{name,count,last_ts}]}`。`subagents` = transcript 里的 `Agent`（老 transcript 是 `Task`）调用，`status ∈ running|ok|err`，按发起顺序，**v1.30 每条多带 `prompt`（派给它的整段任务书）与 `result`（它交回来的报告，还在跑时为空）**；`background_tasks` = 还没等到 `<task-notification>` 的后台任务（`run_in_background` 的 Bash / Agent，或 Monitor），带工具名和摘要而不只是一个计数（会话 `background` 字段仍是它的条数），早发起的在前，**v1.30 每条多带 `detail`（发起它的那一段原文：命令 / 任务书）**。两者的正文各截到 6000 字。客户端把这两节的行做成**点一下原地展开**看正文（2026-09-10 用户拍板：**仅预览**，不提供插手子代理和后台任务的任何口子——没有终止、没有追加输入、没有重跑）；`uploads` = 项目 `_inbox/` 里的文件（`POST /projects/upload` 的落点），新的在前、最多 200 个，目录不存在就是空表；`skills` = 用过的 `Skill` 工具按名字合并计数；**`mcp`（v1.38）** = 走过的 MCP，`[{server, tools, count, last_ts}]`——工具名形如 `mcp__<服务器>__<工具>`，**按服务器合并**（一个 `pass` 底下几十个工具，一行一个只会把这一节淹掉），`tools` 是这个服务器下用过的工具名（去前缀、去重、按首次出现，最多 40 个）。会话不在池子里 → 404；老客户端忽略 `mcp` |
 | GET | `/sessions/:id/screen` | daemon 侧 vt100 的屏幕文本 `{text, alternate_screen}`。非备用屏时 text 前带最近 500 行回滚；备用屏（Claude Code）只有可见画面。客户端「复制屏幕内容」「打开链接」用它。 |
@@ -273,12 +293,13 @@ server → client JSON 文本帧：
 {"t":"session_removed","id":"s_…"}
 {"t":"projects_changed"}
 {"t":"health","ssd_mounted":true}
-{"t":"usage","plan":{…}}                        // v1.4：plan 配额变化，形状同 GET /usage 的 plan
+{"t":"usage","agent":"claude","plan":{…}}       // v1.4：plan 配额变化，形状同 GET /usage 的一份
+{"t":"agent_usage","agent":"agy","plan":{…}}    // v1.39：别的 agent 的配额，形状同上
 ```
 
 **补齐机制只有一个：`snapshot`，而且它是权威的。** 客户端收到 snapshot 就**整表替换**自己那份会话列表（不是合并）。daemon 在两种情形下补发它：**连上来**时；以及这条连接**掉帧**时（broadcast 落后于 512 帧的缓冲区——手机被系统冻住、网络卡一阵都会）。所以事件流**不需要 revision / seq 号**（2026-09-08 两位外部评审都提过这条，核过代码后判定不需要）：WS 之上是 TCP，帧不会乱序也不会静默丢；能丢的只有「客户端跟不上」这一种，而那一种的出口就是一份新的全量 snapshot。`session_removed` 也不必补——整表替换本身就带着删除。`projects_changed` / `messages_changed` / `health` 是通知不是状态，客户端收到自己去拉。钉住这条的是 `smoke.rs::events_reconnect_snapshot_is_authoritative`。
 
-通知策略（客户端行为，2026-09-07 用户拍板，**三种**）：**待回复**（`asking` 翻 true：表单 / 权限对话框等你）、**运行结束**（`running→waiting`）、**出错**（`error` 出现，或非 0 退出码）；正常退出、自己在 app 里 kill 的都不弹。此前（2026-09-02）只有一种「完成」：`running→waiting` 与 `running→exited`（非本机用户手动 kill）各弹一条，标题带项目名，正文是会话标题。不识别「里面要回什么」、不按问题去重、没有高低优先级、没有空转告警；daemon 侧不推送（ntfy 已移除）。**开关只有一个总的**（2026-09-10 用户拍板「通知只需要总开关，不需要分项目开关」）：两端设置页各一个「系统通知」，本机配置，关掉只关通知——项目列表上的黄点照打（关通知是「别吵我」，不是「别记着」）。按项目静音（mac 的 `muted_projects`、Android 的 `muted_projects`、详情面板与长按单里的开关）一并删除，老配置里的键忽略，不需要迁移。用户正盯着的会话（窗口前台且当前页就是它）不弹。**待回复且带 `permission` 的那条，横幅上直接给「允许 / 拒绝」**（v1.27）：按了不进 App，直接 `POST /sessions/:id/permission`，正文也换成 `工具：摘要` 而不是会话标题。结构化提问（`asking` 但没有 `permission`）不给按钮，只能点进去答。mac 用 `UNNotificationCategory` + 两个 `UNNotificationAction`；Android 用 `Notification.Action` + 一个 `BroadcastReceiver`（答完把这条通知撤掉）。mac（2026-09-06）：装成 .app 时走 UserNotifications，以 AAA 自己的名义发、点一下回到 App 打开那条会话（`userInfo.session`）；首次会弹系统的通知授权；`cargo run` 没有 bundle 时退回 `osascript`（发件人是脚本编辑器，点了不跳）。
+通知策略（客户端行为，2026-09-07 用户拍板，**三种**）：**待回复**（`asking` 翻 true：表单 / 权限对话框等你）、**运行结束**（`running→waiting`）、**出错**（`error` 出现，或非 0 退出码）；正常退出、自己在 app 里 kill 的都不弹。此前（2026-09-02）只有一种「完成」：`running→waiting` 与 `running→exited`（非本机用户手动 kill）各弹一条，标题带项目名，正文是会话标题。不识别「里面要回什么」、不按问题去重、没有高低优先级、没有空转告警；daemon 侧不推送（ntfy 已移除）。**开关只有一个总的**（2026-09-10 用户拍板「通知只需要总开关，不需要分项目开关」）：两端设置页各一个「系统通知」，本机配置，关掉只关通知——项目列表上的黄点照打（关通知是「别吵我」，不是「别记着」）。按项目静音（mac 的 `muted_projects`、Android 的 `muted_projects`、详情面板与长按单里的开关）一并删除，老配置里的键忽略，不需要迁移。用户正盯着的会话（窗口前台且当前页就是它）不弹。**待回复且带 `permission` 的那条，横幅上直接给「允许 / 拒绝」**（v1.27）：按了不进 App，直接 `POST /sessions/:id/permission`，正文也换成 `工具：摘要` 而不是会话标题。结构化提问（`asking` 但没有 `permission`）不给按钮。**通知点进去一律落终端视图**（v1.39，2026-09-11 用户拍板：「不要设计进通知，而是有通知点进进来到终端界面」）：三种通知里最要紧的那种就是「它在等你答」，而那道题只能在终端里答。**`AskUserQuestion` 绝不带 `permission`**——Claude Code 对它同样发 `PermissionRequest`，daemon 按工具名把它挡在权限那条线之外（`hooks.rs`）；漏挡的后果不是横幅上多两颗按钮，是「允许」发出去的 `1` + 回车**替用户盲选了第一个选项**。只有一句 message 的 `Notification(permission_prompt)` 兜底同样挡：`asking` 已经为真而 `permission` 还空着，按契约恰好就是「结构化提问在等」。mac 用 `UNNotificationCategory` + 两个 `UNNotificationAction`；Android 用 `Notification.Action` + 一个 `BroadcastReceiver`（答完把这条通知撤掉）。mac（2026-09-06）：装成 .app 时走 UserNotifications，以 AAA 自己的名义发、点一下回到 App 打开那条会话（`userInfo.session`）；首次会弹系统的通知授权；`cargo run` 没有 bundle 时退回 `osascript`（发件人是脚本编辑器，点了不跳）。
 
 ## macOS 权限（一键授权）
 
@@ -359,16 +380,12 @@ Claude 以 `--dangerously-skip-permissions` 运行，`PermissionRequest` 不会�
 - `GET /sessions/:id/messages?after=<seq>&limit=<n=200>` → `{"supported":bool,"source":"claude|agy|none","last_seq":N,"messages":[…]}`
 - 消息结构：`{"seq":N,"ts":"…","role":"user|assistant|tool|system","kind":"text|thinking|tool_use|tool_result|question|answer","text":"…","tool":{"name":"Bash","summary":"cargo build","status":"ok|err|running"}|null,"question":{…}?}`
 - **表单（claude）**：`AskUserQuestion` 工具调用不当普通 tool_use 显示，而是 `kind:"question"`（role assistant）：`text` = 第一题题面，`tool.summary` = 各题 header 用 ` · ` 连接，并附 `"question":{"questions":[{"header":"Color","question":"Pick a color","options":[{"label":"Red","description":"A warm color"}],"multi_select":false}]}`（原样来自工具入参，`multiSelect` 已转 snake_case）。它的 tool_result 变成 `kind:"answer"`（role **user**）：`text` 为用户的回答（单题就是答案本身；多题每行 `题面 → 答案`），`tool.status` 沿用 ok/err。**待答** = 最新一条 question 后面没有 answer，且它不早于本进程 `created_at`（resume 进来的旧 transcript 里悬着的问题，新进程不会再弹框，不算）。这就是会话 `asking` 的定义。**这条判定只在 daemon 做**（`MsgStore::pending_question`，整串比 `ts`），结果就是会话对象上的 `asking_seq`；客户端画哪张卡片一律看它，不再自己倒着找消息流。v1.22 前三端各判一次、比法还不同（daemon 整串、两端取前 19 字符），同一秒里 daemon 说「不是待答」而客户端说「是」，点提交就是 409。
-- 客户端渲染约定：`question` 一律**原生对话框**——单选画单选、`multi_select` 画复选、末尾固定一条「其它…」自填；已有 answer 的表单折成已答态；待答且会话存活时才可交互，提交走 `POST /sessions/:id/answer`。不折叠进过程；`answer` 画在用户一侧。
+- 客户端渲染约定：`question` 画成一张卡，**只读**（v1.39，见 [`REMOVED.md`](REMOVED.md)）——题面、选项、末尾固定那条「其它…」都照画，但选项前面的记号一律是空的那一个，只说明这题是单选还是多选。**待答**（`asking_seq` 正是这一条且会话活着）时卡上露出一个**「去终端答」**，点它切到终端视图；其余情形压暗并打标签（已回答 / 已结束 / 已过期）。不折叠进过程；`answer` 画在用户一侧。
 - daemon 在会话 spawn/resume 后定位该会话的 Claude transcript（resume 已知文件；新会话按 cwd 匹配 + mtime ≥ 启动时刻轮询发现）并增量 tail 解析（jsonl：user/assistant/tool_use/tool_result/thinking，过滤 isSidechain 与注入块）。agy 的形状完全不同，见「Agent 表 · agy 的消息流」；**只有事实来源按 agent 分派，判定不分派**——待答、后台、折叠、排序全走同一份实现。shell（终端）返回 `supported:false`。resume 场景：旧 id 的 transcript 只是延迟兜底（~30s），发现会话自己写的新文件后自动升级；同目录并发会话不共享同一存储文件（已被认领的候选跳过）。
 - **折叠约定（v1.11 修，2026-09-07）**：assistant 的**每一条** `text` 都是回答，一律露出——Claude 的回答天生分段（说一句 → 干活 → 再说一句）。折叠里只放 `thinking` / `tool_use` / `tool_result` / system；一轮内连续的过程消息并成一个折叠段，夹在各段回答之间，展开状态按段内第一条 `seq` 记。只有会话在跑、且**贴在最后**的那一段画成「进行中 · N 步 · 最近：…」。此前只把一轮的最后一条 text 当回答、其余折进「过程」，中途的真回答看起来就成了思考过程。
 - `/events` 新帧：`{"t":"messages_changed","id":"s_…","last_seq":N}`（≥500ms 节流）。客户端收到后增量拉取。
   尾随节拍 **250ms**（v1.18 从 1s 改下来；活会话每拍都看，已退出的每 4 拍一次——它们的 transcript 不会再长）。以前节拍本身就是那个 ≥500ms 节流，现在是显式的：窗口内攒着、下一拍补发，一帧都不丢。**这条链路的延迟天花板不在轮询上**——Claude Code 每条**写完**的消息才落一行 JSONL，没有半截的流式条目，所以消息永远是整块到达的，逐字流只存在于 PTY 屏幕上（终端视图看得到）。
 - `/events` 心跳：服务端每 20s 发一个 WS Ping；客户端应以「45s 无任何帧」为读超时并重连（overlay 网络半开连接检测）。
-
-### 回答表单（daemon 驾驭 Claude Code 对话框）
-
-按键协议实测于 Claude Code 2.1.258（2026-09-02，pyte 采屏）：表单**有 Review/Submit 页** iff 多于一题或任一题多选；单题单选按下即提交。单选：按选项数字键（自动跳下一页/提交）；单选自填：按「Type something」的数字（= 选项数 + 1）、输入文本、回车。多选：逐个数字键切换（高亮停在第 1 行），自填要 **↓×选项数** 落到「Type something」行再输入（自动打勾；此时**回车会把勾取消**，绝不能按），随后 Tab（文本态下 Tab 移到 Submit/Next 行，再回车前进；非文本态 Tab 直接翻页）。最后 daemon 看屏：出现 `Ready to submit your answers?` 就回车确认；`Enter to select` 提示行消失才算成功，3s 内没消失返回 409，让用户去终端收尾。按键之间留 70–160ms 节拍（Ink 一次 read 当一个事件）。
 
 ### 待发送 / 任务收件箱
 

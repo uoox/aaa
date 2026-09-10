@@ -35,7 +35,7 @@ class UsageTest {
     }
 
     /**
-     * 栏表头右边那一段：**说剩多少**、不要 5h、重置时刻只出现一次。
+     * 栏表头右边那一段：**说剩多少**、不要 5h、重置写成还剩多久且只出现一次。
      * 颜色仍按用掉的算（72% 用掉 = 琥珀），换算的只是那个数字。
      */
     @Test fun planLineFull() {
@@ -46,28 +46,31 @@ class UsageTest {
             model_scoped = listOf(ModelScopedUsage("Fable", 40.0, at), ModelScopedUsage("Opus", 72.0, at)),
         )
         val now = Instant.parse("2026-09-11T00:00:00Z")
-        val segs = planLineSegments(plan, now, ZoneId.of("UTC"))
+        val segs = planLineSegments(plan, now)
         assertEquals(
-            listOf("7d 剩 39%", "Fable 剩 60%", "Opus 剩 28%", "重置 周日 09:59"),
+            listOf("剩 39%", "Fable 60%", "Opus 28%", "2d9h 重置"),
             segs.map { it.text },
         )
-        assertEquals("5h 不进来", 3, segs.count { it.text.contains("剩") })
+        assertEquals("5h 不进来", 3, segs.count { it.text.contains("%") })
         assertEquals(PctLevel.WARN, segs.maxOf { it.level })
     }
 
-    /** 按模型的窗口跟 7d 不是同一时刻时，它得自己报——不能拿 7d 的时刻替它说话。 */
+    /**
+     * 两段的重置不是同一时刻（Antigravity 的两组就是这样）：各自带上自己的、
+     * 紧挨在自己后面——不能拿一组的时刻替另一组说话。
+     */
     @Test fun planLineSplitsDifferingResets() {
         val plan = PlanUsage(
-            seven_day = PlanWindow(61.0, JsonPrimitive("2026-09-13T09:59:59Z")),
-            model_scoped = listOf(ModelScopedUsage("Fable", 40.0, JsonPrimitive("2026-09-14T09:59:59Z"))),
+            seven_day = PlanWindow(48.9, JsonPrimitive("2026-09-11T13:00:00Z")),
+            model_scoped = listOf(ModelScopedUsage("Other", 9.7, JsonPrimitive("2026-09-16T15:00:00Z"))),
         )
-        val segs = planLineSegments(plan, Instant.parse("2026-09-11T00:00:00Z"), ZoneId.of("UTC")).map { it.text }
-        assertEquals(listOf("7d 剩 39%", "Fable 剩 60%", "重置 周日 09:59", "Fable 重置 周一 09:59"), segs)
+        val segs = planLineSegments(plan, Instant.parse("2026-09-11T00:00:00Z")).map { it.text }
+        assertEquals(listOf("剩 51%", "13h 重置", "Other 90%", "5d15h 重置"), segs)
     }
 
     @Test fun planLinePartial() {
         val only7d = PlanUsage(seven_day = PlanWindow(95.0))
-        assertEquals(listOf("7d 剩 5%"), planLineSegments(only7d).map { it.text })
+        assertEquals(listOf("剩 5%"), planLineSegments(only7d).map { it.text })
         assertEquals(PctLevel.CRIT, planLineSegments(only7d).maxOf { it.level })
         assertTrue(planLineSegments(null).isEmpty())
         assertTrue(planLineSegments(PlanUsage()).isEmpty())
@@ -98,18 +101,15 @@ class UsageTest {
         assertNull(parseResetsAt(JsonPrimitive("soon")))
     }
 
-    @Test fun resetLabelToday() {
-        assertEquals("重置 14:30", resetLabel(Instant.parse("2026-09-03T06:30:00Z"), now, sh))
-    }
-
-    @Test fun resetLabelOtherDay() {
-        // 2026-09-05 是周六
-        assertEquals("重置 周六 08:05", resetLabel(Instant.parse("2026-09-05T00:05:00Z"), now, sh))
-        // 上海的「今天」在 UTC 的前一天晚上：按时区算（已经过去了 → 月/日）
-        assertEquals("重置 9/2 23:59", resetLabel(Instant.parse("2026-09-02T15:59:00Z"), now, sh))
-        // 七天开外不说周几：十天后的「周六」是哪个周六说不清楚（与 mac 同口径）
-        assertEquals("重置 9/13 08:05", resetLabel(Instant.parse("2026-09-13T00:05:00Z"), now, sh))
-        assertNull(resetLabel(null, now, sh))
+    /** 到重置还剩多久：`2d16h` / `13h` / `40m`，已经过了说 `0m`（与 mac 同口径） */
+    @Test fun resetCountdownFormatting() {
+        // now = 2026-09-03T02:00:00Z（下面 sh 时区的 10:00）
+        assertEquals("2d8h", resetCountdown(Instant.parse("2026-09-05T10:00:00Z"), now))
+        assertEquals("2d", resetCountdown(Instant.parse("2026-09-05T02:00:00Z"), now))
+        assertEquals("13h", resetCountdown(Instant.parse("2026-09-03T15:40:00Z"), now))
+        assertEquals("40m", resetCountdown(Instant.parse("2026-09-03T02:40:00Z"), now))
+        // 已经过了（轮询还没跟上）：0m，不给负数
+        assertEquals("0m", resetCountdown(Instant.parse("2026-09-01T00:00:00Z"), now))
     }
 
     @Test fun artifactTime() {
@@ -142,10 +142,23 @@ class UsageTest {
         assertNull(parseResetsAt(r.plan?.model_scoped?.first()?.resets_at))
         // 5h 不进那一行；Fable 的 resets_at 是 null，重置只报 7d 那一条
         assertEquals(
-            listOf("7d 剩 38%", "Fable 剩 60%", "重置 周六 00:00"),
-            planLineSegments(r.plan, Instant.parse("2026-09-03T00:00:00Z"), ZoneId.of("UTC")).map { it.text },
+            listOf("剩 38%", "Fable 60%", "2d 重置"),
+            planLineSegments(r.plan, Instant.parse("2026-09-03T00:00:00Z")).map { it.text },
         )
         assertNull(j.decodeFromString(UsageResponse.serializer(), """{"plan":null}""").plan)
+        // 老 daemon 只给 `plan`：byAgent 把它当 claude 那一份
+        assertEquals(setOf(DEFAULT_AGENT), r.byAgent().keys)
+        // v1.39 的 daemon 给 `plans`，一个 agent 一份，`plan` 只是留给老客户端的影子
+        val two = j.decodeFromString(
+            UsageResponse.serializer(),
+            """{"plan":{"seven_day":{"used_percentage":61}},"plans":{"claude":{"seven_day":{"used_percentage":61}},"agy":{"seven_day":{"used_percentage":48.9},"model_scoped":[{"display_name":"Other","utilization":9.7}]}}}""",
+        )
+        assertEquals(setOf("claude", "agy"), two.byAgent().keys)
+        assertEquals(
+            listOf("剩 51%", "Other 90%"),
+            planLineSegments(two.byAgent()["agy"], Instant.parse("2026-09-03T00:00:00Z")).map { it.text },
+        )
+        assertTrue(j.decodeFromString(UsageResponse.serializer(), """{"plan":null}""").byAgent().isEmpty())
 
         val a = j.decodeFromString(ArtifactsResponse.serializer(), """{"artifacts":[{"url":"https://x/1","title":"T","description":"D","file_path":"/p","ts":"2026-09-03T01:05:00Z"}]}""")
         assertEquals("T", a.artifacts.single().title)

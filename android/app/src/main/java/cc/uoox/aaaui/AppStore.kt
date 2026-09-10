@@ -82,8 +82,10 @@ class AppStore private constructor(context: Context) {
     private val _health = MutableStateFlow<Health?>(null)
     val health: StateFlow<Health?> = _health.asStateFlow()
     /** 套餐用量（5h / 7d / 按模型）；null = 没数据，首页不显示 */
-    private val _planUsage = MutableStateFlow<PlanUsage?>(null)
-    val planUsage: StateFlow<PlanUsage?> = _planUsage.asStateFlow()
+    /** v1.39 一个 agent 一份配额（键 = `GET /agents` 的 id）。以前只有一份、只画在
+     *  Claude 那一栏；现在 Antigravity 那一栏也有自己的 */
+    private val _planUsage = MutableStateFlow<Map<String, PlanUsage>>(emptyMap())
+    val planUsage: StateFlow<Map<String, PlanUsage>> = _planUsage.asStateFlow()
 
     /** Session-state transition notifications (running → waiting / exited). */
     private val _notifyEvents = MutableSharedFlow<NotifyEvent>(extraBufferCapacity = 32)
@@ -306,7 +308,8 @@ class AppStore private constructor(context: Context) {
                 _health.value = (_health.value ?: Health()).copy(ssd_mounted = frame.ssdMounted)
             }
             is EventFrame.MessagesChanged -> _frames.tryEmit(frame)
-            is EventFrame.UsageUpdate -> _planUsage.value = frame.plan
+            is EventFrame.UsageUpdate -> setPlan(DEFAULT_AGENT, frame.plan)
+            is EventFrame.AgentUsageUpdate -> if (frame.agent.isNotBlank()) setPlan(frame.agent, frame.plan)
             is EventFrame.Unknown -> { }
         }
     }
@@ -408,10 +411,20 @@ class AppStore private constructor(context: Context) {
         runCatching { api.projects() }.onSuccess { _projects.value = it }
     }
 
-    /** 404（旧 daemon）或失败都不动现值；成功才覆盖，包括覆盖成 null */
+    /** 404（旧 daemon）或失败都不动现值；成功才覆盖，包括覆盖成空表 */
     suspend fun refreshUsage() {
         val api = client ?: return
         runCatching { api.usage() }.onSuccess { _planUsage.value = it }
+    }
+
+    /**
+     * 收下某个 agent 的配额；`null` = daemon 暂时拿不到，那一栏行尾就空着
+     * （不留上一次的数字：过期的余额比没有余额更误导人）
+     */
+    private fun setPlan(agent: String, plan: PlanUsage?) {
+        _planUsage.value = _planUsage.value.toMutableMap().apply {
+            if (plan == null) remove(agent) else put(agent, plan)
+        }
     }
 
     suspend fun refreshHealth() {

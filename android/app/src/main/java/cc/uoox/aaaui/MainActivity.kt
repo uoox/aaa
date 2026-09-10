@@ -48,6 +48,7 @@ import kotlinx.coroutines.launch
 class MainActivity : ComponentActivity() {
     private val pendingSessionId = mutableStateOf<String?>(null)
     private val pendingPrefill = mutableStateOf<String?>(null)
+    private val pendingView = mutableStateOf<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -57,7 +58,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             // 折叠/展开只是配置变化（manifest 里已接管），整棵 composition 不重建。
             // 首页是单栏项目列表，宽窄屏同一套布局，不再按窗口宽度切导航位置。
-            AaaTheme { AaaApp(store, pendingSessionId, pendingPrefill) }
+            AaaTheme { AaaApp(store, pendingSessionId, pendingPrefill, pendingView) }
         }
     }
 
@@ -69,11 +70,14 @@ class MainActivity : ComponentActivity() {
     private fun consumeIntent(intent: Intent?) {
         intent?.getStringExtra(EXTRA_SESSION_ID)?.let { pendingSessionId.value = it }
         intent?.getStringExtra(EXTRA_PREFILL)?.let { pendingPrefill.value = it }
+        intent?.getStringExtra(EXTRA_VIEW)?.let { pendingView.value = it }
     }
 
     companion object {
         const val EXTRA_SESSION_ID = "cc.uoox.aaaui.SESSION_ID"
         const val EXTRA_PREFILL = "cc.uoox.aaaui.PREFILL"
+        /** 进去先看哪一屏：通知一律 `"terminal"`（2026-09-11 用户拍板） */
+        const val EXTRA_VIEW = "cc.uoox.aaaui.VIEW"
     }
 }
 
@@ -82,6 +86,7 @@ fun AaaApp(
     store: AppStore,
     pendingSessionId: androidx.compose.runtime.MutableState<String?>,
     pendingPrefill: androidx.compose.runtime.MutableState<String?>,
+    pendingView: androidx.compose.runtime.MutableState<String?>,
 ) {
     val nav = rememberNavController()
     val settings by store.settings.flow.collectAsState(initial = null)
@@ -90,11 +95,11 @@ fun AaaApp(
     // 一个入口：会话卡片、通知深链、项目页「继续会话」、会话页 ☰ 切换都走这里，行为不会各走各的。
     // 回退栈始终是 home → 当前会话：从一个会话切到另一个不叠页，返回键直接回首页
     val scope = rememberCoroutineScope()
-    val openSession: (String, String) -> Unit = { id, prefill ->
+    val openSession: (String, String, String) -> Unit = { id, prefill, view ->
         // 记住：下次 app 起来直接回这个会话（没有首页了）
         autoOpenedLastSession = true
         scope.launch { store.settings.setLastSession(id) }
-        nav.navigate("session/$id?prefill=${Uri.encode(prefill)}") {
+        nav.navigate("session/$id?prefill=${Uri.encode(prefill)}&view=${Uri.encode(view)}") {
             launchSingleTop = true
             popUpTo("home")
         }
@@ -106,7 +111,8 @@ fun AaaApp(
         if (loaded && id != null) {
             pendingSessionId.value = null
             val prefill = pendingPrefill.value.orEmpty(); pendingPrefill.value = null
-            openSession(id, prefill)
+            val view = pendingView.value.orEmpty(); pendingView.value = null
+            openSession(id, prefill, view)
         }
     }
 
@@ -123,7 +129,6 @@ fun AaaApp(
             }
             composable("pair") { PairScreen(store) { nav.navigate("home") { popUpTo("pair") { inclusive = true } } } }
             composable("home") { HomeScreen(store, nav) }
-            composable("settings") { SettingsScreen(store, nav) }
             composable("detail/{id}") { entry ->
                 SessionDetailScreen(store, nav, entry.arguments?.getString("id").orEmpty())
             }
@@ -144,14 +149,16 @@ fun AaaApp(
                 TerminalScreen(store, nav, focusId = entry.arguments?.getString("focus").orEmpty())
             }
             composable(
-                "session/{id}?prefill={prefill}",
+                "session/{id}?prefill={prefill}&view={view}",
                 arguments = listOf(
                     androidx.navigation.navArgument("prefill") { type = androidx.navigation.NavType.StringType; defaultValue = "" },
+                    androidx.navigation.navArgument("view") { type = androidx.navigation.NavType.StringType; defaultValue = "" },
                 ),
             ) { entry ->
                 val id = entry.arguments?.getString("id").orEmpty()
                 val prefill = entry.arguments?.getString("prefill").orEmpty()
-                SessionScreen(store, nav, id, Uri.decode(prefill))
+                val view = entry.arguments?.getString("view").orEmpty()
+                SessionScreen(store, nav, id, Uri.decode(prefill), Uri.decode(view))
             }
         }
     }
@@ -298,7 +305,7 @@ fun HomeScreen(store: AppStore, nav: NavHostController) {
         val last = settings?.lastSession ?: return@LaunchedEffect
         if (!autoOpenedLastSession && sessions.any { it.id == last }) {
             autoOpenedLastSession = true
-            openSession(last, "")
+            openSession(last, "", "")
         }
     }
     Box(Modifier.fillMaxSize().background(Tok.Bg)) { ProjectPanel(store, nav) }

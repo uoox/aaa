@@ -48,9 +48,18 @@ impl EventHub {
         self.send(&serde_json::json!({"t": "messages_changed", "id": id, "last_seq": last_seq}));
     }
 
-    /// v1.3 plan 配额（statusLine 的 rate_limits），任一会话转来新值就广播
+    /// v1.3 plan 配额（claude 那一份），新值就广播。
+    /// **这一帧永远只说 claude**：v1.38 之前的客户端把每一个 `usage` 帧都当成账号
+    /// 配额收下，别的 agent 混进来就会把 Claude 那一栏的数字改错。
     pub fn usage(&self, plan: &serde_json::Value) {
-        self.send(&serde_json::json!({"t": "usage", "plan": plan}));
+        self.send(&serde_json::json!({"t": "usage", "agent": "claude", "plan": plan}));
+    }
+
+    /// v1.39 别的 agent 的配额（当前只有 `agy`）。**另起一个帧名**而不是给 `usage`
+    /// 加字段：老客户端认得 `usage`、不认得这个，未知帧它们本来就丢掉——一升 daemon
+    /// 就把 Antigravity 的数字画到 Claude 头上，是这里唯一要防的事。
+    pub fn agent_usage(&self, agent: &str, plan: &serde_json::Value) {
+        self.send(&serde_json::json!({"t": "agent_usage", "agent": agent, "plan": plan}));
     }
 
     pub fn inbox_changed(&self, path: &str) {

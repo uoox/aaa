@@ -96,6 +96,11 @@ object Notifier {
             context, sessionId.hashCode(),
             Intent(context, MainActivity::class.java)
                 .putExtra(MainActivity.EXTRA_SESSION_ID, sessionId)
+                // **通知一律落终端**（2026-09-11 用户拍板）：三种通知里最要紧的那种是
+                // 「它在等你答」，而 Claude Code 的结构化提问在消息流里替答不可靠
+                // （daemon 是在盲操一个会变的 TUI，见 PROTOCOL「回答表单」）。
+                // 终端里那个对话框是它自己画的，你按什么就是什么。
+                .putExtra(MainActivity.EXTRA_VIEW, "terminal")
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )

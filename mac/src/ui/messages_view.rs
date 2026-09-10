@@ -1,7 +1,8 @@
 //! 消息流视图：daemon `/sessions/:id/messages` 的气泡列表，与 Android 同源同构。
 //! 终端仍是权威视图；消息流里能直接对 agent 说话（底部 composer → POST /input），
-//! claude 的 AskUserQuestion 表单在这里**原生**画出来（单选 / 复选 / 「其它」自填），
-//! 提交走 POST /sessions/:id/answer，由 daemon 翻译成对话框按键。⌘E 切换。
+//! claude 的 AskUserQuestion 表单在这里画出来，但**只读**（v1.39，见 REMOVED.md）：
+//! 题面、选项、末尾那条「其它…」都看得见，待答时卡上给一个「去终端答」——那道题
+//! 只能在终端里答，那个对话框是 Claude Code 自己画的。⌘E 切换。
 //!
 //! 拉取模型：打开时全量补齐（seq 游标循环直到追平 last_seq），此后靠
 //! /events 的 messages_changed 帧增量拉。`supported:false`（shell）或 404
@@ -29,7 +30,7 @@ use super::kit::{c, ca};
 use super::mini_input::MiniInput;
 use super::stream_fold::{self, StreamItem};
 use crate::markdown::{self, Block, Span};
-use crate::model::{AnswerItem, ChatMessage, PermissionPrompt, QuestionItem, QuestionSpec};
+use crate::model::{ChatMessage, PermissionPrompt, QuestionItem, QuestionSpec};
 use crate::net::Net;
 use crate::theme;
 
@@ -39,75 +40,8 @@ const KEEP: usize = 2000;
 /// 离底部不到这么多像素就算「在底部」：新消息到来时跟到底，浮动 ↓ 也不出现
 const BOTTOM_SLACK: f32 = 40.;
 
-/// 一道题的草稿：勾选的选项下标 + 「其它」自填（镜像自该题的 MiniInput）
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Draft {
-    pub selected: Vec<usize>,
-    pub other: String,
-}
-
-impl Draft {
-    fn has_other(&self) -> bool {
-        !self.other.trim().is_empty()
-    }
-
-    /// 与 daemon `answer::validate` 同口径：单选恰好一个选择（选项或自填），
-    /// 多选至少一个
-    pub fn complete(&self, multi: bool) -> bool {
-        let n = self.selected.len() + usize::from(self.has_other());
-        if multi { n >= 1 } else { n == 1 }
-    }
-
-    fn to_answer(&self) -> AnswerItem {
-        let mut selected = self.selected.clone();
-        selected.sort_unstable();
-        AnswerItem {
-            selected,
-            other: if self.has_other() {
-                Some(self.other.trim().to_string())
-            } else {
-                None
-            },
-        }
-    }
-}
-
-/// 整张表单是否可提交：每题都齐
-pub fn form_complete(spec: &QuestionSpec, drafts: &[Draft]) -> bool {
-    drafts.len() == spec.questions.len()
-        && spec
-            .questions
-            .iter()
-            .zip(drafts)
-            .all(|(q, d)| d.complete(q.multi_select))
-}
-
-/// 这张表单此刻能不能作答：**daemon 说待答的正是这一条**（会话的 `asking_seq`），
-/// 而且本端还没把它提交出去（answer 消息还在路上时先按已答画，免得空表单闪一下）。
-///
-/// v1.22 之前这里是一整套本地判定：从消息流尾部倒着找最近的 question / answer，再拿
-/// 消息 `ts` 的前 19 个字符跟会话 created_at 比大小，判掉「resume 把上个进程没答完的
-/// 问题带了进来」。它错在同一个问题三端各有一份答案——daemon 有 transcript 的结构化
-/// 事实，客户端却在拿字符串比时间猜，边界（同一秒、缺毫秒、会话刚 resume）谁都不一样。
-pub fn form_interactive(asking_seq: Option<u64>, seq: u64, answered_here: bool) -> bool {
-    asking_seq == Some(seq) && !answered_here
-}
-
-/// 某条 question 之后紧跟的是不是 answer（已答态标签用）
-fn answered_after(msgs: &[ChatMessage], seq: u64) -> bool {
-    msgs.iter()
-        .filter(|m| m.seq > seq)
-        .find(|m| m.kind == "question" || m.kind == "answer")
-        .is_some_and(|m| m.kind == "answer")
-}
-
-/// 选项行的元素 id：gpui 没有四元组 From，拼成名字
-fn opt_id(seq: u64, qi: usize, oi: usize) -> ElementId {
-    ElementId::Name(format!("opt-{seq}-{qi}-{oi}").into())
-}
-
-/// 提交失败文案：409 = daemon 没法替你按（没有待答问题 / 对话框没吃下）→ 去终端收尾
-fn describe_submit_error(e: &anyhow::Error) -> String {
+/// API 报错文案：409 = daemon 没法替你按（对话框已经不在了 / 没吃下）→ 去终端收尾
+fn describe_api_error(e: &anyhow::Error) -> String {
     let msg = match e.downcast_ref::<crate::net::ApiFailure>() {
         Some(f) if !f.message.is_empty() => f.message.clone(),
         _ => e.to_string(),
@@ -119,15 +53,12 @@ fn describe_submit_error(e: &anyhow::Error) -> String {
     }
 }
 
-/// 表单卡片此刻的交互态
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FormMode {
-    /// 已答 / 已过期 / 会话已退出：只读、压暗
-    ReadOnly,
-    /// 待答且会话活着：可勾选、可填、可提交
-    Editing,
-    /// 提交在路上：保留内容但不响应点击
-    Submitting,
+/// 某条 question 之后紧跟的是不是 answer（已答态标签用）
+fn answered_after(msgs: &[ChatMessage], seq: u64) -> bool {
+    msgs.iter()
+        .filter(|m| m.seq > seq)
+        .find(|m| m.kind == "question" || m.kind == "answer")
+        .is_some_and(|m| m.kind == "answer")
 }
 
 pub struct MessagesView {
@@ -169,21 +100,20 @@ pub struct MessagesView {
     /// 项目目录：附件上传的去处（`_inbox/`）
     project_path: String,
     uploading: bool,
-    /// v1.22：待答的是消息流里的哪一条（daemon 给，见 [`form_interactive`]）
+    /// v1.22：待答的是消息流里的哪一条（daemon 给的 `asking_seq`，客户端不自己找）
     asking_seq: Option<u64>,
     /// 此刻排着还没送进去的消息（会话的 `queued`）：Claude Code 自己的队列，只画不管
     queued: Vec<crate::model::QueuedMsg>,
-    /// 表单草稿：question 消息 seq → 每题一份
-    drafts: HashMap<u64, Vec<Draft>>,
-    /// 每题的「其它」自填框，(question seq, 题号) 按需创建，表单不再待答时回收
-    other_inputs: HashMap<(u64, usize), Entity<MiniInput>>,
-    /// 正在提交的表单
-    submitting: HashSet<u64>,
-    /// 提交失败的表单 → 展示文案（草稿保留，可改可重试）
-    errors: HashMap<u64, String>,
-    /// 本端已提交成功、answer 消息还没到的表单：先按已答态画，免得空表单闪一下
-    answered: HashSet<u64>,
 }
+
+/// 消息流往外说的话。现在只有一句：**把我换成终端**——待答表单上那个「去终端答」
+/// 按下去时发出来，`RootView` 订阅着它，收到就 `set_view(Terminal)`。视图归谁管这件事
+/// 只有一个答案（RootView 的 `view_mode`），消息流自己不去改它。
+pub enum MsgEvent {
+    GoTerminal,
+}
+
+impl gpui::EventEmitter<MsgEvent> for MessagesView {}
 
 impl MessagesView {
     pub fn new(sid: String, net: Net, cx: &mut Context<Self>) -> Self {
@@ -213,11 +143,6 @@ impl MessagesView {
             uploading: false,
             asking_seq: None,
             queued: Vec::new(),
-            drafts: HashMap::new(),
-            other_inputs: HashMap::new(),
-            submitting: HashSet::new(),
-            errors: HashMap::new(),
-            answered: HashSet::new(),
         };
         v.fetch(cx);
         v
@@ -314,7 +239,6 @@ impl MessagesView {
         self.alive = alive;
         self.running = running;
         self.asking_seq = asking_seq;
-        self.ensure_form_state(cx);
         cx.notify();
     }
 
@@ -346,20 +270,6 @@ impl MessagesView {
 
     fn on_key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if ev.keystroke.key != "enter" {
-            return;
-        }
-        // 焦点在某题的「其它」框里：回车 = 提交这张表单（没填齐就什么都不做）。
-        // IME 组字中的回车是「确认候选词」，不能抢。
-        let in_form = self
-            .other_inputs
-            .iter()
-            .find(|(_, i)| i.read(cx).focus_handle.is_focused(window))
-            .map(|((seq, _), i)| (*seq, i.read(cx).composing()));
-        if let Some((seq, composing)) = in_form {
-            if !composing {
-                self.submit(seq, cx);
-                cx.stop_propagation();
-            }
             return;
         }
         // MiniInput 不消费回车；composer 有焦点且不在组字才算「发送」
@@ -405,7 +315,6 @@ impl MessagesView {
                             if stream_fold::should_follow_tail(was_at_bottom, had, !v.msgs.is_empty()) {
                                 v.scroll.scroll_to_bottom();
                             }
-                            v.ensure_form_state(cx);
                         }
                         if r.supported && v.last_seq < r.last_seq {
                             v.fetch(cx);
@@ -458,107 +367,6 @@ impl MessagesView {
         cx.notify();
     }
 
-    // ── 表单状态 ───────────────────────────────────────────────────────
-
-    /// 让草稿 / 输入框 / 错误只围着「当前待答的那张表单」存在：
-    /// 表单被答掉（无论从哪端）或会话退出，相关状态一并回收。
-    fn ensure_form_state(&mut self, cx: &mut Context<Self>) {
-        let pending = self.asking_seq;
-        self.drafts.retain(|k, _| Some(*k) == pending);
-        self.other_inputs.retain(|(k, _), _| Some(*k) == pending);
-        self.errors.retain(|k, _| Some(*k) == pending);
-        self.submitting.retain(|k| Some(*k) == pending);
-        self.answered.retain(|k| Some(*k) == pending);
-        let Some(seq) = pending else {
-            return;
-        };
-        let spec = self
-            .msgs
-            .iter()
-            .find(|m| m.seq == seq)
-            .and_then(|m| m.question.clone());
-        let Some(spec) = spec else {
-            return;
-        };
-        let n = spec.questions.len();
-        let drafts = self.drafts.entry(seq).or_default();
-        if drafts.len() != n {
-            drafts.resize(n, Draft::default());
-        }
-        for (qi, q) in spec.questions.iter().enumerate() {
-            if self.other_inputs.contains_key(&(seq, qi)) {
-                continue;
-            }
-            let input = cx.new(|cx| MiniInput::new(cx, "其它…"));
-            let multi = q.multi_select;
-            // MiniInput 改文本时自己 notify；这里镜像进草稿，并执行「单选自填即弃选」
-            cx.observe(&input, move |v: &mut Self, input, cx| {
-                let text = input.read(cx).text().to_string();
-                v.on_other_changed(seq, qi, multi, text, cx);
-            })
-            .detach();
-            self.other_inputs.insert((seq, qi), input);
-        }
-    }
-
-    fn on_other_changed(
-        &mut self,
-        seq: u64,
-        qi: usize,
-        multi: bool,
-        text: String,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(d) = self.drafts.get_mut(&seq).and_then(|v| v.get_mut(qi)) else {
-            return;
-        };
-        if d.other == text {
-            return;
-        }
-        d.other = text;
-        if !multi && d.has_other() {
-            // 单选只能有一个答案：开始自填就把勾过的选项放掉
-            d.selected.clear();
-        }
-        self.errors.remove(&seq);
-        cx.notify();
-    }
-
-    fn toggle_option(
-        &mut self,
-        seq: u64,
-        qi: usize,
-        oi: usize,
-        multi: bool,
-        cx: &mut Context<Self>,
-    ) {
-        if self.submitting.contains(&seq) {
-            return;
-        }
-        let Some(d) = self.drafts.get_mut(&seq).and_then(|v| v.get_mut(qi)) else {
-            return;
-        };
-        if multi {
-            match d.selected.iter().position(|&x| x == oi) {
-                Some(p) => {
-                    d.selected.remove(p);
-                }
-                None => d.selected.push(oi),
-            }
-        } else {
-            d.selected = vec![oi];
-            // 单选点了选项就把自填清掉（反向规则在 on_other_changed）
-            if !d.other.is_empty() {
-                d.other.clear();
-                if let Some(input) = self.other_inputs.get(&(seq, qi)).cloned() {
-                    input.update(cx, |i, cx| i.set_text("", cx));
-                }
-            }
-        }
-        self.errors.remove(&seq);
-        cx.notify();
-    }
-
     /// 权限对话框：允许 / 拒绝 → daemon 驱动 PTY 作答；失败（对话框还在）把话留在卡片上
     fn decide_permission(&mut self, behavior: &'static str, cx: &mut Context<Self>) {
         if self.perm_busy {
@@ -573,7 +381,7 @@ impl MessagesView {
                 v.perm_busy = false;
                 match res {
                     Ok(_) => v.fetch(cx),
-                    Err(e) => v.perm_error = Some(describe_submit_error(&e)),
+                    Err(e) => v.perm_error = Some(describe_api_error(&e)),
                 }
                 cx.notify();
             });
@@ -642,51 +450,6 @@ impl MessagesView {
             .into_any_element()
     }
 
-    fn submit(&mut self, seq: u64, cx: &mut Context<Self>) {
-        if self.submitting.contains(&seq) {
-            return;
-        }
-        let spec = self
-            .msgs
-            .iter()
-            .find(|m| m.seq == seq)
-            .and_then(|m| m.question.as_ref());
-        let Some(spec) = spec else {
-            return;
-        };
-        let Some(drafts) = self.drafts.get(&seq) else {
-            return;
-        };
-        if !form_complete(spec, drafts) {
-            return;
-        }
-        let answers: Vec<AnswerItem> = drafts.iter().map(Draft::to_answer).collect();
-        self.submitting.insert(seq);
-        self.errors.remove(&seq);
-        let fut = self.net.session_answer(&self.sid, answers);
-        cx.spawn(async move |this, cx| {
-            let res = fut.await;
-            let _ = this.update(cx, |v: &mut MessagesView, cx| {
-                v.submitting.remove(&seq);
-                match res {
-                    Ok(_) => {
-                        // daemon 已确认对话框关闭；answer 消息随 messages_changed 到达。
-                        // 先按已答态画，并顺手拉一次缩短空窗。
-                        v.drafts.remove(&seq);
-                        v.answered.insert(seq);
-                        v.fetch(cx);
-                    }
-                    Err(e) => {
-                        // 草稿保留：改一改还能再交
-                        log::warn!("回答表单失败: {e}");
-                        v.errors.insert(seq, describe_submit_error(&e));
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
 
     // ── 渲染 ───────────────────────────────────────────────────────────
 
@@ -1009,17 +772,13 @@ impl MessagesView {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let seq = m.seq;
-        let interactive = form_interactive(pending, seq, self.answered.contains(&seq));
-        let submitting = self.submitting.contains(&seq);
-        let mode = match (interactive, submitting) {
-            (false, _) => FormMode::ReadOnly,
-            (true, false) => FormMode::Editing,
-            (true, true) => FormMode::Submitting,
-        };
-        let drafts = self.drafts.get(&seq).cloned().unwrap_or_default();
-        let tag: Option<&'static str> = if interactive {
+        // **待答 = daemon 说待答的正是这一条**（会话的 `asking_seq`）且会话还活着。
+        // 待答不等于「能在这儿答」：v1.39 起这张卡一律只读（见本文件头），待答时
+        // 露出的是一个「去终端答」，不是提交按钮。
+        let waiting = pending == Some(seq) && self.alive;
+        let tag: Option<&'static str> = if waiting {
             None
-        } else if self.answered.contains(&seq) || answered_after(&self.msgs, seq) {
+        } else if answered_after(&self.msgs, seq) {
             Some("已回答")
         } else if !self.alive {
             Some("已结束")
@@ -1038,7 +797,7 @@ impl MessagesView {
             .border_1()
             .border_color(ca(theme::AMBER, 0.55))
             .bg(ca(theme::AMBER, 0.08))
-            .when(!interactive, |el| el.opacity(0.6));
+            .when(!waiting, |el| el.opacity(0.6));
 
         // 顶行：表单标识 + 已答态标签
         card = card.child(
@@ -1052,11 +811,7 @@ impl MessagesView {
                         .text_size(px(10.5))
                         .font_family("Menlo")
                         .text_color(c(theme::AMBER))
-                        .child(if interactive {
-                            "? 等你选择"
-                        } else {
-                            "? 表单"
-                        }),
+                        .child(if waiting { "? 等你选择" } else { "? 表单" }),
                 )
                 .when_some(tag, |el, t| {
                     el.child(
@@ -1073,64 +828,46 @@ impl MessagesView {
                 }),
         );
 
-        for (qi, q) in spec.questions.iter().enumerate() {
-            let d = drafts.get(qi).cloned().unwrap_or_default();
-            card = card.child(self.question_block(seq, qi, q, &d, mode, cx));
+        for q in spec.questions.iter() {
+            card = card.child(self.question_block(q));
         }
 
-        if interactive {
-            let complete = form_complete(spec, &drafts);
-            let label = if submitting { "…" } else { "提交" };
-            let mut btn = accent_btn(("q-submit", seq)).child(label);
-            if complete && !submitting {
-                btn = btn
-                    .cursor_pointer()
-                    .hover(|s| s.opacity(0.85))
-                    .on_click(cx.listener(move |v: &mut Self, _, _, cx| v.submit(seq, cx)));
-            } else {
-                btn = btn.opacity(0.4);
-            }
-            card = card.child(div().flex().justify_end().child(btn));
-        }
-
-        let mut outer = div().w_full().flex().flex_col().gap(px(4.)).child(card);
-        if let Some(err) = self.errors.get(&seq) {
-            outer = outer.child(
-                div()
-                    .px(px(4.))
-                    .text_size(px(11.))
-                    .text_color(c(theme::RED))
-                    .child(SharedString::from(err.clone())),
+        // 待答：一个「去终端答」。**这张卡自己不收答案**——那个对话框是 Claude Code
+        // 画在终端里的，去按它自己的键，按什么就是什么。⌘E 也切得过去。
+        if waiting {
+            card = card.child(
+                div().flex().items_center().gap(px(8.)).justify_end().child(
+                    div()
+                        .flex_1()
+                        .text_size(px(10.5))
+                        .font_family("Menlo")
+                        .text_color(c(theme::FAINT))
+                        .child("在终端里答（⌘E）"),
+                ).child(
+                    accent_btn(("q-terminal", seq))
+                        .cursor_pointer()
+                        .hover(|s| s.opacity(0.85))
+                        .on_click(cx.listener(|_: &mut Self, _, _, cx| cx.emit(MsgEvent::GoTerminal)))
+                        .child("去终端答"),
+                ),
             );
         }
-        outer.into_any_element()
+
+        div().w_full().flex().flex_col().gap(px(4.)).child(card).into_any_element()
     }
 
-    /// 一道题：header / 题面 / 选项行 / 末尾固定一条「其它」自填
-    fn question_block(
-        &self,
-        seq: u64,
-        qi: usize,
-        q: &QuestionItem,
-        d: &Draft,
-        mode: FormMode,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        let multi = q.multi_select;
-        let clickable = mode == FormMode::Editing;
-        let glyph_el = |on: bool| {
-            let glyph = match (multi, on) {
-                (false, false) => "○",
-                (false, true) => "●",
-                (true, false) => "☐",
-                (true, true) => "☑",
-            };
+    /// 一道题：header / 题面 / 选项行 / 末尾固定一条「其它」。**只画，不收**
+    /// （v1.39 起表单一律只读，答在终端里）：所以没有勾选态，选项前面那个记号
+    /// 一律是空的那一个，只用来说明这题是单选还是多选。
+    fn question_block(&self, q: &QuestionItem) -> gpui::AnyElement {
+        let glyph = if q.multi_select { "☐" } else { "○" };
+        let glyph_el = || {
             div()
                 .flex_none()
                 .w(px(16.))
                 .text_size(px(12.))
                 .font_family("Menlo")
-                .text_color(c(if on { theme::ACCENT } else { theme::DIM }))
+                .text_color(c(theme::DIM))
                 .child(glyph)
         };
 
@@ -1152,17 +889,15 @@ impl MessagesView {
                 .child(SharedString::from(q.question.clone())),
         );
 
-        for (oi, opt) in q.options.iter().enumerate() {
-            let on = d.selected.contains(&oi);
-            let mut row = div()
-                .id(opt_id(seq, qi, oi))
+        for opt in q.options.iter() {
+            let row = div()
                 .flex()
                 .items_start()
                 .gap(px(8.))
                 .px(px(6.))
                 .py(px(3.))
                 .rounded(px(6.))
-                .child(glyph_el(on))
+                .child(glyph_el())
                 .child(
                     div()
                         .flex_1()
@@ -1184,42 +919,19 @@ impl MessagesView {
                             )
                         }),
                 );
-            if clickable {
-                row = row
-                    .cursor_pointer()
-                    .hover(|s| s.bg(ca(theme::AMBER, 0.12)))
-                    .on_click(cx.listener(move |v: &mut Self, _, _, cx| {
-                        v.toggle_option(seq, qi, oi, multi, cx)
-                    }));
-            }
             block = block.child(row);
         }
 
-        // 「其它」：待答时是输入框（提交中保留内容），否则只是一条占位
+        // 末尾那条「其它…」：Claude Code 的对话框固定有它，这里照画，说明这题
+        // 除了列出的选项还能自己写
         let other_row = div()
             .flex()
             .items_center()
             .gap(px(8.))
             .px(px(6.))
             .py(px(3.))
-            .child(glyph_el(d.has_other()));
-        let other_row = match self.other_inputs.get(&(seq, qi)) {
-            Some(input) if mode != FormMode::ReadOnly => other_row
-                .child(
-                    div()
-                        .flex_none()
-                        .text_size(px(12.5))
-                        .text_color(c(theme::INK))
-                        .child("其它"),
-                )
-                .child(div().flex_1().min_w(px(0.)).child(input.clone())),
-            _ => other_row.child(
-                div()
-                    .text_size(px(12.5))
-                    .text_color(c(theme::DIM))
-                    .child("其它…"),
-            ),
-        };
+            .child(glyph_el())
+            .child(div().text_size(px(12.5)).text_color(c(theme::DIM)).child("其它…"));
         block.child(other_row).into_any_element()
     }
 }
@@ -1836,7 +1548,6 @@ impl MessagesView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::QOption;
 
     fn msg(seq: u64, kind: &str) -> ChatMessage {
         ChatMessage {
@@ -1850,38 +1561,6 @@ mod tests {
         }
     }
 
-    fn spec(multi: &[bool]) -> QuestionSpec {
-        QuestionSpec {
-            questions: multi
-                .iter()
-                .map(|&m| QuestionItem {
-                    header: String::new(),
-                    question: "q".into(),
-                    options: vec![QOption::default(), QOption::default(), QOption::default()],
-                    multi_select: m,
-                })
-                .collect(),
-        }
-    }
-
-    fn draft(selected: &[usize], other: &str) -> Draft {
-        Draft {
-            selected: selected.to_vec(),
-            other: other.into(),
-        }
-    }
-
-    /// v1.22：待答的是哪一条只有一个来源——daemon 给的 `asking_seq`
-    #[test]
-    fn only_the_seq_daemon_named_is_answerable() {
-        // 流里有好几张表单，能作答的只有 daemon 点名的那一条
-        assert!(form_interactive(Some(5), 5, false));
-        assert!(!form_interactive(Some(5), 2, false), "旧表单：agent 自己跳过了，只读");
-        // 没有待答（答完了 / 会话退了 / 老 daemon 不给）：一张都不能动
-        assert!(!form_interactive(None, 5, false));
-        // 本端刚提交、answer 消息还没到：先按已答画，免得空表单闪一下
-        assert!(!form_interactive(Some(5), 5, true));
-    }
 
     #[test]
     fn answered_after_looks_at_next_form_event() {
@@ -1894,42 +1573,7 @@ mod tests {
         assert!(!answered_after(&[msg(2, "question")], 2));
     }
 
-    #[test]
-    fn draft_completeness_matches_daemon_validate() {
-        // 单选：恰好一个（选项或自填），不多不少
-        assert!(!draft(&[], "").complete(false));
-        assert!(draft(&[1], "").complete(false));
-        assert!(draft(&[], "Zed").complete(false));
-        assert!(!draft(&[1], "Zed").complete(false));
-        assert!(!draft(&[0, 1], "").complete(false));
-        assert!(!draft(&[], "   ").complete(false), "空白自填不算");
-        // 多选：至少一个
-        assert!(!draft(&[], "").complete(true));
-        assert!(draft(&[0, 2], "").complete(true));
-        assert!(draft(&[], "x").complete(true));
-        assert!(draft(&[1], "x").complete(true));
-    }
 
-    #[test]
-    fn form_complete_needs_every_question() {
-        let s = spec(&[false, true]);
-        assert!(form_complete(&s, &[draft(&[0], ""), draft(&[1, 2], "")]));
-        assert!(!form_complete(&s, &[draft(&[0], ""), draft(&[], "")]));
-        // 题数不齐（草稿还没建全）
-        assert!(!form_complete(&s, &[draft(&[0], "")]));
-        assert!(!form_complete(&s, &[]));
-    }
-
-    #[test]
-    fn draft_to_answer_shape() {
-        // 下标排好序；自填去首尾空白；空自填不发
-        let a = draft(&[2, 0], "  Zed ").to_answer();
-        assert_eq!(a.selected, vec![0, 2]);
-        assert_eq!(a.other.as_deref(), Some("Zed"));
-        let a = draft(&[1], "  ").to_answer();
-        assert_eq!(a.selected, vec![1]);
-        assert_eq!(a.other, None);
-    }
 
     #[test]
     fn time_caption_is_hhmm_in_target_zone() {
@@ -2000,10 +1644,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn option_ids_are_distinct() {
-        assert_ne!(opt_id(7, 0, 1), opt_id(7, 1, 0));
-        assert_ne!(opt_id(7, 0, 1), opt_id(8, 0, 1));
-        assert_eq!(opt_id(7, 0, 1), opt_id(7, 0, 1));
-    }
 }

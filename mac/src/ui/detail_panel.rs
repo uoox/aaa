@@ -14,7 +14,7 @@
 
 use std::time::{Duration, Instant};
 
-use chrono::{DateTime, Datelike, TimeZone, Weekday};
+use chrono::{DateTime, Datelike, TimeZone};
 use gpui::{Context, SharedString, div, prelude::*, px, relative};
 
 use super::kit::*;
@@ -107,6 +107,7 @@ pub(super) fn pct_level(pct: f64) -> Level {
     }
 }
 
+
 /// 级别 → 颜色；正常级别用调用方给的底色（侧栏是 dim、上下文条是主色）
 pub(super) fn level_color(level: Level, ok: u32) -> u32 {
     match level {
@@ -116,35 +117,24 @@ pub(super) fn level_color(level: Level, ok: u32) -> u32 {
     }
 }
 
-fn weekday_zh(w: Weekday) -> &'static str {
-    match w {
-        Weekday::Mon => "周一",
-        Weekday::Tue => "周二",
-        Weekday::Wed => "周三",
-        Weekday::Thu => "周四",
-        Weekday::Fri => "周五",
-        Weekday::Sat => "周六",
-        Weekday::Sun => "周日",
-    }
-}
-
-/// 重置时刻的短写：今天 → `14:30`；一周内 → `周四`；更远 → `9/12`
-pub(super) fn fmt_reset<Tz: TimeZone>(t: &DateTime<Tz>, now: &DateTime<Tz>) -> String
+/// 到重置还有多久，写成 `2d16h` / `13h` / `40m`（2026-09-11 用户拍板：
+/// 「xdxh 指的是重置日还剩下 x 日 x 小时」）。**说还剩多久，不说几点重置**：
+/// 「周日 17:59」要你自己去减，而你想知道的本来就是那个差。
+/// 口径与 Android 的 `resetCountdown` 一字不差。
+pub(super) fn fmt_reset_in<Tz: TimeZone>(t: &DateTime<Tz>, now: &DateTime<Tz>) -> String
 where
     Tz::Offset: std::fmt::Display,
 {
-    let (d, today) = (t.date_naive(), now.date_naive());
-    let hm = t.format("%H:%M").to_string();
-    if d == today {
-        return hm;
-    }
-    let days = (d - today).num_days();
-    // 别的日子带上星期 / 日期再加时刻——「周日」不说几点，等于没说
-    // （口径与 Android 的 `resetLabel` 一字不差）
-    if (1..7).contains(&days) {
-        format!("{} {hm}", weekday_zh(d.weekday()))
+    let mins = (t.clone().with_timezone(&chrono::Utc) - now.clone().with_timezone(&chrono::Utc)).num_minutes();
+    // 已经过了（轮询还没跟上）：说 0h，不说一个负数，也不假装它没到期
+    let mins = mins.max(0);
+    let (d, h, m) = (mins / 1440, (mins % 1440) / 60, mins % 60);
+    if d > 0 {
+        if h > 0 { format!("{d}d{h}h") } else { format!("{d}d") }
+    } else if h > 0 {
+        format!("{h}h")
     } else {
-        format!("{}/{} {hm}", d.month(), d.day())
+        format!("{m}m")
     }
 }
 
@@ -212,19 +202,23 @@ pub(super) fn remain_text(used: f64) -> String {
     format!("{}%", 100 - used.round() as i64)
 }
 
-/// `Claude` 那一栏表头右边那一段：`7d 剩 22% · Fable 剩 9% · 重置 周六 18:00`
-/// （2026-09-11 用户拍板：「订阅剩余额度直接放在列表上 Claude/Antigravity 这一行后面，
-/// 不需要 5h，只需要 7d 和重置时间，claude 加个 Fable 剩余额度，重置时间应该是一样的
-/// 所以不用显示」）。
+/// 一栏表头行尾那一段：`剩 22% · Fable 9% · 2d16h 重置`
+/// （2026-09-11 用户拍板的写法：`Claude: 剩22% Fable 9% xdxh 重置`，
+/// `Antigravity: 剩22% Other 70% xdxh 重置`）。
 ///
-/// 三条：
+/// 四条：
 /// - **说剩多少，不说用了多少**。接口给的是用掉的百分比，这里换算成「剩」——「还能用
 ///   多少」才是你要据以决定接下来干什么的数。颜色仍按**用掉的**算（用得越多越红）。
 /// - **5h 不进来**：它每五小时翻一次，看它没有意义；周窗口才是真会把人卡住的那个。
-/// - **重置时间只出现一次**：7d 与按模型的周窗口实测同一时刻。真不一样了（差一分钟
-///   以上）那一条才补自己的——宁可多一段，也不能拿 7d 的时刻替 Fable 说话。
+/// - **重置写成还剩多久**（`2d16h`），不写几点：那个差才是你要的数。
+/// - **重置时刻一样就只说一次**，摆在行尾；真不一样了（差一分钟以上，Antigravity 的
+///   两组就是这样）**每一段各自带上自己的**——宁可长一点，也不能拿一组的时刻替另一组
+///   说话。
 ///
-/// 返回 `(要显示的字, 用掉的百分比)`；`None` 的那一段是重置时刻，不着色。
+/// v1.39 起这个函数**两栏共用**：daemon 把 agy 的配额压成了同一个 plan 形状
+/// （`quota.rs::parse_agy_usage`），所以 `Claude` 与 `Antigravity` 两栏只有这一套画法。
+///
+/// 返回 `(要显示的字, 用掉的百分比)`；`None` 的那一段是重置，不着色。
 /// 两端同一份口径（Android 的 `planLineSegments`）。
 pub(super) fn plan_header_segs<Tz: TimeZone>(
     plan: &PlanUsage,
@@ -234,37 +228,45 @@ pub(super) fn plan_header_segs<Tz: TimeZone>(
 where
     Tz::Offset: std::fmt::Display,
 {
-    let mut v: Vec<(String, Option<f64>)> = Vec::new();
-    if let Some(p) = plan.seven_day.as_ref().and_then(|w| w.used_percentage) {
-        v.push((format!("7d 剩 {}", remain_text(p)), Some(p)));
+    let at = |r: &Option<crate::model::ResetsAt>| r.as_ref().and_then(|x| x.to_utc());
+    // (要显示的字, 用掉的百分比, 这一段自己的重置时刻)
+    let mut rows: Vec<(String, f64, Option<chrono::DateTime<chrono::Utc>>)> = Vec::new();
+    if let Some(w) = plan.seven_day.as_ref() {
+        if let Some(p) = w.used_percentage {
+            rows.push((format!("剩 {}", remain_text(p)), p, at(&w.resets_at)));
+        }
     }
     for m in plan.model_scoped.iter().flatten() {
         if let Some(p) = m.utilization {
             let name = if m.display_name.is_empty() { "模型" } else { m.display_name.as_str() };
-            v.push((format!("{name} 剩 {}", remain_text(p)), Some(p)));
+            rows.push((format!("{name} {}", remain_text(p)), p, at(&m.resets_at)));
         }
     }
-    if v.is_empty() {
-        return v;
+    if rows.is_empty() {
+        return Vec::new();
     }
-    let at = |r: &Option<crate::model::ResetsAt>| r.as_ref().and_then(|x| x.to_utc());
-    // 重置时刻：以 7d 的为准，没有 7d 就用第一个按模型窗口的
-    let base = plan
-        .seven_day
-        .as_ref()
-        .and_then(|w| at(&w.resets_at))
-        .or_else(|| plan.model_scoped.iter().flatten().find_map(|m| at(&m.resets_at)));
-    if let Some(t) = base {
-        v.push((format!("重置 {}", fmt_reset(&t.with_timezone(tz), now)), None));
-    }
-    // 跟 7d 不是同一时刻的那些，各报各的（实测都一样，所以通常一条都不加）
-    for m in plan.model_scoped.iter().flatten() {
-        let Some(t) = at(&m.resets_at) else { continue };
-        if base.is_some_and(|b| (t - b).num_seconds().abs() <= 60) {
-            continue;
+    // 各段的重置是不是同一时刻（没有时刻的那些不参与判断：它们本来就没什么可说的）
+    let times: Vec<chrono::DateTime<chrono::Utc>> = rows.iter().filter_map(|r| r.2).collect();
+    let same = times
+        .first()
+        .map(|b| times.iter().all(|t| (*t - *b).num_seconds().abs() <= 60))
+        .unwrap_or(true);
+    let mut v: Vec<(String, Option<f64>)> = Vec::new();
+    if same {
+        for (text, used, _) in &rows {
+            v.push((text.clone(), Some(*used)));
         }
-        let name = if m.display_name.is_empty() { "模型" } else { m.display_name.as_str() };
-        v.push((format!("{name} 重置 {}", fmt_reset(&t.with_timezone(tz), now)), None));
+        if let Some(t) = times.first() {
+            v.push((format!("{} 重置", fmt_reset_in(&t.with_timezone(tz), now)), None));
+        }
+    } else {
+        // 不一样：谁的重置跟着谁走，紧挨在它后面
+        for (text, used, t) in &rows {
+            v.push((text.clone(), Some(*used)));
+            if let Some(t) = t {
+                v.push((format!("{} 重置", fmt_reset_in(&t.with_timezone(tz), now)), None));
+            }
+        }
     }
     v
 }
@@ -381,7 +383,7 @@ impl RootView {
         self.spawn_fetch(
             self.net.usage(),
             |r, u: crate::model::UsageResponse, cx| {
-                r.plan = u.plan;
+                r.plans = u.by_agent();
                 cx.notify();
             },
             false,
@@ -1064,21 +1066,20 @@ mod tests {
     }
 
     #[test]
-    fn reset_time_formatting() {
-        let now = at("2026-09-03T10:00:00+08:00"); // 周四
-        // 今天 → 时刻
-        assert_eq!(fmt_reset(&at("2026-09-03T14:30:00+08:00"), &now), "14:30");
-        // 明天到六天后 → 周几 + 时刻（「周日」不说几点等于没说；与 Android 同口径）
-        assert_eq!(fmt_reset(&at("2026-09-04T06:00:00+08:00"), &now), "周五 06:00");
-        assert_eq!(fmt_reset(&at("2026-09-06T06:00:00+08:00"), &now), "周日 06:00");
-        assert_eq!(fmt_reset(&at("2026-09-09T06:00:00+08:00"), &now), "周三 06:00");
-        // 七天及以上 → 月/日 + 时刻
-        assert_eq!(fmt_reset(&at("2026-09-10T06:00:00+08:00"), &now), "9/10 06:00");
-        assert_eq!(fmt_reset(&at("2026-10-01T06:00:00+08:00"), &now), "10/1 06:00");
-        // 过去（已经重置了）→ 月/日 + 时刻
-        assert_eq!(fmt_reset(&at("2026-09-01T06:00:00+08:00"), &now), "9/1 06:00");
-        // 今天但时区不同的输入：比较前应先换到同一时区（调用方负责），这里只验同 tz
-        assert_eq!(fmt_reset(&at("2026-09-03T00:05:00+08:00"), &now), "00:05");
+    fn reset_countdown_formatting() {
+        let now = at("2026-09-03T10:00:00+08:00");
+        // 一天以上：天 + 小时；整天不写 0h
+        assert_eq!(fmt_reset_in(&at("2026-09-05T18:00:00+08:00"), &now), "2d8h");
+        assert_eq!(fmt_reset_in(&at("2026-09-05T10:00:00+08:00"), &now), "2d");
+        // 不到一天：只有小时
+        assert_eq!(fmt_reset_in(&at("2026-09-03T23:40:00+08:00"), &now), "13h");
+        // 不到一小时：分钟
+        assert_eq!(fmt_reset_in(&at("2026-09-03T10:40:00+08:00"), &now), "40m");
+        // 已经过了（轮询还没跟上）：0m，不给负数
+        assert_eq!(fmt_reset_in(&at("2026-09-01T06:00:00+08:00"), &now), "0m");
+        // 跨时区的输入按**同一时刻**算，不按挂钟上的数字：15:40+13:00 就是 02:40Z，
+        // 距 now（02:00Z）40 分钟——按挂钟减会得出 5h40m
+        assert_eq!(fmt_reset_in(&at("2026-09-03T15:40:00+13:00"), &now), "40m");
     }
 
     #[test]
@@ -1175,8 +1176,9 @@ mod tests {
         let texts = |p: &PlanUsage| -> Vec<String> {
             plan_header_segs(p, &now, &tz).into_iter().map(|(t, _)| t).collect()
         };
-        // 5h 那一段整个不进来；7d 的 9/6 = 周日 00:00；Fable 没有自己的重置时刻
-        assert_eq!(texts(&plan), vec!["7d 剩 39%", "Fable 剩 60%", "重置 周日 00:00"]);
+        // 5h 那一段整个不进来；7d 的 9/6 00:00 距 9/3 10:00 是 2d14h；
+        // Fable 没有自己的重置时刻，行尾那一个就替全行说话
+        assert_eq!(texts(&plan), vec!["剩 39%", "Fable 60%", "2d14h 重置"]);
         // 着色仍按**用掉的**算：Fable 用了 40% 是常色，7d 用了 61% 也还没到 70
         let segs = plan_header_segs(&plan, &now, &tz);
         assert_eq!(segs[0].1, Some(61.0));
@@ -1191,23 +1193,25 @@ mod tests {
             seven_day: Some(PlanWindow { used_percentage: Some(95.0), resets_at: None }),
             ..Default::default()
         };
-        assert_eq!(texts(&only7), vec!["7d 剩 5%"]);
-        // 按模型的窗口跟 7d 不是同一时刻：它得自己报
+        assert_eq!(texts(&only7), vec!["剩 5%"]);
+        // 两段的重置不是同一时刻（Antigravity 的两组就是这样）：各自带上自己的，
+        // 紧挨在自己后面——不能拿一组的时刻替另一组说话
         let split = PlanUsage {
             seven_day: Some(PlanWindow {
-                used_percentage: Some(61.0),
-                resets_at: Some(ResetsAt::Text("2026-09-05T16:00:00Z".into())),
+                used_percentage: Some(48.9),
+                resets_at: Some(ResetsAt::Text("2026-09-03T23:52:00+08:00".into())),
             }),
             model_scoped: Some(vec![ModelWindow {
-                display_name: "Fable".into(),
-                utilization: Some(40.0),
-                resets_at: Some(ResetsAt::Text("2026-09-06T16:00:00Z".into())),
+                display_name: "Other".into(),
+                utilization: Some(9.7),
+                resets_at: Some(ResetsAt::Text("2026-09-09T01:00:00+08:00".into())),
             }]),
             ..Default::default()
         };
         assert_eq!(
             texts(&split),
-            vec!["7d 剩 39%", "Fable 剩 60%", "重置 周日 00:00", "Fable 重置 周一 00:00"]
+            vec!["剩 51%", "13h 重置", "Other 90%", "5d15h 重置"]
         );
     }
+
 }

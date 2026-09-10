@@ -4,9 +4,10 @@ version = 4
 
 [[package]]
 name = "aaa-daemon"
-version = "1.38.0"
+version = "1.40.0"
 dependencies = [
  "axum",
+ "base64",
  "bytes",
  "chrono",
  "futures-util",

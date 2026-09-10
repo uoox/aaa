@@ -10,7 +10,7 @@
 pub const SCHEMA: u32 = 2;
 
 pub mod agents;
-pub mod answer;
+pub mod permission;
 pub mod api;
 pub mod cache;
 pub mod config;
@@ -31,7 +31,6 @@ pub mod pool;
 pub mod quota;
 pub mod registry;
 pub mod rootcheck;
-pub mod screen;
 pub mod service;
 pub mod slug;
 pub mod stores;

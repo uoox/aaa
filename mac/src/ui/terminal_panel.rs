@@ -113,20 +113,29 @@ impl RootView {
     }
 
     /// 「+」：在项目根开一个新 shell（fresh，第二个标签必须真是第二个 shell）
+    /// 侧栏终端那一栏的新建行：框里的字就是新终端的名字（空着也行，那还叫「终端 N」）
     pub(super) fn new_terminal(&mut self, cx: &mut Context<Self>) {
         let root = self.project_root();
-        self.create_terminal_in(root, true, cx);
+        let title = self.new_input.read(cx).text().trim().to_string();
+        self.create_terminal_in(root, true, title, cx);
     }
 
     /// 在 `dir` 开终端并切过去。`fresh`：true 一定新开（面板「+」）；false 沿用
     /// daemon 的幂等（目录里已有存活 shell 就回它，旧 shell 项目双击用）。
-    pub(super) fn create_terminal_in(&mut self, dir: String, fresh: bool, cx: &mut Context<Self>) {
-        let fut = self.net.create_terminal(dir, fresh);
+    pub(super) fn create_terminal_in(&mut self, dir: String, fresh: bool, title: String, cx: &mut Context<Self>) {
+        let named = !title.trim().is_empty();
+        let fut = self.net.create_terminal(dir, fresh, title);
         self.spawn_fetch(
             fut,
-            |r, s: Session, cx| {
+            move |r, s: Session, cx| {
                 let id = s.id.clone();
                 r.upsert_session(s, cx);
+                // 名字已经用掉了，草稿就该清掉（2026-09-11 agy 审阅指出：不清的话
+                // 切到项目栏时它还挂在那儿，被当成项目的文件夹名）。Android 那边
+                // 建完也是这么做的
+                if named {
+                    r.new_input.update(cx, |i, cx| i.set_text(String::new(), cx));
+                }
                 r.focus_terminal(id, cx);
             },
             true,
@@ -178,13 +187,22 @@ impl RootView {
     /// 点一行就是那一个终端。以前它是底部一个入口行，后面还藏着一条标签条。
     /// 同日用户「终端列表前面不需要三道杠」：行首那个记号（连同项目行的指示位）一起
     /// 拿掉了——终端没有状态可言，一个记号只是占着行首；标题现在顶格起，和项目行对齐。
-    pub(super) fn render_terminal_rows(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    pub(super) fn render_terminal_rows(
+        &self,
+        // 输入框此刻在不在这一栏
+        new_live: bool,
+        window: &gpui::Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         // 表头与 Claude / Antigravity 两栏同一个写法（2026-09-11 三栏）
         let mut col = div()
             .flex()
             .flex_col()
             .gap(px(1.))
-            .child(super::section_header("终端", &[]));
+            .child(super::section_header("shell", "终端", &[]))
+            // 新建那一行排在栏名底下第一行，与另外两栏同一个位置、同一个构件
+            // （2026-09-11 用户拍板：「终端也是放个输入框，回车新建，相当于给终端命名了」）
+            .child(self.render_new_project_row(new_live, "shell", window, cx));
         for (ix, (id, label)) in self.live_terminal_tabs().into_iter().enumerate() {
             let active =
                 self.page == Page::Terminal && self.active_terminal.as_deref() == Some(id.as_str());
@@ -220,18 +238,7 @@ impl RootView {
                     ),
             );
         }
-        col.child(
-            sidebar_row("sb-term-new".into())
-                .hover(|st| st.bg(c(theme::SURFACE_RAISED)))
-                .on_click(cx.listener(|this, _, _, cx| this.new_terminal(cx)))
-                .child(
-                    div()
-                        .flex_1()
-                        .text_size(px(12.5))
-                        .text_color(c(theme::ACCENT))
-                        .child("＋ 新增终端"),
-                ),
-        )
+        col
     }
 
     /// 面板正文：当前终端的视图。标签条 2026-09-08 拆了——侧栏就是标签条，

@@ -103,11 +103,13 @@ class DaemonClient(
 
     suspend fun sessions(): List<Session> = json.decodeFromString(ListSerializer(Session.serializer()), get("/sessions"))
 
-    suspend fun createSession(projectPath: String, agent: String, resume: Boolean, feedInbox: Boolean = true, fresh: Boolean = false): Session {
+    /** [title] 非空 = 用户给它起的名字（daemon 记成 custom_title，namer 不再改）——终端在用 */
+    suspend fun createSession(projectPath: String, agent: String, resume: Boolean, feedInbox: Boolean = true, fresh: Boolean = false, title: String = ""): Session {
         val body = buildJsonObject {
             put("project_path", projectPath); put("agent", agent); put("resume", resume)
             if (!feedInbox) put("feed_inbox", false)
             if (fresh) put("fresh", true)
+            if (title.isNotBlank()) put("title", title.trim())
         }
         return json.decodeFromString(post("/sessions", body.toString()))
     }
@@ -138,17 +140,6 @@ class DaemonClient(
         post("/sessions/$sessionId/permission", buildJsonObject { put("behavior", behavior) }.toString())
     }
     /** v1.16：看板上勾 / 取消勾清单项 */
-    suspend fun answer(sessionId: String, answers: List<AnswerItem>) {
-        val body = buildJsonObject {
-            put("answers", kotlinx.serialization.json.JsonArray(answers.map { a ->
-                buildJsonObject {
-                    put("selected", kotlinx.serialization.json.JsonArray(a.selected.map { kotlinx.serialization.json.JsonPrimitive(it) }))
-                    put("other", a.other?.let { kotlinx.serialization.json.JsonPrimitive(it) } ?: kotlinx.serialization.json.JsonNull)
-                }
-            }))
-        }
-        post("/sessions/$sessionId/answer", body.toString())
-    }
 
 
     /** 看板：待办 + 按天流水 + 数字（daemon 一次算好） */
@@ -156,7 +147,9 @@ class DaemonClient(
     // ---------- v1.4 ----------
 
     /** 套餐用量；plan 为 null = daemon 暂时没有数据 */
-    suspend fun usage(): PlanUsage? = json.decodeFromString(UsageResponse.serializer(), get("/usage")).plan
+    /** 一个 agent 一份（老 daemon 只给 `plan`，[UsageResponse.byAgent] 把它当 claude 的） */
+    suspend fun usage(): Map<String, PlanUsage> =
+        json.decodeFromString(UsageResponse.serializer(), get("/usage")).byAgent()
 
     /** 「产物」一节的两样：发布过的链接 + 项目里的 Markdown */
     suspend fun artifacts(id: String): ArtifactsResponse =

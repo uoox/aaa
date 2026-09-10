@@ -47,6 +47,7 @@ fn build_app(root: &Path, home: &Path) -> aaa_daemon::api::SharedApp {
         history: std::sync::Mutex::new(history),
         inbox: std::sync::Mutex::new(inbox),
         plan_usage: std::sync::Mutex::new(None),
+        agy_plan_usage: std::sync::Mutex::new(None),
         root_state: std::sync::atomic::AtomicU8::new(aaa_daemon::rootcheck::RootState::Ok.as_u8()),
         restarting: std::sync::atomic::AtomicBool::new(false),
         restart_when_idle: std::sync::atomic::AtomicBool::new(false),

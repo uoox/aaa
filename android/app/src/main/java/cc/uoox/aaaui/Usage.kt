@@ -51,44 +51,55 @@ fun usageHeaderSegments(usage: SessionUsage?): List<UsageSegment> {
 }
 
 /**
- * `Claude` 那一栏表头右边那一段：`7d 剩 22% · Fable 剩 9% · 重置 周六 18:00`
- * （2026-09-11 用户拍板：「订阅剩余额度直接放在列表上 Claude/Antigravity 这一行后面，
- * 不需要 5h，只需要 7d 和重置时间，claude 加个 Fable 剩余额度，重置时间应该是一样的
- * 所以不用显示」）。
+ * 一栏表头行尾那一段：`剩 22% · Fable 9% · 2d16h 重置`
+ * （2026-09-11 用户拍板的写法：`Claude: 剩22% Fable 9% xdxh 重置`，
+ * `Antigravity: 剩22% Other 70% xdxh 重置`）。
  *
- * 三条：
+ * 四条：
  * - **说剩多少，不说用了多少**。接口给的是 `utilization`（用掉的百分比），这里换算成
- *   `100 - used` 并写个「剩」字——「还能用多少」才是你要据以决定接下来干什么的数。
- *   颜色仍按**用掉的**算（用得越多越红），换算的只是那个数字。
+ *   `100 - used`——「还能用多少」才是你要据以决定接下来干什么的数。颜色仍按**用掉的**
+ *   算（用得越多越红），换算的只是那个数字。
  * - **5h 不进来**：它每五小时翻一次，看它没有意义；周窗口才是真会把人卡住的那个。
- * - **重置时间只出现一次**：7d 与按模型的周窗口实测同一时刻。真不一样了（差一分钟以上）
- *   那一条才补自己的——宁可多一段，也不能拿 7d 的时刻替 Fable 说话。
+ * - **重置写成还剩多久**（`2d16h`），不写几点：那个差才是你要的数。
+ * - **重置时刻一样就只说一次**，摆在行尾；真不一样了（差一分钟以上，Antigravity 的
+ *   两组就是这样）**每一段各自带上自己的**——宁可长一点，也不能拿一组的时刻替另一组说话。
+ *
+ * v1.39 起这个函数**两栏共用**：daemon 把 agy 的配额压成了同一个 plan 形状
+ * （`quota.rs::parse_agy_usage`），所以两栏只有这一套画法。
  *
  * 两端同一份口径（mac 的 `plan_header_segs`），两边的单测各盯各的一份同样的例子。
  */
 fun planLineSegments(
     plan: PlanUsage?,
     now: Instant = Instant.now(),
-    zone: ZoneId = ZoneId.systemDefault(),
 ): List<UsageSegment> {
     if (plan == null) return emptyList()
-    val out = mutableListOf<UsageSegment>()
-    plan.seven_day?.used_percentage?.let { out += UsageSegment("7d 剩 " + remainText(it), pctColorLevel(it)) }
+    // (要显示的字, 用掉的百分比, 这一段自己的重置时刻)
+    data class Row(val text: String, val used: Double, val at: Instant?)
+    val rows = mutableListOf<Row>()
+    plan.seven_day?.let { w ->
+        w.used_percentage?.let { rows += Row("剩 " + remainText(it), it, parseResetsAt(w.resets_at)) }
+    }
     plan.model_scoped.orEmpty().forEach { m ->
         m.utilization?.let {
-            out += UsageSegment((m.display_name.ifBlank { "模型" }) + " 剩 " + remainText(it), pctColorLevel(it))
+            rows += Row((m.display_name.ifBlank { "模型" }) + " " + remainText(it), it, parseResetsAt(m.resets_at))
         }
     }
-    if (out.isEmpty()) return out
-    // 重置时刻：以 7d 的为准，没有 7d 就用第一个按模型窗口的
-    val base = parseResetsAt(plan.seven_day?.resets_at)
-        ?: plan.model_scoped.orEmpty().firstNotNullOfOrNull { parseResetsAt(it.resets_at) }
-    resetLabel(base, now, zone)?.let { out += UsageSegment(it) }
-    // 跟 7d 不是同一时刻的那些，各报各的（实测都一样，所以通常一条都不加）
-    plan.model_scoped.orEmpty().forEach { m ->
-        val t = parseResetsAt(m.resets_at) ?: return@forEach
-        if (base != null && kotlin.math.abs(t.epochSecond - base.epochSecond) <= 60) return@forEach
-        resetLabel(t, now, zone)?.let { out += UsageSegment((m.display_name.ifBlank { "模型" }) + " " + it) }
+    if (rows.isEmpty()) return emptyList()
+    // 各段的重置是不是同一时刻（没有时刻的那些不参与判断：它们本来就没什么可说的）
+    val times = rows.mapNotNull { it.at }
+    val base = times.firstOrNull()
+    val same = base == null || times.all { kotlin.math.abs(it.epochSecond - base.epochSecond) <= 60 }
+    val out = mutableListOf<UsageSegment>()
+    if (same) {
+        rows.forEach { out += UsageSegment(it.text, pctColorLevel(it.used)) }
+        base?.let { out += UsageSegment(resetCountdown(it, now) + " 重置") }
+    } else {
+        // 不一样：谁的重置跟着谁走，紧挨在它后面
+        rows.forEach { r ->
+            out += UsageSegment(r.text, pctColorLevel(r.used))
+            r.at?.let { out += UsageSegment(resetCountdown(it, now) + " 重置") }
+        }
     }
     return out
 }
@@ -108,23 +119,26 @@ fun parseResetsAt(el: JsonElement?): Instant? {
         ?: runCatching { OffsetDateTime.parse(s).toInstant() }.getOrNull()
 }
 
-private val WEEKDAYS = arrayOf("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 private val HHMM = DateTimeFormatter.ofPattern("HH:mm")
 
 /**
- * `重置 14:30`（今天）/ `重置 周四 14:30`（一周内）/ `重置 9/18 14:30`（更远或已过去）；
- * null 进 null 出。**七天开外不说周几**：十天后的「周四」是哪个周四说不清楚
- * （口径与 mac 的 `fmt_reset` 一字不差）。
+ * 到重置还有多久，写成 `2d16h` / `13h` / `40m`（2026-09-11 用户拍板：
+ * 「xdxh 指的是重置日还剩下 x 日 x 小时」）。**说还剩多久，不说几点重置**：
+ * 「周日 17:59」要你自己去减，而你想知道的本来就是那个差。
+ * 已经过了（轮询还没跟上）说 `0m`，不给负数。
+ * 口径与 mac 的 `fmt_reset_in` 一字不差。
  */
-fun resetLabel(resetsAt: Instant?, now: Instant = Instant.now(), zone: ZoneId = ZoneId.systemDefault()): String? {
-    if (resetsAt == null) return null
-    val t = resetsAt.atZone(zone)
-    val today: LocalDate = now.atZone(zone).toLocalDate()
-    val hm = t.format(HHMM)
-    if (t.toLocalDate() == today) return "重置 $hm"
-    val days = java.time.temporal.ChronoUnit.DAYS.between(today, t.toLocalDate())
-    if (days in 1..6) return "重置 ${WEEKDAYS[t.dayOfWeek.value - 1]} $hm"
-    return "重置 ${t.monthValue}/${t.dayOfMonth} $hm"
+fun resetCountdown(resetsAt: Instant, now: Instant = Instant.now()): String {
+    val mins = maxOf(0L, java.time.Duration.between(now, resetsAt).toMinutes())
+    val d = mins / 1440
+    val h = (mins % 1440) / 60
+    val m = mins % 60
+    return when {
+        d > 0 && h > 0 -> "${d}d${h}h"
+        d > 0 -> "${d}d"
+        h > 0 -> "${h}h"
+        else -> "${m}m"
+    }
 }
 
 /** 产物时间：今天只给 HH:mm，其它日子给 M/d；解析失败给空串 */

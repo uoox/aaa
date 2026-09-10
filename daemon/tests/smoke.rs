@@ -183,7 +183,7 @@ async fn full_session_lifecycle() {
         .map(|a| a["id"].as_str().unwrap())
         .collect();
     assert_eq!(ids, vec!["claude", "agy"]);
-    assert!(list[0]["available"].is_boolean() && list[0]["label"] == "Claude");
+    assert!(list[0]["available"].is_boolean() && list[0]["label"] == "Anthropic");
 
     // unknown agent rejected
     let (code, e) = http(

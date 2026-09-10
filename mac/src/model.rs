@@ -42,6 +42,9 @@ pub struct Session {
     pub id: String,
     #[serde(default)]
     pub title: String,
+    /// v1.40：`title` 是不是用户自己起的（终端行据此决定叫名字还是「终端 N」）
+    #[serde(default)]
+    pub custom_title: bool,
     #[serde(default)]
     pub project_path: String,
     #[serde(default)]
@@ -231,11 +234,28 @@ pub struct PlanUsage {
     pub model_scoped: Option<Vec<ModelWindow>>,
 }
 
-/// `GET /usage` → `{"plan": null | {…}}`
+/// `GET /usage` → `{"plan": null | {…}, "plans": {"claude": {…}, "agy": {…}}}`
+///
+/// `plan` 是 claude 那一份，daemon 为老客户端留着；**这边读 `plans`**——一个 agent
+/// 一份，键就是 `GET /agents` 的 id。老 daemon 不给 `plans`，那就退回把 `plan` 当
+/// claude 的（见 [`UsageResponse::by_agent`]）。
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct UsageResponse {
     #[serde(default)]
     pub plan: Option<PlanUsage>,
+    #[serde(default)]
+    pub plans: std::collections::HashMap<String, PlanUsage>,
+}
+
+impl UsageResponse {
+    /// 按 agent 分好的配额表。老 daemon（没有 `plans`）只有 claude 那一份
+    pub fn by_agent(self) -> std::collections::HashMap<String, PlanUsage> {
+        if !self.plans.is_empty() {
+            return self.plans;
+        }
+        // 字面量而不是 ui::DEFAULT_AGENT：model 不该反过来依赖 ui
+        self.plan.into_iter().map(|p| ("claude".to_string(), p)).collect()
+    }
 }
 
 // ── 产物 / 改动 / 收件箱 ────────────────────────────────────────────────────
@@ -590,15 +610,6 @@ pub struct QuestionSpec {
     pub questions: Vec<QuestionItem>,
 }
 
-/// `POST /sessions/:id/answer` 里的一项：对应一题，顺序同 `QuestionSpec::questions`。
-/// `selected` 是 0 起的选项下标；`other` 是「其它」自填，空就不发字段。
-#[derive(Debug, Clone, Serialize, Default, PartialEq)]
-pub struct AnswerItem {
-    pub selected: Vec<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub other: Option<String>,
-}
-
 #[derive(Debug, Clone, Deserialize)]
 pub struct ChatMessage {
     pub seq: u64,
@@ -665,6 +676,15 @@ pub enum DaemonEvent {
     },
     /// v1.4：套餐用量刷新（plan 为 null = 拿不到套餐信息，侧栏隐藏该块）
     Usage {
+        #[serde(default)]
+        plan: Option<PlanUsage>,
+    },
+    /// v1.39 别的 agent 的配额（当前只有 `agy`）。**另起一个帧名**是 daemon 那边
+    /// 的决定：老客户端认得 `usage` 不认得这个，不会把 Antigravity 的数字
+    /// 画到 Claude 头上
+    AgentUsage {
+        #[serde(default)]
+        agent: String,
         #[serde(default)]
         plan: Option<PlanUsage>,
     },
@@ -1009,20 +1029,6 @@ mod tests {
             serde_json::from_str(r#"{"seq":8,"role":"user","kind":"answer","text":"Red"}"#).unwrap();
         assert_eq!(m.kind, "answer");
         assert!(m.question.is_none());
-    }
-
-    #[test]
-    fn answer_item_shape() {
-        // 与 PROTOCOL 一致：selected 下标数组；other 为空时整个字段不发
-        let v = serde_json::to_value(vec![
-            AnswerItem { selected: vec![0, 2], other: None },
-            AnswerItem { selected: vec![], other: Some("Zed".into()) },
-        ])
-        .unwrap();
-        assert_eq!(v[0]["selected"], serde_json::json!([0, 2]));
-        assert!(v[0].get("other").is_none());
-        assert_eq!(v[1]["selected"], serde_json::json!([]));
-        assert_eq!(v[1]["other"], "Zed");
     }
 
     #[test]

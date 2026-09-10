@@ -46,16 +46,6 @@ import androidx.compose.ui.unit.sp
 fun Modifier.insetPanel(radius: Dp = 8.dp): Modifier =
     background(Tok.Inset, RoundedCornerShape(radius))
 
-/**
- * 「浮起来」的卡片：[Tok.Surface] 打底 + 一像素 [Tok.Edge] 描边，两者同一个圆角。设置页那
- * 张大卡（12dp）和看板的会话卡（10dp）只差圆角，所以只有 [radius] 一个参数。
- *
- * 顺序是先 background 后 border：border 的一像素描在底色之上，反过来底色会盖住描边内侧半格。
- */
-fun Modifier.surfaceCard(radius: Dp): Modifier =
-    background(Tok.Surface, RoundedCornerShape(radius))
-        .border(1.dp, Tok.Edge, RoundedCornerShape(radius))
-
 // ---------- 小构件 ----------
 
 /**
@@ -125,9 +115,9 @@ fun TintPillButton(label: String, tint: Color, enabled: Boolean = true, onClick:
 }
 
 /**
- * 顶栏左上角那个返回箭头。三屏（设置 / 看板 / 详情）都是这一个字加同样的 8dp 触摸区，只有
- * 字号差一档（详情屏 28sp，另两屏 26sp），所以 [fontSize] 是参数。外面那行 Row 各屏的
- * padding 并不相同，就不一起收了——收进来反而要多一个参数去还原各自的行高。
+ * 顶栏左上角那个返回箭头。压栈进来的几屏（详情、Markdown 阅读）都是这一个字加同样的
+ * 8dp 触摸区，只有字号可能差一档，所以 [fontSize] 是参数。外面那行 Row 各屏的 padding
+ * 并不相同，就不一起收了——收进来反而要多一个参数去还原各自的行高。
  */
 @Composable
 fun BackArrow(onClick: () -> Unit, fontSize: TextUnit = 26.sp) {
@@ -141,8 +131,8 @@ fun BackArrow(onClick: () -> Unit, fontSize: TextUnit = 26.sp) {
 
 /**
  * 全 app 的对话框骨架：[Tok.Raised] 的底、[Tok.Ink] 的标题、右下角一个确认按钮、可选一个
- * 取消按钮。五处对话框（重启 daemon / 重命名 / 回放链接 / 套餐用量 / 删除报告）此前逐行
- * 写了五遍同样的三行样式，正文各不相同——所以正文是 [body] 插槽，其余都定死。
+ * 取消按钮。几处对话框（重命名 / 回放链接 / 删除报告 / 结束会话 / 删除项目）此前逐行
+ * 写了几遍同样的三行样式，正文各不相同——所以正文是 [body] 插槽，其余都定死。
  *
  * [confirmColor] 默认 `Color.Unspecified`：那正是 `Text` 不写 color 时的取值，于是「按钮用
  * M3 主色」和「按钮特意染红/染灰」两种写法都能原样还原，不必为此分出两个构件。
@@ -173,7 +163,7 @@ fun AaaDialog(
 
 /**
  * 「做不做这件事」的确认框：正文一段淡字，确认按钮红（这类框问的都是会毁掉东西的事），
- * 取消固定叫「取消」。结束会话、删除项目、重启 daemon 都走它。
+ * 取消固定叫「取消」。结束会话、删除项目都走它。
  */
 @Composable
 fun ConfirmDialog(title: String, body: String, confirmLabel: String, onConfirm: () -> Unit, onCancel: () -> Unit) {

@@ -1,6 +1,6 @@
 [package]
 name = "aaa-daemon"
-version = "1.38.0"
+version = "1.40.0"
 edition = "2021"
 description = "AAA daemon: PTY pool + server-side VT for AI agent sessions (REST + WS)"
 
@@ -23,6 +23,7 @@ libc = "0.2"
 if-addrs = "0.13"
 percent-encoding = "2"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+base64 = "0.22"                                  # agy 令牌在钥匙串里是 go-keyring 的 base64
 ureq = { version = "2", default-features = false, features = ["tls", "json"] }
 
 [dev-dependencies]

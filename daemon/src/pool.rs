@@ -267,6 +267,10 @@ impl Session {
         serde_json::json!({
             "id": self.id,
             "title": meta.title,
+            // v1.40：这个标题是不是**用户自己起的**。终端行拿它决定叫「终端 N」还是
+            // 那个名字——终端没有 agent 给它起名，`title` 平时就是目录名，不看这一位
+            // 会把目录名当成用户起的名字
+            "custom_title": meta.custom_title,
             "project_path": meta.project_path,
             "project_name": meta.project_name,
             "agent": meta.agent,

@@ -234,6 +234,7 @@ fun NewProjectRow(
     creating: Boolean,
     onCreate: () -> Unit,
     modifier: Modifier = Modifier,
+    placeholder: String = "＋ 新建项目：文件夹名，回车",
 ) {
     // 点这一行的任何地方都聚焦到输入框：光标只占标题那一格，行的上下内边距和右半边
     // 都是点不着的死区（mac 那一行点哪儿都会 focus）
@@ -260,7 +261,7 @@ fun NewProjectRow(
                 decorationBox = { inner ->
                     Box {
                         if (value.isEmpty()) {
-                            Text("＋ 新建项目：文件夹名，回车", color = Tok.Faint, fontSize = ROW_TEXT)
+                            Text(placeholder, color = Tok.Faint, fontSize = ROW_TEXT)
                         }
                         inner()
                     }
@@ -287,8 +288,8 @@ fun NewProjectRow(
  * 且 resume 找不到旧对话会自动开新会话）再进；长按出项目操作单。列表末尾那一行是新建
  * 项目（[NewProjectRow]，与 mac 侧栏一致）。
  *
- * 面板本身画的东西分成三块：降级横幅 [SchemaTooOldBanner]、顶栏 [ProjectPanelHeader]、
- * 列表（[projectSection] + 新建那一行 [NewProjectRow] + [terminalSection]）。留在这里的是
+ * 面板本身画的东西分成三块：降级横幅 [SchemaTooOldBanner]、列表（[projectSection] +
+ * 新建那一行 [NewProjectRow] + [terminalSection]）、底下那一条 [ProjectPanelFooter]。留在这里的是
  * **状态和动作**——建项目 / 开终端 / 开会话都要 store 与导航，收不进任何一块里。
  */
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
@@ -301,7 +302,7 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
     val sessions by store.sessions.collectAsState()
     val conn by store.connState.collectAsState()
     val health by store.health.collectAsState()
-    val plan by store.planUsage.collectAsState()
+    val plans by store.planUsage.collectAsState()
     val settings by store.settings.flow.collectAsState(initial = AppSettings())
     /** 新建那一行里的字：**只是新项目的文件夹名**，不是搜索词（v1.22 用户拍板） */
     var newName by rememberSaveable { mutableStateOf("") }
@@ -318,6 +319,8 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
     // 正在 POST /projects + /sessions：挡住第二次回车
     var creating by remember { mutableStateOf(false) }
     var creatingTerminal by remember { mutableStateOf(false) }
+    /** 终端那一栏新建行里的字：新终端的名字（2026-09-11 用户拍板） */
+    var newTerminalName by rememberSaveable { mutableStateOf("") }
     val root = health?.project_root?.takeIf { it.isNotBlank() } ?: "/Volumes/SSD/project"
     // 行尾那个「N 分钟前」得自己会走：这一屏只在 daemon 推了东西时重组，整套系统闲着
     // 的时候那行字会一直停在「刚刚」。一分钟一跳，只有时间那一个 Text 跟着重组。
@@ -357,7 +360,7 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
                 newName = ""
                 newFor = ""
                 focusManager.clearFocus()
-                onBeforeNavigate(); openSession(sess.id, "")
+                onBeforeNavigate(); openSession(sess.id, "", "")
             } catch (e: Exception) {
                 toast(createErrorText(e))
             } finally { creating = false }
@@ -368,10 +371,12 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
     fun newTerminal() {
         if (creatingTerminal) return
         creatingTerminal = true
+        val name = newTerminalName.trim()
         scope.launch {
             try {
-                val sess = store.client?.createSession(root, "shell", resume = false, fresh = true)
+                val sess = store.client?.createSession(root, "shell", resume = false, fresh = true, title = name)
                     ?: throw IllegalStateException("未连接 daemon")
+                newTerminalName = ""
                 store.refreshSessions()
                 store.prewarmAttachment(sess.id)
                 onBeforeNavigate(); nav.openTerminal(sess.id)
@@ -384,7 +389,7 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
     fun open(row: ProjectRow) {
         val p = row.project
         // 还活着就直接进；进哪一个由 daemon 的 session_id 说了算，客户端不再自己从 /sessions 里挑代表
-        if (row.alive) p.session_id?.let { onBeforeNavigate(); openSession(it, ""); return }
+        if (row.alive) p.session_id?.let { onBeforeNavigate(); openSession(it, "", ""); return }
         // 注册表里没有这个目录（在别处 aaa open 开出来的），daemon 不认它，resume 只会建错东西
         if (!p.registered) { toast("这个目录不在项目注册表里，只能在它还有会话时打开"); return }
         // 注册表里登记了什么就跑什么；分栏读的是同一句话（[ProjectRow.agentId]），
@@ -399,17 +404,23 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
                 // 模板，天然开新）。exited 会话被 daemon 重启清掉后列表里没有它，但
                 // agent 存储里的对话还在，按 primary != null 判会把续聊变成开新对话。
                 val sess = api.createSession(p.path, agent, resume = true)
-                onBeforeNavigate(); openSession(sess.id, "")
+                onBeforeNavigate(); openSession(sess.id, "", "")
             } catch (e: Exception) {
                 toast("启动失败：${e.message}")
             } finally { busy = busy - p.path }
         }
     }
 
-    // 顶栏只剩一栏（2026-09-08 用户拍板）：去掉 "AAA" 标题和 IP · 延迟——app 只有一个，
-    // 标题是废话；IP 和 ms 连着好的时候没人看。留下的三样是真会用的：额度、看板、设置。
-    // 连接**不**正常时那一格改写连接状态：断了得说一声，但这不值得常年占一整行。
-    val planSegs = planLineSegments(plan)
+    // 每栏表头行尾那一段余额（v1.39 起 Claude 与 Antigravity 各有各的，都由 daemon
+    // 压成同一个 plan 形状；终端那一栏没有 agent，取不到就是空的）。**在这里算好**：
+    // 列表里那一层是 LazyListScope，不是 @Composable，remember 进不去。跟着 minuteTick
+    // 重算——行尾写的是「还剩多久重置」，它得自己会走。
+    val planSegsByAgent = remember(plans, minuteTick) { plans.mapValues { (_, p) -> planLineSegments(p) } }
+
+    // 顶栏没有了，设置也没有了（2026-09-11 用户拍板：先「设置按钮改成和 MacOS 一样
+    // fix 在底部」，随即「Android 这边不用设置，里面那些设置就是默认这些不用改了」）。
+    // 剩下的只有「连接不正常时得说一声」，那就**只在不正常时**画列表底下那一条——
+    // 连着好的时候一行都不占，整屏都是项目列表。
     // 面板本身不管宽度：它铺满给它的地方。宽度由**外面那层**定——☰ 抽屉按
     // [sidebarFraction] 小屏铺满 / 大屏半屏，没打开会话时它就是整屏。
     Column(Modifier.fillMaxSize()) {
@@ -417,18 +428,13 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
         // status / title / session_id，这一屏就画不出项目状态——**不留第二套算法**，留着就等于把
         // 刚删掉的分歧又养回来（daemon 与 mac App 同机同版发布，只有手机可能先更新，是几分钟的窗口）
         health?.takeIf { it.schema < SCHEMA_PROJECT_STATUS }?.let { h -> SchemaTooOldBanner(h.version) }
-        ProjectPanelHeader(
-            conn = conn,
-            ssdMissing = health?.ssd_mounted == false,
-            onSettings = { onBeforeNavigate(); nav.navigate("settings") },
-        )
         PullToRefreshBox(
             isRefreshing = refreshing,
             onRefresh = {
                 refreshing = true
                 scope.launch { store.refreshProjects(); store.refreshSessions(); store.refreshHealth(); refreshing = false }
             },
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier.weight(1f).fillMaxWidth(),
         ) {
             LazyColumn(Modifier.fillMaxSize()) {
                 // 一个 agent 一栏（2026-09-11 用户拍板「项目列表三栏：
@@ -437,22 +443,25 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
                 sections.forEach { sec ->
                     projectSection(
                         section = sec,
-                        // 配额是 claude.ai 那份订阅的，只挂在 Claude 那一栏
-                        planSegs = if (sec.agent == DEFAULT_AGENT) planSegs else emptyList(),
+                        planSegs = planSegsByAgent[sec.agent].orEmpty(),
                         minuteTick = minuteTick,
                         busy = busy,
                         currentPath = currentPath,
                         onOpen = { row -> open(row) },
                         onLongPress = { p -> actionsFor = p },
+                        // 新建那一行**排在栏名底下第一行**（2026-09-11 用户拍板）：
+                        // 项目多了不用滚到这一栏的底才能建
+                        newRow = if (!sec.available) null else {
+                            {
+                                NewProjectRow(
+                                    value = if (newFor == sec.agent) newName else "",
+                                    onValueChange = { newFor = sec.agent; newName = it },
+                                    creating = creating && newFor == sec.agent,
+                                    onCreate = { create(sec.agent) },
+                                )
+                            }
+                        },
                     )
-                    if (sec.available) item(key = "new-" + sec.agent) {
-                        NewProjectRow(
-                            value = if (newFor == sec.agent) newName else "",
-                            onValueChange = { newFor = sec.agent; newName = it },
-                            creating = creating && newFor == sec.agent,
-                            onCreate = { create(sec.agent) },
-                        )
-                    }
                 }
                 // 终端与会话平级（2026-09-08 用户拍板）：项目列表下面直接是终端列表，
                 // 底部一行「新增终端」。以前它藏在顶栏一个 `>_` 按钮后面，是另一个世界。
@@ -460,6 +469,8 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
                     terminals = terminals,
                     root = root,
                     creatingTerminal = creatingTerminal,
+                    newName = newTerminalName,
+                    onNameChange = { newTerminalName = it },
                     currentTerminalId = currentTerminalId,
                     onOpen = { t ->
                         // 点下去就把 attach 拉起来，等屏幕组合完 replay 往往已经到了
@@ -471,6 +482,12 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
                 )
             }
         }
+        ProjectPanelFooter(
+            conn = conn,
+            version = health?.version.orEmpty(),
+            ssdMissing = health?.ssd_mounted == false,
+            onRepair = { onBeforeNavigate(); nav.navigate("pair") },
+        )
     }
 
     actionsFor?.let { p ->
@@ -480,8 +497,9 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
 }
 
 /**
- * 列表的**一栏**：表头 + 归这个 agent 的项目行。「新建项目」那一行由调用点接在后面
- * （它要 store 与导航，收不进这一节）。
+ * 列表的**一栏**：表头 + 新建那一行 + 归这个 agent 的项目行。新建那一行的**内容**
+ * 由调用点给（它要 store 与导航，收不进这一节），但**位置**在这里定死：栏名底下
+ * 第一行（2026-09-11 用户拍板）。
  *
  * 写成 `LazyListScope` 的扩展而不是 `@Composable`：这一节是**若干个 item**（表头一项、
  * 项目若干项），包进一个 composable 会把它们压成列表里的一项，行的复用和
@@ -492,8 +510,10 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
  */
 private fun LazyListScope.projectSection(
     section: AgentSection,
-    /** 订阅余额：只有 `Claude` 那一栏传得进来，别的栏是空表 */
+    /** 这一栏的订阅余额；没有就是空表（终端那一栏没有 agent，天然是空的） */
     planSegs: List<UsageSegment>,
+    /** 栏名底下第一行画什么；null = 这个 agent 这台机器没装，不给新建入口 */
+    newRow: (@Composable () -> Unit)?,
     minuteTick: Long,
     /** 正在 POST /sessions 的项目路径，行先按「在跑」画淡蓝底 */
     busy: Set<String>,
@@ -503,8 +523,9 @@ private fun LazyListScope.projectSection(
 ) {
     // 老 daemon 不给 /agents：label 是空的，那就不画表头，一整列照旧
     if (section.label.isNotEmpty()) item(key = "hdr-" + section.agent) {
-        SectionHeader(section.label, planSegs)
+        SectionHeader(section.agent, section.label, planSegs)
     }
+    newRow?.let { row -> item(key = "new-" + section.agent) { row() } }
     items(section.rows, key = { it.project.path }) { row ->
         // 顺序随最近更新变：Compose 按 key 做位移过渡，上移/下移都有动画
         ProjectRowItem(
@@ -525,13 +546,18 @@ private fun LazyListScope.terminalSection(
     /** 项目根，用来把终端的工作目录缩成一个短名字 */
     root: String,
     creatingTerminal: Boolean,
+    /** 新建那一行框里的字 = 要给新终端起的名字（空着回车照样建，那就还叫「终端 N」） */
+    newName: String,
+    onNameChange: (String) -> Unit,
     /** 正在看的那个终端（终端屏才有），强调色标题 + 整行边框 */
     currentTerminalId: String? = null,
     onOpen: (Session) -> Unit,
     onClose: (Session) -> Unit,
     onNew: () -> Unit,
 ) {
-    item(key = "terminals-hdr") { SectionHeader("终端") }
+    item(key = "terminals-hdr") { SectionHeader("shell", "终端") }
+    // 新建那一行排在栏名底下第一行，与另外两栏同一个位置、同一个构件
+    item(key = "terminal-new") { NewTerminalRow(newName, onNameChange, creatingTerminal, onNew) }
     itemsIndexed(terminals, key = { _, t -> "term-" + t.id }) { i, t ->
         TerminalRowItem(
             terminalTabLabel(i, t, root),
@@ -541,7 +567,8 @@ private fun LazyListScope.terminalSection(
             onClose = { onClose(t) },
         )
     }
-    item(key = "terminal-new") { NewTerminalRow(creatingTerminal, onNew) }
+    // 滚到底时最后一行不该被会话页右下角那枚悬浮按钮盖住
+    item(key = "terminal-tail") { Spacer(Modifier.height(80.dp)) }
 }
 
 /**
@@ -561,38 +588,42 @@ private fun SchemaTooOldBanner(version: String) {
 }
 
 /**
- * 面板顶栏一行（2026-09-08 用户拍板砍到三样）：额度 / 看板 / 设置。去掉了 "AAA" 标题和
- * IP · 延迟——app 只有一个，标题是废话；IP 和 ms 连着好的时候没人看。连接**不**正常时左边
- * 那一格改写连接状态：断了得说一声，但这不值得常年占一整行。
+ * 列表**底下**那一条：连接状态点 + `daemon v<版本>` + 「重新配对」，与 mac 侧栏底部
+ * `render_sidebar_footer` 同一个形状、同一个顺序。它不随列表滚，永远贴在底上；
+ * SSD 掉了在右边加一个 `SSD ✗`。
+ *
+ * **整条可点，点进配对页；而且它一直画着。** 设置页删了之后（2026-09-11 用户拍板：
+ * 「Android 这边不用设置」），这是换主机 / 换 token **唯一的出路**——一度做成
+ * 「只在连接不正常时才画」，那就把这条路和故障绑死了：在家连着好好的想换成
+ * 出门用的地址，全屏没有一个能点的地方，只能去清 App 数据（2026-09-11 agy 审阅
+ * 指出）。首次配对不经过它（`gate` 看见没配过直接跳 `pair`）。
  */
 @Composable
-private fun ProjectPanelHeader(
+private fun ProjectPanelFooter(
     conn: ConnState,
-    /** SSD 掉了是事故，才值得占顶栏；正常时不显示 */
+    /** daemon 版本，连上了才有；空串就写个「?」 */
+    version: String,
+    /** SSD 掉了是事故，才值得占这一条；正常时不显示 */
     ssdMissing: Boolean,
-    onSettings: () -> Unit,
+    onRepair: () -> Unit,
 ) {
+    val (dotColor, text) = when (conn) {
+        is ConnState.Connected -> Tok.Green to ("daemon v" + version.ifBlank { "?" })
+        is ConnState.Connecting -> Tok.Amber to "连接中…"
+        is ConnState.Failed -> Tok.Red to "已断开"
+        ConnState.NoServer -> Tok.Dim to "未配对"
+    }
+    HorizontalDivider(color = Tok.Edge)
     Row(
-        Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp, top = 2.dp, bottom = 2.dp),
+        Modifier.fillMaxWidth().clickable(onClick = onRepair).padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // 套餐用量 v1.37 搬到 `Claude` 那一栏的表头上（用户拍板），这一格因此
-        // **只在连接不正常时才有字**：断了得说一声，连着好的时候它是空的
-        Box(Modifier.weight(1f)) {
-            when (conn) {
-                is ConnState.Connected -> Unit
-                is ConnState.Connecting -> DotWithText(Tok.Amber, "连接中…")
-                is ConnState.Failed -> DotWithText(Tok.Red, "已断开")
-                ConnState.NoServer -> DotWithText(Tok.Dim, "未配对")
-            }
-        }
+        Box(Modifier.weight(1f)) { DotWithText(dotColor, text) }
         if (ssdMissing) {
             Text("SSD ✗", color = Tok.Red, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.width(4.dp))
+            Spacer(Modifier.width(8.dp))
         }
-        IconButton(onClick = onSettings) {
-            Text("⚙", color = Tok.Dim, fontSize = 20.sp)
-        }
+        Text("重新配对", color = Tok.Dim, fontSize = 12.sp)
     }
 }
 
@@ -605,8 +636,24 @@ private fun ProjectPanelHeader(
  * 配额是 claude.ai 那份订阅的，daemon 也只问那一家；Antigravity 与终端那两栏
  * 行尾就是空的——没有的东西不编一个出来。
  */
+/**
+ * 栏名前面那个记号（2026-09-11 用户：「也可以换成好看的 logo」）。**用字符不用图片**：
+ * 真的品牌标志有商标问题，也要多带一份资源；一个字符就够把三栏在余光里分开，
+ * 而且跟着字号和主题走，不用为深浅色各出一张图。
+ *
+ * 一律 [Tok.Faint]，**不给它们各自的品牌色**：这个 app 里颜色是有语义的（琥珀 = 在等你、
+ * 蓝 = 在跑、红 = 出事），拿品牌色进来会跟状态色抢读者。形状本来就够认了。
+ * 两端同一张表（mac 的 `section_glyph`）。
+ */
+fun sectionGlyph(agent: String): String? = when (agent) {
+    "claude" -> "✳"
+    "agy" -> "▲"
+    "shell" -> "❯"
+    else -> null
+}
+
 @Composable
-private fun SectionHeader(label: String, planSegs: List<UsageSegment> = emptyList()) {
+private fun SectionHeader(agent: String, label: String, planSegs: List<UsageSegment> = emptyList()) {
     // 上面不留空（2026-09-11 用户：「Claude/Antigravity/终端 上面是有一点高度和空白的，
     // 可以去掉」）：只剩那条分隔线和一点点不让字贴着线的内边距
     HorizontalDivider(color = Tok.Edge, thickness = 1.dp)
@@ -614,7 +661,13 @@ private fun SectionHeader(label: String, planSegs: List<UsageSegment> = emptyLis
         Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 3.dp, bottom = 3.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(label, color = Tok.Dim, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+        // 栏名是这一列的主语，粗体 + 比行文字大一档（2026-09-11 用户：「Anthropic 和
+        // Antigravity 都改成粗体，稍微大一点」）。不用等宽字：等宽是给数字排队用的，
+        // 品牌名用正文字体更像话；行尾那段余额仍旧等宽
+        sectionGlyph(agent)?.let { g ->
+            Text(g, color = Tok.Faint, fontSize = 12.sp, modifier = Modifier.width(16.dp))
+        }
+        Text(label, color = Tok.Ink, fontSize = 15.sp, fontWeight = FontWeight.Bold)
         if (planSegs.isNotEmpty()) {
             Spacer(Modifier.width(10.dp))
             // 挤不下就从右边截：栏名不能被余额顶掉，它才是这一行的主语
@@ -633,14 +686,17 @@ private fun SectionHeader(label: String, planSegs: List<UsageSegment> = emptyLis
  * 按钮让位的，滚到底时最后一行不该被它盖住。
  */
 @Composable
-private fun NewTerminalRow(creating: Boolean, onClick: () -> Unit) {
-    Text(
-        if (creating) "＋ 新增终端…" else "＋ 新增终端",
-        color = if (creating) Tok.Faint else Tok.Accent, fontSize = ROW_TEXT,
-        modifier = Modifier.fillMaxWidth().clickable(enabled = !creating, onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = ROW_PAD),
+private fun NewTerminalRow(value: String, onValueChange: (String) -> Unit, creating: Boolean, onCreate: () -> Unit) {
+    // 与项目那一行同一个构件（2026-09-11 用户拍板：「终端也是放个输入框，回车新建，
+    // 相当于给终端命名了」）：三栏的新建行从此长得一模一样。名字空着回车照样建，
+    // 那就还叫「终端 N」——命名是可选的，不是门槛
+    NewProjectRow(
+        value = value,
+        onValueChange = onValueChange,
+        creating = creating,
+        onCreate = onCreate,
+        placeholder = "＋ 新建终端：名字，回车",
     )
-    Spacer(Modifier.height(80.dp))
 }
 
 /**
@@ -797,13 +853,13 @@ fun ProjectActionsSheet(
                 scope.launch {
                     try {
                         val sess = store.client?.createSession(p.path, agent, resume = true) ?: return@launch
-                        onDismiss(); onBeforeNavigate(); openSession(sess.id, "")
+                        onDismiss(); onBeforeNavigate(); openSession(sess.id, "", "")
                     } catch (e: Exception) { toast("失败：${e.message}") }
                 }
             }
             if (!alive && primary != null) {
                 // 点行 = resume 新会话；上一条已退出的会话只要还在池子里就留着 transcript 回放入口
-                SheetItem("↺", "上次会话回放", "消息流 · 终端回放") { onDismiss(); onBeforeNavigate(); openSession(primary.id, "") }
+                SheetItem("↺", "上次会话回放", "消息流 · 终端回放") { onDismiss(); onBeforeNavigate(); openSession(primary.id, "", "") }
             }
             SheetItem("＞", "在此目录开终端", "zsh") {
                 scope.launch {

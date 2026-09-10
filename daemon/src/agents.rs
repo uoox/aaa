@@ -11,7 +11,7 @@ pub struct AgentDef {
 pub const AGENTS: &[AgentDef] = &[
     AgentDef {
         id: "claude",
-        label: "Claude",
+        label: "Anthropic",
         cmd: "claude --dangerously-skip-permissions",
         resume_cmd: Some("claude --resume %ID% --dangerously-skip-permissions"),
     },

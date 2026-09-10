@@ -163,7 +163,12 @@ private tailrec fun Context.findActivity(): Activity? = when (this) {
 }
 
 /** 打开会话的统一入口，由 AaaApp 提供（压栈到 session/{id}）。 */
-val LocalOpenSession = staticCompositionLocalOf<(String, String) -> Unit> {
+/**
+ * 打开一个会话：`(会话 id, 预填文本, 进去先看哪一屏)`。第三个参数是 `""` 时按会话页
+ * 自己的规矩走（消息流；消息流画不出来的会话退到终端），传 `"terminal"` 就直奔终端
+ * ——通知点进来走的就是后者（2026-09-11 用户拍板，见 PROTOCOL「通知」）。
+ */
+val LocalOpenSession = staticCompositionLocalOf<(String, String, String) -> Unit> {
     error("LocalOpenSession 未提供")
 }
 

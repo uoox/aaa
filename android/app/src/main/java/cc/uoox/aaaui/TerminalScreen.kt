@@ -38,15 +38,19 @@ import androidx.compose.ui.unit.sp
 import androidx.navigation.NavHostController
 import kotlinx.coroutines.launch
 
-fun terminalTabLabel(index: Int, s: Session, root: String): String =
+fun terminalTabLabel(index: Int, s: Session, root: String): String {
+    // **自己起过名字的就叫那个名字**（v1.40，2026-09-11 用户拍板：新建终端时输的字
+    // 就是它的名字）。`custom_title` 是 daemon 记的「这是用户起的」，没有它就不能拿
+    // `title` 当名字——终端没有 agent 给它起名，那个字段平时就是目录名。
+    if (s.custom_title && s.title.isNotBlank()) return s.title.trim()
     // 尾斜杠要先去掉再比、再取叶子名（v1.22 补）：`/a/b/` 与 `/a/b` 是同一个目录，
     // 而 `"/a/b/".substringAfterLast('/')` 是空串——手机上就多出一截「终端 1 · 」的尾巴。
     // mac 侧 `ui/mod.rs` 的标签一直是 trim 过的。
-    ("终端 " + (index + 1)).let { base ->
-        val path = s.project_path.trimEnd('/')
-        val leaf = path.substringAfterLast('/')
-        if (path.isNotEmpty() && path != root.trimEnd('/') && leaf.isNotEmpty()) "$base · $leaf" else base
-    }
+    val base = "终端 " + (index + 1)
+    val path = s.project_path.trimEnd('/')
+    val leaf = path.substringAfterLast('/')
+    return if (path.isNotEmpty() && path != root.trimEnd('/') && leaf.isNotEmpty()) "$base · $leaf" else base
+}
 
 /**
  * 一个终端一屏（2026-09-08 用户拍板：终端列表搬到项目面板里，和会话平级，这里就不再需要

@@ -175,6 +175,7 @@ fn run() {
         inbox: std::sync::Mutex::new(inbox),
         history: std::sync::Mutex::new(history),
         plan_usage: std::sync::Mutex::new(None),
+        agy_plan_usage: std::sync::Mutex::new(None),
         root_state: std::sync::atomic::AtomicU8::new(root_state.as_u8()),
         restarting: std::sync::atomic::AtomicBool::new(false),
         restart_when_idle: std::sync::atomic::AtomicBool::new(false),
@@ -278,6 +279,60 @@ fn run() {
                             // 同一个错只报一次，网断了不刷屏
                             if last_err.as_deref() != Some(e.as_str()) {
                                 eprintln!("quota: usage poll failed: {e}");
+                                last_err = Some(e);
+                            }
+                        }
+                        Ok(None) | Err(_) => {}
+                    }
+                }
+            });
+        }
+        // v1.39 agy 配额轮询（quota.rs 的第二份）：agy 的 statusLine 不带 rate_limits，
+        // 这一份只有轮询一个来源。节奏与上面那一份一样——没有活会话时降到 5 分钟一次，
+        // 没登录 / 令牌过期就跳过这一轮沿用旧值（agy 的令牌 agy 自己会续）。
+        {
+            let app = Arc::clone(&app);
+            tokio::spawn(async move {
+                let mut iv = tokio::time::interval(crate::quota::POLL_INTERVAL);
+                let mut last_err: Option<String> = None;
+                let mut ticks: u64 = 0;
+                let mut backoff_ticks: u64 = 0;
+                loop {
+                    iv.tick().await;
+                    if backoff_ticks > 0 {
+                        backoff_ticks -= 1;
+                        continue;
+                    }
+                    let any_live = app.pool.all().iter().any(|s| {
+                        s.live.lock().unwrap().is_some() && s.meta.lock().unwrap().agent == "agy"
+                    });
+                    ticks += 1;
+                    if !any_live && ticks % crate::quota::IDLE_POLL_EVERY != 1 {
+                        continue;
+                    }
+                    let home = app.paths.home.clone();
+                    let res = tokio::task::spawn_blocking(move || {
+                        let token = crate::quota::agy_access_token(&home)?;
+                        Some(crate::quota::agy_fetch(&token).map(|b| crate::quota::parse_agy_usage(&b)))
+                    })
+                    .await;
+                    match res {
+                        Ok(Some(Ok(Some(mut plan)))) => {
+                            plan["updated_at"] = serde_json::Value::String(
+                                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                            );
+                            app.set_agy_plan_usage(plan);
+                            if last_err.take().is_some() {
+                                println!("quota: agy usage poll recovered");
+                            }
+                        }
+                        Ok(Some(Ok(None))) => {}
+                        Ok(Some(Err(e))) => {
+                            if e == "HTTP 429" {
+                                backoff_ticks = crate::quota::RATE_LIMIT_BACKOFF_TICKS;
+                            }
+                            if last_err.as_deref() != Some(e.as_str()) {
+                                eprintln!("quota: agy usage poll failed: {e}");
                                 last_err = Some(e);
                             }
                         }

@@ -358,6 +358,34 @@ pub fn apply(sess: &Session, event: &str, body: &Value, now: Instant) -> Applied
         .filter(|s| !s.is_empty())
         .map(PathBuf::from);
 
+    // agy 的钩子**不带 transcript_path**，对话 id 就是 transcript 路径的一部分
+    // （`brain/<对话 id>/…`）。学到一个新的对话 id 时，之前认定的那个文件就作废了——
+    // 不作废的后果是消息流永远空着（2026-09-11 用户报「MacOS 的 agy 消息流怎么没有出现」）：
+    //
+    //   daemon 重启 → 按 `resume_after_restart.json` 里的**旧**对话 id 认下一个文件
+    //   → agy 起来其实开了**新**对话，钩子把新 id 报上来、`resume_id` 跟着变
+    //   → 但 `store.file` 还锁在旧文件上，而 agy 那条发现路径给的一律是
+    //     `via_fallback = false`，于是「已在兜底文件上，持续找新的」那条升级路走不到
+    //   → 旧对话被 agy 自己 GC 掉，文件没了，一条消息都读不出来。
+    //
+    // 本机实测：两个 agy 项目在 `cache/last_conversations.json` 里根本没有记录，
+    // 只能靠钩子报来的 id 定位——正是最容易踩中这条的情形。
+    if transcript.is_none() {
+        if let Some(sid) = session_id {
+            // 两把锁**不同时持有**：先读 meta 判断，放掉，再拿 msgs
+            let changed = { sess.meta.lock().unwrap().resume_id.as_deref() != Some(sid) };
+            if changed {
+                let mut store = sess.msgs.lock().unwrap();
+                if store.supported && !store.authoritative && store.file.is_some() {
+                    store.file = None;
+                    store.offset = 0;
+                    store.partial.clear();
+                    store.via_fallback = false;
+                }
+            }
+        }
+    }
+
     // transcript: authoritative, replaces discovery
     if let Some(tp) = transcript {
         let mut store = sess.msgs.lock().unwrap();
@@ -396,7 +424,10 @@ pub fn apply(sess: &Session, event: &str, body: &Value, now: Instant) -> Applied
                 meta.usage = Some(usage);
                 out.dirty = true;
             }
-            out.plan = plan_usage(body);
+            // **只有 claude 的 statusLine 能改 claude 的配额**：v1.39 起 agy 也有自己的
+            // 一份（走 quota.rs 的轮询），它的 statusLine 要是哪天开始带 rate_limits，
+            // 不加这一句就会把 Antigravity 的数字写进 Claude 那一栏
+            out.plan = if meta.agent == "claude" { plan_usage(body) } else { None };
         }
         "SessionStart" => {
             // TUI 起来了、停在输入框：轮到你。compact 是一轮中途的整理，不算
@@ -473,7 +504,13 @@ pub fn apply(sess: &Session, event: &str, body: &Value, now: Instant) -> Applied
             // 提示去终端
             let msg = body.get("message").and_then(Value::as_str).unwrap_or("").to_string();
             match kind {
-                "permission_prompt" if meta.permission.is_none() => {
+                // `!meta.asking` 是第二道闸，挡的是同一件事的另一条路：这条兜底只有一句
+                // message，分不出弹的是权限对话框还是 AskUserQuestion 的选择题。而
+                // 「asking 真、permission 空」按契约（PROTOCOL「会话对象」）**恰好就是**
+                // 「结构化提问在等」——那时候再浮一张「允许 / 拒绝」，按下去就是盲选第一项。
+                // 权限自己的兜底不会被误伤：真的权限对话框先设 permission，第一个条件就拦了；
+                // 答完之后 permission 清空、hint 过期，asking 每秒重算也就回了 false。
+                "permission_prompt" if meta.permission.is_none() && !meta.asking => {
                     meta.permission = Some(json!({"kind": "permission", "tool_name": "权限", "summary": msg, "tool_input": Value::Null, "tool_use_id": Value::Null,
                         "since": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)}));
                     meta.asking = true;
@@ -501,6 +538,21 @@ pub fn apply(sess: &Session, event: &str, body: &Value, now: Instant) -> Applied
             // 我们不在 hook 里决定（async，返回被忽略，对话框照常弹）；客户端按钮通过
             // POST /sessions/:id/permission 驱动 PTY 作答，终端里手动答也一样
             let tool = body.get("tool_name").and_then(Value::as_str).unwrap_or("").to_string();
+            // **AskUserQuestion 不走这条线**（2026-09-11 用户报的那个「消息流选项卡出现时
+            // 上面还盖着一个弹窗」）：Claude Code 对它同样发 PermissionRequest，但它不是
+            // 一个「允许 / 拒绝」的对话框，而是一道选择题——归 `asking_seq` 那条线画表单卡。
+            // 设了 `permission` 的后果不是多一张卡，是**答错**：「允许」发出去的是
+            // `permission_steps` 的数字键 1 + 回车，等于替用户盲选了第一个选项。
+            // 契约本来就是这么写的（PROTOCOL「通知」：「结构化提问（asking 但没有
+            // permission）不给按钮」），漏的是这里这一个判断。
+            if tool == "AskUserQuestion" {
+                meta.asking_hint_inst = Some(now);
+                if !meta.asking {
+                    meta.asking = true;
+                    out.dirty = true;
+                }
+                return out;
+            }
             let input = body.get("tool_input").cloned().unwrap_or(Value::Null);
             meta.permission = Some(json!({
                 "kind": "permission",
@@ -817,6 +869,12 @@ mod tests {
         assert_eq!(sess.meta.lock().unwrap().usage.as_ref().unwrap()["model"], "Fable 5.1");
         let a = apply(&sess, STATUSLINE_EVENT, &body, Instant::now());
         assert!(!a.dirty, "same usage twice is not a change");
+        // v1.39：agy 的 statusLine 只喂本会话用量，**不许动 claude 那份账号配额**
+        // ——agy 有自己的一份（quota.rs 的轮询）
+        let agy = Session::for_test("agy", "/p");
+        let a = apply(&agy, STATUSLINE_EVENT, &body, Instant::now());
+        assert!(a.dirty, "本会话用量照收");
+        assert!(a.plan.is_none(), "但配额不是它能说的");
     }
 
     #[test]
@@ -875,6 +933,56 @@ mod tests {
         assert_eq!(sess.meta.lock().unwrap().permission.as_ref().unwrap()["summary"], "批准计划并退出计划模式");
         apply(&sess, "UserPromptSubmit", &body("UserPromptSubmit", json!({})), now);
         assert!(sess.meta.lock().unwrap().permission.is_none(), "用户又发言了 = 拒绝路径走完了");
+        // agy 换了对话：认定的 transcript 作废，让发现流程按新 id 重来。
+        // 不作废的话消息流就永远停在旧文件上（旧对话还会被 agy 自己 GC 掉）
+        {
+            let agy = Session::for_test("agy", "/p");
+            {
+                let mut st = agy.msgs.lock().unwrap();
+                st.file = Some(std::path::PathBuf::from("/brain/旧对话/transcript.jsonl"));
+                st.offset = 4096;
+            }
+            let agy_body = |sid: &str| body("UserPromptSubmit", json!({"session_id": sid, "transcript_path": null}));
+            apply(&agy, "UserPromptSubmit", &agy_body("新对话"), now);
+            let st = agy.msgs.lock().unwrap();
+            assert!(st.file.is_none(), "旧文件作废");
+            assert_eq!(st.offset, 0);
+            // 同一个 id 再来一次：不该把已经读到的位置清掉
+            drop(st);
+            {
+                let mut st = agy.msgs.lock().unwrap();
+                st.file = Some(std::path::PathBuf::from("/brain/新对话/transcript.jsonl"));
+                st.offset = 128;
+            }
+            apply(&agy, "UserPromptSubmit", &agy_body("新对话"), now);
+            let st = agy.msgs.lock().unwrap();
+            assert_eq!(st.offset, 128, "id 没变就别重来");
+        }
+
+        // AskUserQuestion 也会来一条 PermissionRequest，但它**不是**「允许 / 拒绝」的
+        // 对话框：只翻 asking，不设 permission。设了的话客户端会在消息流上层浮一张
+        // 「允许 / 拒绝」，按下去等于替用户盲选第一个选项（2026-09-11 用户报的问题）
+        let ask = Session::for_test("claude", "/p");
+        let a = apply(
+            &ask,
+            "PermissionRequest",
+            &body("PermissionRequest", json!({"tool_name": "AskUserQuestion", "tool_input": {"questions": []}})),
+            now,
+        );
+        assert!(a.dirty);
+        {
+            let m = ask.meta.lock().unwrap();
+            assert!(m.asking, "它确实在等你答");
+            assert!(m.permission.is_none(), "但这不是权限对话框");
+        }
+        // 另一条路：只有一句 message 的 permission_prompt 兜底。已经在等你答了
+        // （asking 真、permission 空 = 结构化提问）就别再浮一张「允许 / 拒绝」
+        apply(&ask, "Notification", &body("Notification", json!({"notification_type": "permission_prompt", "message": "Claude is waiting for your input"})), now);
+        assert!(ask.meta.lock().unwrap().permission.is_none(), "选择题在等，兜底不许把它说成权限");
+        // 而没有任何东西在等的时候，这条兜底照常起作用
+        let plain = Session::for_test("claude", "/p");
+        apply(&plain, "Notification", &body("Notification", json!({"notification_type": "permission_prompt", "message": "Claude needs your permission to use Bash"})), now);
+        assert_eq!(plain.meta.lock().unwrap().permission.as_ref().unwrap()["kind"], "permission");
     }
 
     #[test]

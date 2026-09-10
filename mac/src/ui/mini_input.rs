@@ -291,6 +291,16 @@ pub enum InputEvent {
 impl gpui::EventEmitter<InputEvent> for MiniInput {}
 
 impl MiniInput {
+    /// 换占位字（侧栏那一个输入框在三栏之间搬家时用：项目栏写「文件夹名」，
+    /// 终端栏写「名字」）。同一个值不写，免得白重画一帧。
+    pub fn set_placeholder(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
+        let text = text.into();
+        if self.placeholder != text {
+            self.placeholder = text;
+            cx.notify();
+        }
+    }
+
     pub fn new(cx: &mut Context<Self>, placeholder: impl Into<SharedString>) -> Self {
         MiniInput {
             ed: Editor::default(),

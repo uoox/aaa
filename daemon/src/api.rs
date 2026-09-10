@@ -47,6 +47,10 @@ pub struct App {
     /// v1.3 账号 plan 配额：5h / 7d 来自最近一次 statusLine 的 rate_limits，
     /// 按模型窗口（Fable）来自 quota.rs 对 claude.ai usage 接口的轮询
     pub plan_usage: std::sync::Mutex<Option<Value>>,
+    /// v1.39 Antigravity（agy）那一份配额：来自 `quota.rs` 对 agy 自己那个配额接口
+    /// 的轮询，压成与上面同一个 plan 形状。agy 的 statusLine 不带 `rate_limits`，
+    /// 所以这一份**只有轮询一个来源**
+    pub agy_plan_usage: std::sync::Mutex<Option<Value>>,
     /// Last known readability of the project root, refreshed by the health
     /// watcher. Requests read this instead of probing: `is_dir()` lies under a
     /// TCC denial (stat passes, `opendir` does not), and an honest probe costs
@@ -105,6 +109,20 @@ impl App {
         };
         if changed {
             self.hub.usage(&plan);
+        }
+    }
+
+    /// v1.39 换上新的 agy 配额；变了才广播 `agent_usage` 帧。
+    /// 没有 `carry_scoped` 那一套：agy 只有轮询一个来源，每次都是完整的一份。
+    pub fn set_agy_plan_usage(&self, plan: Value) {
+        let changed = {
+            let mut cur = self.agy_plan_usage.lock().unwrap();
+            let same = cur.as_ref().is_some_and(|c| crate::quota::same_windows(c, &plan));
+            *cur = Some(plan.clone());
+            !same
+        };
+        if changed {
+            self.hub.agent_usage("agy", &plan);
         }
     }
 }
@@ -755,6 +773,12 @@ struct CreateSession {
     /// 实测事故：双击「没反应」再点一次 → 两个进程 resume 同一个对话）
     #[serde(default)]
     fresh: bool,
+    /// v1.40 建出来就叫这个名字，且是**用户起的**（`custom_title`，namer 不再改它）。
+    /// 给终端用（2026-09-11 用户拍板：「终端也是放个输入框，回车新建，相当于给终端
+    /// 命名了」）——终端没有 agent 会给它起名，不自己写就只剩「终端 N」。
+    /// 空串 = 没写，照旧走标题回退链。
+    #[serde(default)]
+    title: String,
 }
 
 /// 项目行的标题回退链：活会话的标题 → agent 存储读出的 `session_title` → 目录名。
@@ -992,8 +1016,12 @@ async fn sessions_create(
     // 标题接着上一段（v1.34）：新会话的标题先用目录名占着，等 namer 起名。平时看不
     // 出来（新会话本来也没标题），但重启会把所有活会话 resume 一遍——那几十秒里整列
     // 项目都显示成文件夹名，赶上会话在这窗口里被收掉，错的那版还会落进会话日志。
-    let (title, custom_title) = carried_title(&app, resume_id.as_deref(), &canon_str, agent.id)
-        .unwrap_or_else(|| (project_name.clone(), false));
+    // 客户端明写了名字就用它，并记成**用户起的**（namer 不许再改）；否则接着上一段
+    let (title, custom_title) = match body.title.trim() {
+        "" => carried_title(&app, resume_id.as_deref(), &canon_str, agent.id)
+            .unwrap_or_else(|| (project_name.clone(), false)),
+        t => (t.to_string(), true),
+    };
     let spec = SpawnSpec {
         project_path: canon_str.clone(),
         project_name: project_name.clone(),
@@ -1060,12 +1088,18 @@ async fn hook_event(
         app.set_plan_usage(plan, true);
     }
     if let Some((dir, id)) = applied.learned_id {
-        // 注册表第三列：迁移后 resume 的兜底，现在从事件里直接拿到
+        // 注册表第三列：迁移后 resume 的兜底，现在从事件里直接拿到。
+        // **agent 用这个会话自己的**，不是写死的 `claude`（2026-09-11 用户报「agy 项目
+        // 怎么跑到 Claude 里面了」）：agy 的钩子同样报 session_id，写死之后
+        // `set_id` 会把那一行的 agent 无条件改成 claude，项目于是从 Antigravity
+        // 那一栏跳到 Claude 那一栏，点进去开的还是 claude——注册表说了算的东西
+        // 被一次事件改掉了。
+        let agent = sess.meta.lock().unwrap().agent.clone();
         let root = app.cfg.project_root.clone();
         let _ = tokio::task::spawn_blocking(move || {
             let _reg_lock = crate::registry::lock();
             let mut reg = Registry::load(&root);
-            let _ = reg.set_id(&dir, "claude", &id);
+            let _ = reg.set_id(&dir, &agent, &id);
         })
         .await;
     }
@@ -1082,10 +1116,28 @@ async fn hook_event(
     Json(json!({}))
 }
 
-/// 账号 plan 配额（statusLine 的 rate_limits）：还没有任何会话转来时 `plan` 为 null
+/// 账号 plan 配额：还没有任何来源给过时为 null。
+///
+/// `plan` 是 claude 那一份，**为老客户端留着**；v1.39 起真正该读的是 `plans`——
+/// 一个 agent 一份，键就是 `GET /agents` 里的 id（`claude` / `agy`）。两份同一个
+/// 形状，客户端因此只有一套画法（mac `plan_header_segs` / Android `planLineSegments`）。
 async fn usage_get(State(app): State<SharedApp>) -> Json<Value> {
     let plan = app.plan_usage.lock().unwrap().clone();
-    Json(json!({ "plan": plan }))
+    let agy = app.agy_plan_usage.lock().unwrap().clone();
+    Json(usage_body(plan, agy))
+}
+
+/// `GET /usage` 的响应体。拿不到的那一份**在 `plans` 里就没有那个键**（不是 null）：
+/// 「这个 agent 我问不到」和「它剩 0%」是两回事，客户端据此让那一栏行尾空着。
+pub fn usage_body(plan: Option<Value>, agy: Option<Value>) -> Value {
+    let mut plans = serde_json::Map::new();
+    if let Some(p) = plan.clone() {
+        plans.insert("claude".into(), p);
+    }
+    if let Some(p) = agy {
+        plans.insert("agy".into(), p);
+    }
+    json!({ "plan": plan, "plans": Value::Object(plans) })
 }
 
 /// 「产物」一节的两样东西：
@@ -1263,46 +1315,6 @@ async fn session_input(
     Ok(Json(json!({"ok": true})))
 }
 
-#[derive(Deserialize)]
-struct AnswerBody {
-    answers: Vec<crate::answer::Answer>,
-}
-
-/// Answer the AskUserQuestion form the session is waiting on. The client
-/// sends choices (option indexes / free text per question); the daemon
-/// turns them into the dialog's keystrokes and confirms the dialog closed.
-async fn session_answer(
-    State(app): State<SharedApp>,
-    UrlPath(id): UrlPath<String>,
-    Json(body): Json<AnswerBody>,
-) -> ApiResult<Json<Value>> {
-    let sess = get_session(&app, &id)?;
-    if sess.state() == SState::Exited {
-        return Err(ApiError::conflict("session already exited"));
-    }
-    let (agent, since) = {
-        let meta = sess.meta.lock().unwrap();
-        (
-            meta.agent.clone(),
-            meta.created_at.to_rfc3339_opts(SecondsFormat::Millis, true),
-        )
-    };
-    if agent != "claude" {
-        return Err(ApiError::conflict("only claude sessions carry structured questions"));
-    }
-    let spec = {
-        let store = sess.msgs.lock().unwrap();
-        store
-            .pending_question(Some(&since))
-            .and_then(|m| m.question.clone())
-            .ok_or_else(|| ApiError::conflict("no question is waiting for an answer"))?
-    };
-    crate::answer::validate(&spec, &body.answers).map_err(ApiError::bad_request)?;
-    let steps = crate::answer::plan(&spec, &body.answers);
-    crate::answer::drive(&sess, steps).await.map_err(ApiError::conflict)?;
-    Ok(Json(json!({"ok": true})))
-}
-
 async fn session_kill(
     State(app): State<SharedApp>,
     UrlPath(id): UrlPath<String>,
@@ -1420,11 +1432,8 @@ async fn session_permission(
     if sess.meta.lock().unwrap().permission.is_none() {
         return Err(ApiError::conflict("没有权限对话框在等（可能已经在终端里答过了）"));
     }
-    let steps = crate::answer::permission_steps(&body.behavior).map_err(ApiError::bad_request)?;
-    for (bytes, pause) in steps {
-        sess.write_input(&bytes).map_err(|e| ApiError::internal(e.to_string()))?;
-        tokio::time::sleep(std::time::Duration::from_millis(pause)).await;
-    }
+    let steps = crate::permission::permission_steps(&body.behavior).map_err(ApiError::bad_request)?;
+    crate::permission::type_steps(&sess, steps).await.map_err(ApiError::internal)?;
     for _ in 0..20 {
         if sess.meta.lock().unwrap().permission.is_none() {
             return Ok(Json(json!({"ok": true})));
@@ -2000,7 +2009,6 @@ pub fn router(app: SharedApp) -> Router {
         .route("/api/v1/sessions/clean_exited", post(sessions_clean_exited))
         .route("/api/v1/sessions/{id}", delete(session_delete))
         .route("/api/v1/sessions/{id}/input", post(session_input))
-        .route("/api/v1/sessions/{id}/answer", post(session_answer))
         .route("/api/v1/sessions/{id}/kill", post(session_kill))
         .route("/api/v1/sessions/{id}/rename", post(session_rename))
         .route("/api/v1/sessions/{id}/screen", get(session_screen))
@@ -2030,6 +2038,25 @@ pub fn router(app: SharedApp) -> Router {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn usage_body_keys_only_what_we_actually_have() {
+        let claude = json!({"seven_day": {"used_percentage": 61.0}});
+        let agy = json!({"seven_day": {"used_percentage": 48.9}});
+        let both = usage_body(Some(claude.clone()), Some(agy.clone()));
+        assert_eq!(both["plans"]["claude"], claude);
+        assert_eq!(both["plans"]["agy"], agy);
+        // `plan` 是 claude 那一份的影子，为 v1.38 及更早的客户端留着
+        assert_eq!(both["plan"], claude);
+        // 问不到的那一份**没有那个键**，不是 null——「问不到」不是「剩 0%」
+        let only_agy = usage_body(None, Some(agy.clone()));
+        assert!(only_agy["plan"].is_null());
+        assert!(only_agy["plans"].get("claude").is_none());
+        assert_eq!(only_agy["plans"]["agy"], agy);
+        let neither = usage_body(None, None);
+        assert!(neither["plan"].is_null());
+        assert_eq!(neither["plans"], json!({}));
+    }
+
     #[test]
     fn restart_refuses_live_sessions_unless_forced() {
         assert!(restart_blockers(&[], false).is_ok());

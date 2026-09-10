@@ -106,6 +106,8 @@ fun SessionScreen(
     nav: NavHostController,
     sessionId: String,
     prefill: String,
+    /** 进来先看哪一屏：`""` 按下面那条链走，`"terminal"` 直奔终端（通知深链） */
+    initialView: String = "",
     onClose: () -> Unit = { nav.popBackStack() },
 ) {
     val scope = rememberCoroutineScope()
@@ -116,7 +118,16 @@ fun SessionScreen(
 
     // 消息流支持探测：null=未知，true/false=已知
     var messagesSupported by remember { mutableStateOf<Boolean?>(null) }
-    var uiMode by rememberSaveable { mutableStateOf("") } // "" = 未定，跟随默认设置
+    // "" = 未定，按下面那条链走。**通知点进来时它是 `"terminal"`**（2026-09-11 用户拍板：
+    // Claude Code 的结构化提问在消息流里作答不可靠，通知就直接把人送进终端，在 TUI 里
+    // 原生答——见 PROTOCOL「通知」）。之后顶栏点一下照样能切回消息流。
+    var uiMode by rememberSaveable { mutableStateOf(initialView) }
+    // 会话**已经开着**时又从通知点进来：`launchSingleTop` 不重建这一屏，
+    // `rememberSaveable` 的初值也就不会再读一遍 `initialView`，通知落终端那条规矩
+    // 在热会话上就失效了（2026-09-11 agy 审阅指出）。参数变了就跟着走一次。
+    LaunchedEffect(initialView) {
+        if (initialView.isNotEmpty()) uiMode = initialView
+    }
     val effectiveMode = when {
         uiMode.isNotEmpty() -> uiMode
         messagesSupported == false -> "terminal"
@@ -321,17 +332,9 @@ fun SessionScreen(
                     pending = pending,
                     permission = s?.permission,
                     onPermission = { b -> store.client?.permission(sessionId, b) },
-                    onAnswer = { _, answers ->
-                        try {
-                            store.client?.answer(sessionId, answers)
-                        } catch (e: DaemonHttpException) {
-                            Toast.makeText(context, e.message ?: "作答失败", Toast.LENGTH_LONG).show()
-                            throw e
-                        } catch (e: Exception) {
-                            Toast.makeText(context, "作答失败：${e.message}", Toast.LENGTH_LONG).show()
-                            throw e
-                        }
-                    },
+                    // 待答表单上那个「去终端答」：切到终端，那个对话框是 Claude Code
+                    // 自己画在那儿的，按什么就是什么
+                    onGoTerminal = { uiMode = "terminal" },
                 )
             } else {
                 TerminalHost(
@@ -397,10 +400,10 @@ private fun SessionTopBar(
     onToggleView: () -> Unit,
     onDetail: () -> Unit,
 ) {
-    // 竖向内边距只留 4dp：☰ 与 ⓘ 两个 42dp 的方块自己把这一行撑到 50dp，
+    // 竖向内边距只留 4dp：左边 ☰ 那个 42dp 的方块自己把这一行撑到 50dp，
     // 再加 8dp 就白高出去一截
     Row(
-        Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 4.dp),
+        Modifier.fillMaxWidth().padding(start = 6.dp, end = 12.dp, top = 4.dp, bottom = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
@@ -434,14 +437,20 @@ private fun SessionTopBar(
             Spacer(Modifier.width(8.dp))
         }
         StateDot(Tok.stateColor(state))
+        Spacer(Modifier.width(8.dp))
         // 2026-09-08 用户拍板：⋮ 整个换成详情按钮——里面九项大半一年用一次，而
         // 子代理 / 后台任务 / 已上传 / 产物 / 技能这些「发生过但翻不出来」的才该占这个位置。
-        // 2026-09-10 用户报「右上角的详情按钮太小了」：字号 20→26，触摸区从
-        // 「一个字加 10dp 左右内边距」补成 42dp 见方（☰ 同样处理，一行里两头得一样大）
-        Box(
-            Modifier.size(42.dp).clickable(onClick = onDetail),
-            contentAlignment = Alignment.Center,
-        ) { Text("ⓘ", color = Tok.Dim, fontSize = 26.sp) }
+        // 2026-09-11 用户拍板「详情按钮替换成中文按钮」：`ⓘ` 换成「详情」两个字，
+        // 与左边那个视图切换同一款（描边 + 圆角），一眼知道点下去是什么，不用猜图标。
+        // 高度仍与 ☰ 那个 42dp 的方块对齐，一行里两头一样高。
+        Text(
+            "详情",
+            color = Tok.Dim, fontSize = 12.sp,
+            modifier = Modifier
+                .clickable(onClick = onDetail)
+                .border(1.dp, Tok.Edge2, RoundedCornerShape(8.dp))
+                .padding(horizontal = 8.dp, vertical = 4.dp),
+        )
     }
 }
 
@@ -543,7 +552,7 @@ fun MessagesView(
     sessionAlive: Boolean = true,
     /** 待答的是消息流里的哪一条（会话的 `asking_seq`，daemon 判好的）；null = 没有待答表单 */
     askingSeq: Long? = null,
-    onAnswer: suspend (seq: Long, answers: List<AnswerItem>) -> Unit = { _, _ -> },
+    onGoTerminal: () -> Unit = {},
     /** 待发送：Claude Code 自己排着的消息（会话的 `queued`），画在末尾，只读 */
     pending: List<QueuedMsg> = emptyList(),
     /** v1.16：正在等的权限对话框；浮在列表底部，允许 / 拒绝直接答 */
@@ -556,8 +565,8 @@ fun MessagesView(
     val expanded = remember { mutableStateMapOf<Long, Boolean>() }
     val expandedKeys = expanded.filterValues { it }.keys.toSet()
     val items = remember(messages, live, expandedKeys) { flattenForList(foldTurns(messages, live), expandedKeys) }
-    // 表单状态：daemon 说待答的那条可交互（同一个判定 daemon 拿去开 /answer 的门），
-    // 其余按「已回答 / 已结束 / 已过期」画成只读
+    // 表单状态：daemon 说待答的那条露出「去终端答」，其余按
+    // 「已回答 / 已结束 / 已过期」压暗打标签。**四种态都是只读的**（v1.39 起）
     val pendingSeq = askingSeq
     val answeredSeqs = remember(messages) { answeredQuestionSeqs(messages) }
     // 空列表算在底部：没东西可滚，浮动按钮也不该出现
@@ -625,7 +634,7 @@ fun MessagesView(
                                 else -> FormState.STALE
                             }
                         },
-                        onAnswer = onAnswer,
+                        onGoTerminal = onGoTerminal,
                     )
                 }
             }
@@ -645,7 +654,7 @@ fun MessagesView(
     }
 }
 
-/** 表单的四种态：待答（可交互）/ 已回答 / 会话已结束 / 被更新的问题顶掉（悬着但不可答） */
+/** 表单的四种态：待答（露出「去终端答」）/ 已回答 / 会话已结束 / 被更新的问题顶掉。**都只读** */
 enum class FormState { PENDING, ANSWERED, CLOSED, STALE }
 
 @Composable
@@ -653,7 +662,7 @@ private fun StreamRow(
     item: StreamItem,
     expanded: MutableMap<Long, Boolean>,
     formState: (ChatMessage) -> FormState = { FormState.ANSWERED },
-    onAnswer: suspend (Long, List<AnswerItem>) -> Unit = { _, _ -> },
+    onGoTerminal: () -> Unit = {},
 ) {
     when (item) {
         is StreamItem.User -> UserBlock(item.msg)
@@ -662,7 +671,7 @@ private fun StreamRow(
         }
         is StreamItem.Step -> StepRow(item.msg)
         is StreamItem.Reply -> ReplyBlock(item.msg)
-        is StreamItem.Question -> QuestionCard(item.msg, formState(item.msg)) { answers -> onAnswer(item.msg.seq, answers) }
+        is StreamItem.Question -> QuestionCard(item.msg, formState(item.msg), onGoTerminal)
         is StreamItem.Answer -> AnswerBlock(item.msg)
     }
 }
@@ -851,25 +860,14 @@ private fun ToolRow(m: ChatMessage) {
 
 /**
  * 原生表单：agent 的 AskUserQuestion 不再是一行「? 问题」，而是按结构化数据画出来——
- * 单选画单选、多选画复选、末尾固定一条「其它」自填。提交交给 daemon 翻译成对话框按键。
- * 只有 [state] == PENDING 的那张卡可交互；其它状态同布局、只读、带一个小标签。
+ * 题面、选项、末尾固定那条「其它…」都照画，但**只读**（v1.39 起，见 REMOVED.md）：
+ * 选项前面的记号一律是空的那一个，只说明这题是单选还是多选。
+ * 只有 [state] == PENDING 的那张卡露出「去终端答」；其它状态同布局、压暗、带一个小标签。
  */
 @Composable
-private fun QuestionCard(m: ChatMessage, state: FormState, onSubmit: suspend (List<AnswerItem>) -> Unit) {
+private fun QuestionCard(m: ChatMessage, state: FormState, onGoTerminal: () -> Unit) {
     val spec = m.question
-    val scope = rememberCoroutineScope()
     val pending = state == FormState.PENDING
-    val n = spec?.questions?.size ?: 0
-    var selections by remember(m.seq) { mutableStateOf(List(n) { emptySet<Int>() }) }
-    var others by remember(m.seq) { mutableStateOf(List(n) { "" }) }
-    var submitting by remember(m.seq) { mutableStateOf(false) }
-    var error by remember(m.seq) { mutableStateOf<String?>(null) }
-
-    fun complete(i: Int, q: QuestionItem): Boolean {
-        val sel = selections[i]; val other = others[i].isNotBlank()
-        return if (q.multi_select) sel.isNotEmpty() || other else (sel.size == 1 && !other) || (sel.isEmpty() && other)
-    }
-    val allComplete = spec != null && spec.questions.withIndex().all { (i, q) -> complete(i, q) }
 
     Column(
         Modifier.fillMaxWidth().padding(vertical = 4.dp)
@@ -883,7 +881,7 @@ private fun QuestionCard(m: ChatMessage, state: FormState, onSubmit: suspend (Li
             Text("? ${m.text}", color = Tok.Amber, fontSize = 13.sp, fontWeight = FontWeight.Bold)
             return@Column
         }
-        spec.questions.forEachIndexed { qi, q ->
+        spec.questions.forEach { q ->
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     if (q.header.isNotBlank()) {
@@ -892,22 +890,16 @@ private fun QuestionCard(m: ChatMessage, state: FormState, onSubmit: suspend (Li
                     if (q.multi_select) Text("可多选", color = Tok.Faint, fontSize = 10.sp)
                 }
                 Text(q.question, color = Tok.Ink, fontSize = 14.sp, fontWeight = FontWeight.Medium, lineHeight = 20.sp)
-                q.options.forEachIndexed { oi, opt ->
-                    val selected = oi in selections[qi]
+                // 选项**只画不收**（v1.39 起表单一律只读，答在终端里）：记号一律是空的
+                // 那一个，只用来说明这题是单选还是多选
+                val glyph = if (q.multi_select) "☐" else "○"
+                q.options.forEach { opt ->
                     Row(
-                        Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp))
-                            .then(if (pending) Modifier.clickable {
-                                selections = selections.toMutableList().also { list ->
-                                    list[qi] = if (q.multi_select) (if (selected) list[qi] - oi else list[qi] + oi) else setOf(oi)
-                                }
-                                if (!q.multi_select) others = others.toMutableList().also { it[qi] = "" }
-                            } else Modifier)
-                            .padding(vertical = 4.dp, horizontal = 2.dp),
+                        Modifier.fillMaxWidth().padding(vertical = 4.dp, horizontal = 2.dp),
                         verticalAlignment = Alignment.Top,
                     ) {
                         Text(
-                            if (q.multi_select) (if (selected) "☑" else "☐") else (if (selected) "●" else "○"),
-                            color = if (selected) Tok.Accent else Tok.Dim, fontSize = 15.sp, fontFamily = FontFamily.Monospace,
+                            glyph, color = Tok.Dim, fontSize = 15.sp, fontFamily = FontFamily.Monospace,
                             modifier = Modifier.padding(end = 10.dp, top = 1.dp),
                         )
                         Column(Modifier.weight(1f)) {
@@ -916,32 +908,14 @@ private fun QuestionCard(m: ChatMessage, state: FormState, onSubmit: suspend (Li
                         }
                     }
                 }
-                // 其它：自填一行；单选里有字就顶掉圆点，多选里算多勾一项
-                val other = others[qi]
+                // 末尾那条「其它…」：Claude Code 的对话框固定有它，照画，说明这题除了
+                // 列出的选项还能自己写
                 Row(Modifier.fillMaxWidth().padding(vertical = 2.dp, horizontal = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-                    val otherOn = other.isNotBlank()
                     Text(
-                        if (q.multi_select) (if (otherOn) "☑" else "☐") else (if (otherOn) "●" else "○"),
-                        color = if (otherOn) Tok.Accent else Tok.Dim, fontSize = 15.sp, fontFamily = FontFamily.Monospace,
+                        glyph, color = Tok.Dim, fontSize = 15.sp, fontFamily = FontFamily.Monospace,
                         modifier = Modifier.padding(end = 10.dp),
                     )
-                    BasicTextField(
-                        value = other,
-                        onValueChange = { v ->
-                            val one = v.replace('\n', ' ')
-                            others = others.toMutableList().also { it[qi] = one }
-                            if (!q.multi_select && one.isNotBlank()) selections = selections.toMutableList().also { it[qi] = emptySet() }
-                        },
-                        enabled = pending,
-                        singleLine = true,
-                        textStyle = TextStyle(color = Tok.Ink, fontSize = 14.sp),
-                        cursorBrush = SolidColor(Tok.Accent),
-                        modifier = Modifier.weight(1f).insetPanel(6.dp).padding(horizontal = 10.dp, vertical = 7.dp),
-                        decorationBox = { inner ->
-                            if (other.isEmpty()) Text("其它…", color = Tok.Faint, fontSize = 14.sp)
-                            inner()
-                        },
-                    )
+                    Text("其它…", color = Tok.Faint, fontSize = 14.sp)
                 }
             }
         }
@@ -952,26 +926,16 @@ private fun QuestionCard(m: ChatMessage, state: FormState, onSubmit: suspend (Li
                 FormState.CLOSED -> Tag("已结束")
                 FormState.STALE -> Tag("已过期")
             }
-            error?.let { Text(it, color = Tok.Red, fontSize = 11.sp, modifier = Modifier.weight(1f).padding(end = 8.dp)) }
-                ?: Spacer(Modifier.weight(1f))
+            Spacer(Modifier.weight(1f))
+            // 待答：一个「去终端答」。**这张卡自己不收答案**——那个对话框是 Claude Code
+            // 画在终端里的，去按它自己的键，按什么就是什么。
             if (pending) {
-                val enabled = allComplete && !submitting
                 Text(
-                    if (submitting) "提交中…" else "提交",
-                    color = if (enabled) Tok.OnAccent else Tok.Faint, fontSize = 13.sp, fontWeight = FontWeight.Bold,
+                    "去终端答",
+                    color = Tok.OnAccent, fontSize = 13.sp, fontWeight = FontWeight.Bold,
                     modifier = Modifier
-                        .background(if (enabled) Tok.Accent else Tok.Edge2, RoundedCornerShape(8.dp))
-                        .then(if (enabled) Modifier.clickable {
-                            val answers = spec.questions.indices.map { i ->
-                                AnswerItem(selected = selections[i].sorted(), other = others[i].trim().ifBlank { null })
-                            }
-                            scope.launch {
-                                submitting = true
-                                try { onSubmit(answers); error = null }
-                                catch (e: Exception) { error = (e.message ?: "作答失败") + " · 请到终端处理" }
-                                finally { submitting = false }
-                            }
-                        } else Modifier)
+                        .background(Tok.Accent, RoundedCornerShape(8.dp))
+                        .clickable(onClick = onGoTerminal)
                         .padding(horizontal = 16.dp, vertical = 8.dp),
                 )
             }

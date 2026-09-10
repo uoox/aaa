@@ -170,7 +170,7 @@
     "agents": [
       {
         "id": "claude",
-        "label": "Claude",
+        "label": "Anthropic",
         "available": true
       },
       {
@@ -182,7 +182,7 @@
     "sections": [
       {
         "agent": "claude",
-        "label": "Claude",
+        "label": "Anthropic",
         "rows": [
           "/p/ask",
           "/p/run",
