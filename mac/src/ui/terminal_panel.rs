@@ -199,7 +199,7 @@ impl RootView {
             .flex()
             .flex_col()
             .gap(px(1.))
-            .child(super::section_header("shell", "终端", &[]))
+            .child(super::section_header("shell", &[]))
             // 新建那一行排在栏名底下第一行，与另外两栏同一个位置、同一个构件
             // （2026-09-11 用户拍板：「终端也是放个输入框，回车新建，相当于给终端命名了」）
             .child(self.render_new_project_row(new_live, "shell", window, cx));

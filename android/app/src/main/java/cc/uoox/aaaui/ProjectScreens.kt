@@ -523,7 +523,7 @@ private fun LazyListScope.projectSection(
 ) {
     // 老 daemon 不给 /agents：label 是空的，那就不画表头，一整列照旧
     if (section.label.isNotEmpty()) item(key = "hdr-" + section.agent) {
-        SectionHeader(section.agent, section.label, planSegs)
+        SectionHeader(section.agent, planSegs)
     }
     newRow?.let { row -> item(key = "new-" + section.agent) { row() } }
     items(section.rows, key = { it.project.path }) { row ->
@@ -555,7 +555,7 @@ private fun LazyListScope.terminalSection(
     onClose: (Session) -> Unit,
     onNew: () -> Unit,
 ) {
-    item(key = "terminals-hdr") { SectionHeader("shell", "终端") }
+    item(key = "terminals-hdr") { SectionHeader("shell") }
     // 新建那一行排在栏名底下第一行，与另外两栏同一个位置、同一个构件
     item(key = "terminal-new") { NewTerminalRow(newName, onNameChange, creatingTerminal, onNew) }
     itemsIndexed(terminals, key = { _, t -> "term-" + t.id }) { i, t ->
@@ -653,7 +653,7 @@ fun sectionGlyph(agent: String): String? = when (agent) {
 }
 
 @Composable
-private fun SectionHeader(agent: String, label: String, planSegs: List<UsageSegment> = emptyList()) {
+private fun SectionHeader(agent: String, planSegs: List<UsageSegment> = emptyList()) {
     // 上面不留空（2026-09-11 用户：「Claude/Antigravity/终端 上面是有一点高度和空白的，
     // 可以去掉」）：只剩那条分隔线和一点点不让字贴着线的内边距
     HorizontalDivider(color = Tok.Edge, thickness = 1.dp)
@@ -661,13 +661,12 @@ private fun SectionHeader(agent: String, label: String, planSegs: List<UsageSegm
         Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 3.dp, bottom = 3.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // 栏名是这一列的主语，粗体 + 比行文字大一档（2026-09-11 用户：「Anthropic 和
-        // Antigravity 都改成粗体，稍微大一点」）。不用等宽字：等宽是给数字排队用的，
-        // 品牌名用正文字体更像话；行尾那段余额仍旧等宽
+        // **这一行只剩那个记号**（2026-09-11 用户：「两个加粗大标题可以去掉，这个 LOGO
+        // 挺好的，已经很有标识度了」）：记号一眼就认得出是哪一栏，栏名再写一遍是同一件
+        // 事说两次，还把这一行撑高
         sectionGlyph(agent)?.let { g ->
-            Text(g, color = Tok.Faint, fontSize = 12.sp, modifier = Modifier.width(16.dp))
+            Text(g, color = Tok.Dim, fontSize = 13.sp, modifier = Modifier.width(18.dp))
         }
-        Text(label, color = Tok.Ink, fontSize = 15.sp, fontWeight = FontWeight.Bold)
         if (planSegs.isNotEmpty()) {
             Spacer(Modifier.width(10.dp))
             // 挤不下就从右边截：栏名不能被余额顶掉，它才是这一行的主语

@@ -266,11 +266,7 @@ pub(super) fn section_glyph(agent: &str) -> Option<&'static str> {
     }
 }
 
-pub(super) fn section_header(
-    agent: &str,
-    label: impl Into<SharedString>,
-    segs: &[(String, Option<f64>)],
-) -> gpui::Div {
+pub(super) fn section_header(agent: &str, segs: &[(String, Option<f64>)]) -> gpui::Div {
     // 上面不留空（2026-09-11 用户：「Claude/Antigravity/终端 上面是有一点高度和空白的，
     // 可以去掉」）：只剩那条分隔线和一点点不让字贴着线的内边距
     let mut row = meta()
@@ -283,26 +279,20 @@ pub(super) fn section_header(
         .flex()
         .items_center()
         .gap(px(8.))
-        // 栏名是这一列的主语：粗体 + 比行文字大一档（2026-09-11 用户：「Anthropic 和
-        // Antigravity 都改成粗体，稍微大一点」）。行尾那段余额仍是 meta 的小号字。
+        // **这一行只剩那个记号**（2026-09-11 用户：「两个加粗大标题可以去掉，这个 LOGO
+        // 挺好的，已经很有标识度了」）：记号短暂看一眼就认得出是哪一栏，栏名再写一遍
+        // 是同一件事说两次，还把这一行撑高。`label` 因此只剩一个用处——它是空的就
+        // 说明老 daemon 没给 `/agents`，那一栏整个不画表头。
         .when_some(section_glyph(agent), |el, g| {
             el.child(
                 div()
                     .flex_none()
-                    .w(px(14.))
-                    .text_size(px(11.))
-                    .text_color(c(theme::FAINT))
+                    .w(px(16.))
+                    .text_size(px(13.))
+                    .text_color(c(theme::DIM))
                     .child(g),
             )
-        })
-        .child(
-            div()
-                .flex_none()
-                .text_size(px(14.))
-                .font_weight(gpui::FontWeight::BOLD)
-                .text_color(c(theme::INK))
-                .child(label.into()),
-        );
+        });
     if !segs.is_empty() {
         let mut line = div().flex_1().min_w(px(0.)).flex().overflow_hidden().whitespace_nowrap();
         for (ix, (text, used)) in segs.iter().enumerate() {
@@ -1389,7 +1379,7 @@ impl RootView {
                     .get(&sec.agent)
                     .map(|p| detail_panel::plan_header_segs(p, &now, &chrono::Local))
                     .unwrap_or_default();
-                list_col = list_col.child(section_header(&sec.agent, sec.label.clone(), &segs));
+                list_col = list_col.child(section_header(&sec.agent, &segs));
             }
             // 新建那一行**排在栏名底下第一行**（2026-09-11 用户拍板）：项目多了
             // 不用滚到这一栏的底才能建
@@ -1864,10 +1854,14 @@ impl RootView {
 impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.win_w = f32::from(window.viewport_size().width);
-        // 挂起的焦点请求（异步流程里无 window，延到这里）
-        if let Some(id) = self.pending_focus.take()
+        // 挂起的焦点请求（异步流程里无 window，延到这里）。
+        // **拿不到终端实体就把请求留着**，不是 take 掉：`take()` 无条件消费，而后面
+        // 那个 `get` 会失败——实体是在同一轮里才建出来的话，焦点就这么丢了，人切过去
+        // 还得自己再点一下终端。「去终端答」按下去就是为了马上按键，落空最难受。
+        if let Some(id) = self.pending_focus.clone()
             && let Some(t) = self.terminals.get(&id)
         {
+            self.pending_focus = None;
             let handle = t.read(cx).focus_handle_clone();
             handle.focus(window, cx);
         }

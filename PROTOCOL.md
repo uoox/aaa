@@ -178,7 +178,7 @@ transcript 的位置优先认 hooks 报的 `session_id`（就是对话 id），�
 daemon **不再读屏猜「它在问什么」**：没有 `idle`，没有 `question`，没有提示模式匹配。agent 在等一个具体回答这件事只认一个来源——claude transcript 里的 `AskUserQuestion` 工具调用（结构化，见「消息流」），`asking` 就是它的镜像；其它 agent 没有这种结构化信号，`asking` 恒为 false。
 
 GUI 列表口径（mac 侧栏 / Android 项目面板一致）——**单列，一项目一行，不分栏**：
-- **项目列表分三栏：`Claude` / `Antigravity` / `终端`**（v1.36，2026-09-11 用户拍板「项目列表三栏：Claude/Antigravity/Terminal」）。**三栏同一个形状**——表头（一条上边线 + 栏名前一个字符记号 + 栏名）+ 第一行「新建」+ 若干行。表头**上面不留空**（v1.38，用户 2026-09-11：「上面是有一点高度和空白的，可以去掉」）：只剩那条线和 3px 不让字贴着线的内边距，列表顶上那点 padding 也去掉了。终端那一栏本来就长这样，另外两栏照它来；v1.40 反过来了——终端那一栏的「＋ 新增终端」也换成了同款输入框（输的字是终端的名字）。
+- **项目列表分三栏：`Anthropic` / `Antigravity` / `终端`**（v1.36，2026-09-11 用户拍板「项目列表三栏：Claude/Antigravity/Terminal」）。**三栏同一个形状**——表头（一条上边线 + 一个字符记号）+ 第一行「新建」+ 若干行。表头**上面不留空**（v1.38，用户 2026-09-11：「上面是有一点高度和空白的，可以去掉」）：只剩那条线和 3px 不让字贴着线的内边距，列表顶上那点 padding 也去掉了。终端那一栏本来就长这样，另外两栏照它来；v1.40 反过来了——终端那一栏的「＋ 新增终端」也换成了同款输入框（输的字是终端的名字）。
   - **栏序按 `GET /agents` 给的表**（daemon 的 AGENTS 表序：Claude、Antigravity），**栏名用表里的 `label`**——客户端不自己编那张表。**栏内顺序不动**：那是项目列表的排序（更新时间从新到旧），一处算一次。
   - **一行归哪一栏 = 点它跑哪个 agent**，同一句话：注册表登记的 `agent` → 代表会话在跑的 → 默认 `claude`。表里没有的 agent（装过 codex 之类留下的旧项目）归**第一栏**——宁可排错一栏，也不能让一个项目在列表里整个消失。
   - **空栏只在「这台机器装了它」时才留**；没装但有项目的那一栏照画（那些项目得有地方待），只是不给「新建」那一行——开不起来的 agent 不该给入口。**老 daemon 不给 `/agents`**：一栏、不画表头，一整列照旧——编不出「这一栏是谁」就别编。
@@ -187,9 +187,9 @@ GUI 列表口径（mac 侧栏 / Android 项目面板一致）——**单列，�
 - **订阅余额挂在那一栏的表头行尾**（v1.37 起先有 `Claude`，v1.39 起 `Antigravity` 也有；2026-09-11 用户拍板：「订阅剩余额度直接放在列表上 Claude/Antigravity 这一行后面，不需要 5h，只需要 7d 和重置时间」「Claude: 剩22% Fable 9% xdxh 重置；Antigravity：剩22% Other 70% xdxh 重置；5h 不显示」，其中 `Other` 那一段 v1.40 又拿掉了，见下）：
 
   ```
-  Anthropic     剩 22% · Fable 9% · 2d16h 重置
-  Antigravity   剩 51% · 13h 重置
-  终端
+  ✳    剩 22% · Fable 9% · 2d16h 重置
+  ▲    剩 51% · 13h 重置
+  ❯
   ```
 
   口径两端一字不差（mac `plan_header_segs` / Android `planLineSegments`），**两栏共用同一个函数**——daemon 把 agy 的配额压成了同一个 plan 形状，客户端不为第二个 agent 写第二套画法：
@@ -198,8 +198,9 @@ GUI 列表口径（mac 侧栏 / Android 项目面板一致）——**单列，�
   - **重置写成「还剩多久」，不写「几点重置」**（v1.39，用户：「xdxh 指的是重置日还剩下 x 日 x 小时」）：`2d16h` / `13h` / `40m`，已经过了（轮询还没跟上）写 `0m`，不写负数。「周日 17:59」要你自己去减，而你想知道的本来就是那个差。跟着一分钟一跳的那个 tick 自己会走。
   - **各段重置一样就只说一次**，摆在行尾（Claude 实测 7d 与 Fable 逐秒相同）；**不一样就每段各自带上自己的**，紧挨在自己后面。宁可长一点，也不能拿一组的时刻替另一组说话。
   - **Antigravity 只取它默认在用的那一档**（v1.40，用户：「antigravity 右边就不放 Other 了吧，反正也很少用」）：接口按模型分组给（Gemini 一组、Claude/GPT 一组），daemon 只把**第一组**压进 `seven_day`，其余整组不要，`model_scoped` 恒为 null。所以那一栏行尾就是两段。
-  - **栏名前面一个字符记号**（v1.40，用户：「也可以换成好看的 logo」）：`✳` Anthropic / `▲` Antigravity / `❯` 终端。**用字符不用图片**——真的品牌标志有商标问题，也要多带一份资源；一个字符就够在余光里把三栏分开，还跟着字号和主题走。一律用最淡的那一档色，**不给它们各自的品牌色**：这个 app 里颜色是有语义的（琥珀 = 在等你、蓝 = 在跑、红 = 出事），品牌色进来会跟状态色抢读者。两端同一张表（mac `section_glyph` / Android `sectionGlyph`）。
-  - **栏名加粗、比行文字大一档**（v1.40，用户：「Anthropic 和 Antigravity 都改成粗体，稍微大一点」）；`Claude` 那一栏的名字同时改叫 **`Anthropic`**（栏名来自 `GET /agents` 的 `label`，客户端不自己编那张表）。
+  - **表头这一行只有一个字符记号，没有栏名**（v1.40.1，用户：「两个加粗大标题可以去掉，这个 LOGO 挺好的，已经很有标识度了」）：`✳` Anthropic / `▲` Antigravity / `❯` 终端。记号一眼就认得出是哪一栏，栏名再写一遍是同一件事说两次，还把这一行撑高。
+  - **用字符不用图片**——真的品牌标志有商标问题，也要多带一份资源；一个字符就够在余光里把三栏分开，还跟着字号和主题走。一律用淡色，**不给它们各自的品牌色**：这个 app 里颜色是有语义的（琥珀 = 在等你、蓝 = 在跑、红 = 出事），品牌色进来会跟状态色抢读者。两端同一张表（mac `section_glyph` / Android `sectionGlyph`）。
+  - `GET /agents` 的 `label` 因此**只剩一个用处**：它是空的就说明老 daemon 没给 `/agents`，那一栏整个不画表头。（`Claude` 那一栏 v1.40 已改名 `Anthropic`，现在画不出来了，但表里仍是这个名字。）
   - **v1.39 起 `Antigravity` 那一栏也有自己的**（2026-09-11 用户拍板：「antigravity 的账户额度也要放在 Antigravity 的右边」）。终端那一栏没有 agent，行尾天然是空的。mac 侧栏底部那一块空了出来（只剩连接状态 + daemon 版本 + ⚙）。
 - **列表行的字号与行高（Android，v1.36，用户：「Android 列表字体小一些，不要加粗，这样也可以显示更多」）**：项目行、新建那一行、终端行、「＋ 新增终端」**共用一对令牌**（13.5sp / 上下 7dp），一列里几种行本来就该一样高。此前项目行是 15sp 粗体 + 11dp，比终端行高出一截，一屏少放三四个项目；**粗体也去掉**——选中那一行本来就靠强调色 + 整行边框说话。mac 侧栏那一列早就是 12.5px 不加粗，这次是补齐两端。
 - **这个框不做搜索，两端都不做（v1.22 用户拍板：「侧栏就不要做搜索框了，双端都不要，就是用来创建项目的」）**：**不边打字边过滤列表**（Android 此前顺手做了过滤，mac 没有——又是一处两端不一样）。要找一个项目就在列表里翻：一行只有标题 + 时间 + 一根线，本来就是给眼睛扫的。
@@ -380,7 +381,7 @@ Claude 以 `--dangerously-skip-permissions` 运行，`PermissionRequest` 不会�
 - `GET /sessions/:id/messages?after=<seq>&limit=<n=200>` → `{"supported":bool,"source":"claude|agy|none","last_seq":N,"messages":[…]}`
 - 消息结构：`{"seq":N,"ts":"…","role":"user|assistant|tool|system","kind":"text|thinking|tool_use|tool_result|question|answer","text":"…","tool":{"name":"Bash","summary":"cargo build","status":"ok|err|running"}|null,"question":{…}?}`
 - **表单（claude）**：`AskUserQuestion` 工具调用不当普通 tool_use 显示，而是 `kind:"question"`（role assistant）：`text` = 第一题题面，`tool.summary` = 各题 header 用 ` · ` 连接，并附 `"question":{"questions":[{"header":"Color","question":"Pick a color","options":[{"label":"Red","description":"A warm color"}],"multi_select":false}]}`（原样来自工具入参，`multiSelect` 已转 snake_case）。它的 tool_result 变成 `kind:"answer"`（role **user**）：`text` 为用户的回答（单题就是答案本身；多题每行 `题面 → 答案`），`tool.status` 沿用 ok/err。**待答** = 最新一条 question 后面没有 answer，且它不早于本进程 `created_at`（resume 进来的旧 transcript 里悬着的问题，新进程不会再弹框，不算）。这就是会话 `asking` 的定义。**这条判定只在 daemon 做**（`MsgStore::pending_question`，整串比 `ts`），结果就是会话对象上的 `asking_seq`；客户端画哪张卡片一律看它，不再自己倒着找消息流。v1.22 前三端各判一次、比法还不同（daemon 整串、两端取前 19 字符），同一秒里 daemon 说「不是待答」而客户端说「是」，点提交就是 409。
-- 客户端渲染约定：`question` 画成一张卡，**只读**（v1.39，见 [`REMOVED.md`](REMOVED.md)）——题面、选项、末尾固定那条「其它…」都照画，但选项前面的记号一律是空的那一个，只说明这题是单选还是多选。**待答**（`asking_seq` 正是这一条且会话活着）时卡上露出一个**「去终端答」**，点它切到终端视图；其余情形压暗并打标签（已回答 / 已结束 / 已过期）。不折叠进过程；`answer` 画在用户一侧。
+- 客户端渲染约定：`question` 画成一张卡，**只读**（v1.39，见 [`REMOVED.md`](REMOVED.md)）——题面、选项、末尾固定那条「其它…」都照画，但选项前面的记号一律是空的那一个，只说明这题是单选还是多选。**待答**（`asking_seq` 正是这一条且会话活着）时卡上露出一个**「去终端答」**，点它切到终端视图**并把焦点交给终端**（mac 的挂起焦点请求在拿不到终端实体时会留到下一帧，不 take 掉——按下去就是为了马上按键，落空最难受）；其余情形压暗并打标签（已回答 / 已结束 / 已过期）。不折叠进过程；`answer` 画在用户一侧。
 - daemon 在会话 spawn/resume 后定位该会话的 Claude transcript（resume 已知文件；新会话按 cwd 匹配 + mtime ≥ 启动时刻轮询发现）并增量 tail 解析（jsonl：user/assistant/tool_use/tool_result/thinking，过滤 isSidechain 与注入块）。agy 的形状完全不同，见「Agent 表 · agy 的消息流」；**只有事实来源按 agent 分派，判定不分派**——待答、后台、折叠、排序全走同一份实现。shell（终端）返回 `supported:false`。resume 场景：旧 id 的 transcript 只是延迟兜底（~30s），发现会话自己写的新文件后自动升级；同目录并发会话不共享同一存储文件（已被认领的候选跳过）。
 - **折叠约定（v1.11 修，2026-09-07）**：assistant 的**每一条** `text` 都是回答，一律露出——Claude 的回答天生分段（说一句 → 干活 → 再说一句）。折叠里只放 `thinking` / `tool_use` / `tool_result` / system；一轮内连续的过程消息并成一个折叠段，夹在各段回答之间，展开状态按段内第一条 `seq` 记。只有会话在跑、且**贴在最后**的那一段画成「进行中 · N 步 · 最近：…」。此前只把一轮的最后一条 text 当回答、其余折进「过程」，中途的真回答看起来就成了思考过程。
 - `/events` 新帧：`{"t":"messages_changed","id":"s_…","last_seq":N}`（≥500ms 节流）。客户端收到后增量拉取。
