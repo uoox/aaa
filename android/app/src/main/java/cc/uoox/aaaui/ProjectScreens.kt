@@ -303,7 +303,6 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
     val health by store.health.collectAsState()
     val plan by store.planUsage.collectAsState()
     val settings by store.settings.flow.collectAsState(initial = AppSettings())
-    var planDialog by remember { mutableStateOf(false) }
     /** 新建那一行里的字：**只是新项目的文件夹名**，不是搜索词（v1.22 用户拍板） */
     var newName by rememberSaveable { mutableStateOf("") }
     /**
@@ -420,9 +419,7 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
         health?.takeIf { it.schema < SCHEMA_PROJECT_STATUS }?.let { h -> SchemaTooOldBanner(h.version) }
         ProjectPanelHeader(
             conn = conn,
-            planSegs = planSegs,
             ssdMissing = health?.ssd_mounted == false,
-            onPlanClick = { planDialog = true },
             onHistory = { onBeforeNavigate(); nav.navigate("history") },
             onSettings = { onBeforeNavigate(); nav.navigate("settings") },
         )
@@ -441,6 +438,8 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
                 sections.forEach { sec ->
                     projectSection(
                         section = sec,
+                        // 配额是 claude.ai 那份订阅的，只挂在 Claude 那一栏
+                        planSegs = if (sec.agent == DEFAULT_AGENT) planSegs else emptyList(),
                         minuteTick = minuteTick,
                         busy = busy,
                         currentPath = currentPath,
@@ -479,7 +478,6 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
         ProjectActionsSheet(store, nav, p, onDismiss = { actionsFor = null }, onPurged = { purgeReport = it }, onBeforeNavigate = onBeforeNavigate)
     }
     purgeReport?.let { results -> PurgeReportDialog(results) { purgeReport = null } }
-    if (planDialog) plan?.let { PlanUsageDialog(it) { planDialog = false } }
 }
 
 /**
@@ -495,6 +493,8 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
  */
 private fun LazyListScope.projectSection(
     section: AgentSection,
+    /** 订阅余额：只有 `Claude` 那一栏传得进来，别的栏是空表 */
+    planSegs: List<UsageSegment>,
     minuteTick: Long,
     /** 正在 POST /sessions 的项目路径，行先按「在跑」画淡蓝底 */
     busy: Set<String>,
@@ -503,7 +503,9 @@ private fun LazyListScope.projectSection(
     onLongPress: (Project) -> Unit,
 ) {
     // 老 daemon 不给 /agents：label 是空的，那就不画表头，一整列照旧
-    if (section.label.isNotEmpty()) item(key = "hdr-" + section.agent) { SectionHeader(section.label) }
+    if (section.label.isNotEmpty()) item(key = "hdr-" + section.agent) {
+        SectionHeader(section.label, planSegs)
+    }
     items(section.rows, key = { it.project.path }) { row ->
         // 顺序随最近更新变：Compose 按 key 做位移过渡，上移/下移都有动画
         ProjectRowItem(
@@ -567,11 +569,8 @@ private fun SchemaTooOldBanner(version: String) {
 @Composable
 private fun ProjectPanelHeader(
     conn: ConnState,
-    /** 套餐用量的各段，空 = 没数据（或 daemon 不给），那一格就空着 */
-    planSegs: List<UsageSegment>,
     /** SSD 掉了是事故，才值得占顶栏；正常时不显示 */
     ssdMissing: Boolean,
-    onPlanClick: () -> Unit,
     onHistory: () -> Unit,
     onSettings: () -> Unit,
 ) {
@@ -579,15 +578,11 @@ private fun ProjectPanelHeader(
         Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp, top = 2.dp, bottom = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        // 套餐用量 v1.37 搬到 `Claude` 那一栏的表头上（用户拍板），这一格因此
+        // **只在连接不正常时才有字**：断了得说一声，连着好的时候它是空的
         Box(Modifier.weight(1f)) {
             when (conn) {
-                is ConnState.Connected ->
-                    // 套餐用量：5h / 7d / 按模型，最高的那个 ≥70 琥珀、≥90 红；点开看重置时间
-                    if (planSegs.isNotEmpty()) Text(
-                        segmentsAnnotated(planSegs, Tok.Faint),
-                        fontSize = 11.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.fillMaxWidth().clickable(onClick = onPlanClick),
-                    )
+                is ConnState.Connected -> Unit
                 is ConnState.Connecting -> DotWithText(Tok.Amber, "连接中…")
                 is ConnState.Failed -> DotWithText(Tok.Red, "已断开")
                 ConnState.NoServer -> DotWithText(Tok.Dim, "未配对")
@@ -607,18 +602,33 @@ private fun ProjectPanelHeader(
 }
 
 /**
- * 一栏的表头：一条分隔线 + 栏名（`Claude` / `Antigravity` / `终端`）。
+ * 一栏的表头：一条分隔线 + 栏名（`Claude` / `Antigravity` / `终端`）+ 行尾的订阅余额。
  * 三栏同一个写法——终端与会话平级（2026-09-08 用户拍板），它只是列表里的最后一栏，
  * 不是另一个页面。栏名来自 `GET /agents` 的 `label`，客户端不自己编那张表。
+ *
+ * [planSegs] 只有 `Claude` 那一栏有（v1.37 用户拍板把订阅余额放到这一行后面）：
+ * 配额是 claude.ai 那份订阅的，daemon 也只问那一家；Antigravity 与终端那两栏
+ * 行尾就是空的——没有的东西不编一个出来。
  */
 @Composable
-private fun SectionHeader(label: String) {
+private fun SectionHeader(label: String, planSegs: List<UsageSegment> = emptyList()) {
     HorizontalDivider(color = Tok.Edge, thickness = 1.dp, modifier = Modifier.padding(top = 10.dp))
-    Text(
-        label,
-        color = Tok.Dim, fontSize = 11.sp, fontFamily = FontFamily.Monospace,
-        modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 4.dp),
-    )
+    Row(
+        Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, color = Tok.Dim, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+        if (planSegs.isNotEmpty()) {
+            Spacer(Modifier.width(10.dp))
+            // 挤不下就从右边截：栏名不能被余额顶掉，它才是这一行的主语
+            Text(
+                segmentsAnnotated(planSegs, Tok.Faint),
+                fontSize = 11.sp, fontFamily = FontFamily.Monospace,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+        }
+    }
 }
 
 /**
@@ -634,35 +644,6 @@ private fun NewTerminalRow(creating: Boolean, onClick: () -> Unit) {
             .padding(horizontal = 16.dp, vertical = ROW_PAD),
     )
     Spacer(Modifier.height(80.dp))
-}
-
-/** 每个窗口一行：名称 + 百分比（按级别着色）+ 重置时间 */
-@Composable
-fun PlanUsageDialog(plan: PlanUsage, onDismiss: () -> Unit) {
-    data class Line(val name: String, val pct: Double?, val resetsAt: kotlinx.serialization.json.JsonElement?)
-    val lines = buildList {
-        plan.five_hour?.let { add(Line("5 小时", it.used_percentage, it.resets_at)) }
-        plan.seven_day?.let { add(Line("7 天", it.used_percentage, it.resets_at)) }
-        plan.model_scoped.orEmpty().forEach { add(Line(it.display_name.ifBlank { "模型" }, it.utilization, it.resets_at)) }
-    }
-    AaaDialog("套餐用量", onDismiss, confirmLabel = "关闭", confirmColor = Tok.Dim) {
-        Column {
-            lines.forEach { l ->
-                Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(l.name, color = Tok.Ink, fontSize = 14.sp, modifier = Modifier.weight(1f))
-                    Text(
-                        l.pct?.let { pctText(it) } ?: "—",
-                        color = pctColor(pctColorLevel(l.pct), Tok.Ink), fontSize = 14.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold,
-                    )
-                    resetLabel(parseResetsAt(l.resetsAt))?.let {
-                        Spacer(Modifier.width(12.dp))
-                        Text(it, color = Tok.Faint, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
-                    }
-                }
-            }
-            if (lines.isEmpty()) Text("暂无数据", color = Tok.Faint)
-        }
-    }
 }
 
 /**

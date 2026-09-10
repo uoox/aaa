@@ -237,10 +237,17 @@ fn agent_sections(rows: Vec<ProjectRow>, agents: &[AgentInfo]) -> Vec<AgentSecti
         .collect()
 }
 
-/// 一栏的表头：一条上边线 + 栏名（`Claude` / `Antigravity` / `终端`）。三栏同一个写法。
-/// 栏名来自 `GET /agents` 的 `label`，客户端不自己编那张表。
-pub(super) fn section_header(label: impl Into<SharedString>) -> gpui::Div {
-    meta()
+/// 一栏的表头：一条上边线 + 栏名（`Claude` / `Antigravity` / `终端`）+ 行尾的订阅余额。
+/// 三栏同一个写法。栏名来自 `GET /agents` 的 `label`，客户端不自己编那张表。
+///
+/// `segs` 只有 `Claude` 那一栏有（v1.37 用户拍板把订阅余额放到这一行后面）：配额是
+/// claude.ai 那份订阅的，daemon 也只问那一家；Antigravity 与终端那两栏行尾就是空的
+/// ——没有的东西不编一个出来。挤不下就从右边截，栏名不能被余额顶掉。
+pub(super) fn section_header(
+    label: impl Into<SharedString>,
+    segs: &[(String, Option<f64>)],
+) -> gpui::Div {
+    let mut row = meta()
         .mx(px(6.))
         .px(px(10.))
         .mt(px(8.))
@@ -248,7 +255,25 @@ pub(super) fn section_header(label: impl Into<SharedString>) -> gpui::Div {
         .pb(px(4.))
         .border_t_1()
         .border_color(c(theme::EDGE))
-        .child(label.into())
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .child(div().flex_none().child(label.into()));
+    if !segs.is_empty() {
+        let mut line = div().flex_1().min_w(px(0.)).flex().overflow_hidden().whitespace_nowrap();
+        for (ix, (text, used)) in segs.iter().enumerate() {
+            if ix > 0 {
+                line = line.child(div().px(px(4.)).text_color(c(theme::FAINT)).child("·"));
+            }
+            // 着色按**用掉的**算（用得越多越红）；重置那一段没有百分比，用最淡的一档
+            let color = used.map_or(theme::FAINT, |p| {
+                detail_panel::level_color(detail_panel::pct_level(p), theme::FAINT)
+            });
+            line = line.child(div().flex_none().text_color(c(color)).child(SharedString::from(text.clone())));
+        }
+        row = row.child(line);
+    }
+    row
 }
 
 /// 行尾那个时间（2026-09-08 用户：「MacOS 这边也显示出来时间」——Android 项目列表
@@ -1241,8 +1266,6 @@ impl RootView {
             // 会话日志入口
             .child(self.render_history_entry(cx))
             .child(self.render_sidebar_footer(conn_color, conn_text, cx))
-            // 套餐用量：最底下两行小字（没有套餐信息就整块不画）
-            .when_some(self.render_plan_usage(), |el, block| el.child(block))
     }
 
     /// 侧栏主体那一列：一个 agent 一栏，终端是最后一栏。
@@ -1271,7 +1294,12 @@ impl RootView {
         for sec in sections {
             // 老 daemon 不给 /agents：label 是空的，那就不画表头，一整列照旧
             if !sec.label.is_empty() {
-                list_col = list_col.child(section_header(sec.label.clone()));
+                // 配额是 claude.ai 那份订阅的，只挂在 Claude 那一栏
+                let segs: Vec<(String, Option<f64>)> = match (&self.plan, sec.agent == DEFAULT_AGENT) {
+                    (Some(p), true) => detail_panel::plan_header_segs(p, &now, &chrono::Local),
+                    _ => Vec::new(),
+                };
+                list_col = list_col.child(section_header(sec.label.clone(), &segs));
             }
             for row in sec.rows {
                 list_col = list_col.child(self.render_project_row(row, now, cx));

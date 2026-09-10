@@ -215,7 +215,7 @@ impl RootView {
             .flex()
             .flex_col()
             .gap(px(1.))
-            .child(super::section_header("终端"));
+            .child(super::section_header("终端", &[]));
         for (ix, (id, label)) in self.live_terminal_tabs().into_iter().enumerate() {
             let active =
                 self.page == Page::Terminal && self.active_terminal.as_deref() == Some(id.as_str());

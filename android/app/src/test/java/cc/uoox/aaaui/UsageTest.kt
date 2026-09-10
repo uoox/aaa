@@ -34,24 +34,45 @@ class UsageTest {
         assertTrue(usageHeaderSegments(SessionUsage(model = "  ")).isEmpty())
     }
 
+    /**
+     * 栏表头右边那一段：**说剩多少**、不要 5h、重置时刻只出现一次。
+     * 颜色仍按用掉的算（72% 用掉 = 琥珀），换算的只是那个数字。
+     */
     @Test fun planLineFull() {
+        val at = JsonPrimitive("2026-09-13T09:59:59Z")
         val plan = PlanUsage(
-            five_hour = PlanWindow(32.0), seven_day = PlanWindow(61.0),
-            model_scoped = listOf(ModelScopedUsage("Fable", 40.0), ModelScopedUsage("Opus", 72.0)),
+            five_hour = PlanWindow(32.0, JsonPrimitive("2026-09-10T18:00:00Z")),
+            seven_day = PlanWindow(61.0, at),
+            model_scoped = listOf(ModelScopedUsage("Fable", 40.0, at), ModelScopedUsage("Opus", 72.0, at)),
         )
+        val now = Instant.parse("2026-09-11T00:00:00Z")
+        val segs = planLineSegments(plan, now, ZoneId.of("UTC"))
         assertEquals(
-            listOf("5h 32%", "7d 61%", "Fable 40%", "Opus 72%"),
-            planLineSegments(plan).map { it.text },
+            listOf("7d 剩 39%", "Fable 剩 60%", "Opus 剩 28%", "重置 周日 09:59"),
+            segs.map { it.text },
         )
-        assertEquals(PctLevel.WARN, planLineSegments(plan).maxOf { it.level })
+        assertEquals("5h 不进来", 3, segs.count { it.text.contains("剩") })
+        assertEquals(PctLevel.WARN, segs.maxOf { it.level })
+    }
+
+    /** 按模型的窗口跟 7d 不是同一时刻时，它得自己报——不能拿 7d 的时刻替它说话。 */
+    @Test fun planLineSplitsDifferingResets() {
+        val plan = PlanUsage(
+            seven_day = PlanWindow(61.0, JsonPrimitive("2026-09-13T09:59:59Z")),
+            model_scoped = listOf(ModelScopedUsage("Fable", 40.0, JsonPrimitive("2026-09-14T09:59:59Z"))),
+        )
+        val segs = planLineSegments(plan, Instant.parse("2026-09-11T00:00:00Z"), ZoneId.of("UTC")).map { it.text }
+        assertEquals(listOf("7d 剩 39%", "Fable 剩 60%", "重置 周日 09:59", "Fable 重置 周一 09:59"), segs)
     }
 
     @Test fun planLinePartial() {
-        assertEquals(listOf("7d 95%"), planLineSegments(PlanUsage(seven_day = PlanWindow(95.0))).map { it.text })
-        assertEquals(PctLevel.CRIT, planLineSegments(PlanUsage(seven_day = PlanWindow(95.0))).maxOf { it.level })
+        val only7d = PlanUsage(seven_day = PlanWindow(95.0))
+        assertEquals(listOf("7d 剩 5%"), planLineSegments(only7d).map { it.text })
+        assertEquals(PctLevel.CRIT, planLineSegments(only7d).maxOf { it.level })
         assertTrue(planLineSegments(null).isEmpty())
         assertTrue(planLineSegments(PlanUsage()).isEmpty())
-        assertTrue(planLineSegments(PlanUsage(five_hour = PlanWindow(null))).isEmpty())
+        // 只有 5h：那一段不画，整行就是空的
+        assertTrue(planLineSegments(PlanUsage(five_hour = PlanWindow(32.0))).isEmpty())
     }
 
     @Test fun parseResetsAtEpochSeconds() {
@@ -84,8 +105,10 @@ class UsageTest {
     @Test fun resetLabelOtherDay() {
         // 2026-09-05 是周六
         assertEquals("重置 周六 08:05", resetLabel(Instant.parse("2026-09-05T00:05:00Z"), now, sh))
-        // 上海的「今天」在 UTC 的前一天晚上：按时区算
-        assertEquals("重置 周三 23:59", resetLabel(Instant.parse("2026-09-02T15:59:00Z"), now, sh))
+        // 上海的「今天」在 UTC 的前一天晚上：按时区算（已经过去了 → 月/日）
+        assertEquals("重置 9/2 23:59", resetLabel(Instant.parse("2026-09-02T15:59:00Z"), now, sh))
+        // 七天开外不说周几：十天后的「周六」是哪个周六说不清楚（与 mac 同口径）
+        assertEquals("重置 9/13 08:05", resetLabel(Instant.parse("2026-09-13T00:05:00Z"), now, sh))
         assertNull(resetLabel(null, now, sh))
     }
 
@@ -117,7 +140,11 @@ class UsageTest {
         assertEquals(Instant.parse("2026-09-03T06:30:00Z"), parseResetsAt(r.plan?.five_hour?.resets_at))
         assertEquals(Instant.parse("2026-09-05T00:00:00Z"), parseResetsAt(r.plan?.seven_day?.resets_at))
         assertNull(parseResetsAt(r.plan?.model_scoped?.first()?.resets_at))
-        assertEquals(listOf("5h 32%", "7d 62%", "Fable 40%"), planLineSegments(r.plan).map { it.text })
+        // 5h 不进那一行；Fable 的 resets_at 是 null，重置只报 7d 那一条
+        assertEquals(
+            listOf("7d 剩 38%", "Fable 剩 60%", "重置 周六 00:00"),
+            planLineSegments(r.plan, Instant.parse("2026-09-03T00:00:00Z"), ZoneId.of("UTC")).map { it.text },
+        )
         assertNull(j.decodeFromString(UsageResponse.serializer(), """{"plan":null}""").plan)
 
         val a = j.decodeFromString(ArtifactsResponse.serializer(), """{"artifacts":[{"url":"https://x/1","title":"T","description":"D","file_path":"/p","ts":"2026-09-03T01:05:00Z"}]}""")

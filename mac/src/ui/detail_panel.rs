@@ -134,14 +134,17 @@ where
     Tz::Offset: std::fmt::Display,
 {
     let (d, today) = (t.date_naive(), now.date_naive());
+    let hm = t.format("%H:%M").to_string();
     if d == today {
-        return t.format("%H:%M").to_string();
+        return hm;
     }
     let days = (d - today).num_days();
+    // 别的日子带上星期 / 日期再加时刻——「周日」不说几点，等于没说
+    // （口径与 Android 的 `resetLabel` 一字不差）
     if (1..7).contains(&days) {
-        weekday_zh(d.weekday()).to_string()
+        format!("{} {hm}", weekday_zh(d.weekday()))
     } else {
-        format!("{}/{}", d.month(), d.day())
+        format!("{}/{} {hm}", d.month(), d.day())
     }
 }
 
@@ -203,44 +206,65 @@ pub(super) fn sort_artifacts_newest_first(v: &mut [Artifact]) {
     v.sort_by(|a, b| b.ts.cmp(&a.ts).then_with(|| a.url.cmp(&b.url)));
 }
 
-/// 套餐块第一行的各段：`(标签, 百分比)`，顺序 5h、7d、各模型窗口；没数的窗口不出现
-pub(super) fn plan_parts(plan: &PlanUsage) -> Vec<(String, f64)> {
-    let mut v = Vec::new();
-    if let Some(p) = plan.five_hour.as_ref().and_then(|w| w.used_percentage) {
-        v.push(("5h".to_string(), p));
-    }
+/// 用掉 `used`% 之后还剩多少。**先把用掉的取整再相减**，不是 `round(100 - used)`：
+/// 两边各自取整时 61.5 会同时显示成「用了 62%」和「剩 39%」，加起来 101。
+pub(super) fn remain_text(used: f64) -> String {
+    format!("{}%", 100 - used.round() as i64)
+}
+
+/// `Claude` 那一栏表头右边那一段：`7d 剩 22% · Fable 剩 9% · 重置 周六 18:00`
+/// （2026-09-11 用户拍板：「订阅剩余额度直接放在列表上 Claude/Antigravity 这一行后面，
+/// 不需要 5h，只需要 7d 和重置时间，claude 加个 Fable 剩余额度，重置时间应该是一样的
+/// 所以不用显示」）。
+///
+/// 三条：
+/// - **说剩多少，不说用了多少**。接口给的是用掉的百分比，这里换算成「剩」——「还能用
+///   多少」才是你要据以决定接下来干什么的数。颜色仍按**用掉的**算（用得越多越红）。
+/// - **5h 不进来**：它每五小时翻一次，看它没有意义；周窗口才是真会把人卡住的那个。
+/// - **重置时间只出现一次**：7d 与按模型的周窗口实测同一时刻。真不一样了（差一分钟
+///   以上）那一条才补自己的——宁可多一段，也不能拿 7d 的时刻替 Fable 说话。
+///
+/// 返回 `(要显示的字, 用掉的百分比)`；`None` 的那一段是重置时刻，不着色。
+/// 两端同一份口径（Android 的 `planLineSegments`）。
+pub(super) fn plan_header_segs<Tz: TimeZone>(
+    plan: &PlanUsage,
+    now: &DateTime<Tz>,
+    tz: &Tz,
+) -> Vec<(String, Option<f64>)>
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let mut v: Vec<(String, Option<f64>)> = Vec::new();
     if let Some(p) = plan.seven_day.as_ref().and_then(|w| w.used_percentage) {
-        v.push(("7d".to_string(), p));
+        v.push((format!("7d 剩 {}", remain_text(p)), Some(p)));
     }
     for m in plan.model_scoped.iter().flatten() {
         if let Some(p) = m.utilization {
             let name = if m.display_name.is_empty() { "模型" } else { m.display_name.as_str() };
-            v.push((name.to_string(), p));
+            v.push((format!("{name} 剩 {}", remain_text(p)), Some(p)));
         }
     }
-    v
-}
-
-/// 套餐块第二行：`5h 重置 14:30` 这样的段，只列解析得出重置时刻的窗口
-pub(super) fn plan_resets<Tz: TimeZone>(plan: &PlanUsage, now: &DateTime<Tz>, tz: &Tz) -> Vec<String>
-where
-    Tz::Offset: std::fmt::Display,
-{
-    let mut v = Vec::new();
-    let mut push = |label: &str, at: &Option<crate::model::ResetsAt>| {
-        if let Some(t) = at.as_ref().and_then(|r| r.to_utc()) {
-            v.push(format!("{label} 重置 {}", fmt_reset(&t.with_timezone(tz), now)));
-        }
-    };
-    if let Some(w) = &plan.five_hour {
-        push("5h", &w.resets_at);
+    if v.is_empty() {
+        return v;
     }
-    if let Some(w) = &plan.seven_day {
-        push("7d", &w.resets_at);
+    let at = |r: &Option<crate::model::ResetsAt>| r.as_ref().and_then(|x| x.to_utc());
+    // 重置时刻：以 7d 的为准，没有 7d 就用第一个按模型窗口的
+    let base = plan
+        .seven_day
+        .as_ref()
+        .and_then(|w| at(&w.resets_at))
+        .or_else(|| plan.model_scoped.iter().flatten().find_map(|m| at(&m.resets_at)));
+    if let Some(t) = base {
+        v.push((format!("重置 {}", fmt_reset(&t.with_timezone(tz), now)), None));
     }
+    // 跟 7d 不是同一时刻的那些，各报各的（实测都一样，所以通常一条都不加）
     for m in plan.model_scoped.iter().flatten() {
+        let Some(t) = at(&m.resets_at) else { continue };
+        if base.is_some_and(|b| (t - b).num_seconds().abs() <= 60) {
+            continue;
+        }
         let name = if m.display_name.is_empty() { "模型" } else { m.display_name.as_str() };
-        push(name, &m.resets_at);
+        v.push((format!("{name} 重置 {}", fmt_reset(&t.with_timezone(tz), now)), None));
     }
     v
 }
@@ -962,53 +986,6 @@ impl RootView {
             .collect();
         self.detail_rows(rows, "这个会话还没用过技能", cx)
     }
-
-    /// 侧栏最底部的套餐用量块；plan 为 null / 没有任何窗口有数就整块不画
-    pub(super) fn render_plan_usage(&self) -> Option<gpui::Div> {
-        let plan = self.plan.as_ref()?;
-        let parts = plan_parts(plan);
-        if parts.is_empty() {
-            return None;
-        }
-        let now = chrono::Local::now();
-        let resets = plan_resets(plan, &now, &chrono::Local);
-
-        let mut line1 = div()
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .font_family("Menlo")
-            .text_size(px(11.));
-        for (ix, (label, pct)) in parts.iter().enumerate() {
-            if ix > 0 {
-                line1 = line1.child(div().px(px(4.)).text_color(c(theme::FAINT)).child("·"));
-            }
-            let color = level_color(pct_level(*pct), theme::DIM);
-            line1 = line1.child(
-                div()
-                    .text_color(c(color))
-                    .child(SharedString::from(format!("{label} {}%", pct.round() as i64))),
-            );
-        }
-        let mut block = div()
-            .flex_none()
-            .flex()
-            .flex_col()
-            .gap(px(2.))
-            .px(px(16.))
-            .py(px(7.))
-            .border_t_1()
-            .border_color(c(theme::EDGE))
-            .child(line1);
-        if !resets.is_empty() {
-            block = block.child(
-                meta()
-                    .truncate()
-                    .child(SharedString::from(resets.join(" · "))),
-            );
-        }
-        Some(block)
-    }
 }
 
 #[cfg(test)]
@@ -1068,15 +1045,15 @@ mod tests {
         let now = at("2026-09-03T10:00:00+08:00"); // 周四
         // 今天 → 时刻
         assert_eq!(fmt_reset(&at("2026-09-03T14:30:00+08:00"), &now), "14:30");
-        // 明天到六天后 → 周几
-        assert_eq!(fmt_reset(&at("2026-09-04T06:00:00+08:00"), &now), "周五");
-        assert_eq!(fmt_reset(&at("2026-09-06T06:00:00+08:00"), &now), "周日");
-        assert_eq!(fmt_reset(&at("2026-09-09T06:00:00+08:00"), &now), "周三");
-        // 七天及以上 → 月/日
-        assert_eq!(fmt_reset(&at("2026-09-10T06:00:00+08:00"), &now), "9/10");
-        assert_eq!(fmt_reset(&at("2026-10-01T06:00:00+08:00"), &now), "10/1");
-        // 过去（已经重置了）→ 月/日
-        assert_eq!(fmt_reset(&at("2026-09-01T06:00:00+08:00"), &now), "9/1");
+        // 明天到六天后 → 周几 + 时刻（「周日」不说几点等于没说；与 Android 同口径）
+        assert_eq!(fmt_reset(&at("2026-09-04T06:00:00+08:00"), &now), "周五 06:00");
+        assert_eq!(fmt_reset(&at("2026-09-06T06:00:00+08:00"), &now), "周日 06:00");
+        assert_eq!(fmt_reset(&at("2026-09-09T06:00:00+08:00"), &now), "周三 06:00");
+        // 七天及以上 → 月/日 + 时刻
+        assert_eq!(fmt_reset(&at("2026-09-10T06:00:00+08:00"), &now), "9/10 06:00");
+        assert_eq!(fmt_reset(&at("2026-10-01T06:00:00+08:00"), &now), "10/1 06:00");
+        // 过去（已经重置了）→ 月/日 + 时刻
+        assert_eq!(fmt_reset(&at("2026-09-01T06:00:00+08:00"), &now), "9/1 06:00");
         // 今天但时区不同的输入：比较前应先换到同一时区（调用方负责），这里只验同 tz
         assert_eq!(fmt_reset(&at("2026-09-03T00:05:00+08:00"), &now), "00:05");
     }
@@ -1170,26 +1147,44 @@ mod tests {
                 },
             ]),
         };
-        let parts = plan_parts(&plan);
-        assert_eq!(
-            parts,
-            vec![("5h".to_string(), 32.4), ("7d".to_string(), 61.0), ("Fable".to_string(), 40.0)]
-        );
         let tz = FixedOffset::east_opt(8 * 3600).unwrap();
         let now = at("2026-09-03T10:00:00+08:00");
-        // 5h 的 06:30Z = 本地 14:30 今天；7d 的 9/6 = 周日；Fable 没有重置时刻
-        assert_eq!(plan_resets(&plan, &now, &tz), vec!["5h 重置 14:30", "7d 重置 周日"]);
-        // 空套餐 → 没有段（侧栏整块隐藏）
-        assert!(plan_parts(&PlanUsage::default()).is_empty());
-        assert!(plan_resets(&PlanUsage::default(), &now, &tz).is_empty());
-        // 只有一个窗口有数
+        let texts = |p: &PlanUsage| -> Vec<String> {
+            plan_header_segs(p, &now, &tz).into_iter().map(|(t, _)| t).collect()
+        };
+        // 5h 那一段整个不进来；7d 的 9/6 = 周日 00:00；Fable 没有自己的重置时刻
+        assert_eq!(texts(&plan), vec!["7d 剩 39%", "Fable 剩 60%", "重置 周日 00:00"]);
+        // 着色仍按**用掉的**算：Fable 用了 40% 是常色，7d 用了 61% 也还没到 70
+        let segs = plan_header_segs(&plan, &now, &tz);
+        assert_eq!(segs[0].1, Some(61.0));
+        assert_eq!(segs.last().unwrap().1, None, "重置那一段不着色");
+        // 空套餐 → 没有段（表头行尾就是空的）
+        assert!(texts(&PlanUsage::default()).is_empty());
+        // 只有 5h 也是空的：那一段不画，就没有可画的了
+        let only5 = PlanUsage { five_hour: plan.five_hour.clone(), ..Default::default() };
+        assert!(texts(&only5).is_empty());
+        // 只有一个窗口有数，且没有重置时刻
         let only7 = PlanUsage {
-            seven_day: Some(PlanWindow {
-                used_percentage: Some(95.0),
-                resets_at: None,
-            }),
+            seven_day: Some(PlanWindow { used_percentage: Some(95.0), resets_at: None }),
             ..Default::default()
         };
-        assert_eq!(plan_parts(&only7), vec![("7d".to_string(), 95.0)]);
+        assert_eq!(texts(&only7), vec!["7d 剩 5%"]);
+        // 按模型的窗口跟 7d 不是同一时刻：它得自己报
+        let split = PlanUsage {
+            seven_day: Some(PlanWindow {
+                used_percentage: Some(61.0),
+                resets_at: Some(ResetsAt::Text("2026-09-05T16:00:00Z".into())),
+            }),
+            model_scoped: Some(vec![ModelWindow {
+                display_name: "Fable".into(),
+                utilization: Some(40.0),
+                resets_at: Some(ResetsAt::Text("2026-09-06T16:00:00Z".into())),
+            }]),
+            ..Default::default()
+        };
+        assert_eq!(
+            texts(&split),
+            vec!["7d 剩 39%", "Fable 剩 60%", "重置 周日 00:00", "Fable 重置 周一 00:00"]
+        );
     }
 }
