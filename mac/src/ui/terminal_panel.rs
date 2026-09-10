@@ -172,37 +172,6 @@ impl RootView {
 
     // ── 渲染 ────────────────────────────────────────────────────────────
 
-    /// 侧栏底部「看板」入口：最近做了什么 + 还有什么没做
-    pub(super) fn render_history_entry(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let active = self.page == Page::History;
-        div()
-            .id("sb-history")
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .px(px(16.))
-            .py(px(7.))
-            .border_t_1()
-            .border_color(c(theme::EDGE))
-            .cursor_pointer()
-            .when(active, |el| el.bg(c(theme::SURFACE_RAISED)))
-            .hover(|st| st.bg(c(theme::SURFACE_RAISED)))
-            .on_click(cx.listener(|this, _, _, cx| this.open_history(cx)))
-            .child(
-                div()
-                    .font_family("Menlo")
-                    .text_size(px(11.))
-                    .text_color(c(if active { theme::ACCENT } else { theme::DIM }))
-                    .child("▦"),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .text_size(px(12.5))
-                    .text_color(c(if active { theme::ACCENT } else { theme::INK }))
-                    .child("看板"),
-            )
-    }
 
     /// 侧栏里的终端小节：一条分隔线 + 「终端」小标题 + 一终端一行 + 「＋ 新增终端」。
     /// 2026-09-08 用户拍板：终端与对话同级——和项目行排在同一列里、同一套行样式，

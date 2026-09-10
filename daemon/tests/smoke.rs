@@ -660,12 +660,6 @@ async fn inbox_auto_feed_on_first_waiting() {
     }
     assert!(saw_inbox_changed, "inbox_changed event expected");
 
-    // 看板：终端会话不进看板，但形状必须齐
-    let (code, dash) = http("GET", port, "/api/v1/history/dashboard", Some(TOKEN), None);
-    assert_eq!(code, 200);
-    assert!(dash["sessions"].as_array().unwrap().is_empty(), "终端不进看板");
-    assert_eq!(dash["counts"]["open_items"], 0);
-
     // messages endpoint: shell sessions are unsupported
     let (code, m) = http(
         "GET",

@@ -110,6 +110,21 @@ pub struct SkillUse {
     pub last_ts: String,
 }
 
+/// 会话里用过的一个 MCP 服务器（v1.38）。工具名形如 `mcp__<服务器>__<工具>`，
+/// 按**服务器**合并——一个 `pass` 底下能有几十个工具，一行一个工具只会把这一节淹掉。
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct McpUse {
+    pub server: String,
+    /// 这个服务器下用过的工具（去掉前缀，按首次出现的顺序，最多 [`MAX_MCP_TOOLS`] 个）
+    pub tools: Vec<String>,
+    /// 一共调了多少次
+    pub count: usize,
+    pub last_ts: String,
+}
+
+/// 一个 MCP 服务器最多记这么多个工具名：再多列出来也没人读，响应还得替它扛着
+pub const MAX_MCP_TOOLS: usize = 40;
+
 /// 会话里发布过的 Artifact（Claude Code 的 Artifact 工具：报告、原型、图）。按 url 去重，
 /// 重复发布同一 url 只更新时间与描述。
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -164,6 +179,8 @@ pub struct MsgStore {
     agy_sub_conv: HashMap<String, usize>,
     /// v1.17 详情屏：用过的技能，按名字合并（首次出现的顺序）
     pub skills: Vec<SkillUse>,
+    /// v1.38 详情屏：用过的 MCP，按服务器合并（首次出现的顺序）
+    pub mcp: Vec<McpUse>,
     /// v1.22：Claude Code 此刻排着的待发送消息（见 [`QueuedMsg`]）。`<task-notification>`
     /// 和斜杠命令不算——那些不是「你打的字在等着发出去」
     pub queued: Vec<QueuedMsg>,
@@ -211,6 +228,7 @@ impl MsgStore {
             agy_subs_awaiting: VecDeque::new(),
             agy_sub_conv: HashMap::new(),
             skills: Vec::new(),
+            mcp: Vec::new(),
             queued: Vec::new(),
             awaiting_result: HashSet::new(),
             last_activity_ts: String::new(),
@@ -270,6 +288,31 @@ impl MsgStore {
             }
         } else {
             self.skills.push(SkillUse { name: name.to_string(), count: 1, last_ts: ts.to_string() });
+        }
+    }
+
+    /// 记一次 MCP 调用。工具名不是 `mcp__服务器__工具` 这个形状就不是 MCP，直接跳过
+    /// ——这一节只收真的走了 MCP 的那些，不替别的工具猜身份。
+    fn note_mcp(&mut self, name: &str, ts: &str) {
+        let Some((server, tool)) = split_mcp_tool(name) else { return };
+        let entry = match self.mcp.iter_mut().find(|u| u.server == server) {
+            Some(u) => u,
+            None => {
+                self.mcp.push(McpUse {
+                    server: server.to_string(),
+                    tools: Vec::new(),
+                    count: 0,
+                    last_ts: String::new(),
+                });
+                self.mcp.last_mut().expect("刚 push 过")
+            }
+        };
+        entry.count += 1;
+        if ts > entry.last_ts.as_str() {
+            entry.last_ts = ts.to_string();
+        }
+        if entry.tools.len() < MAX_MCP_TOOLS && !entry.tools.iter().any(|t| t == tool) {
+            entry.tools.push(tool.to_string());
         }
     }
 
@@ -751,6 +794,7 @@ pub fn parse_claude_line(store: &mut MsgStore, v: &Value) {
                             if name == SKILL_TOOL {
                                 store.note_skill(&str_field(item.get("input"), "skill"), ts);
                             }
+                            store.note_mcp(&name, ts);
                             if name == ARTIFACT_TOOL {
                                 let inp = item.get("input");
                                 let g = |k: &str| inp.and_then(|i| i.get(k)).and_then(|x| x.as_str()).unwrap_or("").to_string();
@@ -793,6 +837,14 @@ pub fn parse_claude_line(store: &mut MsgStore, v: &Value) {
         }
         _ => {}
     }
+}
+
+/// `mcp__pass__node_list` → `("pass", "node_list")`。不是这个形状就是 `None`。
+/// 服务器名与工具名都不许为空——`mcp____x` 这种畸形串不算数。
+pub fn split_mcp_tool(name: &str) -> Option<(&str, &str)> {
+    let rest = name.strip_prefix("mcp__")?;
+    let (server, tool) = rest.split_once("__")?;
+    (!server.is_empty() && !tool.is_empty()).then_some((server, tool))
 }
 
 pub const ARTIFACT_TOOL: &str = "Artifact";
@@ -1176,6 +1228,7 @@ pub fn parse_agy_line(store: &mut MsgStore, v: &Value) {
                 let args = call.get("args");
                 let label = agy_tool_label(&name).to_string();
                 let summary = agy_call_summary(&name, args);
+                store.note_mcp(&name, &ts);
                 if name == "invoke_subagent" {
                     agy_note_subagents(store, &ts, args, &summary);
                 }
@@ -1406,8 +1459,15 @@ pub fn discover_file(
     // 这一步：先认 resume id（hooks 报的 session_id 就是对话 id），再退回
     // `cache/last_conversations.json` 里这个 cwd 的最后一条
     if source == "agy" {
-        let by_id = resume_id.and_then(|id| crate::stores::agy_transcript(paths, id));
-        if let Some(f) = by_id.filter(|f| !claimed.contains(f)) {
+        // **认到 id 这条路不看 `claimed`**（v1.38 修）：`claimed` 是给「扫一遍猜一个」
+        // 那种发现方式兜底的——猜错了会抢走别人的文件。而 agy 的 resume 就是**同一个
+        // 对话**：一个 agy 对话被 resume 过几次，AAA 这边就有几条会话指着同一个
+        // transcript，它们本来就该都读到它。
+        //
+        // 加着这个判断的后果是：先起来的那条（往往是早已退出、只为回放留在池子里的）
+        // 把文件占住，**你真正打开的那条活会话永远是空的**——本机实测 9 条 agy 会话里
+        // 7 条已退出的都有消息，2 条 waiting 的一条都没有，看上去就像「agy 的消息流没做」。
+        if let Some(f) = resume_id.and_then(|id| crate::stores::agy_transcript(paths, id)) {
             return Some((f, false));
         }
         let id = crate::stores::agy_find(paths, project_path);
@@ -2053,6 +2113,57 @@ mod tests {
         assert_eq!(st.pending_background(None), 0, "回来了就销掉");
         let last = st.msgs.back().unwrap();
         assert!(last.text.starts_with("Task id"), "外层的「以下是系统消息」和内层的投递信封都不给人读第二遍");
+    }
+
+    /// 一个 agy 对话被 resume 过几次，AAA 这边就有几条会话指着同一个 transcript
+    /// ——它们**都**该读到它。此前 `claimed` 把文件判给先起来的那一条（往往是早已退出、
+    /// 只为回放留在池子里的），你真正打开的那条活会话于是永远是空的。
+    #[test]
+    fn agy_sessions_resuming_one_conversation_all_see_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path());
+        let conv = "b920e71e-04c7-4bed-be48-41d9a572fa83";
+        let f = crate::stores::agy_transcript_path(&paths, conv);
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        std::fs::write(&f, "{}\n").unwrap();
+        let mut claimed = std::collections::HashSet::new();
+        // 第一条会话认到它
+        let (got, fallback) =
+            discover_file(&paths, "agy", "/p/a", Some(conv), 0.0, &claimed).expect("认得到");
+        assert_eq!((got.clone(), fallback), (f.clone(), false));
+        // 它占住之后，第二条 resume 同一个对话的会话仍然认得到同一个文件
+        claimed.insert(got);
+        let (again, _) =
+            discover_file(&paths, "agy", "/p/a", Some(conv), 0.0, &claimed).expect("被占住也认得到");
+        assert_eq!(again, f);
+    }
+
+    /// MCP 的工具名形如 `mcp__服务器__工具`，按**服务器**合并成一条：
+    /// 一个 `pass` 底下几十个工具，一行一个只会把这一节淹掉。
+    #[test]
+    fn mcp_calls_group_by_server() {
+        assert_eq!(split_mcp_tool("mcp__pass__node_list"), Some(("pass", "node_list")));
+        assert_eq!(split_mcp_tool("mcp__plugin_grok_grok__grok_search"), Some(("plugin_grok_grok", "grok_search")));
+        assert_eq!(split_mcp_tool("Bash"), None, "普通工具不是 MCP");
+        assert_eq!(split_mcp_tool("mcp__pass"), None, "少一段不算");
+        assert_eq!(split_mcp_tool("mcp____x"), None, "服务器名空着不算");
+
+        let mut st = MsgStore::for_agent("claude");
+        let use_tool = |st: &mut MsgStore, name: &str, ts: &str| {
+            feed_lines(st, &[json!({"type":"assistant","timestamp":ts,"message":{"role":"assistant","content":[
+                {"type":"tool_use","id":format!("t-{name}-{ts}"),"name":name,"input":{}}]}})]);
+        };
+        use_tool(&mut st, "mcp__pass__node_list", "t1");
+        use_tool(&mut st, "mcp__pass__node_get", "t2");
+        use_tool(&mut st, "mcp__pass__node_list", "t3");
+        use_tool(&mut st, "Bash", "t4");
+        use_tool(&mut st, "mcp__telegram__list_chats", "t5");
+        assert_eq!(st.mcp.len(), 2, "两个服务器，Bash 不进来");
+        assert_eq!(st.mcp[0].server, "pass");
+        assert_eq!(st.mcp[0].count, 3);
+        assert_eq!(st.mcp[0].tools, vec!["node_list", "node_get"], "工具去重、按首次出现排");
+        assert_eq!(st.mcp[0].last_ts, "t3");
+        assert_eq!(st.mcp[1].server, "telegram");
     }
 
     /// v1.35：模型那一步自己带着 `thinking` 和 `tool_calls`——工具名与入参**记在文件里**，

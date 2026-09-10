@@ -10,10 +10,6 @@ import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Test
 
 class ProtocolTest {
-    /** 「已完成」= 暂停且清单全勾完。v1.17 取消「做完的折起来」之后生产代码不再问这个问题，
-     *  只有看板分组的测试还拿它当参照——所以 v1.22 从生产代码搬到这里（mac 那边一直挂着 `#[cfg(test)]`）。 */
-    private fun cardIsFinished(c: SessionCard): Boolean = c.status == "paused" && c.open == 0
-
     private val json = ProtocolJson.instance
 
     @Test fun pairPayloadParsesHostsAndToken() {
@@ -96,26 +92,6 @@ class ProtocolTest {
         assertTrue(json.decodeFromString<Session>("""{"id":"s_2"}""").queued.isEmpty())
     }
 
-    @Test fun dashboardCardsParseSearchAndFinished() {
-        val d = json.decodeFromString<Dashboard>(
-            """{"counts":{"asking":1,"running":0,"background":1,"active":2,"paused":5,"open_items":7},
-                "sessions":[{"id":"a","title":"改登录页","project_name":"Shop","status":"background","alive":true,"done":1,"open":1,
-                             "items":[{"done":true,"text":"修登录"},{"done":false,"text":"补测试"}]},
-                            {"id":"b","title":"旧活","project_name":"Mail","status":"paused","done":2,"open":0,"items":[]}]}""",
-        )
-        assertEquals(7, d.counts.open_items)
-        assertEquals(2, d.sessions.size)
-        val a = d.sessions[0]
-        assertTrue(a.alive && a.status == "background" && a.items[1].text == "补测试" && !a.items[1].done)
-        assertTrue(cardMatches(a, "") && cardMatches(a, "测试") && cardMatches(a, "shop") && cardMatches(a, "登录"))
-        assertTrue(!cardMatches(a, "支付"))
-        assertTrue(!cardIsFinished(a) && cardIsFinished(d.sessions[1]))
-        assertTrue(cardRunning(a.copy(status = "running")) && cardRunning(a.copy(status = "background")))
-        assertTrue(!cardRunning(a.copy(status = "active")) && !cardRunning(a.copy(status = "running", deleted = true)))
-        // 老 daemon 的形状（没有 sessions）必须解码失败 → 界面报「请升级」，不能静默画空看板
-        assertTrue(runCatching { json.decodeFromString<Dashboard>("""{"today":{"sessions":1},"days":[]}""") }.isFailure)
-    }
-
     /** v1.22：清单由 daemon 解析好下发；客户端不再自己拆 `summary` 那串 markdown */
     @Test fun sessionChecklistAndAskingSeqComeFromDaemon() {
         val s = json.decodeFromString<Session>(
@@ -194,16 +170,5 @@ class ProtocolTest {
         assertEquals("/Volumes/SSD/Agents/aaaproject", rerootPath("/Volumes/SSD/project", "/Volumes/SSD/project/", "/Volumes/SSD/Agents/aaaproject"))
         assertEquals("同前缀不同目录不算", "/Volumes/SSD/projectX/y", rerootPath("/Volumes/SSD/projectX/y", "/Volumes/SSD/project", "/new"))
         assertEquals("/elsewhere", rerootPath("/elsewhere", "/Volumes/SSD/project", "/new"))
-    }
-
-    /** 三端共享向量 fixtures/dashboard.json：客户端的过滤口径（已完成 / 搜索）必须得到 expect */
-    @Test fun sharedFixtureFilters() {
-        val fx = json.parseToJsonElement(java.io.File("../../fixtures/dashboard.json").readText()).jsonObject
-        val d = json.decodeFromString<Dashboard>("""{"sessions":${fx["sessions"]}}""")
-        fun expect(k: String) = fx["expect"]!!.jsonObject[k]!!.jsonArray.map { it.jsonPrimitive.content }
-        assertEquals(expect("finished"), d.sessions.filter { cardIsFinished(it) && !it.deleted }.map { it.id })
-        assertEquals(expect("match_测试"), d.sessions.filter { cardMatches(it, "测试") }.map { it.id })
-        assertEquals(listOf("ask", "run", "bg", "act", "poolpau", "pau", "fin", "old", "del"), d.sessions.map { it.id })
-        assertEquals(expect("visible_default"), d.sessions.filter { !it.deleted }.map { it.id })
     }
 }

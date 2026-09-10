@@ -133,25 +133,11 @@ class DaemonClient(
     suspend fun fileRead(path: String): FileBody =
         json.decodeFromString(FileBody.serializer(), get("/files/read?path=" + urlEncode(path)))
 
-    /** 紧急制动：收掉还活着的项目会话（终端不收） */
-    suspend fun killAll(runningOnly: Boolean = true): String =
-        post("/sessions/kill_all", buildJsonObject { put("running_only", runningOnly) }.toString())
-
-    /** 清掉池子里已退出的会话记录（不动项目目录、不动 agent 存储） */
-    suspend fun cleanExited(): String = post("/sessions/clean_exited", "{}")
-
     /** v1.16：替用户答权限对话框（allow / deny） */
     suspend fun permission(sessionId: String, behavior: String) {
         post("/sessions/$sessionId/permission", buildJsonObject { put("behavior", behavior) }.toString())
     }
     /** v1.16：看板上勾 / 取消勾清单项 */
-    /**
-     * 勾 / 取消勾一条清单项。[index] 是它在 daemon 给的 `items` 里的**位置**（v1.22）：
-     * 只按文字匹配的话，清单里有两条一样的（haiku 重写时并不罕见）点一条会勾掉两条。
-     */
-    suspend fun checklist(sessionId: String, index: Int, text: String, done: Boolean) {
-        post("/sessions/$sessionId/checklist", buildJsonObject { put("index", index); put("text", text); put("done", done) }.toString())
-    }
     suspend fun answer(sessionId: String, answers: List<AnswerItem>) {
         val body = buildJsonObject {
             put("answers", kotlinx.serialization.json.JsonArray(answers.map { a ->
@@ -166,8 +152,6 @@ class DaemonClient(
 
 
     /** 看板：待办 + 按天流水 + 数字（daemon 一次算好） */
-    suspend fun historyDashboard(): Dashboard =
-        json.decodeFromString(Dashboard.serializer(), get("/history/dashboard"))
 
     // ---------- v1.4 ----------
 

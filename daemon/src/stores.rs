@@ -251,14 +251,20 @@ pub fn agy_transcript(paths: &Paths, id: &str) -> Option<std::path::PathBuf> {
     if !safe_id(id) {
         return None;
     }
-    let p = paths
+    let p = agy_transcript_path(paths, id);
+    p.is_file().then_some(p)
+}
+
+/// 这个对话的 transcript **应该**在哪儿（存不存在不管）。`agy_transcript` 与测试共用，
+/// 免得路径拼法写两遍。
+pub fn agy_transcript_path(paths: &Paths, id: &str) -> std::path::PathBuf {
+    paths
         .agy_root()
         .join("brain")
         .join(id)
         .join(".system_generated")
         .join("logs")
-        .join("transcript.jsonl");
-    p.is_file().then_some(p)
+        .join("transcript.jsonl")
 }
 
 /// 这个 cwd 最近一次 agy 对话的 id（表里指着已被 GC 的对话时是空串）。

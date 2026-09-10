@@ -201,6 +201,19 @@ fun SessionDetailScreen(store: AppStore, nav: NavHostController, sessionId: Stri
                 }
             }
 
+            // ── 已使用 MCP：`mcp__服务器__工具` 那些调用，按服务器合并（副文列出用过的工具）
+            DetailSection("已使用 MCP", d?.mcp?.size) {
+                if (d == null) LoadingRow()
+                else if (d.mcp.isEmpty()) EmptyHint("这个会话还没走过 MCP")
+                else d.mcp.forEach { u ->
+                    TwoLineRow(
+                        u.server,
+                        u.tools.joinToString(" · "),
+                        (if (u.count > 1) "${u.count} 次 " else "1 次 ") + relativeTime(u.last_ts),
+                    )
+                }
+            }
+
             // ── 更多：原来 ⋮ 里那些一年用一次的操作，收在最后（用户 2026-09-08：顶栏不该占着它们）。
             // 结束会话 / 删除**不在这里**：那归项目列表（长按项目行）
             DetailSection("更多", null) {

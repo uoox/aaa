@@ -122,11 +122,24 @@ import java.net.URLDecoder
 @Serializable data class BgTask(val tool: String = "", val summary: String = "", val ts: String = "", val detail: String = "")
 @Serializable data class UploadInfo(val name: String = "", val path: String = "", val size: Long = 0, val ts: String = "")
 @Serializable data class SkillUse(val name: String = "", val count: Int = 0, val last_ts: String = "")
+
+/**
+ * v1.38 详情屏「MCP」：会话里用过的一个 MCP 服务器。工具名形如 `mcp__<服务器>__<工具>`，
+ * daemon 按**服务器**合并——一个 `pass` 底下能有几十个工具，一行一个只会把这一节淹掉。
+ */
+@Serializable data class McpUse(
+    val server: String = "",
+    val tools: List<String> = emptyList(),
+    val count: Int = 0,
+    val last_ts: String = "",
+)
 @Serializable data class SessionDetail(
     val subagents: List<Subagent> = emptyList(),
     val background_tasks: List<BgTask> = emptyList(),
     val uploads: List<UploadInfo> = emptyList(),
     val skills: List<SkillUse> = emptyList(),
+    /** v1.38：用过的 MCP（老 daemon 不给 → 空） */
+    val mcp: List<McpUse> = emptyList(),
 )
 
 @Serializable data class Health(
@@ -216,62 +229,6 @@ const val SCHEMA_PROJECT_STATUS = 2
 )
 
 // v1.9 会话日志（GET /history）：所有出现过的会话，含已退出、已删除
-/**
- * 看板（GET /history/dashboard，2026-09-07 第二版）：**所有会话的进度**，没有时间维度。
- * daemon 一次算好，两端只画。
- */
-/** `sessions` 故意没有默认值：老 daemon（v1.11/1.12）返回的是另一种形状，缺这个字段就该解码失败报「请升级 daemon」，
- *  而不是静默画一个空看板（gpt-6 审阅指出） */
-@Serializable data class Dashboard(val counts: DashCounts = DashCounts(), val sessions: List<SessionCard>)
-
-@Serializable data class DashCounts(
-    /** 未删除会话里没勾的清单项总数——看板顶上唯一还留着的数字 */
-    val open_items: Int = 0,
-)
-
-/** 一张卡 = 一个会话的进度 */
-@Serializable data class SessionCard(
-    val id: String = "",
-    val title: String = "",
-    val project_name: String = "",
-    val project_path: String = "",
-    /** asking | running | background | active | paused */
-    val status: String = "",
-    /** 还在池子里（能点开，已退出的回放也算） */
-    val alive: Boolean = false,
-    val deleted: Boolean = false,
-    val done: Int = 0,
-    val open: Int = 0,
-    val items: List<ChecklistItem> = emptyList(),
-    val updated_at: String = "",
-    /**
-     * v1.27：卡在什么权限请求上（`asking` 且是权限对话框时才有）。看板顶上的
-     * 「待决策」靠它原地放行；`asking` 而没有它 = 结构化提问，只能进会话答。
-     */
-    val permission: PermissionPrompt? = null,
-)
-
-/**
- * 卡片上画不画蓝点（2026-09-08 用户拍板：看板和项目列表说同一套话——蓝点 / 黄点 / 什么都没有，
- * 五个状态字连同顶上的计数条一起去掉）。`status` 本身还留在协议里，它是排序和这个判断的依据。
- */
-fun cardRunning(c: SessionCard): Boolean = !c.deleted && (c.status == "running" || c.status == "background")
-
-/**
- * 「在 AAA 里」= 这个会话此刻**还活着**：进程在跑、或者停在输入框等你说话（2026-09-08
- * 用户拍板的看板分节口径）。`alive`（还在 daemon 池子里）**不算**——daemon 会把已经退出的
- * 会话留在池子里供回放，真实数据里 318 张卡有 164 张是这种，按 `alive` 切等于没切。真正
- * 「在 AAA 里」的就是项目列表上那几行。已退出的仍可能点得开（`alive`），那是「打开」的事。
- */
-fun cardInAaa(c: SessionCard): Boolean = c.alive && c.status != "paused"
-
-/** 看板搜索：标题 / 项目 / 任一清单项含关键字（不分大小写）；空串全匹配 */
-fun cardMatches(c: SessionCard, query: String): Boolean {
-    val q = query.trim().lowercase()
-    return q.isEmpty() || c.title.lowercase().contains(q) || c.project_name.lowercase().contains(q) || c.items.any { it.text.lowercase().contains(q) }
-}
-
-
 /**
  * 排着还没送进去的一条（会话的 `queued`）。**这是 Claude Code 自己的队列**：模型在跑时
  * 往 TUI 里敲的字它自己会排队，这一轮结束再送进去；daemon 从 transcript 读出来下发，

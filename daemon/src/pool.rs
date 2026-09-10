@@ -121,8 +121,6 @@ pub struct Meta {
     #[serde(skip)]
     pub permission: Option<serde_json::Value>,
     /// v1.16：看板上手工勾 / 取消勾的清单项（文字 → done），haiku 重写清单后按它盖回去
-    #[serde(default)]
-    pub checklist_overrides: std::collections::BTreeMap<String, bool>,
     /// v1.13：还没回来的后台任务数（transcript 里的 run_in_background / 异步子代理 /
     /// Monitor 减去回来的 task-notification）。waiting 且 >0 = 「后台」
     #[serde(skip)]
@@ -252,7 +250,6 @@ impl Session {
                 last_stop_at: None,
                 running_by_transcript: false,
                 permission: None,
-                checklist_overrides: Default::default(),
                 usage: None,
                 summary: String::new(),
             }),
@@ -750,7 +747,6 @@ impl SessionPool {
             last_stop_at: None,
             running_by_transcript: false,
             permission: None,
-            checklist_overrides: Default::default(),
             usage: None,
             summary: String::new(),
         };

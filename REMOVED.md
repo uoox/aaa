@@ -4,6 +4,17 @@ AAA 砍掉过的功能，连同砍它的理由。**这不是契约**——当下
 留着它是因为「为什么当初删了」比「删了什么」值钱：同一个想法过一阵会有人重新提，
 理由还成立就别再做一遍，不成立就大方加回来（`GET /agents` 就是这么回来的）。
 
+**2026-09-11（v1.38）：看板。** `GET /history/dashboard` 与 daemon 的 `dashboard()` / `SessionCard` / `Counts` / `Dashboard` / `LiveStatus` / `status_rank`、mac 的 `ui/history.rs` 与 `Page::History`、Android 的 `HistoryScreen.kt` 与 ▦ 入口、两端的 `Dashboard`/`SessionCard` DTO 与卡片过滤函数、共享向量 `fixtures/dashboard.json`、`daemon/examples/dashboard_debug.rs`、设计令牌里的 `blue`，全部删掉。理由（用户 2026-09-11，「我的使用次数非常少」）：
+
+- **顶上那个数是假的**。删它那天本机实测：430 张卡，其中 **262 张已删除、412 张 paused**，而「未完成条目 338」是在这 430 张上算的。那些清单是 haiku 在某次 Stop 时写的，属于**已经结束**的会话——不是「还没做完的事」，是做完的事留下的渣。
+- **真的那一半和项目列表是同一件事**。「在 AAA 里」那一节当天是 **18 行**，就是项目列表那 18 行；v1.36 之后项目列表已经三栏分好、整行底色说状态、行尾有时间。
+- **待决策是同一件事的第三份**。当天是 0。真有的时候，消息流里已经原地出「允许 / 拒绝」卡片，手机也已经收到通知直达那条会话。
+- 代价：mac 452 行 + Android 369 行 + 365 行共享向量，加上散在 9 个文件里的测试；从 git log 看它被返工过四次（v1.15 瀑布流、v1.17 砍计数条、v1.21 分两节、v1.27 加待决策）。
+
+**跟着走的**：`POST /sessions/:id/checklist`（勾 / 取消勾只在看板上有）、daemon 的 `checklist_overrides` 与 `summary::set_item` / `set_item_at`、mac 与 Android 的 `kill_all` / `clean_exited` 客户端方法（`aaa` CLI 还在用这两条路由，daemon 侧留着）。**清单本身留着**，两端详情栏的「进度」一节照画，只是**只读**——用户 2026-09-11：「清单不需要开关，默认就是一定要的」。
+
+**留着的**：`GET /history`（账本，删项目后「记录还在吗」只有它看得见，没有客户端画它，要看就 curl）、`POST /sessions/kill_all` 与 `/sessions/clean_exited`（CLI 在用）。**明知的代价**：看板是唯一能看到**已经停掉的**会话的清单的地方，这条路没了；用户拍板时的原话是「代价不用管，我需要的时候手动去看就好」。
+
 **2026-09-10（v1.35）：「浏览」——会话的第三种看法。** `GET /files`（列目录）、`files.rs` 的 `list_dir` / `Entry` / `parent_of`、mac 的 `FilesView`、Android 的 `FilesView`、两端视图轮换里的那一档全部删掉。理由（用户 2026-09-10）：「不需要『浏览』功能，取而代之是项目生成的 Markdown 也显示在产物里面，并支持阅读」。手机上真正会去翻的只有报告和笔记，不是一个 `.git/objects` 也点得进去的文件管理器；而报告本来就该和「发布过的产物链接」排在一起。**留下的是读文件那一半**：`GET /files/read` 还在（守卫也还是那一条：出项目根 404），`GET /sessions/:id/artifacts` 多带一段 `docs`（项目里的 Markdown，最近改的在前），两端在详情栏「产物」一节里画它、点开就读，见 PROTOCOL「产物」。⌘E 因此回到两档（终端 ⇄ 消息流）。
 
 **2026-09-10（v1.35）：Android 详情屏的收件箱。** 那一节、`InboxEntry` DTO、`inboxList` / `inboxAdd` / `inboxDelete` 三个调用、`inbox_changed` 帧的解析与订阅一并删掉。理由（用户 2026-09-10）：「Android 详情里面的收件箱也可以去掉」。v1.32 删 mac 那一节时留下的理由是「排队是人不在跟前才需要的，那正是手机的场景」——用下来手机上也不需要：**排队是 Claude Code 自己的行为**（消息流末尾那些「待发送」），AAA 这一套只是另一个要维护的队列。**daemon 那一套照旧跑着**（`feed.rs` 每秒重试、`GET/POST/DELETE /inbox` 三条路由都在、`inbox_changed` 照发），「信任对话框挡着屏幕时把整句话收下」那条岔路仍靠它落地；现在没有任何客户端入口。

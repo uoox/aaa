@@ -35,7 +35,6 @@ pub const AMBER: u32 = 0xb8860b;
 pub const RED: u32 = 0xc0392b;
 /// 看板卡片标题前「在跑」那根线。green/amber/red 各有旧含义，accent 是橙，
 /// 只有蓝读作「它自己在动」
-pub const BLUE: u32 = 0x3f6ea8;
 /// 输入框 / 折叠面板的下沉底：比 surface 更亮一点点
 pub const INSET: u32 = 0xfffefa;
 /// 项目列表行的状态底色（2026-09-10 用整行淡底代替行尾竖线）：淡蓝 = 在跑
@@ -200,7 +199,6 @@ mod tests {
             ("green", GREEN),
             ("amber", AMBER),
             ("red", RED),
-            ("blue", BLUE),
             ("inset", INSET),
             ("row_running", ROW_RUNNING),
             ("row_unread", ROW_UNREAD),
@@ -234,8 +232,6 @@ mod tests {
             assert_ne!(bg, SURFACE);
         }
         assert_ne!(ROW_RUNNING, ROW_UNREAD);
-        assert_ne!(BLUE, AMBER);
-        assert!((luminance(BLUE) - luminance(BG)).abs() > 0.1, "看板的蓝线在底色上看不见");
     }
 
     #[test]

@@ -28,7 +28,7 @@ class TokensTest {
             "ink" to Tok.Ink, "dim" to Tok.Dim, "faint" to Tok.Faint,
             "term_bg" to Tok.TermBg, "term_fg" to Tok.TermFg,
             "accent" to Tok.Accent, "on_accent" to Tok.OnAccent, "magenta" to Tok.Magenta,
-            "green" to Tok.Green, "amber" to Tok.Amber, "red" to Tok.Red, "blue" to Tok.Blue,
+            "green" to Tok.Green, "amber" to Tok.Amber, "red" to Tok.Red,
             "inset" to Tok.Inset,
             "row_running" to Tok.RowRunning, "row_unread" to Tok.RowUnread,
         )

@@ -623,6 +623,7 @@ impl RootView {
             // 计数是「这一节里有几行」：链接与 Markdown 都算（与 Android 同一口径）
             .child(Self::section_n("产物", d.map(|d| d.artifacts.len() + d.docs.len()).unwrap_or(0), self.render_artifacts_section(d, &now, cx)))
             .child(Self::section_n("已使用技能", ex.skills.len(), self.render_skills(ex, &now, cx)))
+            .child(Self::section_n("已使用 MCP", ex.mcp.len(), self.render_mcp(ex, &now, cx)))
             ;
 
         Some(
@@ -985,6 +986,28 @@ impl RootView {
             })
             .collect();
         self.detail_rows(rows, "这个会话还没用过技能", cx)
+    }
+
+    /// 已使用 MCP：`mcp__服务器__工具` 那些调用，按服务器合并（副文列出用过的工具）
+    fn render_mcp(&self, ex: &SessionDetailResponse, now: &DateTime<chrono::Local>, cx: &mut Context<Self>) -> gpui::Div {
+        let rows = ex
+            .mcp
+            .iter()
+            .map(|u| {
+                (
+                    None,
+                    u.server.clone(),
+                    u.tools.join(" · "),
+                    format!(
+                        "{} 次 {}",
+                        u.count,
+                        fmt_artifact_time(&u.last_ts, now, &chrono::Local).unwrap_or_default()
+                    ),
+                    None,
+                )
+            })
+            .collect();
+        self.detail_rows(rows, "这个会话还没走过 MCP", cx)
     }
 }
 

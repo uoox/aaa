@@ -2,7 +2,6 @@
 
 mod detail_panel;
 mod doc_view;
-mod history;
 mod kit;
 mod messages_view;
 mod mini_input;
@@ -38,8 +37,6 @@ pub enum Page {
     Settings,
     /// 常驻多标签终端面板（侧栏底部入口），标签 = 存活的 shell 会话
     Terminal,
-    /// 会话日志（侧栏底部入口）：所有出现过的会话，含已退出、已删除
-    History,
 }
 
 /// 一条会话的看法。**只有两种可以切**：终端与消息流；`Doc` 是详情栏里点开一份
@@ -247,12 +244,13 @@ pub(super) fn section_header(
     label: impl Into<SharedString>,
     segs: &[(String, Option<f64>)],
 ) -> gpui::Div {
+    // 上面不留空（2026-09-11 用户：「Claude/Antigravity/终端 上面是有一点高度和空白的，
+    // 可以去掉」）：只剩那条分隔线和一点点不让字贴着线的内边距
     let mut row = meta()
         .mx(px(6.))
         .px(px(10.))
-        .mt(px(8.))
-        .pt(px(8.))
-        .pb(px(4.))
+        .pt(px(3.))
+        .pb(px(3.))
         .border_t_1()
         .border_color(c(theme::EDGE))
         .flex()
@@ -487,16 +485,7 @@ pub struct RootView {
     pub unread_projects: Vec<String>,
     /// 套餐用量（GET /usage + usage 帧）；None = 没有套餐信息，侧栏不画
     pub plan: Option<PlanUsage>,
-    /// 看板（GET /history/dashboard），打开「看板」页时拉
-    pub dashboard: Dashboard,
-    /// 看板搜索框
-    pub history_input: Entity<MiniInput>,
-    /// 看板：显示已删除的
-    pub dash_show_deleted: bool,
-    /// 看板：「不在 AAA 里」那一节展开与否（默认折起来，2026-09-08 用户「东西太多了」）
-    pub dash_show_gone: bool,
     /// 看板的滚动条（瀑布流一屏装不下，滚起来得知道自己在哪儿）
-    dash_scroll: scrollbar::Scrollbar,
     /// 窗口宽度（render 开头刷新；看板按它算瀑布流列数）
     pub win_w: f32,
     /// 每会话的产物 / 改动状态（含各自的拉取节流器）
@@ -590,7 +579,6 @@ impl RootView {
         let port_input = cx.new(|cx| MiniInput::new(cx, "2730"));
         let token_input = cx.new(|cx| MiniInput::new(cx, "aaa_tk_…"));
         let root_input = cx.new(|cx| MiniInput::new(cx, "~/project"));
-        let history_input = cx.new(|cx| MiniInput::new(cx, "搜索：标题 / 项目 / 条目"));
         // 输入法送来的回车（见 MiniInput::replace_text_in_range）与键盘回车同一出口
         cx.subscribe(&new_input, |this, _, _: &mini_input::InputEvent, cx| {
             if matches!(this.modal, Modal::None) {
@@ -633,11 +621,6 @@ impl RootView {
             notify_on: ui_state.notify,
             unread_projects: ui_state.unread_projects,
             plan: None,
-            dashboard: Dashboard::default(),
-            history_input,
-            dash_show_deleted: false,
-            dash_show_gone: false,
-            dash_scroll: scrollbar::Scrollbar::default(),
             win_w: 1200.,
             detail: HashMap::new(),
             new_input,
@@ -1175,7 +1158,7 @@ impl RootView {
                         cx.stop_propagation();
                     }
                 }
-                Page::Home | Page::Settings | Page::History => {}
+                Page::Home | Page::Settings => {}
             }
             return;
         }
@@ -1260,11 +1243,9 @@ impl RootView {
                     .flex_1()
                     .min_h(px(0.))
                     .overflow_y_scroll()
-                    .pt(px(4.))
                     .child(self.render_sidebar_list(window, cx)),
             )
             // 会话日志入口
-            .child(self.render_history_entry(cx))
             .child(self.render_sidebar_footer(conn_color, conn_text, cx))
     }
 
@@ -1722,7 +1703,7 @@ impl RootView {
                 }
             }
             Page::Terminal => self.render_terminal_statusbar(bar),
-            Page::Home | Page::Settings | Page::History => {
+            Page::Home | Page::Settings => {
                 // 终端不是会话，不进这里的计数
                 let total = self.sessions.iter().filter(|s| !s.is_terminal()).count();
                 let asking = self
@@ -1818,7 +1799,6 @@ impl Render for RootView {
                 ),
                 Page::Settings => el.child(self.render_settings(window, cx)),
                 Page::Terminal => el.child(self.render_terminal_page(cx)),
-                Page::History => el.child(self.render_history_page(cx)),
             }
         });
 

@@ -126,117 +126,10 @@ pub struct PermissionPrompt {
     pub since: String,
 }
 
-/// 看板（GET /history/dashboard，2026-09-07 第二版：所有会话的进度，没有时间维度）
-#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
-pub struct Dashboard {
-    #[serde(default)]
-    pub counts: DashCounts,
-    /// 故意没有 default：老 daemon 的响应缺它 → 解码失败 → 弹「请升级 daemon」，不静默画空
-    pub sessions: Vec<SessionCard>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
-pub struct DashCounts {
-    /// 未完成的清单条目数——看板顶上就这一个数。五态计数于 2026-09-08 拿掉
-    /// （用户拍板：看板和项目列表要说同一套话），daemon 从此不下发那五个字段，
-    /// 这边却还留着五个恒为 0 的成员，v1.22 一并删掉。
-    #[serde(default)]
-    pub open_items: usize,
-}
-
-/// 一张卡 = 一个会话的进度
-#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
-pub struct SessionCard {
-    #[serde(default)]
-    pub id: String,
-    #[serde(default)]
-    pub title: String,
-    #[serde(default)]
-    pub project_name: String,
-    #[serde(default)]
-    pub project_path: String,
-    /// asking | running | background | active | paused
-    #[serde(default)]
-    pub status: String,
-    /// 还在池子里（能点开，已退出的回放也算）
-    #[serde(default)]
-    pub alive: bool,
-    #[serde(default)]
-    pub deleted: bool,
-    #[serde(default)]
-    pub done: usize,
-    #[serde(default)]
-    pub open: usize,
-    #[serde(default)]
-    pub items: Vec<ChecklistItem>,
-    #[serde(default)]
-    pub updated_at: String,
-    /// v1.27：卡在什么权限请求上（`asking` 且是权限对话框时才有）。看板顶上的
-    /// 「待决策」靠它原地放行；`asking` 而没有它 = 结构化提问，只能进会话答。
-    #[serde(default)]
-    pub permission: Option<PermissionPrompt>,
-}
-
-// ── 五态（PROTOCOL「/projects」那张 5 行表的镜像）─────────────────────────────
-//
-// `asking | running | background | active | paused` 由 daemon 算出来下发（项目行、看板卡
-// 片、CLI 同一套）。客户端**不判定**状态，只对着这个字符串做一件纯显示的事：底色画不画成
-// 蓝的。所以这里只剩一个查表函数，没有枚举——有枚举就会有人往 `of()` 里塞判定逻辑，
-// v1.22 删掉的正是那个（三端各写一遍，同一个项目在两台设备上状态不一样）。
-//
-// 2026-09-10 排序档位表（`status_rank`）也删了：列表改成纯按时间排，状态由底色说，
-// 不再拿它排第二遍。
-
-/// 淡蓝底（项目行）/ 蓝线（看板卡片）：它还在动，不用你管（自己在跑，或后台任务还没回来）。
+/// 淡蓝底（项目行）：它还在动，不用你管（自己在跑，或后台任务还没回来）。
 /// `asking` 不算——那是在等你。
 pub fn status_running(s: &str) -> bool {
     s == "running" || s == "background"
-}
-
-/// 看板搜索：标题 / 项目 / 任一清单项含关键字（不分大小写）；空串全匹配
-pub fn card_matches(c: &SessionCard, query: &str) -> bool {
-    let q = query.trim().to_lowercase();
-    q.is_empty()
-        || c.title.to_lowercase().contains(&q)
-        || c.project_name.to_lowercase().contains(&q)
-        || c.items.iter().any(|i| i.text.to_lowercase().contains(&q))
-}
-
-/// 「在 AAA 里」= 这个会话此刻**还活着**：进程在跑、或者停在输入框等你说话。
-/// 2026-09-08 用户拍板的分节口径——`alive`（还在池子里）**不算**：daemon 会把已经退出的
-/// 会话留在池子里供回放，318 张卡里有 164 张是这种，按 `alive` 切等于没切。真正「在 AAA
-/// 里」的就是侧栏项目列表上那几行。已退出的仍可能点得开（`alive`），那是「打开」按钮的事。
-pub fn card_in_aaa(c: &SessionCard) -> bool {
-    c.alive && c.status != "paused"
-}
-
-/// 看板分节（2026-09-08 用户拍板「看板里面东西太多了，要做一下分割，即在 AAA 里面的
-/// 对话，和不在里面的对话」）：**在 AAA 里** 见 [`card_in_aaa`]；**不在 AAA 里** = 其余
-/// （退出了的、只剩记录的），默认折起来。
-/// 过滤（搜索 + 已删除开关）在这里一次做完，daemon 给的顺序在节内原样保留。
-pub fn dashboard_split<'a>(
-    cards: &'a [SessionCard],
-    query: &str,
-    show_deleted: bool,
-) -> (Vec<&'a SessionCard>, Vec<&'a SessionCard>) {
-    cards
-        .iter()
-        .filter(|c| card_matches(c, query))
-        .filter(|c| show_deleted || !c.deleted)
-        .partition(|c| card_in_aaa(c))
-}
-
-/// 卡片上画不画蓝点（2026-09-08 用户拍板：看板和侧栏说同一套话——蓝点 / 什么都没有，
-/// 五个状态字连同顶上的计数条一起去掉）。`status` 本身还留在协议里，它是排序和这个判断的依据。
-pub fn card_running(c: &SessionCard) -> bool {
-    !c.deleted && status_running(&c.status)
-}
-
-#[cfg(test)]
-/// 「已完成」= 暂停且清单全勾完（或没清单）。v1.17 取消了「做完的折起来」之后
-/// 生产代码不再问这个问题，只有看板分组的测试还在用它当参照。
-fn card_is_finished(c: &SessionCard) -> bool {
-    c.status == "paused" && c.open == 0
 }
 
 /// 进度清单的一项。**只剩 serde 用途**：v1.22 起 `- [x] …` 的解析归 daemon，看板卡片的
@@ -448,6 +341,19 @@ pub struct UploadInfo {
 
 /// 用过的一个技能（Skill 工具），按名字合并
 #[derive(Debug, Clone, Deserialize, Default)]
+pub struct McpUse {
+    #[serde(default)]
+    pub server: String,
+    /// 这个服务器下用过的工具（去掉 `mcp__服务器__` 前缀）
+    #[serde(default)]
+    pub tools: Vec<String>,
+    #[serde(default)]
+    pub count: usize,
+    #[serde(default)]
+    pub last_ts: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
 pub struct SkillUse {
     #[serde(default)]
     pub name: String,
@@ -468,6 +374,9 @@ pub struct SessionDetailResponse {
     pub uploads: Vec<UploadInfo>,
     #[serde(default)]
     pub skills: Vec<SkillUse>,
+    /// v1.38：用过的 MCP，按服务器合并（老 daemon 不给 → 空）
+    #[serde(default)]
+    pub mcp: Vec<McpUse>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -979,57 +888,6 @@ mod tests {
         assert!(!s.is_terminal());
     }
 
-    /// 三端共享向量 fixtures/dashboard.json：客户端的过滤口径（已完成 / 搜索）必须得到 expect
-    #[test]
-    fn shared_fixture_filters() {
-        let fx: serde_json::Value = serde_json::from_str(include_str!("../../fixtures/dashboard.json")).unwrap();
-        let d: Dashboard = serde_json::from_value(serde_json::json!({"sessions": fx["sessions"]})).unwrap();
-        let ids = |f: &dyn Fn(&SessionCard) -> bool| d.sessions.iter().filter(|c| f(c)).map(|c| c.id.clone()).collect::<Vec<_>>();
-        let expect = |k: &str| fx["expect"][k].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect::<Vec<_>>();
-        assert_eq!(ids(&|c| card_is_finished(c) && !c.deleted), expect("finished"));
-        assert_eq!(ids(&|c| card_matches(c, "测试")), expect("match_测试"));
-        // 顺序照 daemon 给的，客户端不重排
-        assert_eq!(d.sessions.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["ask", "run", "bg", "act", "poolpau", "pau", "fin", "old", "del"]);
-        assert_eq!(ids(&|c| !c.deleted), expect("visible_default"));
-        // 2026-09-08 的两节：在 AAA 里（还活着）/ 不在 AAA 里
-        let split = |q: &str, del: bool| {
-            let (a, b) = dashboard_split(&d.sessions, q, del);
-            let f = |v: Vec<&SessionCard>| v.into_iter().map(|c| c.id.clone()).collect::<Vec<_>>();
-            (f(a), f(b))
-        };
-        assert_eq!(split("", false), (expect("in_aaa"), expect("not_in_aaa")));
-        assert_eq!(split("", true).1, expect("not_in_aaa_with_deleted"), "已删除的开关只作用在「不在 AAA 里」这一节（删了的自然不在池子里）");
-        assert_eq!(split("测试", false), (vec!["run".to_string()], vec!["old".to_string()]), "搜索两节都筛");
-        // 分水岭：还在池子里（点得开）但进程已经退出的，算「不在 AAA 里」
-        let pooled = d.sessions.iter().find(|c| c.id == "poolpau").unwrap();
-        assert!(pooled.alive && !card_in_aaa(pooled));
-    }
-
-    #[test]
-    fn dashboard_cards_search_labels_and_finished() {
-        let c = SessionCard {
-            title: "改登录页".into(),
-            project_name: "Shop".into(),
-            status: "paused".into(),
-            open: 1,
-            items: vec![ChecklistItem { done: false, text: "补测试".into() }],
-            ..Default::default()
-        };
-        assert!(card_matches(&c, "") && card_matches(&c, "登录") && card_matches(&c, "shop") && card_matches(&c, "测试"));
-        assert!(!card_matches(&c, "支付"));
-        assert!(card_running(&SessionCard { status: "running".into(), ..Default::default() }));
-        assert!(card_running(&SessionCard { status: "background".into(), ..Default::default() }));
-        assert!(!card_running(&SessionCard { status: "active".into(), ..Default::default() }));
-        assert!(!card_running(&SessionCard { status: "running".into(), deleted: true, ..Default::default() }), "已删除的不画蓝点");
-        assert!(!card_is_finished(&c), "暂停但还有没勾的：不算完");
-        let done = SessionCard { status: "paused".into(), open: 0, ..Default::default() };
-        assert!(card_is_finished(&done));
-        let live = SessionCard { status: "active".into(), open: 0, ..Default::default() };
-        assert!(!card_is_finished(&live), "还活着的不算完");
-        // 老 daemon 的形状（没有 sessions）必须解码失败，不能静默画空看板
-        assert!(serde_json::from_str::<Dashboard>(r#"{"today":{"sessions":1},"days":[]}"#).is_err());
-        assert!(serde_json::from_str::<Dashboard>(r#"{"sessions":[]}"#).is_ok());
-    }
 
     /// v1.22：清单和「待答的是哪一条」都由 daemon 给，客户端不再解析 `summary`、
     /// 也不再从消息流尾部倒着找 question

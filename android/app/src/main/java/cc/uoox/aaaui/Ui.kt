@@ -65,8 +65,6 @@ object Tok {
     val Green = Color(0xFF2F855A)
     val Amber = Color(0xFFB8860B)
     val Red = Color(0xFFC0392B)
-    /** 看板卡片标题前「在跑」那根线。Green/Amber/Red 各有旧含义，Accent 是橙，只有蓝读作「它自己在动」。 */
-    val Blue = Color(0xFF3F6EA8)
     /** 代码块 / 思考行 / 工具输出这类「凹下去」的小面板底色——界面侧的，跟终端无关。 */
     val Inset = Color(0xFFFFFEFA)
 

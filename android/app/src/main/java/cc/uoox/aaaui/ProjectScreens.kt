@@ -420,7 +420,6 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
         ProjectPanelHeader(
             conn = conn,
             ssdMissing = health?.ssd_mounted == false,
-            onHistory = { onBeforeNavigate(); nav.navigate("history") },
             onSettings = { onBeforeNavigate(); nav.navigate("settings") },
         )
         PullToRefreshBox(
@@ -431,7 +430,7 @@ fun ProjectPanel(store: AppStore, nav: NavHostController, currentPath: String? =
             },
             modifier = Modifier.fillMaxSize(),
         ) {
-            LazyColumn(Modifier.fillMaxSize().padding(top = 6.dp)) {
+            LazyColumn(Modifier.fillMaxSize()) {
                 // 一个 agent 一栏（2026-09-11 用户拍板「项目列表三栏：
                 // Claude/Antigravity/Terminal」），每栏末尾各有一行新建项目——
                 // 建出来归哪个 agent 由它在哪一栏说了算
@@ -571,7 +570,6 @@ private fun ProjectPanelHeader(
     conn: ConnState,
     /** SSD 掉了是事故，才值得占顶栏；正常时不显示 */
     ssdMissing: Boolean,
-    onHistory: () -> Unit,
     onSettings: () -> Unit,
 ) {
     Row(
@@ -592,9 +590,6 @@ private fun ProjectPanelHeader(
             Text("SSD ✗", color = Tok.Red, fontSize = 12.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.width(4.dp))
         }
-        IconButton(onClick = onHistory) {
-            Text("▦", color = Tok.Dim, fontSize = 17.sp)
-        }
         IconButton(onClick = onSettings) {
             Text("⚙", color = Tok.Dim, fontSize = 20.sp)
         }
@@ -612,9 +607,11 @@ private fun ProjectPanelHeader(
  */
 @Composable
 private fun SectionHeader(label: String, planSegs: List<UsageSegment> = emptyList()) {
-    HorizontalDivider(color = Tok.Edge, thickness = 1.dp, modifier = Modifier.padding(top = 10.dp))
+    // 上面不留空（2026-09-11 用户：「Claude/Antigravity/终端 上面是有一点高度和空白的，
+    // 可以去掉」）：只剩那条分隔线和一点点不让字贴着线的内边距
+    HorizontalDivider(color = Tok.Edge, thickness = 1.dp)
     Row(
-        Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 4.dp),
+        Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 3.dp, bottom = 3.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(label, color = Tok.Dim, fontSize = 11.sp, fontFamily = FontFamily.Monospace)

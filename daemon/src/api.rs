@@ -584,9 +584,9 @@ struct HistoryQuery {
 
 /// 会话日志：所有出现过的会话（含已退出、已删除），最新在前。
 ///
-/// 2026-09-08 差点被当成死路由删掉：两端确实只取 `/history/dashboard`。但看板**不收终端**，
-/// 而历史账本是收的——删项目之后「记录还在吗」只有这里能看见（smoke 就这么验的）。
-/// 它是这个账本唯一的读出口，留着。
+/// **这个账本唯一的读出口**。2026-09-08 差点被当成死路由删掉（那会儿两端只取
+/// `/history/dashboard`）；看板 2026-09-11 整个删了之后它更是唯一的了——删项目之后
+/// 「记录还在吗」只有这里能看见（smoke 就这么验的）。客户端不画它，用 curl 看。
 async fn history_list(
     State(app): State<SharedApp>,
     axum::extract::Query(q): axum::extract::Query<HistoryQuery>,
@@ -609,24 +609,6 @@ async fn history_backfill(State(app): State<SharedApp>) -> ApiResult<Json<Value>
     let app2 = Arc::clone(&app);
     tokio::task::spawn_blocking(move || crate::summary::backfill(&app2, 500));
     Ok(Json(json!({"ok": true, "started": true, "missing": missing})))
-}
-
-/// 看板：所有会话的进度（daemon 一次算好，两端只画）
-async fn history_dashboard(State(app): State<SharedApp>) -> ApiResult<Json<Value>> {
-    let entries = app.history.lock().unwrap().list(crate::history::KEEP);
-    // 池子里的会话此刻的状态；不在池子里的一律 paused（不能点开）
-    let mut live = std::collections::HashMap::new();
-    for s in app.pool.list() {
-        let m = s.meta.lock().unwrap();
-        let status = crate::history::status_of(&m);
-        let updated_at = m.updated_at.unwrap_or(m.created_at).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        live.insert(
-            s.id.clone(),
-            crate::history::LiveStatus { status, updated_at, permission: m.permission.clone() },
-        );
-    }
-    let d = crate::history::dashboard(&entries, &live);
-    Ok(Json(serde_json::to_value(d).unwrap_or_else(|_| json!({}))))
 }
 
 #[derive(Deserialize)]
@@ -1142,9 +1124,9 @@ async fn session_detail(
     };
     // 锁序约定：meta 与 msgs 不同时持有
     let since = created_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    let (subagents, background, skills) = {
+    let (subagents, background, skills, mcp) = {
         let ms = sess.msgs.lock().unwrap();
-        (ms.subagents.clone(), ms.background_tasks(Some(&since)), ms.skills.clone())
+        (ms.subagents.clone(), ms.background_tasks(Some(&since)), ms.skills.clone(), ms.mcp.clone())
     };
     let uploads = blocking(move || list_uploads(&project_path)).await?;
     Ok(Json(json!({
@@ -1152,6 +1134,7 @@ async fn session_detail(
         "background_tasks": background,
         "uploads": uploads,
         "skills": skills,
+        "mcp": mcp,
     })))
 }
 
@@ -1449,52 +1432,6 @@ async fn session_permission(
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     Err(ApiError::conflict("对话框还在：去终端里看一眼"))
-}
-
-#[derive(Deserialize)]
-struct ChecklistBody {
-    /// 清单项的文字（看板卡片里那一行）
-    text: String,
-    done: bool,
-    /// v1.22：这是清单里的第几项（与 `history::parse_checklist` / 会话对象上的
-    /// `checklist` 同下标）。给了就只翻这一条，文字只用来核对；不给（老客户端）
-    /// 退回「只翻第一条匹配的」。以前每一条同文的都跟着翻——清单里出现两条一样
-    /// 的话，点一条勾掉两条。
-    #[serde(default)]
-    index: Option<usize>,
-}
-
-/// v1.16：看板上直接勾 / 取消勾。改 summary 里那一行，并记进 checklist_overrides：
-/// haiku 下一轮重写清单时按它盖回去，手工勾的不会被重写冲掉
-async fn session_checklist(
-    State(app): State<SharedApp>,
-    UrlPath(id): UrlPath<String>,
-    Json(body): Json<ChecklistBody>,
-) -> ApiResult<Json<Value>> {
-    let sess = get_session(&app, &id)?;
-    let text = body.text.trim().to_string();
-    if text.is_empty() {
-        return Err(ApiError::bad_request("text 不能为空"));
-    }
-    {
-        let mut meta = sess.meta.lock().unwrap();
-        let next = crate::summary::set_item_at(&meta.summary, body.index, &text, body.done);
-        if next == meta.summary && !meta.summary.contains(&text) {
-            return Err(ApiError::not_found("清单里没有这一项"));
-        }
-        meta.summary = next;
-        meta.checklist_overrides.insert(text.clone(), body.done);
-    }
-    sess.mark_dirty();
-    if sess.state() == SState::Exited {
-        sess.persist(&app.pool.ctx);
-    }
-    {
-        let mut h = app.history.lock().unwrap();
-        h.upsert(crate::history::entry_from(&sess));
-        h.save_if_dirty();
-    }
-    Ok(Json(json!({"ok": true, "text": text, "done": body.done})))
 }
 
 #[derive(Deserialize)]
@@ -2058,8 +1995,6 @@ pub fn router(app: SharedApp) -> Router {
         .route("/api/v1/history", get(history_list))
         .route("/api/v1/history/backfill", post(history_backfill))
         .route("/api/v1/sessions/{id}/permission", post(session_permission))
-        .route("/api/v1/sessions/{id}/checklist", post(session_checklist))
-        .route("/api/v1/history/dashboard", get(history_dashboard))
         .route("/api/v1/sessions", get(sessions_list).post(sessions_create))
         .route("/api/v1/sessions/kill_all", post(sessions_kill_all))
         .route("/api/v1/sessions/clean_exited", post(sessions_clean_exited))

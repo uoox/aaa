@@ -164,10 +164,6 @@ impl Net {
     pub fn sessions(&self) -> impl Future<Output = Result<Vec<Session>>> + use<> {
         self.get_json("/sessions")
     }
-    /// 看板：待办 + 按天流水 + 数字（daemon 一次算好）
-    pub fn history_dashboard(&self) -> impl Future<Output = Result<Dashboard>> + use<> {
-        self.get_json::<Dashboard>("/history/dashboard")
-    }
     pub fn create_project(
         &self,
         name: Option<String>,
@@ -247,26 +243,9 @@ impl Net {
     /// daemon 负责翻译成对话框按键并确认对话框关闭。409（`ApiFailure::status`）=
     /// 没有待答问题 / 非 claude 会话 / 对话框没吃下——调用方提示用户去终端收尾。
     /// v1.16：替用户答权限对话框（allow / deny）
-    /// 紧急制动：收掉还活着的项目会话（终端不收）
-    pub fn kill_all(&self, running_only: bool) -> impl Future<Output = Result<serde_json::Value>> + use<> {
-        self.post_json("/sessions/kill_all", serde_json::json!({ "running_only": running_only }))
-    }
-    /// 清掉池子里已退出的会话记录（不动项目目录、不动 agent 存储）
-    pub fn clean_exited(&self) -> impl Future<Output = Result<serde_json::Value>> + use<> {
-        self.post_json("/sessions/clean_exited", serde_json::json!({}))
-    }
     /// 项目任务队列：排着的几句话（agent 空下来 daemon 自动喂下一句）
     pub fn session_permission(&self, id: &str, behavior: &str) -> impl Future<Output = Result<serde_json::Value>> + use<> {
         self.post_json(&format!("/sessions/{id}/permission"), serde_json::json!({ "behavior": behavior }))
-    }
-    /// v1.16：看板上勾 / 取消勾清单项
-    /// 勾 / 取消勾一条清单项。`index` 是它在 daemon 给的 `items` 里的**位置**（v1.22）：
-    /// 只按文字匹配的话，清单里有两条一样的（haiku 重写时并不罕见）点一条会勾掉两条。
-    pub fn session_checklist(&self, id: &str, index: usize, text: &str, done: bool) -> impl Future<Output = Result<serde_json::Value>> + use<> {
-        self.post_json(
-            &format!("/sessions/{id}/checklist"),
-            serde_json::json!({ "index": index, "text": text, "done": done }),
-        )
     }
     pub fn session_answer(
         &self,

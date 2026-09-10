@@ -187,12 +187,6 @@ pub fn on_turn_done(app: &SharedApp, sess: Arc<Session>) {
     };
     {
         let mut meta = sess.meta.lock().unwrap();
-        // 看板上手工勾过的项按用户的来，haiku 重写不许翻回去
-        let overrides = meta.checklist_overrides.clone();
-        let mut text = text;
-        for (item, done) in &overrides {
-            text = set_item(&text, item, *done);
-        }
         meta.summary = text;
     }
     sess.mark_dirty();
@@ -340,89 +334,8 @@ pub fn backfill(app: &SharedApp, max: usize) -> usize {
     done
 }
 
-/// 把清单里文字等于 `item` 的那一行改成 done / 未 done；没有这一项就原样返回
-pub fn set_item(summary: &str, item: &str, done: bool) -> String {
-    set_item_at(summary, None, item, done)
-}
-
-/// v1.22：按**位置**勾（`index` = 清单里的第几项，与 `parse_checklist` 的下标同口径），
-/// 文字只用来核对。以前只按文字匹配，且**每一条**同文的都跟着翻——清单里出现两条一样
-/// 的话（haiku 重写时并不罕见），点一条就勾掉了两条。`index` 为 None（老客户端、
-/// 或 haiku 重写后按 override 盖回去）时只翻**第一条**匹配的，不再全翻。
-pub fn set_item_at(summary: &str, index: Option<usize>, item: &str, done: bool) -> String {
-    let mut seen = 0usize;
-    let mut hit = false;
-    summary
-        .lines()
-        .map(|raw| {
-            let l = raw.trim().trim_start_matches(['-', '*']).trim_start();
-            let rest = l
-                .strip_prefix("[x]")
-                .or_else(|| l.strip_prefix("[X]"))
-                .or_else(|| l.strip_prefix("[ ]"));
-            let Some(r) = rest else { return raw.to_string() };
-            let here = seen;
-            seen += 1;
-            let matches = r.trim() == item
-                && match index {
-                    Some(i) => i == here,
-                    None => !hit,
-                };
-            if !matches {
-                return raw.to_string();
-            }
-            hit = true;
-            format!("- [{}] {}", if done { 'x' } else { ' ' }, item)
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 #[cfg(test)]
 mod tests {
-    /// 点一条勾一条：清单里有两条一样的话，以前 `set_item` 会把两条一起翻过去。
-    #[test]
-    fn set_item_at_flips_exactly_one() {
-        let md = "- [ ] 补测试\n- [ ] 别的事\n- [ ] 补测试";
-        // 按位置：只翻第 2 条（下标 2）
-        let out = crate::summary::set_item_at(md, Some(2), "补测试", true);
-        assert_eq!(out, "- [ ] 补测试\n- [ ] 别的事\n- [x] 补测试");
-        // 没给位置（老客户端 / override 盖回）：只翻第一条匹配的
-        let out = crate::summary::set_item_at(md, None, "补测试", true);
-        assert_eq!(out, "- [x] 补测试\n- [ ] 别的事\n- [ ] 补测试");
-        // 位置对不上文字：不动
-        assert_eq!(crate::summary::set_item_at(md, Some(1), "补测试", true), md);
-    }
-
-    #[test]
-    fn locate_by_cwd_picks_the_transcript_active_in_the_window() {
-        let dir = tempfile::tempdir().unwrap();
-        let paths = crate::paths::Paths::new(dir.path());
-        let proj = dir.path().join("proj");
-        std::fs::create_dir_all(&proj).unwrap();
-        let cwd = crate::stores::realpath(&proj.to_string_lossy());
-        let slug = paths.claude_root().join("-x");
-        std::fs::create_dir_all(&slug).unwrap();
-        let line = |ts: &str| format!("{{\"type\":\"user\",\"cwd\":\"{cwd}\",\"timestamp\":\"{ts}\",\"message\":{{\"role\":\"user\",\"content\":\"hi\"}}}}\n");
-        std::fs::write(slug.join("a.jsonl"), line("2026-09-01T10:00:00.000Z") + &line("2026-09-01T10:05:00.000Z")).unwrap();
-        std::fs::write(slug.join("b.jsonl"), line("2026-09-03T10:00:00.000Z") + &line("2026-09-03T10:05:00.000Z") + &line("2026-09-03T10:06:00.000Z")).unwrap();
-        // 按 id 直接命中
-        assert_eq!(super::locate_transcript(&paths, Some("b"), &cwd, "", ""), Some(slug.join("b.jsonl")));
-        // id 找不到 → 按 cwd + 窗口：9-03 的会话落在 b
-        assert_eq!(super::locate_transcript(&paths, Some("gone"), &cwd, "2026-09-03T09:59:00Z", "2026-09-03T10:10:00Z"), Some(slug.join("b.jsonl")));
-        assert_eq!(super::locate_transcript(&paths, None, &cwd, "2026-09-01T09:59:00Z", "2026-09-01T10:10:00Z"), Some(slug.join("a.jsonl")));
-        // 窗口里谁都没记录 → None
-        assert_eq!(super::locate_transcript(&paths, None, &cwd, "2026-09-02T00:00:00Z", "2026-09-02T01:00:00Z"), None);
-    }
-
-    #[test]
-    fn set_item_flips_only_the_matching_line() {
-        let s = "- [ ] 补测试\n- [x] 修登录\n* [ ] 发版";
-        assert_eq!(super::set_item(s, "补测试", true), "- [x] 补测试\n- [x] 修登录\n* [ ] 发版");
-        assert_eq!(super::set_item(s, "修登录", false), "- [ ] 补测试\n- [ ] 修登录\n* [ ] 发版");
-        assert_eq!(super::set_item(s, "没有的", true), s);
-    }
-
     use super::*;
     use crate::messages::ToolInfo;
 

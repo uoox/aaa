@@ -260,7 +260,6 @@ pub fn parse_checklist(md: &str) -> Vec<ChecklistItem> {
 }
 
 /// 会话此刻的状态字（与侧栏同一套五态，PROTOCOL「GUI 列表口径」）
-pub const STATUS_ORDER: [&str; 5] = ["asking", "running", "background", "active", "paused"];
 
 /// 池子里一条会话此刻是五态里的哪一个。**只此一处**（v1.22）：看板、项目列表、
 /// 两端的侧栏说的都是这一句——此前 daemon 一份、mac `RowStatus::of` 一份、
@@ -274,10 +273,6 @@ pub fn status_of(m: &crate::pool::Meta) -> &'static str {
         crate::pool::State::Waiting if m.background > 0 => "background",
         crate::pool::State::Waiting => "active",
     }
-}
-
-pub fn status_rank(status: &str) -> usize {
-    STATUS_ORDER.iter().position(|s| *s == status).unwrap_or(STATUS_ORDER.len())
 }
 
 /// 池子里一条会话，聚项目行时要看的那几样（v1.22）
@@ -323,108 +318,8 @@ pub fn project_aggregate(snaps: impl Iterator<Item = SessSnap>) -> std::collecti
     out
 }
 
-/// 池子里一条会话此刻的样子（api 层从 pool 取）
-#[derive(Clone, Debug)]
-pub struct LiveStatus {
-    /// asking | running | background | active | paused（已退出但还在池子里 = paused）
-    pub status: &'static str,
-    /// updated_at（排序键）
-    pub updated_at: String,
-    /// 此刻卡在什么权限请求上（`Session.permission` 原样），没有就是 None
-    pub permission: Option<serde_json::Value>,
-}
-
-/// 一张卡
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SessionCard {
-    pub id: String,
-    pub title: String,
-    pub project_name: String,
-    pub project_path: String,
-    /// asking | running | background | active | paused
-    pub status: String,
-    /// 还在池子里（能点开，已退出的回放也算）
-    pub alive: bool,
-    pub deleted: bool,
-    pub done: usize,
-    pub open: usize,
-    pub items: Vec<ChecklistItem>,
-    /// 排序键：状态翻转 / 改名 / 退出的时刻
-    pub updated_at: String,
-    /// v1.27 待决策：卡在什么权限请求上（与 `/sessions` 行上的 `permission` 同一个对象）。
-    /// 有它 = 看板顶上那一节能原地放行，不必进会话。`asking` 但没有它 = 结构化提问
-    /// （AskUserQuestion），只能进会话答。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub permission: Option<serde_json::Value>,
-}
-
-/// 看板顶上唯一还留着的数字（2026-09-08 用户拍板：五态计数条跟着列表的状态字一起去掉——
-/// 「还欠多少件事」是个真的量，「有几个 active」不是）。
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Counts {
-    /// 未删除会话里没勾的清单项总数
-    pub open_items: usize,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Dashboard {
-    pub counts: Counts,
-    pub sessions: Vec<SessionCard>,
-}
-
-/// `live`：池子里的会话 id → 此刻状态；不在池子里的一律 paused（不能点开）。
-/// 终端不进看板；已删除的进（`deleted:true`，客户端默认藏起来），但不计数。
-pub fn dashboard(
-    entries: &[Entry],
-    live: &std::collections::HashMap<String, LiveStatus>,
-) -> Dashboard {
-    let mut cards: Vec<SessionCard> = entries
-        .iter()
-        .filter(|e| e.agent != "shell")
-        .map(|e| {
-            let items = parse_checklist(&e.summary);
-            let (status, updated_at, alive, permission) = match live.get(&e.id) {
-                Some(l) => (l.status.to_string(), l.updated_at.clone(), true, l.permission.clone()),
-                None => (
-                    "paused".to_string(),
-                    e.ended_at.clone().unwrap_or_else(|| e.created_at.clone()),
-                    false,
-                    None,
-                ),
-            };
-            SessionCard {
-                id: e.id.clone(),
-                title: if e.title.is_empty() { e.project_name.clone() } else { e.title.clone() },
-                project_name: e.project_name.clone(),
-                project_path: e.project_path.clone(),
-                status,
-                alive,
-                deleted: e.deleted_at.is_some(),
-                done: items.iter().filter(|i| i.done).count(),
-                open: items.iter().filter(|i| !i.done).count(),
-                items,
-                updated_at,
-                permission,
-            }
-        })
-        .collect();
-    // 状态 → 已删除的沉到组尾 → 最近更新在前
-    cards.sort_by(|a, b| {
-        status_rank(&a.status)
-            .cmp(&status_rank(&b.status))
-            .then_with(|| a.deleted.cmp(&b.deleted))
-            .then_with(|| b.updated_at.cmp(&a.updated_at))
-            .then_with(|| a.id.cmp(&b.id))
-    });
-    let mut counts = Counts::default();
-    for c in cards.iter().filter(|c| !c.deleted) {
-        counts.open_items += c.open;
-    }
-    Dashboard { counts, sessions: cards }
-}
-
 #[cfg(test)]
-mod dashboard_tests {
+mod aggregate_tests {
     use super::*;
     use std::collections::HashMap;
 
@@ -465,27 +360,6 @@ mod dashboard_tests {
         assert_eq!(m["/p/a"].live.as_ref().unwrap().id, "s2");
     }
 
-    /// 三端共享向量 fixtures/dashboard.json：daemon 的输出必须逐字段等于 `sessions`
-    #[test]
-    fn shared_fixture_matches_daemon_output() {
-        let fx: serde_json::Value = serde_json::from_str(include_str!("../../fixtures/dashboard.json")).unwrap();
-        let entries: Vec<Entry> = serde_json::from_value(fx["entries"].clone()).unwrap();
-        let live: HashMap<String, LiveStatus> = fx["live"]
-            .as_object()
-            .unwrap()
-            .iter()
-            .map(|(id, v)| {
-                let status = match v["status"].as_str().unwrap() {
-                    "asking" => "asking", "running" => "running", "background" => "background", "active" => "active", _ => "paused",
-                };
-                (id.clone(), LiveStatus { status, updated_at: v["updated_at"].as_str().unwrap().to_string(), permission: None })
-            })
-            .collect();
-        let d = dashboard(&entries, &live);
-        assert_eq!(serde_json::to_value(&d.sessions).unwrap(), fx["sessions"], "卡片（含顺序）与共享向量不一致");
-        assert_eq!(serde_json::to_value(&d.counts).unwrap(), fx["expect"]["counts"]);
-    }
-
     fn e(id: &str, created: &str, title: &str, summary: &str) -> Entry {
         Entry {
             id: id.into(),
@@ -509,61 +383,5 @@ mod dashboard_tests {
         assert!(items[0].done && items[0].text == "修登录");
         assert!(!items[1].done && items[1].text == "补测试");
         assert!(items[2].done, "-[X] 也认");
-    }
-
-    #[test]
-    fn cards_sort_by_status_then_update_and_counts_skip_deleted() {
-        let ls = |status: &'static str, t: &str| LiveStatus { status, updated_at: t.into(), permission: None };
-        let mut live = HashMap::new();
-        live.insert("act".to_string(), ls("active", "2026-09-07T09:00:00Z"));
-        live.insert("bg".to_string(), ls("background", "2026-09-07T01:00:00Z"));
-        live.insert("run".to_string(), ls("running", "2026-09-07T02:00:00Z"));
-        live.insert("ask".to_string(), ls("asking", "2026-09-07T00:00:00Z"));
-        live.insert("gone_pooled".to_string(), ls("paused", "2026-09-07T05:00:00Z"));
-        let mut gone = e("gone", "2026-09-06T00:00:00Z", "老会话", "- [ ] 没做完");
-        gone.ended_at = Some("2026-09-06T03:00:00Z".into());
-        let mut del = e("del", "2026-09-07T10:00:00Z", "删了", "- [ ] 不该计数");
-        del.deleted_at = Some("t".into());
-        let mut shell = e("t1", "2026-09-07T11:00:00Z", "zsh", "- [ ] 终端不进看板");
-        shell.agent = "shell".into();
-        let entries = vec![
-            e("act", "2026-09-07T00:00:00Z", "激活的", "- [x] a\n- [ ] b"),
-            e("bg", "2026-09-07T00:00:00Z", "后台的", "- [ ] c"),
-            e("run", "2026-09-07T00:00:00Z", "运行的", ""),
-            e("ask", "2026-09-07T00:00:00Z", "在问的", "- [x] d"),
-            e("gone_pooled", "2026-09-07T00:00:00Z", "退出还在池子", "- [ ] e"),
-            gone,
-            del,
-            shell,
-        ];
-        let d = dashboard(&entries, &live);
-        let order: Vec<(&str, &str)> = d.sessions.iter().map(|c| (c.id.as_str(), c.status.as_str())).collect();
-        assert_eq!(
-            order,
-            vec![
-                ("ask", "asking"),
-                ("run", "running"),
-                ("bg", "background"),
-                ("act", "active"),
-                // paused 里按 updated_at：退出还在池子的 05:00 > 老会话的 ended_at 03:00；
-                // 已删除的哪怕更新（10:00）也沉到组尾
-                ("gone_pooled", "paused"),
-                ("gone", "paused"),
-                ("del", "paused"),
-            ]
-        );
-        assert!(d.sessions.iter().all(|c| c.id != "t1"), "终端不进看板");
-        let gp = d.sessions.iter().find(|c| c.id == "gone_pooled").unwrap();
-        assert!(gp.alive, "还在池子里就能点开");
-        assert!(!d.sessions.iter().find(|c| c.id == "gone").unwrap().alive);
-        assert!(d.sessions.iter().find(|c| c.id == "del").unwrap().deleted);
-        assert_eq!(
-            d.counts,
-            Counts { open_items: 4 },
-            "已删除的不计数（open_items：b c e + 老会话的一项）"
-        );
-        let act = d.sessions.iter().find(|c| c.id == "act").unwrap();
-        assert_eq!((act.done, act.open), (1, 1));
-        assert_eq!(act.items[1].text, "b");
     }
 }

@@ -124,7 +124,6 @@ fun AaaApp(
             composable("pair") { PairScreen(store) { nav.navigate("home") { popUpTo("pair") { inclusive = true } } } }
             composable("home") { HomeScreen(store, nav) }
             composable("settings") { SettingsScreen(store, nav) }
-            composable("history") { HistoryScreen(store, nav) }
             composable("detail/{id}") { entry ->
                 SessionDetailScreen(store, nav, entry.arguments?.getString("id").orEmpty())
             }
